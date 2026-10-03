@@ -2,12 +2,35 @@
 //!
 //! This module generates readable C source code from the AST.
 
-use crate::ast::{BinaryOp, CExpr, CFunction, CStmt, CType};
+use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
+
+#[cfg(test)]
+use crate::ast::stmt_has_render_observations;
+use crate::ast::{BinaryOp, CExpr, CFunction, CStmt, CType, has_render_observations};
+use crate::observation_journal::{ObservationSealAuthority, RenderObservationId};
 
 /// Threshold for detecting 64-bit negative values stored as unsigned.
 /// Values above this are likely negative offsets (within ~65536 of u64::MAX).
 /// This handles cases like stack offsets: 0xffffffffffffffb8 represents -72.
-const LIKELY_NEGATIVE_THRESHOLD: u64 = 0xffffffffffff0000;
+pub(crate) const LIKELY_NEGATIVE_THRESHOLD: u64 = 0xffffffffffff0000;
+
+/// Above this, an integer literal reads better in hexadecimal.
+///
+/// Small numbers are counts, indices and sizes, and a reader wants those in
+/// decimal. Anything larger is almost always a mask, a flag word, an address
+/// or a magic value that was written in hex in the source and is only
+/// recognisable that way: `0xdead` says what `57005` hides.
+const HEX_LITERAL_THRESHOLD: u64 = 0x100;
+
+/// How a non-negative integer literal is spelled.
+pub(crate) fn format_unsigned_literal(value: u64) -> String {
+    if value >= HEX_LITERAL_THRESHOLD {
+        format!("0x{value:x}")
+    } else {
+        value.to_string()
+    }
+}
 
 /// Code generator configuration.
 #[derive(Debug, Clone)]
@@ -33,28 +56,556 @@ impl Default for CodeGenConfig {
     }
 }
 
+/// Owned AST after every semantics-preserving emission rewrite has run.
+///
+/// Observation sealing must inspect this exact function. The emitter accepts
+/// no raw `CFunction`, which prevents a private clone from being rewritten
+/// after the provenance journal has certified a different tree.
+pub(crate) struct EmissionReadyFunction {
+    function: CFunction,
+    /// The instruction each observation marker stands for, once the journal
+    /// has sealed this tree.
+    ///
+    /// A sealed tree keeps its markers: they are where each statement came
+    /// from, and the emitter reads them to say which instructions each line
+    /// accounts for. Before the seal there is no table and a marker must not
+    /// reach the emitter; after it, nothing may change what a marker names.
+    locations: Option<Rc<ObservationLocations>>,
+}
+
+/// The instruction address each observation marker of one sealed tree names,
+/// by the marker's dense index.
+///
+/// A marker names a cell -- a value a statement computes, a use it makes, a
+/// write it performs, an effect it discharges -- and each cell belongs to one
+/// instruction. A read of a value computed elsewhere names no instruction here:
+/// the line reading it does not account for the instruction that computed it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ObservationLocations {
+    at: Box<[Option<u64>]>,
+    /// The obligation each effect marker discharges where it stands. Any other
+    /// marker discharges none.
+    effects: Box<[Option<r2ssa::SemanticObligationId>]>,
+    /// The SSA version each read marker stands for. Any other marker reads none.
+    reads: Box<[Option<r2ssa::ValueId>]>,
+}
+
+impl ObservationLocations {
+    /// One entry per marker in each table, by the marker's dense index.
+    pub(crate) fn new(
+        at: Vec<Option<u64>>,
+        effects: Vec<Option<r2ssa::SemanticObligationId>>,
+        reads: Vec<Option<r2ssa::ValueId>>,
+    ) -> Self {
+        debug_assert_eq!(at.len(), effects.len());
+        debug_assert_eq!(at.len(), reads.len());
+        Self {
+            at: at.into_boxed_slice(),
+            effects: effects.into_boxed_slice(),
+            reads: reads.into_boxed_slice(),
+        }
+    }
+
+    /// The SSA version this marker's read stands for, where it marks a read.
+    pub(crate) fn read(&self, id: RenderObservationId) -> Option<r2ssa::ValueId> {
+        self.reads.get(id.index() as usize).copied().flatten()
+    }
+
+    fn at(&self, id: RenderObservationId) -> Option<u64> {
+        self.at.get(id.index() as usize).copied().flatten()
+    }
+
+    /// The obligation this marker discharges, where it is an effect's.
+    pub(crate) fn effect(&self, id: RenderObservationId) -> Option<r2ssa::SemanticObligationId> {
+        self.effects.get(id.index() as usize).copied().flatten()
+    }
+}
+
+impl EmissionReadyFunction {
+    /// The function as the aggregate-definition pass reads it: no observation
+    /// assertion, because that pass runs before the markers are discarded and
+    /// reads only declarations.
+    pub(crate) fn function_for_aggregate_definitions(&self) -> &CFunction {
+        &self.function
+    }
+
+    pub(crate) fn set_aggregate_definitions(&mut self, aggregates: Vec<crate::ast::CAggregateDef>) {
+        self.function.aggregates = aggregates;
+    }
+
+    pub(crate) fn set_bitvector_helpers(
+        &mut self,
+        helpers: Vec<crate::bitvector::BitVectorHelper>,
+    ) {
+        self.function.bitvector_helpers = helpers;
+    }
+
+    pub(crate) fn set_typedef_definitions(&mut self, typedefs: Vec<crate::ast::CTypedefDef>) {
+        self.function.typedefs = typedefs;
+    }
+
+    /// The function as the named-type pass reads and repairs it.
+    ///
+    /// No observation assertion, for the same reason the aggregate pass has
+    /// none: it runs before the markers are discarded and touches only types.
+    pub(crate) fn function_mut_for_type_declarations(&mut self) -> &mut CFunction {
+        &mut self.function
+    }
+
+    pub(crate) fn function(&self) -> &CFunction {
+        assert!(
+            self.locations.is_some() || !has_render_observations(&self.function),
+            "marked C AST reached an emission/public boundary without journal sealing"
+        );
+        &self.function
+    }
+
+    /// Rewrite a function the journal has sealed, keeping what its markers name.
+    ///
+    /// For the passes that run after the seal and change no marker: the proof
+    /// note, and the residuals for reads of objects nothing assigns. The
+    /// table the seal built is read by marker, so a rewrite that added,
+    /// dropped or duplicated one would make the line map name instructions a
+    /// line does not account for. The markers are compared before and after
+    /// wherever debug assertions run.
+    pub(crate) fn rewrite_sealed<T>(&mut self, rewrite: impl FnOnce(&mut CFunction) -> T) -> T {
+        let markers = |function: &CFunction| {
+            let mut ids = function
+                .body
+                .iter()
+                .flat_map(crate::ast::stmt_render_observation_ids)
+                .collect::<Vec<_>>();
+            ids.sort_unstable();
+            ids
+        };
+        let before = cfg!(debug_assertions).then(|| markers(&self.function));
+        let result = rewrite(&mut self.function);
+        if let Some(before) = before {
+            assert_eq!(
+                before,
+                markers(&self.function),
+                "a rewrite after the seal changed which markers the tree carries"
+            );
+        }
+        result
+    }
+
+    /// What the markers of this sealed tree name, once it is sealed.
+    pub(crate) fn observation_locations(&self) -> Option<&ObservationLocations> {
+        self.locations.as_deref()
+    }
+
+    pub(crate) fn function_mut_for_observation_seal(
+        &mut self,
+        _authority: &mut ObservationSealAuthority,
+    ) -> &mut CFunction {
+        &mut self.function
+    }
+
+    /// Keep the markers the journal just sealed, with what each one names.
+    pub(crate) fn seal_observation_markers(
+        &mut self,
+        _authority: &mut ObservationSealAuthority,
+        locations: ObservationLocations,
+    ) {
+        self.locations = Some(Rc::new(locations));
+    }
+
+    /// Remove lexical proof markers only after exact observation sealing has
+    /// inspected the same emission-ready tree.
+    pub(crate) fn strip_structured_region_markers(
+        &mut self,
+        regions: &crate::structured_region::SealedStructuredRegionArtifact,
+    ) -> Result<(), crate::structured_region::StructuredRegionFinalizationError> {
+        crate::structured_region::strip_final_region_markers(&mut self.function.body, regions)
+    }
+
+    /// The function as it leaves the decompiler, with no marker left in it.
+    pub(crate) fn into_function(mut self) -> CFunction {
+        assert!(
+            self.locations.is_some() || !has_render_observations(&self.function),
+            "marked C AST reached a public boundary without journal sealing"
+        );
+        crate::ast::discard_render_observations(&mut self.function);
+        self.function
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn function_for_marker_test(&self) -> &CFunction {
+        &self.function
+    }
+}
+
+/// Run all AST rewrites required solely by textual C emission.
+/// Prepare one function for emission, consuming it.
+///
+/// The preparation rebuilds every statement it touches, so taking the tree by
+/// reference meant cloning all of it and throwing the original away. Every
+/// caller owns the function it hands over, so the tree is moved through instead
+/// and the expressions inside it are never copied.
+pub(crate) fn prepare_function_for_emission(func: CFunction) -> EmissionReadyFunction {
+    EmissionReadyFunction {
+        function: CFunction {
+            body: prepare_stmt_sequence_for_emission(func.body),
+            symbols: func.symbols,
+            name: func.name,
+            ret_type: func.ret_type,
+            params: func.params,
+            locals: func.locals,
+            params_known: func.params_known,
+            externs: func.externs,
+            typedefs: func.typedefs,
+            aggregates: func.aggregates,
+            bitvector_helpers: func.bitvector_helpers,
+            extern_objects: func.extern_objects,
+            declaration_only: func.declaration_only,
+        },
+        locations: None,
+    }
+}
+
+/// What the emitter wrote for one function.
+///
+/// One emission, read two ways. The definition is what a reader is shown: the
+/// function and the declarations it needs. The translation unit is that same
+/// text below its prelude -- the headers and the helper definitions -- and is
+/// what a compiler is handed. Lines and residual sites are counted in the unit,
+/// so they name the text a consumer compiles.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Emission {
+    definition: String,
+    unit: String,
+    lines: Vec<SourceLine>,
+    residuals: Vec<ResidualSite>,
+    signature: Option<String>,
+    variables: Vec<crate::report::RenderedVariable>,
+    links: Vec<crate::report::RenderedLink>,
+}
+
+impl Emission {
+    /// The function and what it declares, as a reader is shown it.
+    pub fn definition(&self) -> &str {
+        &self.definition
+    }
+
+    /// The definition as its own translation unit.
+    pub fn unit(&self) -> &str {
+        &self.unit
+    }
+
+    /// Each line of the unit that accounts for an instruction, in line order.
+    pub fn lines(&self) -> &[SourceLine] {
+        &self.lines
+    }
+
+    /// Every residual in the unit, in the order its site numbers run.
+    pub fn residuals(&self) -> &[ResidualSite] {
+        &self.residuals
+    }
+
+    /// The definition's header, as it is written, when the unit defines the
+    /// function rather than stating why it does not.
+    pub fn signature(&self) -> Option<&str> {
+        self.signature.as_deref()
+    }
+
+    /// Every name the unit declares, as the text declares it.
+    pub fn variables(&self) -> &[crate::report::RenderedVariable] {
+        &self.variables
+    }
+
+    /// Every name outside the function the unit refers to, with where it
+    /// resolves in the program.
+    pub fn links(&self) -> &[crate::report::RenderedLink] {
+        &self.links
+    }
+
+    pub(crate) fn into_definition(self) -> String {
+        self.definition
+    }
+}
+
+/// One line of a translation unit and the instructions it accounts for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLine {
+    /// One-based, in the unit.
+    pub line: usize,
+    /// Instruction start addresses, ascending.
+    pub addrs: Vec<u64>,
+}
+
+/// One residual: a construct the rendering could not prove, written as a
+/// call that traps, numbered where it stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidualSite {
+    /// The argument the call passes, counted from one in text order.
+    pub site: u32,
+    /// What the construct would have produced.
+    pub ty: crate::prelude::ResidualType,
+    /// Why the construct is unproven.
+    pub cause: crate::prelude::ResidualCause,
+    /// For a marked gap, the kind its marker names.
+    pub gap: Option<String>,
+    /// One-based, in the unit.
+    pub line: usize,
+}
+
 /// C code generator.
-pub struct CodeGenerator {
+pub(crate) struct CodeGenerator<'c> {
     config: CodeGenConfig,
     output: String,
     indent_level: usize,
+    /// What each marker in the tree being written names, when it was sealed.
+    locations: Option<Rc<ObservationLocations>>,
+    /// Instructions each line accounts for, by one-based line of `output`.
+    lines: BTreeMap<usize, BTreeSet<u64>>,
+    /// The line the next character of `output` goes on, as of `counted` bytes.
+    line: usize,
+    counted: usize,
+    /// Residuals written so far, whose count numbers the next one.
+    residuals: Vec<ResidualSite>,
+    /// The header of the definition last written, as bytes of `output`.
+    signature: Option<std::ops::Range<usize>>,
+    /// The names of the function being written, so a reference can be spelled.
+    symbols: crate::symbol::SymbolTable,
+    /// Where emission is counted. Writing the C out is the largest phase of a
+    /// decompile by measured time -- two thirds of it over dpkg-divert -- and
+    /// before this it charged two units for the whole of it, so the meter said
+    /// nothing about the phase it most needed to bound.
+    work: Option<&'c dyn r2ssa::SsaWorkControl>,
+    /// Set once the work control stops the run; emission then unwinds without
+    /// writing more, and the caller's poll reports the stop with the partial.
+    stopped: bool,
 }
 
-impl CodeGenerator {
+impl<'c> CodeGenerator<'c> {
     /// Create a new code generator.
-    pub fn new(config: CodeGenConfig) -> Self {
+    pub(crate) fn new(config: CodeGenConfig) -> Self {
         Self {
             config,
             output: String::new(),
             indent_level: 0,
+            locations: None,
+            lines: BTreeMap::new(),
+            line: 1,
+            counted: 0,
+            residuals: Vec::new(),
+            signature: None,
+            symbols: crate::symbol::SymbolTable::new(),
+            work: None,
+            stopped: false,
+        }
+    }
+
+    /// The line the next character written goes on.
+    ///
+    /// Counted forward from where the last question left off, so asking once
+    /// per node costs one pass over the text in all.
+    fn current_line(&mut self) -> usize {
+        let fresh = &self.output.as_bytes()[self.counted.min(self.output.len())..];
+        self.line += fresh.iter().filter(|byte| **byte == b'\n').count();
+        self.counted = self.output.len();
+        self.line
+    }
+
+    /// Say that the line being written accounts for these markers' instructions.
+    fn note_observations(&mut self, ids: &[RenderObservationId]) {
+        let Some(locations) = self.locations.clone() else {
+            return;
+        };
+        let addrs = ids
+            .iter()
+            .filter_map(|id| locations.at(*id))
+            .collect::<Vec<_>>();
+        if addrs.is_empty() {
+            return;
+        }
+        let line = self.current_line();
+        self.lines.entry(line).or_default().extend(addrs);
+    }
+
+    /// Write a residual call: its helper, and the next site number.
+    fn emit_residual(
+        &mut self,
+        ty: crate::prelude::ResidualType,
+        cause: crate::prelude::ResidualCause,
+        gap: Option<&str>,
+    ) {
+        let site = u32::try_from(self.residuals.len() + 1).unwrap_or(u32::MAX);
+        let line = self.current_line();
+        self.residuals.push(ResidualSite {
+            site,
+            ty,
+            cause,
+            gap: gap.map(str::to_owned),
+            line,
+        });
+        self.output
+            .push_str(&crate::prelude::Helper::Residual(ty).name());
+        self.output.push_str(&format!("({site})"));
+    }
+
+    /// Emit a function as a translation unit, with where each line came from.
+    pub(crate) fn emit(&mut self, ready: &EmissionReadyFunction, pointer_bits: u32) -> Emission {
+        self.locations.clone_from(&ready.locations);
+        let definition = self.generate_function(ready);
+        let signature = self
+            .signature
+            .take()
+            .and_then(|range| definition.get(range))
+            .map(str::to_owned);
+        let func = ready.function();
+        let defines = func.declaration_only.is_none();
+        let mut prelude = String::new();
+        for include in crate::prelude::INCLUDES {
+            prelude.push_str(include);
+            prelude.push('\n');
+        }
+        prelude.push('\n');
+        if defines {
+            for helper in crate::prelude::helpers_called(func) {
+                prelude.push_str(&helper.definition());
+                prelude.push('\n');
+            }
+        }
+        let offset = prelude.bytes().filter(|byte| *byte == b'\n').count();
+        let lines = std::mem::take(&mut self.lines)
+            .into_iter()
+            .map(|(line, addrs)| SourceLine {
+                line: line + offset,
+                addrs: addrs.into_iter().collect(),
+            })
+            .collect();
+        let residuals = std::mem::take(&mut self.residuals)
+            .into_iter()
+            .map(|residual| ResidualSite {
+                line: residual.line + offset,
+                ..residual
+            })
+            .collect();
+        prelude.push_str(&definition);
+        Emission {
+            definition,
+            unit: prelude,
+            lines,
+            residuals,
+            signature,
+            variables: crate::report::variables(func),
+            links: crate::report::links(func, pointer_bits),
+        }
+    }
+
+    /// Count what this generator emits against the run's work budget.
+    pub(crate) fn with_work(mut self, work: &'c dyn r2ssa::SsaWorkControl) -> Self {
+        self.work = Some(work);
+        self
+    }
+
+    /// One unit for one emitted node, and false once the run is stopped.
+    fn charge(&mut self) -> bool {
+        if self.stopped {
+            return false;
+        }
+        if let Some(work) = self.work
+            && work.poll().is_err()
+        {
+            self.stopped = true;
+            return false;
+        }
+        true
+    }
+
+    /// Declare the named types this rendering spells.
+    ///
+    /// A pointer to an undeclared tag is legal C; a pointer to an undeclared
+    /// typedef name is not, so a rendering that writes `UInt16 *p` has to say
+    /// what `UInt16` is. These precede the aggregates: a typedef may name a tag
+    /// defined below it, and a member may be declared at a typedef name.
+    fn emit_typedef_declarations(&mut self, func: &CFunction) {
+        for typedef in &func.typedefs {
+            self.output.push_str("typedef ");
+            match &typedef.spelling {
+                Some(spelling) => {
+                    self.output.push_str(spelling);
+                    self.output.push(' ');
+                    self.output.push_str(&typedef.name);
+                }
+                None => self.output.push_str(&r2types::c_object_declaration(
+                    &typedef.target,
+                    &typedef.name,
+                )),
+            }
+            self.output.push_str(";\n");
+        }
+        if !func.typedefs.is_empty() {
+            self.output.push('\n');
         }
     }
 
     /// Generate code for a function.
-    pub fn generate_function(&mut self, func: &CFunction) -> String {
+    pub(crate) fn generate_function(&mut self, ready: &EmissionReadyFunction) -> String {
+        let func = ready.function();
+        self.symbols = func.symbols.borrow().clone();
         self.output.clear();
+        self.line = 1;
+        self.counted = 0;
+        self.lines.clear();
+        self.residuals.clear();
+        self.signature = None;
+
+        // A declared address defines nothing: the reason stands where the body
+        // would, and the declarations say what the address resolves to.
+        if let Some(reason) = &func.declaration_only {
+            self.output.push_str("/* ");
+            self.output.push_str(reason);
+            self.output.push_str(" */\n");
+            // What the proof note says about a function nothing defines still
+            // stands, and a comment is all it can be.
+            for stmt in &func.body {
+                if let CStmt::Comment(text) = stmt.unobserved() {
+                    self.output.push_str("/* ");
+                    self.emit_comment_text(text);
+                    self.output.push_str(" */\n");
+                }
+            }
+            self.emit_typedef_declarations(func);
+            self.emit_extern_declarations(func, true);
+            return self.output.clone();
+        }
+
+        self.emit_typedef_declarations(func);
+
+        // A value of an aggregate needs that aggregate defined; a pointer to one
+        // does not. Only what the rendering actually declares is defined here.
+        for aggregate in &func.aggregates {
+            self.output.push_str(if aggregate.is_union {
+                "union "
+            } else {
+                "struct "
+            });
+            self.output.push_str(&aggregate.name);
+            self.output.push_str(" {\n");
+            for (ty, name) in &aggregate.members {
+                self.output.push_str(&self.config.indent);
+                self.output
+                    .push_str(&r2types::c_object_declaration(ty, name));
+                self.output.push_str(";\n");
+            }
+            self.output.push_str("};\n");
+        }
+        if !func.aggregates.is_empty() {
+            self.output.push('\n');
+        }
+
+        // What the body calls on a carrier wider than any C integer, so the
+        // rendering compiles on its own.
+        for helper in &func.bitvector_helpers {
+            self.output.push_str(&helper.definition());
+            self.output.push('\n');
+        }
 
         // Function signature
+        let header = self.output.len();
         self.emit_type(&func.ret_type);
         self.output.push(' ');
         self.output.push_str(&func.name);
@@ -64,24 +615,37 @@ impl CodeGenerator {
             if i > 0 {
                 self.output.push_str(", ");
             }
-            self.emit_type(&param.ty);
-            self.output.push(' ');
-            self.output.push_str(&param.name);
+            self.emit_named_declaration(&param.ty, param.name);
         }
 
         if func.params.is_empty() {
-            self.output.push_str("void");
+            // An empty list is only `void` when it was actually recovered.
+            // Otherwise leave it unspecified rather than asserting the function
+            // takes no arguments.
+            if func.params_known {
+                self.output.push_str("void");
+            }
         }
 
-        self.output.push_str(")\n{\n");
+        self.output.push(')');
+        self.signature = Some(header..self.output.len());
+        self.output.push_str("\n{\n");
         self.indent_level += 1;
+
+        // Declarations for what this function calls.
+        //
+        // Inside the body rather than above it. A block-scope declaration of an
+        // external function is ordinary C and still has external linkage, and
+        // it keeps the rendering self-contained: the text of one function is
+        // the whole translation unit anything needs to compile it, which is not
+        // true of a prototype the reader has to be handed separately.
+        self.emit_extern_declarations(func, false);
 
         // Local variable declarations
         for local in &func.locals {
             self.emit_indent();
-            self.emit_type(&local.ty);
-            self.output.push(' ');
-            self.output.push_str(&local.name);
+            let name = self.symbols.name(local.name).to_owned();
+            self.emit_object_declaration(&local.ty, &name);
             self.output.push_str(";\n");
         }
 
@@ -90,9 +654,7 @@ impl CodeGenerator {
         }
 
         // Function body
-        for stmt in &func.body {
-            self.emit_stmt(stmt);
-        }
+        self.emit_stmt_sequence(&func.body);
 
         self.indent_level -= 1;
         self.output.push_str("}\n");
@@ -100,15 +662,99 @@ impl CodeGenerator {
         self.output.clone()
     }
 
+    /// The prototypes and data objects this rendering needs to stand alone.
+    ///
+    /// At file scope the storage class is spelled, because there is no
+    /// definition beside it to say what the name is.
+    fn emit_extern_declarations(&mut self, func: &CFunction, file_scope: bool) {
+        for declaration in &func.externs {
+            self.emit_indent();
+            if file_scope {
+                self.output.push_str("extern ");
+            }
+            if declaration.noreturn {
+                self.output.push_str("__attribute__((noreturn)) ");
+            }
+            self.emit_type(&declaration.ret_type);
+            self.output.push(' ');
+            self.output.push_str(&declaration.name);
+            self.output.push('(');
+            match &declaration.params {
+                // C has no spelling for a function whose whole parameter list
+                // is an ellipsis, so a variadic callee with no named
+                // parameters is declared with an unspecified list instead: it
+                // accepts the arguments the call passes, which is the point,
+                // and asserts nothing else.
+                Some(params) if params.is_empty() => {
+                    self.output
+                        .push_str(if declaration.variadic { "" } else { "void" });
+                }
+                Some(params) => {
+                    for (index, param) in params.iter().enumerate() {
+                        if index > 0 {
+                            self.output.push_str(", ");
+                        }
+                        self.emit_type(param);
+                    }
+                    if declaration.variadic {
+                        self.output.push_str(", ...");
+                    }
+                }
+                None => {}
+            }
+            self.output.push_str(");\n");
+        }
+        // A name already declared as a function is not also a data object. The
+        // two declarations are a redefinition and the translation unit is
+        // rejected: `__cxa_finalize` arrives as both a callee this function
+        // calls and an address the relocation names.
+        let declared_functions: std::collections::BTreeSet<&str> = func
+            .externs
+            .iter()
+            .map(|declaration| declaration.name.as_str())
+            .collect();
+        for object in &func.extern_objects {
+            if declared_functions.contains(object.name.as_str()) {
+                continue;
+            }
+            // The address the name stands for is the link map's to carry,
+            // beside the text: a tool resolving the object reads it there.
+            self.emit_indent();
+            self.output.push_str("extern ");
+            if let Some(type_fact) = &object.type_fact {
+                self.emit_object_declaration(&type_fact.ty, &object.name);
+            } else {
+                self.output.push_str("char ");
+                self.output.push_str(&object.name);
+                self.output.push_str("[]");
+            }
+            self.output.push_str(";\n");
+        }
+        // The blank line separates the declarations from the definition that follows; a declaration alone has nothing after it.
+        if !file_scope && (!func.externs.is_empty() || !func.extern_objects.is_empty()) {
+            self.output.push('\n');
+        }
+    }
+
+    /// Read names from the table that issued them.
+    pub(crate) fn adopt_symbols(&mut self, symbols: &crate::symbol::SymbolTable) {
+        self.symbols = symbols.clone();
+    }
+
     /// Generate code for a statement.
-    pub fn generate_stmt(&mut self, stmt: &CStmt) -> String {
+    pub(crate) fn generate_stmt(&mut self, stmt: &CStmt) -> String {
+        #[cfg(test)]
+        assert!(
+            !stmt_has_render_observations(stmt),
+            "marked C statement reached codegen without journal sealing"
+        );
         self.output.clear();
         self.emit_stmt(stmt);
         self.output.clone()
     }
 
     /// Generate code for an expression.
-    pub fn generate_expr(&mut self, expr: &CExpr) -> String {
+    pub(crate) fn generate_expr(&mut self, expr: &CExpr) -> String {
         self.output.clear();
         self.emit_expr(expr, 0);
         self.output.clone()
@@ -116,7 +762,16 @@ impl CodeGenerator {
 
     /// Emit a statement.
     fn emit_stmt(&mut self, stmt: &CStmt) {
+        if !self.charge() {
+            return;
+        }
+        // An empty statement writes no line, so it accounts for none.
+        if !matches!(stmt.unobserved(), CStmt::Empty) {
+            self.note_observations(&stmt.observation_ids());
+        }
+        let stmt = stmt.unobserved();
         match stmt {
+            CStmt::StructuredRegion { stmt, .. } => self.emit_stmt(stmt),
             CStmt::Empty => {}
             CStmt::Expr(expr) => {
                 self.emit_indent();
@@ -125,9 +780,7 @@ impl CodeGenerator {
             }
             CStmt::Decl { ty, name, init } => {
                 self.emit_indent();
-                self.emit_type(ty);
-                self.output.push(' ');
-                self.output.push_str(name);
+                self.emit_named_declaration(ty, *name);
                 if let Some(init_expr) = init {
                     self.output.push_str(" = ");
                     self.emit_expr(init_expr, 0);
@@ -138,9 +791,7 @@ impl CodeGenerator {
                 self.emit_indent();
                 self.output.push_str("{\n");
                 self.indent_level += 1;
-                for s in stmts {
-                    self.emit_stmt(s);
-                }
+                self.emit_stmt_sequence(stmts);
                 self.indent_level -= 1;
                 self.emit_indent();
                 self.output.push_str("}\n");
@@ -158,7 +809,7 @@ impl CodeGenerator {
 
                 if let Some(else_stmt) = else_body {
                     // Check if else body is another if (else-if chain)
-                    if matches!(else_stmt.as_ref(), CStmt::If { .. }) {
+                    if matches!(else_stmt.unobserved(), CStmt::If { .. }) {
                         self.output.push_str(" else ");
                         self.emit_stmt_inline(else_stmt);
                     } else {
@@ -226,9 +877,7 @@ impl CodeGenerator {
                     self.emit_expr(&case.value, 0);
                     self.output.push_str(":\n");
                     self.indent_level += 1;
-                    for s in &case.body {
-                        self.emit_stmt(s);
-                    }
+                    self.emit_stmt_sequence(&case.body);
                     self.indent_level -= 1;
                 }
 
@@ -236,9 +885,15 @@ impl CodeGenerator {
                     self.emit_indent();
                     self.output.push_str("default:\n");
                     self.indent_level += 1;
-                    for s in default_stmts {
-                        self.emit_stmt(s);
-                    }
+                    self.emit_stmt_sequence(default_stmts);
+                    self.indent_level -= 1;
+                }
+                // C has no label at the end of a compound statement, so an
+                // arm that renders nothing leaves the switch explicitly.
+                if self.output.ends_with(":\n") {
+                    self.indent_level += 1;
+                    self.emit_indent();
+                    self.output.push_str("break;\n");
                     self.indent_level -= 1;
                 }
 
@@ -269,30 +924,62 @@ impl CodeGenerator {
                 self.output.push_str(";\n");
             }
             CStmt::Label(label) => {
-                // Labels are not indented
+                // Labels are not indented.
+                //
+                // The empty statement is written down rather than left to what
+                // follows. A label labels a statement, and a declaration is not
+                // one before C23, so a label landing on a declaration is
+                // rejected by a strict compile. Saying `;` makes the label's
+                // statement explicit wherever it lands.
                 self.output.push_str(label);
-                self.output.push_str(":\n");
+                self.output.push_str(": ;\n");
             }
             CStmt::Comment(text) => {
                 if self.config.emit_comments {
                     self.emit_indent();
                     self.output.push_str("/* ");
-                    self.output.push_str(text);
+                    self.emit_comment_text(text);
                     self.output.push_str(" */\n");
                 }
             }
+            CStmt::Gap(marker) => {
+                // A gap is always written, whatever the comment configuration
+                // says: it is the record that this cell is unproven, and a
+                // rendering that dropped it would claim more than was proven.
+                // What it stands for is not computed, so running it traps
+                // rather than going on as if the work were done.
+                self.emit_indent();
+                self.emit_residual(
+                    crate::prelude::ResidualType::Void,
+                    crate::prelude::ResidualCause::Gap,
+                    Some(&marker.kind),
+                );
+                self.output.push_str("; /* ");
+                self.emit_comment_text(&marker.to_string());
+                self.output.push_str(" */\n");
+            }
+            CStmt::Observed { .. } => unreachable!("unobserved statement expected"),
+        }
+    }
+
+    /// Emit a straight-line sequence, coalescing adjacent scalar self-updates.
+    fn emit_stmt_sequence(&mut self, stmts: &[CStmt]) {
+        for stmt in stmts {
+            self.emit_stmt(stmt);
         }
     }
 
     /// Emit a statement body (handles braces for single statements).
     fn emit_stmt_body(&mut self, stmt: &CStmt) {
+        if matches!(stmt.unobserved(), CStmt::Block(_)) {
+            self.note_observations(&stmt.observation_ids());
+        }
+        let stmt = stmt.unobserved();
         match stmt {
             CStmt::Block(stmts) => {
                 self.output.push_str("{\n");
                 self.indent_level += 1;
-                for s in stmts {
-                    self.emit_stmt(s);
-                }
+                self.emit_stmt_sequence(stmts);
                 self.indent_level -= 1;
                 self.emit_indent();
                 self.output.push('}');
@@ -310,14 +997,14 @@ impl CodeGenerator {
 
     /// Emit a statement inline (no newline, for for-loop init).
     fn emit_stmt_inline(&mut self, stmt: &CStmt) {
+        self.note_observations(&stmt.observation_ids());
+        let stmt = stmt.unobserved();
         match stmt {
             CStmt::Expr(expr) => {
                 self.emit_expr(expr, 0);
             }
             CStmt::Decl { ty, name, init } => {
-                self.emit_type(ty);
-                self.output.push(' ');
-                self.output.push_str(name);
+                self.emit_named_declaration(ty, *name);
                 if let Some(init_expr) = init {
                     self.output.push_str(" = ");
                     self.emit_expr(init_expr, 0);
@@ -334,7 +1021,7 @@ impl CodeGenerator {
                 self.emit_stmt_body(then_body);
                 if let Some(else_stmt) = else_body {
                     self.output.push_str(" else ");
-                    if matches!(else_stmt.as_ref(), CStmt::If { .. }) {
+                    if matches!(else_stmt.unobserved(), CStmt::If { .. }) {
                         self.emit_stmt_inline(else_stmt);
                     } else {
                         self.emit_stmt_body(else_stmt);
@@ -347,6 +1034,11 @@ impl CodeGenerator {
 
     /// Emit an expression with parent precedence for parenthesization.
     fn emit_expr(&mut self, expr: &CExpr, parent_prec: u8) {
+        if !self.charge() {
+            return;
+        }
+        self.note_observations(&expr.observation_ids());
+        let expr = expr.unobserved();
         let my_prec = expr.precedence();
         let need_parens = my_prec < parent_prec;
 
@@ -356,13 +1048,11 @@ impl CodeGenerator {
 
         match expr {
             CExpr::IntLit(val) => {
-                if *val < 0 {
-                    self.output.push_str(&format!("{}", val));
-                } else if *val > 0xffff {
-                    self.output.push_str(&format!("0x{:x}", val));
-                } else {
-                    self.output.push_str(&format!("{}", val));
-                }
+                let rendered = match u64::try_from(*val) {
+                    Ok(magnitude) => format_unsigned_literal(magnitude),
+                    Err(_) => val.to_string(),
+                };
+                self.output.push_str(&rendered);
             }
             CExpr::UIntLit(val) => {
                 // Check if this looks like a negative offset (high bit set, close to max)
@@ -370,14 +1060,18 @@ impl CodeGenerator {
                     // Convert to negative: two's complement
                     let neg = (!*val).wrapping_add(1);
                     self.output.push_str(&format!("-0x{:x}", neg));
-                } else if *val > 0xffff {
-                    self.output.push_str(&format!("0x{:x}U", val));
                 } else {
-                    self.output.push_str(&format!("{}U", val));
+                    self.output
+                        .push_str(&format!("{}U", format_unsigned_literal(*val)));
                 }
             }
-            CExpr::FloatLit(val) => {
-                self.output.push_str(&format!("{:.6}", val));
+            // The shortest spelling that reads back to the same value; a
+            // `float` literal carries its suffix so it is not a double.
+            CExpr::FloatLit(val, 32) => {
+                self.output.push_str(&format!("{:?}f", *val as f32));
+            }
+            CExpr::FloatLit(val, _) => {
+                self.output.push_str(&format!("{:?}", val));
             }
             CExpr::StringLit(s) => {
                 self.output.push('"');
@@ -407,7 +1101,14 @@ impl CodeGenerator {
                 }
                 self.output.push('\'');
             }
-            CExpr::Var(name) => {
+            CExpr::Var(id) => {
+                self.output.push_str(self.symbols.name(*id));
+            }
+            // The kind is what makes the name allowed, not how it prints.
+            CExpr::External { name, .. } => {
+                self.output.push_str(name);
+            }
+            CExpr::DataObject { name, .. } => {
                 self.output.push_str(name);
             }
             CExpr::Unary { op, operand } => {
@@ -420,30 +1121,46 @@ impl CodeGenerator {
                 }
             }
             CExpr::Binary { op, left, right } => {
-                self.emit_expr(left, my_prec);
-                self.output.push(' ');
-                self.output.push_str(op.as_str());
-                self.output.push(' ');
-                // Right associativity for assignment operators
-                let right_prec = if matches!(
-                    op,
-                    BinaryOp::Assign
-                        | BinaryOp::AddAssign
-                        | BinaryOp::SubAssign
-                        | BinaryOp::MulAssign
-                        | BinaryOp::DivAssign
-                        | BinaryOp::ModAssign
-                        | BinaryOp::BitAndAssign
-                        | BinaryOp::BitOrAssign
-                        | BinaryOp::BitXorAssign
-                        | BinaryOp::ShlAssign
-                        | BinaryOp::ShrAssign
-                ) {
-                    my_prec
+                if let Some((render_op, magnitude)) = additive_negative_rhs_rewrite(*op, right) {
+                    self.emit_expr(left, my_prec);
+                    self.output.push(' ');
+                    self.output.push_str(render_op.as_str());
+                    self.output.push(' ');
+                    self.emit_positive_literal_magnitude(magnitude);
+                } else if let Some((render_op, positive_rhs)) =
+                    additive_negative_product_rhs_rewrite(*op, right)
+                {
+                    self.emit_expr(left, my_prec);
+                    self.output.push(' ');
+                    self.output.push_str(render_op.as_str());
+                    self.output.push(' ');
+                    self.emit_expr(&positive_rhs, my_prec + 1);
                 } else {
-                    my_prec + 1
-                };
-                self.emit_expr(right, right_prec);
+                    self.emit_expr(left, operand_precedence_floor(*op, left, my_prec));
+                    self.output.push(' ');
+                    self.output.push_str(op.as_str());
+                    self.output.push(' ');
+                    // Right associativity for assignment operators
+                    let right_prec = if matches!(
+                        op,
+                        BinaryOp::Assign
+                            | BinaryOp::AddAssign
+                            | BinaryOp::SubAssign
+                            | BinaryOp::MulAssign
+                            | BinaryOp::DivAssign
+                            | BinaryOp::ModAssign
+                            | BinaryOp::BitAndAssign
+                            | BinaryOp::BitOrAssign
+                            | BinaryOp::BitXorAssign
+                            | BinaryOp::ShlAssign
+                            | BinaryOp::ShrAssign
+                    ) {
+                        my_prec
+                    } else {
+                        my_prec + 1
+                    };
+                    self.emit_expr(right, operand_precedence_floor(*op, right, right_prec));
+                }
             }
             CExpr::Ternary {
                 cond,
@@ -456,23 +1173,15 @@ impl CodeGenerator {
                 self.output.push_str(" : ");
                 self.emit_expr(else_expr, my_prec);
             }
-            CExpr::Cast { ty, expr: inner } => {
+            CExpr::Cast {
+                ty, expr: inner, ..
+            } => {
                 self.output.push('(');
                 self.emit_type(ty);
                 self.output.push(')');
                 self.emit_expr(inner, my_prec);
             }
-            CExpr::Call { func, args } => {
-                self.emit_expr(func, my_prec);
-                self.output.push('(');
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 {
-                        self.output.push_str(", ");
-                    }
-                    self.emit_expr(arg, 0);
-                }
-                self.output.push(')');
-            }
+            CExpr::Call { func, args, .. } => self.emit_call(func, args, my_prec),
             CExpr::Subscript { base, index } => {
                 self.emit_expr(base, my_prec);
                 self.output.push('[');
@@ -520,11 +1229,30 @@ impl CodeGenerator {
                 self.emit_expr(inner, 0);
                 self.output.push(')');
             }
+            CExpr::Observed { .. } => unreachable!("unobserved expression expected"),
         }
 
         if need_parens {
             self.output.push(')');
         }
+    }
+
+    /// Emit a call. A residual's argument is its site, which is where it
+    /// stands in the text, so the emitter numbers it.
+    fn emit_call(&mut self, func: &CExpr, args: &[CExpr], my_prec: u8) {
+        if let Some((ty, cause)) = crate::prelude::residual_callee(func) {
+            self.emit_residual(ty, cause, None);
+            return;
+        }
+        self.emit_expr(func, my_prec);
+        self.output.push('(');
+        for (i, arg) in args.iter().enumerate() {
+            if i > 0 {
+                self.output.push_str(", ");
+            }
+            self.emit_expr(arg, 0);
+        }
+        self.output.push(')');
     }
 
     /// Emit a type.
@@ -533,18 +1261,236 @@ impl CodeGenerator {
         self.output.push_str(&ty.to_string());
     }
 
+    /// Emit the declarator for a data object.
+    ///
+    /// C puts the identifier inside the declarator, which only a scalar makes
+    /// look like a type followed by a name.
+    fn emit_object_declaration(&mut self, ty: &CType, name: &str) {
+        self.output
+            .push_str(&r2types::c_object_declaration(ty, name));
+    }
+
+    /// Emit a type together with the identifier it declares.
+    fn emit_named_declaration(&mut self, ty: &CType, name: crate::symbol::SymbolId) {
+        let name = self.symbols.name(name).to_owned();
+        self.emit_object_declaration(ty, &name);
+    }
+
     /// Emit indentation.
     fn emit_indent(&mut self) {
         for _ in 0..self.indent_level {
             self.output.push_str(&self.config.indent);
         }
     }
+
+    fn emit_comment_text(&mut self, text: &str) {
+        let symbols = &self.symbols;
+        let text =
+            crate::sanitize_comment_text_keeping(text, |token| symbols.by_name(token).is_some());
+        self.output.push_str(&text);
+    }
+
+    fn emit_positive_literal_magnitude(&mut self, literal: PositiveLiteralMagnitude) {
+        if let Some((value, bits)) = literal.floating {
+            self.emit_expr(&CExpr::FloatLit(value, bits), 0);
+        } else if literal.prefer_hex {
+            self.output.push_str(&format!("0x{:x}", literal.value));
+        } else {
+            self.output
+                .push_str(&format_unsigned_literal(literal.value));
+        }
+    }
 }
 
-/// Generate C code for a function.
-pub fn generate(func: &CFunction) -> String {
+#[cfg(test)]
+fn generate(func: &CFunction) -> String {
     let mut codegen = CodeGenerator::new(CodeGenConfig::default());
-    codegen.generate_function(func)
+    let ready = prepare_function_for_emission(func.clone());
+    codegen.generate_function(&ready)
+}
+
+fn prepare_stmt_sequence_for_emission(stmts: Vec<CStmt>) -> Vec<CStmt> {
+    stmts.into_iter().map(prepare_stmt_for_emission).collect()
+}
+
+fn prepare_stmt_for_emission(stmt: CStmt) -> CStmt {
+    match stmt {
+        CStmt::StructuredRegion { marker, stmt } => {
+            CStmt::structured_region(marker, prepare_stmt_for_emission(*stmt))
+        }
+        CStmt::Observed { ids, stmt } => CStmt::observe_all(ids, prepare_stmt_for_emission(*stmt)),
+        CStmt::Block(stmts) => CStmt::Block(prepare_stmt_sequence_for_emission(stmts)),
+        CStmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => CStmt::If {
+            cond,
+            then_body: Box::new(prepare_stmt_for_emission(*then_body)),
+            else_body: else_body.map(|body| Box::new(prepare_stmt_for_emission(*body))),
+        },
+        CStmt::While { cond, body } => CStmt::While {
+            cond,
+            body: Box::new(prepare_stmt_for_emission(*body)),
+        },
+        CStmt::DoWhile { body, cond } => CStmt::DoWhile {
+            body: Box::new(prepare_stmt_for_emission(*body)),
+            cond,
+        },
+        CStmt::For {
+            init,
+            cond,
+            update,
+            body,
+        } => CStmt::For {
+            init: init.map(|init| Box::new(prepare_stmt_for_emission(*init))),
+            cond,
+            update,
+            body: Box::new(prepare_stmt_for_emission(*body)),
+        },
+        CStmt::Switch {
+            expr,
+            cases,
+            default,
+        } => CStmt::Switch {
+            expr,
+            cases: cases
+                .into_iter()
+                .map(|case| crate::ast::SwitchCase {
+                    value: case.value,
+                    body: prepare_stmt_sequence_for_emission(case.body),
+                })
+                .collect(),
+            default: default.map(prepare_stmt_sequence_for_emission),
+        },
+        other => other,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PositiveLiteralMagnitude {
+    value: u64,
+    prefer_hex: bool,
+    /// A floating literal's magnitude and width, spelled as the literal is.
+    floating: Option<(f64, u32)>,
+}
+
+fn additive_negative_rhs_rewrite(
+    op: BinaryOp,
+    rhs: &CExpr,
+) -> Option<(BinaryOp, PositiveLiteralMagnitude)> {
+    let magnitude = negative_literal_magnitude(rhs)?;
+    match op {
+        BinaryOp::Add => Some((BinaryOp::Sub, magnitude)),
+        BinaryOp::Sub => Some((BinaryOp::Add, magnitude)),
+        _ => None,
+    }
+}
+
+fn negative_literal_magnitude(expr: &CExpr) -> Option<PositiveLiteralMagnitude> {
+    let expr = expr.unobserved();
+    match expr {
+        CExpr::FloatLit(value, bits) if value.is_sign_negative() && value.is_finite() => {
+            Some(PositiveLiteralMagnitude {
+                value: 0,
+                prefer_hex: false,
+                floating: Some((-value, *bits)),
+            })
+        }
+        CExpr::IntLit(value) if *value < 0 => Some(PositiveLiteralMagnitude {
+            value: value.unsigned_abs(),
+            prefer_hex: false,
+            floating: None,
+        }),
+        CExpr::UIntLit(value) if *value > LIKELY_NEGATIVE_THRESHOLD => {
+            Some(PositiveLiteralMagnitude {
+                value: (!*value).wrapping_add(1),
+                prefer_hex: true,
+                floating: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn additive_negative_product_rhs_rewrite(op: BinaryOp, rhs: &CExpr) -> Option<(BinaryOp, CExpr)> {
+    let positive_rhs = negative_product_positive_rhs(rhs)?;
+    match op {
+        BinaryOp::Add => Some((BinaryOp::Sub, positive_rhs)),
+        BinaryOp::Sub => Some((BinaryOp::Add, positive_rhs)),
+        _ => None,
+    }
+}
+
+fn negative_product_positive_rhs(expr: &CExpr) -> Option<CExpr> {
+    let expr = expr.unobserved();
+    match expr {
+        CExpr::Binary {
+            op: BinaryOp::Mul,
+            left,
+            right,
+        } => {
+            if let Some(magnitude) = negative_literal_magnitude(right) {
+                return positive_product_expr((**left).clone(), magnitude);
+            }
+            if let Some(magnitude) = negative_literal_magnitude(left) {
+                return positive_product_expr((**right).clone(), magnitude);
+            }
+            None
+        }
+        CExpr::Paren(inner) => negative_product_positive_rhs(inner),
+        _ => None,
+    }
+}
+
+fn positive_product_expr(term: CExpr, magnitude: PositiveLiteralMagnitude) -> Option<CExpr> {
+    if magnitude.floating.is_some() {
+        return None;
+    }
+    if magnitude.value == 1 {
+        return Some(term);
+    }
+    let literal = if magnitude.prefer_hex {
+        CExpr::UIntLit(magnitude.value)
+    } else {
+        CExpr::IntLit(i64::try_from(magnitude.value).ok()?)
+    };
+    Some(CExpr::binary(BinaryOp::Mul, term, literal))
+}
+
+/// Whether C's own precedence would regroup this operand away from the reader.
+///
+/// `a | b & c` parses exactly as the model means it -- `&` binds tighter --
+/// but a strict compile rejects the line, because the standard's grouping here
+/// is not the one a reader arrives at unaided. The same holds for a shift
+/// alongside an addition and for `&&` inside `||`.
+///
+/// Where that is the case the printer states the grouping rather than relying
+/// on it. This never changes what the expression means; it removes the reader's
+/// obligation to have memorised the table.
+fn grouping_must_be_explicit(parent: BinaryOp, operand: &CExpr) -> bool {
+    let CExpr::Binary { op: inner, .. } = operand.unobserved() else {
+        return false;
+    };
+    let bitwise = |op| matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor);
+    let shift = |op| matches!(op, BinaryOp::Shl | BinaryOp::Shr);
+    let additive = |op| matches!(op, BinaryOp::Add | BinaryOp::Sub);
+
+    (bitwise(parent) && bitwise(*inner) && parent != *inner)
+        || (shift(parent) && additive(*inner))
+        || (parent == BinaryOp::Or && *inner == BinaryOp::And)
+}
+
+/// The precedence floor an operand is emitted under.
+///
+/// Normally the parent's own precedence, raised just past the operand's when
+/// the pairing is one C reads differently than a person does.
+fn operand_precedence_floor(parent: BinaryOp, operand: &CExpr, default: u8) -> u8 {
+    if grouping_must_be_explicit(parent, operand) {
+        operand.precedence().saturating_add(1)
+    } else {
+        default
+    }
 }
 
 #[cfg(test)]
@@ -552,27 +1498,129 @@ mod tests {
     use super::*;
     use crate::ast::{CLocal, CParam};
 
+    /// The names a fixture in this module declares.
+    fn test_table() -> std::cell::RefCell<crate::symbol::SymbolTable> {
+        std::cell::RefCell::new(crate::symbol::SymbolTable::new())
+    }
+
+    /// A declared address defines nothing, and its declaration stands alone.
+    ///
+    /// The storage class is spelled because there is no definition beside it,
+    /// and the body, its braces and the return type of the stub itself are all
+    /// absent: none of them is a thing this rendering knows.
+    #[test]
+    fn declaration_only_function_emits_no_definition() {
+        let symbols = test_table();
+        let func = CFunction {
+            declaration_only: Some(
+                "r2sleigh: PLT stub at 0x22c0; this symbol resolves to the import `snprintf`"
+                    .to_string(),
+            ),
+            externs: vec![crate::ast::CExternDecl {
+                name: "snprintf".to_string(),
+                ret_type: CType::i32(),
+                params: Some(vec![CType::ptr(CType::u8()), CType::u64()]),
+                variadic: true,
+                noreturn: false,
+                address: None,
+            }],
+            typedefs: Vec::new(),
+            aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
+            extern_objects: Vec::new(),
+            name: "snprintf".to_string(),
+            ret_type: CType::i32(),
+            params: Vec::new(),
+            locals: Vec::new(),
+            body: Vec::new(),
+            params_known: false,
+            symbols: std::rc::Rc::new(symbols),
+        };
+
+        let code = generate(&func);
+        assert!(code.contains("/* r2sleigh: PLT stub at 0x22c0"), "{code}");
+        assert!(
+            code.contains("extern int32_t snprintf(uint8_t*, uint64_t, ...);"),
+            "{code}"
+        );
+        assert!(!code.contains('{'), "{code}");
+        assert!(!code.contains('}'), "{code}");
+    }
+
+    /// A pointer to an undeclared tag is legal C; a pointer to an undeclared
+    /// typedef name is not, so the name has to be declared above the function
+    /// that spells it.
+    #[test]
+    fn a_spelled_name_is_declared_above_the_function() {
+        let symbols = test_table();
+        let func = CFunction {
+            declaration_only: None,
+            externs: Vec::new(),
+            typedefs: vec![
+                crate::ast::CTypedefDef {
+                    name: "UInt16".to_string(),
+                    target: CType::u16(),
+                    spelling: None,
+                },
+                crate::ast::CTypedefDef {
+                    name: "BZFILE".to_string(),
+                    target: CType::Void,
+                    spelling: None,
+                },
+            ],
+            aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
+            extern_objects: Vec::new(),
+            name: "f".to_string(),
+            ret_type: CType::Void,
+            params: vec![CParam {
+                ty: CType::ptr(CType::typedef("UInt16")),
+                name: crate::symbol::declare(&symbols, "q"),
+            }],
+            locals: Vec::new(),
+            body: Vec::new(),
+            params_known: true,
+            symbols: std::rc::Rc::new(symbols),
+        };
+        let code = generate(&func);
+        assert!(code.contains("typedef uint16_t UInt16;"), "{code}");
+        assert!(code.contains("typedef void BZFILE;"), "{code}");
+        assert!(
+            code.find("typedef uint16_t UInt16;") < code.find("void f("),
+            "{code}"
+        );
+    }
+
     #[test]
     fn test_generate_simple_function() {
+        let symbols = test_table();
         let func = CFunction {
+            declaration_only: None,
+            externs: Vec::new(),
+            typedefs: Vec::new(),
+            aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
+            extern_objects: Vec::new(),
             name: "add".to_string(),
             ret_type: CType::i32(),
             params: vec![
                 CParam {
                     ty: CType::i32(),
-                    name: "a".to_string(),
+                    name: crate::symbol::declare(&symbols, "a"),
                 },
                 CParam {
                     ty: CType::i32(),
-                    name: "b".to_string(),
+                    name: crate::symbol::declare(&symbols, "b"),
                 },
             ],
             locals: vec![],
             body: vec![CStmt::Return(Some(CExpr::binary(
                 BinaryOp::Add,
-                CExpr::var("a"),
-                CExpr::var("b"),
+                CExpr::var(crate::symbol::declare(&symbols, "a")),
+                CExpr::var(crate::symbol::declare(&symbols, "b")),
             )))],
+            params_known: true,
+            symbols: std::rc::Rc::new(symbols),
         };
 
         let code = generate(&func);
@@ -581,14 +1629,177 @@ mod tests {
     }
 
     #[test]
+    fn named_array_declaration_places_extent_after_identifier() {
+        let symbols = test_table();
+        let buffer = crate::symbol::declare(&symbols, "stack_m32");
+        let func = CFunction {
+            declaration_only: None,
+            externs: Vec::new(),
+            typedefs: Vec::new(),
+            aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
+            extern_objects: Vec::new(),
+            name: "uses_stack_buffer".to_string(),
+            ret_type: CType::Void,
+            params: Vec::new(),
+            locals: Vec::new(),
+            body: vec![CStmt::Decl {
+                ty: CType::Array(Box::new(CType::u8()), Some(16)),
+                name: buffer,
+                init: None,
+            }],
+            params_known: true,
+            symbols: std::rc::Rc::new(symbols),
+        };
+
+        let code = generate(&func);
+        assert!(code.contains("uint8_t stack_m32[16];"), "{code}");
+        assert!(!code.contains("uint8_t[16] stack_m32"), "{code}");
+    }
+
+    /// One declaration has to serve every call to the callee, and two calls to
+    /// a variadic callee legitimately pass different numbers of arguments. The
+    /// ellipsis is what makes both of them legal C; a fixed list would
+    /// contradict one of them.
+    #[test]
+    fn a_variadic_callee_is_declared_with_an_ellipsis() {
+        let symbols = test_table();
+        let declaration = |params: Option<Vec<CType>>, variadic: bool| {
+            let func = CFunction {
+                declaration_only: None,
+                externs: vec![crate::ast::CExternDecl {
+                    name: "sym_imp_fprintf".to_string(),
+                    ret_type: CType::uint(64),
+                    params,
+                    variadic,
+                    noreturn: false,
+                    address: None,
+                }],
+                typedefs: Vec::new(),
+                aggregates: Vec::new(),
+                bitvector_helpers: Vec::new(),
+                extern_objects: Vec::new(),
+                name: "caller".to_string(),
+                ret_type: CType::Void,
+                params: Vec::new(),
+                locals: Vec::new(),
+                body: Vec::new(),
+                params_known: true,
+                symbols: std::rc::Rc::clone(&func_symbols(&symbols)),
+            };
+            generate(&func)
+        };
+
+        let named = vec![CType::uint(64), CType::uint(64)];
+        assert!(
+            declaration(Some(named.clone()), true)
+                .contains("uint64_t sym_imp_fprintf(uint64_t, uint64_t, ...);"),
+            "a variadic callee keeps its named parameters and gains the ellipsis"
+        );
+        assert!(
+            declaration(Some(named), false)
+                .contains("uint64_t sym_imp_fprintf(uint64_t, uint64_t);"),
+            "a callee that is not variadic is declared with exactly its parameters"
+        );
+        // C has no spelling for a parameter list that is only an ellipsis, so
+        // an unspecified list stands in: it accepts what the call passes and
+        // asserts nothing, where `void` would say the callee takes nothing.
+        assert!(
+            declaration(Some(Vec::new()), true).contains("uint64_t sym_imp_fprintf();"),
+            "a variadic callee with no named parameters asserts no parameter list"
+        );
+        assert!(
+            declaration(Some(Vec::new()), false).contains("uint64_t sym_imp_fprintf(void);"),
+            "an empty recovered list means the callee takes nothing"
+        );
+    }
+
+    fn func_symbols(
+        symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
+    ) -> std::rc::Rc<std::cell::RefCell<crate::symbol::SymbolTable>> {
+        std::rc::Rc::new(std::cell::RefCell::new(symbols.borrow().clone()))
+    }
+
+    #[test]
+    fn unsealed_observation_wrappers_cannot_reach_codegen() {
+        let symbols = test_table();
+        let value = crate::symbol::declare(&symbols, "value");
+        let plain = CFunction {
+            declaration_only: None,
+            externs: Vec::new(),
+            typedefs: Vec::new(),
+            aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
+            extern_objects: Vec::new(),
+            name: "observed".to_string(),
+            ret_type: CType::i32(),
+            params: vec![],
+            locals: vec![],
+            body: vec![CStmt::If {
+                cond: CExpr::binary(BinaryOp::Gt, CExpr::var(value), CExpr::int(0)),
+                then_body: Box::new(CStmt::Return(Some(CExpr::binary(
+                    BinaryOp::Add,
+                    CExpr::var(value),
+                    CExpr::int(1),
+                )))),
+                else_body: Some(Box::new(CStmt::Return(Some(CExpr::int(0))))),
+            }],
+            params_known: true,
+            symbols: std::rc::Rc::new(symbols),
+        };
+        let mut observed = plain.clone();
+        let mut observation_owner = crate::ast::RenderObservationOwner::new();
+        let (_, observed_value) = observation_owner
+            .observe_expr(CExpr::var(value))
+            .expect("allocate value observation");
+        let (_, observed_cond) = observation_owner
+            .observe_expr(CExpr::binary(
+                BinaryOp::Gt,
+                CExpr::var(value),
+                CExpr::int(0),
+            ))
+            .expect("allocate condition observation");
+        let (_, observed_stmt) = observation_owner
+            .observe_stmt(CStmt::If {
+                cond: observed_cond,
+                then_body: Box::new(CStmt::Return(Some(CExpr::binary(
+                    BinaryOp::Add,
+                    observed_value,
+                    CExpr::int(1),
+                )))),
+                else_body: Some(Box::new(CStmt::Return(Some(CExpr::int(0))))),
+            })
+            .expect("allocate statement observation");
+        observed.body = vec![observed_stmt];
+
+        let statement_refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            CodeGenerator::new(CodeGenConfig::default()).generate_stmt(&observed.body[0])
+        }));
+        assert!(
+            statement_refused.is_err(),
+            "marked statement bypassed journal sealing"
+        );
+        let ready = prepare_function_for_emission(observed.clone());
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            CodeGenerator::new(CodeGenConfig::default()).generate_function(&ready)
+        }));
+        assert!(refused.is_err(), "marked AST bypassed journal sealing");
+        assert!(!generate(&plain).is_empty());
+    }
+
+    #[test]
     fn test_generate_if_else() {
+        let symbols = test_table();
+        let sym_x = crate::symbol::declare(&symbols, "x");
         let stmt = CStmt::if_stmt(
-            CExpr::binary(BinaryOp::Gt, CExpr::var("x"), CExpr::int(0)),
+            CExpr::binary(BinaryOp::Gt, CExpr::var(sym_x), CExpr::int(0)),
             CStmt::ret(Some(CExpr::int(1))),
             Some(CStmt::ret(Some(CExpr::int(0)))),
         );
 
         let mut codegen = CodeGenerator::new(CodeGenConfig::default());
+        // The generator renders from the table the fixture declared into.
+        codegen.symbols = symbols.borrow().clone();
         let code = codegen.generate_stmt(&stmt);
 
         assert!(code.contains("if (x > 0)"));
@@ -599,20 +1810,52 @@ mod tests {
 
     #[test]
     fn test_generate_while_loop() {
+        let symbols = test_table();
+        let sym_i = crate::symbol::declare(&symbols, "i");
         let stmt = CStmt::while_loop(
-            CExpr::binary(BinaryOp::Lt, CExpr::var("i"), CExpr::int(10)),
+            CExpr::binary(BinaryOp::Lt, CExpr::var(sym_i), CExpr::int(10)),
             CStmt::expr(CExpr::binary(
                 BinaryOp::AddAssign,
-                CExpr::var("i"),
+                CExpr::var(sym_i),
                 CExpr::int(1),
             )),
         );
 
         let mut codegen = CodeGenerator::new(CodeGenConfig::default());
+        // The generator renders from the table the fixture declared into.
+        codegen.symbols = symbols.borrow().clone();
         let code = codegen.generate_stmt(&stmt);
 
         assert!(code.contains("while (i < 10)"));
         assert!(code.contains("i += 1"));
+    }
+
+    #[test]
+    fn test_generate_prints_the_update_node_it_is_given() {
+        let symbols = test_table();
+        let sym_i = crate::symbol::declare(&symbols, "i");
+        let i = sym_i;
+        let mut codegen = CodeGenerator::new(CodeGenConfig::default());
+        // The generator renders from the table the fixture declared into.
+        codegen.symbols = symbols.borrow().clone();
+        assert_eq!(
+            codegen.generate_expr(&CExpr::binary(
+                BinaryOp::AddAssign,
+                CExpr::var(i),
+                CExpr::int(1),
+            )),
+            "i += 1"
+        );
+        // `i += 1` is shortened to `i++` by the structure rewriter, which
+        // owns the markers that move with it; the printer prints the node.
+        assert!(
+            codegen
+                .generate_stmt(&CStmt::expr(CExpr::Unary {
+                    op: crate::ast::UnaryOp::PostInc,
+                    operand: Box::new(CExpr::var(i)),
+                }))
+                .contains("i++;")
+        );
     }
 
     #[test]
@@ -634,13 +1877,19 @@ mod tests {
 
     #[test]
     fn test_expression_precedence() {
+        let symbols = test_table();
+        let sym_a = crate::symbol::declare(&symbols, "a");
+        let sym_b = crate::symbol::declare(&symbols, "b");
+        let sym_c = crate::symbol::declare(&symbols, "c");
         let mut codegen = CodeGenerator::new(CodeGenConfig::default());
+        // The generator renders from the table the fixture declared into.
+        codegen.symbols = symbols.borrow().clone();
 
         // a + b * c should not need parens around b * c
         let expr = CExpr::binary(
             BinaryOp::Add,
-            CExpr::var("a"),
-            CExpr::binary(BinaryOp::Mul, CExpr::var("b"), CExpr::var("c")),
+            CExpr::var(sym_a),
+            CExpr::binary(BinaryOp::Mul, CExpr::var(sym_b), CExpr::var(sym_c)),
         );
         let code = codegen.generate_expr(&expr);
         assert_eq!(code, "a + b * c");
@@ -649,11 +1898,55 @@ mod tests {
         codegen.output.clear();
         let expr = CExpr::binary(
             BinaryOp::Mul,
-            CExpr::binary(BinaryOp::Add, CExpr::var("a"), CExpr::var("b")),
-            CExpr::var("c"),
+            CExpr::binary(BinaryOp::Add, CExpr::var(sym_a), CExpr::var(sym_b)),
+            CExpr::var(sym_c),
         );
         let code = codegen.generate_expr(&expr);
         assert_eq!(code, "(a + b) * c");
+    }
+
+    #[test]
+    fn test_additive_negative_literals_render_without_stack_placeholder_noise() {
+        let symbols = test_table();
+        let sym_stack_8 = crate::symbol::declare(&symbols, "stack_8");
+        let sym_rsp = crate::symbol::declare(&symbols, "rsp");
+        let mut codegen = CodeGenerator::new(CodeGenConfig::default());
+        // The generator renders from the table the fixture declared into.
+        codegen.symbols = symbols.borrow().clone();
+
+        let expr = CExpr::binary(BinaryOp::Add, CExpr::var(sym_stack_8), CExpr::int(-8));
+        assert_eq!(codegen.generate_expr(&expr), "stack_8 - 8");
+
+        let expr = CExpr::binary(
+            BinaryOp::Sub,
+            CExpr::var(sym_rsp),
+            CExpr::uint(0xffffffffffffffb8),
+        );
+        assert_eq!(codegen.generate_expr(&expr), "rsp + 0x48");
+    }
+
+    #[test]
+    fn test_additive_negative_linear_terms_render_as_subtraction() {
+        let symbols = test_table();
+        let sym_a = crate::symbol::declare(&symbols, "a");
+        let sym_b = crate::symbol::declare(&symbols, "b");
+        let mut codegen = CodeGenerator::new(CodeGenConfig::default());
+        // The generator renders from the table the fixture declared into.
+        codegen.symbols = symbols.borrow().clone();
+
+        let expr = CExpr::binary(
+            BinaryOp::Add,
+            CExpr::var(sym_a),
+            CExpr::binary(BinaryOp::Mul, CExpr::var(sym_b), CExpr::int(-1)),
+        );
+        assert_eq!(codegen.generate_expr(&expr), "a - b");
+
+        let expr = CExpr::binary(
+            BinaryOp::Add,
+            CExpr::var(sym_a),
+            CExpr::binary(BinaryOp::Mul, CExpr::var(sym_b), CExpr::int(-4)),
+        );
+        assert_eq!(codegen.generate_expr(&expr), "a - b * 4");
     }
 
     #[test]
@@ -665,28 +1958,52 @@ mod tests {
     }
 
     #[test]
-    fn test_function_with_locals() {
+    fn test_comment_text_is_sanitized_at_render_boundary() {
+        let mut codegen = CodeGenerator::new(CodeGenConfig::default());
+        let code = codegen.generate_stmt(&CStmt::comment("bad */\nnext"));
+
+        assert!(code.contains("bad * / next"));
+        assert!(!code.contains("bad */"));
+    }
+
+    #[test]
+    fn emission_preserves_placement_owned_local_declarations() {
+        let symbols = test_table();
+        let x = crate::symbol::declare(&symbols, "x");
         let func = CFunction {
+            declaration_only: None,
+            externs: Vec::new(),
+            typedefs: Vec::new(),
+            aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
+            extern_objects: Vec::new(),
             name: "test".to_string(),
             ret_type: CType::Void,
             params: vec![],
             locals: vec![
                 CLocal {
                     ty: CType::i32(),
-                    name: "x".to_string(),
+                    name: x,
                     stack_offset: Some(-8),
                 },
                 CLocal {
                     ty: CType::ptr(CType::i8()),
-                    name: "p".to_string(),
+                    name: crate::symbol::declare(&symbols, "p"),
                     stack_offset: Some(-16),
                 },
             ],
-            body: vec![CStmt::Return(None)],
+            body: vec![
+                CStmt::expr(CExpr::assign(CExpr::var(x), CExpr::int(1))),
+                CStmt::Return(None),
+            ],
+            params_known: true,
+            symbols: std::rc::Rc::new(symbols),
         };
 
         let code = generate(&func);
         assert!(code.contains("int32_t x;"));
         assert!(code.contains("int8_t* p;"));
+        assert!(code.contains("x = 1;"));
+        assert!(!code.contains("int32_t x = 1;"));
     }
 }

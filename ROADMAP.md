@@ -1,277 +1,321 @@
 r2sleigh Roadmap
 ================
 
-> Vision: r2sleigh is not a separate plugin the user needs to know about.
-> It is the **analysis brain** of radare2 — transparently lifting, typing,
-> decompiling, tainting, and solving every function the user touches.
-> The user runs `aaa`, `a:sla.dec`, or just browses code, and the best
-> analysis in the industry happens automatically behind the scenes.
+> The one ordered execution list. Why the project exists and what it is
+> becoming is in [doc/engine-vision.md](doc/engine-vision.md); the working
+> rules are in [AGENTS.md](AGENTS.md). The detailed specification of each
+> phase below is in [doc/handoff/review-fixes/plan.md](doc/handoff/review-fixes/plan.md)
+> and [plan-extension.md](doc/handoff/review-fixes/plan-extension.md); this file
+> owns the order, the status and the decisions, and those own the detail.
+> Where they disagree, this file wins and the disagreement is a defect.
 
-Current State (Feb 2026)
--------------------------
+What r2s is
+-----------
 
-~200 tests passing across 8 crates. 20+ plugin commands working in radare2.
+The radare2 plugin is deleted. `r2s` is the tool, with three surfaces over one
+engine that owns its facts:
 
-Working features:
-- 60+ R2IL opcodes from Ghidra Sleigh specifications
-- Full SSA pipeline: CFG, dominator tree, phi nodes, optimization (SCCP, DCE, CSE, copy-prop, inst-combine)
-- Z3-backed symbolic execution with path exploration
-- SSA-based taint analysis with automatic radare2 integration during aaaa
-- Decompiler producing C code with expression folding, predicate simplification, for-loops, switches, string literals, and symbol resolution
-- Constraint-based type inference with struct/signature support
-- Backward slicing
-- 20+ radare2 plugin commands with automatic analysis hooks
-- Deep integration callbacks: `analyze_fcn`, `recover_vars`, `get_data_refs`, `post_analysis`
+1. **The engine**: discovery, lifting, SSA, memory, types and a certifying
+   decompiler, answering typed queries. C is printed only where checked facts
+   justify it; otherwise a counted residual or a refusal that says why.
+2. **The shell and the visual mode**: radare2's command language and keys, so a
+   radare2 user moves without relearning, with what radare2 never had —
+   completion, discoverability, linked views, a graph you can read, and a UI
+   that never blocks.
+3. **The agent surface**: stateless addressed queries, confidence on every
+   field, explain and verify.
 
-Supported architectures: x86, x86-64, ARM, MIPS.
+How we measure, in order of authority:
 
-Planned Features
-----------------
+| Gate | Question it answers |
+|------|---------------------|
+| Equivalence (`tests/equiv`) | Does the rendered C compute what the machine code computes? The north-star number. |
+| Certification (`scripts/certify_render.py`) | Does every rendering read only what it assigns, and never panic? |
+| Source-gold (`scripts/differential_truth.py`) | Are recovered signatures what the source declared, or marked when not? |
+| Coverage (`tests/coverage`) | How much of a whole binary renders, and does any of it regress? |
+| Differential (`scripts/diff_r2.py`) | Where discovery, naming and decoding disagree with radare2, and who is right. |
 
-### 2026 Priority Reset (Maintainer Feedback, Execution Order)
+A benchmark score is never proof of quality; output is read by hand before a
+quality claim (AGENTS.md, Manual Verification).
 
-This section defines the actual implementation order for upcoming work.
-Phase numbering below remains as thematic grouping, but delivery priority is:
-`P0 (Now) -> P1 (Next) -> P2 (Later)`.
+Where this stands
+-----------------
 
-| Priority | Theme | Why now | Concrete deliverables |
-|---|---|---|---|
-| P0 | **R2IL Foundation Hardening** | Avoid design debt before adding major features | Keep core IL minimal, add optional metadata (`storage_class`, pointer/type hints, memory attributes, richer endianness model), document semantics and compatibility rules |
-| P0 | **Unified Output + One-Liner UX** | Fast iteration for developers and easier maintainer review | Single export pipeline for C-like / r2-command-like / JSON outputs, plus CLI one-liners to run lift/SSA/defuse/dec actions directly |
-| P0 | **RISC-V Support** | Higher ecosystem value than MIPS for new users | Add riscv feature flag, disassembler wiring, register profile/calling convention integration, plugin + e2e coverage |
-| P1 | **Memory Semantics Extensions (VEX-inspired, scoped)** | Improves analysis fidelity without overhauling IL | Add `MemoryOrdering` + atomic/fence/guarded ops where liftable; compare behavior with VEX and document differences |
-| P1 | **Float/Vector + Encoding Path** | Needed for correctness on modern binaries | Integrate r2 float encoding model, add float/vector metadata and staged SIMD support |
-| P1 | **Hardware/Memory Topology Modeling** | Needed for firmware and embedded workflows | MMIO/IO port classification, const/permission/range attributes, segmented/banked memory policy and tests |
-| P2 | **VM Architecture Perspective** | Valuable long-term but high scope | Prototype Dalvik/VM support as separate lifter module, validate whether core IL needs extension |
-| P2 | **Advanced Execution Models** | Niche/high-complexity | VLIW parallel group representation and deeper scheduling semantics |
+Measured on `engine/review-fixes-vfmgfv` at `fe7698e8`, 2026-10-03.
 
-#### Maintainer Points -> Priority Mapping
+| Measure | Value |
+|---------|-------|
+| Equivalence | 582 of 756 `equal` (x86-64, gcc 13 and clang 18, -O0..-O2). The rest: residual-trap 75, ub 37, refused 27, unsupported 20, differs 13, compile-error 1, slow 1 |
+| Hash corpus (issue #61) | 85 of 98 `equal`, from 1 of 36 in August |
+| Certification | 21 rendered, 4 refused, 0 undefined reads, 0 panics |
+| Coverage | 554 of 562 rendered locally; 0 regressions against HEAD at one compiler |
+| Workspace tests | 2072 passed; 2 fail only under Apple clang 21 (strict `main` and unused-helper diagnostics) |
 
-| Maintainer point | Priority | Decision |
-|---|---|---|
-| Multiple address spaces + TLS | P0 | Keep `SpaceId` stable; represent TLS via optional storage metadata first |
-| RISC-V over MIPS | P0 | Promote RISC-V to immediate architecture milestone |
-| VM archs (Dalvik/JVM) | P2 | Explore in separate lifter crate, avoid premature core IL changes |
-| FPU/vector + any float encoding | P1 | Stage through metadata + encoding integration, then expand op support |
-| Atomic ops / guards / VEX comparison | P1 | Add scoped memory-ordering features with explicit doc comparison |
-| MMIO + IO ports | P1 | Add memory-class metadata and explicit IO semantics where available |
-| Complex endianness modes | P0 | Replace binary endianness assumptions with richer enum/override model |
-| VLIW parallel execution | P2 | Model as block-level parallel groups first |
-| Pointer as attribute, not base type | P0 | Treat pointer-ness as semantic metadata/type hint |
-| Const attrs (permissions, valid ranges) | P1 | Add optional memory attribute model |
-| Memory banks / segmented memory | P1 | Keep `SegmentOp`; add policy/docs/tests for banks/segments |
-| Switch as operation | P2 | Keep `switch_info` for now; revisit after SSA/CFG simplification pass |
+Landed since the plugin was deleted (each gated, detail in the program docs):
 
-#### Near-Term Milestones (Next 3)
+- **P0**: dispatch soundness, per-function isolation, `pddj`, the equivalence
+  gate, the plugin-era retirement.
+- **P1 identity and reads**: one bit-identity fact (`ValueView`); a rendered read
+  names a version some statement assigned, or it is a residual; the
+  `SystemReserved` register class.
+- **P2 container statements** and **P3 declarations**: one definition of every
+  container statement, per-libc prototype tables, DWARF read once by address
+  into one type graph.
+- **H** (unused analyses wired or deleted), **K** immediate caps, the **core**
+  tracks (INSERT mask, SSA entry edge, BSF/BSR/TZCNT and PSHUFLW lifting).
+- **P4.1, P7 and P10, in part** (commits marked WIP): frame objects reached by
+  callees, the variadic call contract, byte copies for byte-declared objects.
+- **2026-10-03** (`fe7698e8`): the released wide INSERT base renders; a return
+  register only partly filled is unproven, not a result; `__bzero` declared;
+  pointer parameters from certified accesses; `ParamArray`/`PtrMember` only
+  where the address is exactly the subscript or the field; the source-gold gate
+  refuses a debug build whose truth is the engine's own guess.
+- A visual mode (`V`, `VV`, `agf`) and radare2's layouts for `afl`, `afb`, `afi`.
 
-1. **Milestone A (P0)**: R2IL metadata foundation + docs + compatibility tests.
-2. **Milestone B (P0)**: Unified export formats + CLI one-liners for lift/ssa/defuse/dec.
-3. **Milestone C (P0)**: End-to-end RISC-V support with plugin and e2e coverage.
+What the last month taught
+--------------------------
 
-### Phase 1 — Seamless r2 Integration (make the seams invisible)
+Leaf bugs get fixed fast: nine of the sixteen issues open in August are fixed
+without structural change. What remains is structural, and it is concentrated.
 
-The user should never feel they are using a separate tool. r2sleigh must
-consume everything radare2 already knows and push results back into r2's
-native data structures so every existing r2 command benefits.
+1. **Facts are keyed by position and kept in sync by hand.** About eight r2ssa
+   maps are keyed by `(block, op index)`; `get_block_mut` drops prepared facts;
+   a revision assert catches staleness at run time; the graph is rebuilt after
+   the demand pass; the memory-site remap is safe to run once only because a
+   comment says so (`function/mod.rs:447`).
+2. **A fact does not carry where it came from.** A recovered interface whose
+   types are only carrier widths was read as the source's exact signature, which
+   declared every dereferenced pointer an integer on every stripped binary.
+   Fixed today with a flag; the class is open until provenance is a type.
+3. **The renderer runs a second proof system.** r2dec's binding plan and
+   observation journal are ~22k lines beside r2ssa's ~20k of certificates, with
+   their own fixpoint (`binding_plan/rules.rs:1202`), ~15 refusal enums,
+   first-writer-wins use claims, and spelling rules written three times. Correct
+   pointer types today exposed three renderer defects at once, one of them fake
+   C (`v->beta` for `v[i].beta`) already shipping on DWARF builds.
+4. **One function lives in seven representations**, five rebuilt: SSA blocks,
+   graph (up to twice), value views (three times), the machine projection (per
+   plan build), the term arena (per inlining round), the binding plan (per
+   render-loop iteration).
+5. **The gates were dead for three weeks** (a self-hosted runner nobody
+   watched), so ~185 commits merged unchecked and two baselines were blessed on
+   one laptop, one of them vacuously.
+6. **The visual mode blocks**: the engine is called from inside `draw`; one pane
+   at a time; no completion, colour roles, mouse, or discoverability.
 
-| # | Feature | Description | Effort | Impact |
-|---|---------|-------------|--------|--------|
-| 1.1 | **DWARF signature pipeline** | Verify DWARF-imported function signatures (via r2 `sdb_types` / `afcfj`) flow end-to-end into r2dec's `VariableRecovery` and `TypeInference`. DWARF variable names, parameter types, and return types must appear in decompiled output automatically. | Low | High |
-| 1.2 | **DWARF struct/enum type feeding** | In `sleigh_cmd` (`a:sla.dec`), query r2's `tsj` for DWARF-imported structs/unions/enums and feed into `ExternalTypeDb`. The type solver already has `FieldAccess` constraints and `lookup_field_name`; wire them to real DWARF data. | Medium | High |
-| 1.3 | **DWARF-assisted struct field recovery** | When type inference resolves `*(ptr+offset)` and the `ExternalTypeDb` has a matching struct with a field at that offset, emit `ptr->field` in decompiled C. Combines DWARF data + existing `detect_addr_pattern` + `lookup_field_name`. | Medium | High |
-| 1.4 | **Transparent `pdd` alias** | Register `pdd` (or `pdD`) as an r2 command alias that calls `a:sla.dec` for the current function. Users get decompilation from the standard r2 command vocabulary without knowing r2sleigh exists. | Low | High |
-| 1.5 | **Write-back inferred types to r2** | After decompilation or `aaaa`, push inferred struct shapes, function signatures, and variable types back into `sdb_types` (via `r_anal_save_parsed_type`/`r_anal_import_c_decls`). This means `t` commands, `afvt`, and future analysis passes all benefit. | Medium | High |
-| 1.6 | **Global variable recognition** | Use SSA data-flow analysis to detect accesses to fixed RAM addresses, cross-reference with r2's `r_anal_global_get`/flags, and emit named globals in decompiled output instead of raw hex constants. | Low | Medium |
-| 1.7 | **Autoname functions from decompiler** | After decompilation, heuristically derive function names from string arguments to known calls (e.g., a function whose first call is `printf("usage: ...")` → `print_usage`). Feed names back via `r_anal_function_rename`. Integrate with `aan`. | Medium | Medium |
-| 1.8 | **Calling convention auto-detection** | During `analyze_fcn`, determine calling convention (cdecl/stdcall/fastcall/sysv/win64/arm-aapcs) from SSA parameter-register usage patterns. Write back to r2's `afcc` so all downstream commands agree. Currently hardcoded to SysV x86-64. | Medium | Medium |
+Decision: **restructure, not rewrite.** The lifter, r2image, r2abi, the
+certificates, r2rewrite's proved rules, Kani and the gates are kept. Three parts
+are replaced outright rather than ported, each running beside the old path until
+the gates agree, then the old path is deleted in the same change:
 
-### Phase 2 — Decompiler Quality (match Ghidra, exceed it)
+- the mutable SSA core, by a staged, ID-keyed artifact (F1, F2);
+- r2dec's accounting layer, by a render plan with one by-construction checker (R);
+- `r2s-tui`, by a message-driven visual mode on a worker thread (V).
 
-| # | Feature | Description | Effort | Impact |
-|---|---------|-------------|--------|--------|
-| 2.1 | **Phi node elimination** | Convert `phi(x1,x2)` to proper variable assignments at predecessor edges. Removes the last SSA artifacts from decompiled output. | Medium | High |
-| 2.2 | **Register coalescing** | Merge `RAX_1`, `RAX_2`, ... into a single C variable when the live ranges don't interfere. Dramatically reduces variable clutter. | Medium | High |
-| 2.3 | **Short-circuit operators** | Detect `if(a) { if(b) { X } }` → `if(a && b) { X }` and the OR variant. | Low | Medium |
-| 2.4 | **Condition inversion / early return** | Prefer `if(!x) return;` over `if(x) { ...long body... }`. Reduces nesting. | Low | Medium |
-| 2.5 | **No More Gotos** | Handle irreducible CFGs with region-based restructuring instead of gotos. The `structure.rs` already has region analysis; extend with node splitting or controlled duplication. | High | High |
-| 2.6 | **Pointer type propagation** | Track pointer types through Load/Store chains. When `p = malloc(sizeof(Foo))`, propagate `Foo*` to all uses of `p`. | Medium | High |
-| 2.7 | **Array access patterns** | Detect `base + i*stride` as `arr[i]`. The type solver already has `stride` detection in `detect_addr_pattern`; surface it in codegen. | Medium | Medium |
-| 2.8 | **Enum constant folding** | When a comparison operand matches an enum variant from `ExternalTypeDb`, emit the enum name instead of the raw integer. | Low | Medium |
-| 2.9 | **String constant propagation** | When a local variable is assigned a string address and only used in one call, inline the string literal at the call site. | Low | Medium |
-| 2.10 | **sizeof() recovery** | Detect `malloc(N)` where N matches `sizeof(struct X)` from the type DB. Emit `malloc(sizeof(X))`. | Low | Low |
+Tripwire: if F1 takes more than about four weeks, or touches most of r2ssa,
+switch to a new core crate beside r2ssa and migrate passes into it.
 
-### Phase 3 — Vulnerability Intelligence (the killer feature)
+Decisions
+---------
 
-No other open-source tool provides automatic, per-function vulnerability
-assessment integrated directly into the reversing workflow.
+Taken (2026-10-03):
 
-| # | Feature | Description | Effort | Impact |
-|---|---------|-------------|--------|--------|
-| 3.1 | **Vulnerability pattern library** | Detect buffer overflow, format string, UAF, double-free, integer overflow at IL/SSA level. Each pattern is a taint policy + SSA matcher. Ship as data files, not code. | Medium | Critical |
-| 3.2 | **Risk scoring engine** | Assign per-function risk scores based on: sink severity × input reachability × sanitizer presence. Rank all functions by exploitability during `aaaa`. Write `sla.risk` flag + comment. | Medium | Critical |
-| 3.3 | **Guided vuln discovery** | `a:sym.vuln <sink>` — use symbolic execution to find concrete input reaching a dangerous sink (e.g., `gets()` or unchecked `memcpy`). Output includes input constraints in SMT-LIB2 and concrete model. | Medium | High |
-| 3.4 | **Crypto detection** | Detect crypto algorithms by IL patterns: S-box constants (AES), round constants (SHA), Feistel structure. Flag functions as `sla.crypto.aes`, etc. | Medium | Medium |
-| 3.5 | **Integer overflow detection** | Flag arithmetic operations on user-controlled values that lack bounds checks before use as array indices or allocation sizes. | Medium | High |
-| 3.6 | **Path predicate export** | Export path constraints as SMT-LIB2 for external solvers or integration with fuzzing harnesses. | Low | Medium |
+- **D1. Restructure, not rewrite**, as above.
+- **D2. Stable identity before more facts.** Op and value identities are stable
+  and never reused; no fact is keyed by position. F1 lands before P4's memory
+  SSA, so the memory model is not built on positions.
+- **D3. Stages are types.** `Lifted → Prepared → Sealed`; a transform consumes a
+  stage and returns the next. Remapping twice or editing a sealed artifact does
+  not compile.
+- **D4. Provenance is part of every fact.** Track C's `Confidence{grade, basis,
+  premises}` is extended from discovery to interfaces, types, names and
+  certificates, as `Fact<T>`; a consumer states the least grade it accepts, and
+  a Dylint rejects an unwrapped answer field. It replaces
+  `types_are_carrier_widths`.
+- **D5. Gates are blessed in CI, never on a laptop**, from pinned containers. A
+  queued run that no runner takes is an alert, not a silence.
+- **D6. Equivalence runs on arm64 too**, under qemu-user, so "x86-64 only" stops
+  being a limit of the oracle.
+- **D7. The visual mode never calls the engine while drawing.**
 
-### Phase 4 — Inter-Procedural Analysis (the hard problems)
+To confirm (each reverses or retires an earlier decision):
 
-| # | Feature | Description | Effort | Impact |
-|---|---------|-------------|--------|--------|
-| 4.1 | **Function summaries** | Cache per-function symbolic summaries: which inputs affect which outputs, what gets tainted, what's returned. Enables inter-procedural without full inlining. | High | Critical |
-| 4.2 | **Inter-procedural taint** | Taint analysis spanning function boundaries using summaries. `input:argv` reaching `strcpy` in a callee three levels deep. | High | Critical |
-| 4.3 | **Call graph with data flow** | Build a call graph where edges carry data-flow information (which args of caller flow to which params of callee). | High | High |
-| 4.4 | **Whole-program type inference** | Unify types across function boundaries: if `foo()` returns a `struct stat*` and `bar()` receives it, propagate the struct type into `bar`'s parameter. | High | High |
-| 4.5 | **Context-sensitive decompilation** | When decompiling `foo(x)`, look at callers to determine likely type/range of `x`. Annotate decompiled output with "called from: ..." context. | High | Medium |
+- **D8. The observation journal is replaced, not kept.** plan-extension.md's
+  track H says it stays because it feeds the obligation ledger. The month's
+  evidence says the journal is where proofs are re-derived after rendering; a
+  render tree built with its obligation ids, checked once, makes the journal
+  redundant. Proposed: R replaces it.
+- **D9. `doc/adr-location-ssa.md` is superseded**, not implemented: P1's
+  `ValueView` answers bit identity and P4's partition answers frame identity.
+  What the ADR wanted that neither yet gives — one liveness model over
+  locations (issue #50) and pruned flag and temporary phis (#56) — moves to F2.
+- **D10. DecBench is measured again** only once it runs on a machine that can
+  reach PyPI; until then quality is the equivalence gate plus reading `pdd`.
 
-### Phase 5 — Symbolic Execution & Concolic (the smart engine)
+The program
+-----------
 
-| # | Feature | Description | Effort | Impact |
-|---|---------|-------------|--------|--------|
-| 5.1 | **Interactive symbolic execution** | `a:sym.explore` and `a:sym.solve` commands with user-specified targets, constraints, and hooks. | Medium | High |
-| 5.2 | **Memory in solutions** | Include concrete memory layout (heap, stack, globals) in symbolic path output, not just register values. | Low | Medium |
-| 5.3 | **Concolic execution** | Concrete + symbolic hybrid guided by ESIL traces from r2's debugger. Run the binary, record a trace, symbolically explore alternatives. | High | High |
-| 5.4 | **Symbolic call stubs** | Auto-generate symbolic stubs for common libc functions (`strlen` returns symbolic length, `malloc` returns fresh symbolic pointer). | Medium | High |
-| 5.5 | **Constraint caching** | Cache Z3 queries per function so repeated solves (e.g., during fuzzing integration) don't redundantly re-solve. | Medium | Medium |
+Identifiers are kept from plan.md and plan-extension.md (P*, PE, C, H, I, K, Q,
+S, E, A); the new ones are G (gates), F (foundation), R (renderer as printer)
+and V (visual mode and shell experience).
 
-### Phase 6 — Platform & Architecture Expansion
+### G. Gates first — now, blocks everything
 
-| # | Feature | Description | Effort | Impact |
-|---|---------|-------------|--------|--------|
-| 6.1 | **ABI/calling-convention model** | Abstract architecture-specific assumptions (arg registers, stack direction, alignment) into a data model. Currently hardcoded for SysV x86-64 in `variable.rs`, `types.rs`, `taint.rs`. | Medium | High |
-| 6.2 | **RISC-V support** | Add RISC-V Sleigh spec + register profile + calling convention. **Execution priority: P0 (Milestone C).** | Medium | Medium |
-| 6.3 | **AArch64 / ARM64 support** | Full ARM64 support with AAPCS64 calling convention. | Medium | Medium |
-| 6.4 | **PPC / AVR / SPARC** | Additional architecture support with per-arch test fixtures. | Medium | Low |
-| 6.5 | **Register naming policy** | Normalize register names, resolve overlapping aliases (RAX vs EAX vs AX vs AL). Use canonical names in decompiled output. | Low | Medium |
-| 6.6 | **Floating-point type inference** | Properly distinguish float/double from integer types using SSA float opcodes. | Low | Low |
+| Item | Exit |
+|------|------|
+| CI under ten minutes: one `ci`-profile build every gate downloads, equivalence in six shards held to the baseline by `tests/equiv/merge_shards.py`, the harness's own tests in their own job | The slowest job finishes in ten minutes; it was 33 for equivalence alone |
+| CI green, with the equivalence, coverage and source-gold baselines re-blessed from CI's own run (the merge job writes `baseline.proposed.json`) | Every gate passes on a push with no laptop baseline |
+| Queued-run alert; pinned containers for gcc 13, clang 18 and the macOS coverage compiler; compiled coverage cells replaced by pinned bytes | A gate result does not depend on the runner |
+| Diagnose the equivalence `PipelineTests`/`SelfTestSuite` stall on hosted runners. From unittest a driver run never returns, and the step outlives even a step-level timeout, so some process is in an uninterruptible wait (the runtime's guard install is the first suspect); the same self-tests pass inside every equivalence shard. Reproduce on x86-64 Linux: `tests/equiv/bounded.sh 240 test_equiv.SelfTestSuite`. The two classes are out of CI until then | Both classes pass from `bounded.sh` and gate again in the harness job |
+| arm64 equivalence under qemu-user (D6) | `tests/equiv` reports both architectures |
+| SSA integrity check in CI: one definition per value, every use dominated | Fails on the duplicate `tmp:2c200_1` definition seen in #56, or proves it a display artefact |
+| Split PR #66 into reviewable pieces and merge | `master` carries the program |
+| Close the issues fixed since August; update the partial ones; one tracking issue per item below | The issue board is the roadmap |
 
-### Phase 7 — Advanced Analysis & Research
+### F. Foundation — the spine (r2ssa, r2source)
 
-| # | Feature | Description | Effort | Impact |
-|---|---------|-------------|--------|--------|
-| 7.1 | **Memory/value-set analysis** | Alias-aware abstract interpretation tracking value ranges and pointer targets. Enables more precise taint, slicing, and decompilation. | High | High |
-| 7.2 | **R2IL VM + event tracing** | Make R2IL executable with concrete values. Record execution traces with events (mem read/write, branch taken). Compare static vs dynamic analysis. | High | Medium |
-| 7.3 | **Semantic diff** | Compare two functions (or two versions of a binary) for semantic differences at the SSA level. Highlight what changed in the decompiled output. | High | Medium |
-| 7.4 | **Pattern matching DSL** | User-defined IL patterns for custom detection. "Find all functions that read from `[user_input + *]` and pass it to `exec*`." | Medium | Medium |
-| 7.5 | **Incremental analysis** | When the user annotates a type or renames a variable, incrementally update SSA/taint/decompilation without re-lifting the whole function. | High | Medium |
-| 7.6 | **Decompiler output diffing** | When types/signatures change, show a diff of the decompiled C output. Useful for iterative reverse engineering. | Low | Low |
+| Item | Depends on | Exit |
+|------|-----------|------|
+| **F1** Stable op and value ids; every `(block, op index)` map re-keyed; stage types (D2, D3) | G | `get_block_mut`, `op_mut`, the revision asserts and the remap comment are gone |
+| **F2** One IR with views: blocks, graph and value views built once at seal; the machine projection and term arena become indexes; one liveness model over locations; flag and temporary phis pruned by liveness | F1, P4 | No rebuild after seal; closes #47, #50, #56 |
+| **K** One fixpoint driver: lattice height, widening and a visible budget for every iterative pass, Kani on the lattice laws (the rest of track K) | F1 | No bare `loop` until unchanged; `objects.rs:196` first |
 
-Integration Architecture
-------------------------
+### Analysis (detail in plan.md)
 
-The key insight: r2sleigh hooks into radare2's analysis pipeline at every
-stage, consuming r2's metadata and pushing results back. The user never
-invokes r2sleigh directly — it's just "r2 but smarter."
+| Item | Depends on | Exit |
+|------|-----------|------|
+| **PE** Byte-dependency relation; result width from the written-lane lattice; `narrow_zero_extend_input_size` deleted | F1 | `main` returns `int`-width, `gt` is not `uint8_t`, `fnv1a32` returns 32 bits (#58, #63) |
+| **P1.7** `Unspecified(width)` leaf for partial entry-lane writes | PE | The rotl listing makes no false claim |
+| **C** Confidence everywhere as `Fact<T>` (D4) | — | Every public answer field is a `Fact`; the minted-interface flag is deleted |
+| **P4** Memory model: frame partition (P4.1 in part), MemorySSA on stable ids, stack-protector elision, `afv`/`afi` from sealed entities | F1, C | The canary traps in #61 are gone; one owner of frame objects |
+| **Q** Demand-driven query database; `memo.rs` and the eight caches deleted | F1 | A random-write session equals a fresh open |
+| **I** Unread container facts: CFI extents and save slots as stated entries, LSDA, IBT, RELRO, init arrays | Q | Stripped discovery finds every FDE start |
+| **P5** Value domain completed; loads from immutable memory fold | K | The `optimize.rs` round cap is gone |
+| **R** Renderer as printer: the render plan is one pure function of sealed facts with no rounds; the render tree carries obligation ids by construction; one linear checker; P10's render-only lowering and admissibility rules; the journal deleted (D8) | F2, P5 | r2dec reads only sealed facts; the three bound-address rules are one |
+| **P6** One resolved body per function per revision, on Q; callee summaries bottom-up over SCCs | Q, I | `read_callees` is gone |
+| **P7** Call contracts: one ABI classifier, variadic and format roles, result proof over the call graph | PE, P6, C | No dropped or invented argument; printf's stack tail renders |
+| **P8** Data objects and strings | P5, P7 | `iz` lists proven strings |
+| **P9** Types over the graph: declared-pointee propagation, inferred aggregates | P4, P8 | A struct pointer is not `uint32_t*` (`rec_index`) |
+| **P11** Names and commands: one spelling of an unnamed function, aliases by occupancy | C, P6 | Differential disagreements all judged |
+
+### Surface
+
+| Item | Depends on | Exit |
+|------|-----------|------|
+| **V1** Visual-mode core: message-driven state, engine on a worker thread with a cache keyed by address and revision, a ticked event loop, mouse and resize; a `reedline` prompt with history shared by the shell and `:` | G | No engine call while drawing; first frame within 50 ms whatever the function costs |
+| **S1** One verb table (verb, arity, help, JSON shape); `?` generated from it; `j` on every verb; `e` for presentation keys | — | Help and completion cannot disagree with dispatch |
+| **V2** Colour from the engine: token roles from the disassembly speller and `pddj`, radare2's colour roles and `eco` themes, terminal detection, colour in the shell too | V1 | `pd` and `pdd` coloured identically in the shell and the visual mode |
+| **V3** Completion and discoverability: grammar-aware tab completion from `line.rs` and S1's table; flags, functions, config keys; prefix-key hints; `Ctrl-P` palette; contextual `?` | V1, S1 | Every action is findable without documentation |
+| **V4** Panels: a layout tree of splits and tabs (`V!`), linked cursors across C, disassembly and graph, breadcrumbs | V1 | A C line lights its instructions in every pane |
+| **V5** Graphs: edge kinds coloured and labelled, back edges distinct, zoom levels, path highlighting, search, follow calls, loops shaded and folded from sealed loop facts, call and reference graphs through one renderer | V2; loop shading after F2 | `agf`, `agc` and `agx` share the renderer; layout off the UI thread |
+| **S2** `@@` iterators, search, pipes and redirects, `-i`/`-q0` for r2pipe | Q | `diff_r2.py` covers the `j` forms |
+| **E** Emulation over `r2il::eval`, then verify (`Proved`/`Disproved`/`Unknown`) | P2.3 | aarch64 originals checked against host-compiled renderings |
+| **A** Agent surface: stateless typed queries, `Fact<T>` fields, budgets and elision, explain | Q, C | A transcript test and a shuffled-order determinism test |
+| **V6** Annotation: rename, comment, retype and define as stored user facts, recompute through Q, undo | R, Q | An edit shows in every pane without reopening |
+
+### Order
+
+One engineer per track; a single engineer takes them in this order.
 
 ```
-radare2 analysis pipeline          r2sleigh hooks
-─────────────────────────          ──────────────
-aa  (basic analysis)
- └─ af (find functions)     ──→   analyze_fcn: SSA + annotations
- └─ afva (find vars)        ──→   recover_vars: SSA-derived stack vars + reg args
- └─ aar (find refs)         ──→   get_data_refs: SSA-derived data/code/string refs
-
-aaa (deeper analysis)
- └─ aan (autoname)          ──→   [NEW] autoname from decompiler heuristics
- └─ DWARF integration       ──→   [NEW] DWARF types → ExternalTypeDb → decompiler
- └─ afcfj (signatures)      ──→   already consumed by a:sla.dec
- └─ tsj (type structs)      ──→   already consumed by a:sla.dec
-
-aaaa (experimental)
- └─ post_analysis            ──→   taint analysis + risk scoring + xrefs
- └─ [NEW]                   ──→   write-back inferred types to sdb_types
- └─ [NEW]                   ──→   write-back function signatures to afcc
- └─ [NEW]                   ──→   flag risky functions with sla.risk.*
-
-User commands (transparent)
- └─ pdd / pdD               ──→   [NEW] alias to a:sla.dec
- └─ a:sla.dec               ──→   decompile with full context from r2
- └─ a:sla.taint             ──→   taint current function
- └─ a:sym.solve <addr>      ──→   solve for reachability
+wave  engine                         analysis                 surface
+W0    G                              —                        —
+W1    F1                             PE, C, P1.7              V1, S1
+W2    K                              P4, Q                    V2, V3
+W3    F2                             I, P5                    V4, S2
+W4    R                              P6                       V5
+W5    —                              P7                       E, A
+W6    —                              P8, P9                   V6
+W7    —                              P11                      DecBench (D10)
 ```
 
-### Data Flow: r2 → r2sleigh → r2
+Single-engineer order: G, F1, PE, C, V1, S1, V2, V3, K, P4, Q, F2, V4, I, P5,
+R, V5, P6, P7, E, A, P8, P9, V6, P11.
 
-```
-                    ┌──────────────┐
-                    │   radare2    │
-                    │              │
-  ┌─────────────────┤  sdb_types   │◄──────── DWARF / PDB / user annotations
-  │                 │  flags       │
-  │                 │  xrefs       │
-  │                 │  afcfj       │
-  │                 │  afvj        │
-  │                 │  tsj         │
-  │                 │  aflj        │
-  │                 └──────┬───────┘
-  │                        │ JSON
-  │                        ▼
-  │                 ┌──────────────┐
-  │                 │  r2sleigh    │
-  │                 │              │
-  │                 │  R2IL lift   │
-  │                 │  SSA build   │
-  │                 │  Type infer  │
-  │                 │  Decompile   │
-  │                 │  Taint       │
-  │                 │  SymExec     │
-  │                 └──────┬───────┘
-  │                        │ JSON + C strings
-  │                        ▼
-  │                 ┌──────────────┐
-  │ write-back ────►│   radare2    │
-  │  types          │              │
-  │  signatures     │  sdb_types ← inferred struct shapes
-  │  variables      │  afcc     ← detected calling convention
-  │  names          │  flags    ← taint/risk/crypto flags
-  │  xrefs          │  xrefs   ← taint-flow + data refs
-  │  comments       │  comments ← taint summaries, risk scores
-  └─────────────────┤  afn     ← auto-named functions
-                    └──────────────┘
-```
+Rules for every item: it runs beside the path it replaces and deletes it when
+the gates agree; it deletes more than it adds or says why not; no new
+renderer-side policy lands while R is open; no visual-mode feature calls the
+engine synchronously.
 
-Comparison
-----------
+### After the program
 
-### vs radare2 (stock)
+From the vision's tiers, in order, each only once its consumers exist: binary
+diffing over callee summaries; exception-handler recovery; the outside
+techniques of issue #65 (the switch prover's own harness, SAILR idioms as
+r2rewrite rules one at a time, library identification measured before built,
+Retypd revisited after P9); static rewriting; deobfuscation; trace recording
+and query; the debugger (`doc/debugger-build-plan.md`).
 
-r2sleigh adds: SSA form, phi nodes, def-use chains, dominator tree,
-symbolic execution, taint analysis, path exploration, Z3 solving, typed
-decompilation, constraint-based type inference, vulnerability detection,
-risk scoring, automatic function naming from decompiler heuristics.
+Issues
+------
 
-### vs angr
+Triaged against `fe7698e8` on 2026-10-03.
 
-r2sleigh provides: zero-friction radare2 integration (no Python, no
-separate process), CLI-first workflow, Sleigh specs (vs VEX), JSON
-output for scripting, per-function taint during `aaaa`, decompiler
-output, no Python overhead. angr has: mature inter-procedural analysis,
-larger community, more memory models.
+| Issue | State | Owner here |
+|-------|-------|-----------|
+| #49, #51, #52, #53, #54, #55, #59 | Fixed | close |
+| #60 | Fixed on x86-64 | close after an arm64 -O0 check |
+| #57 | Obsolete (the plugin is deleted) | close |
+| #47, #50 | Partly fixed | F2 |
+| #56 | Open; possible duplicate definition | G (integrity check), F2 |
+| #58 | Partly: pointers fixed, return widths and pointee types open | PE, P9 |
+| #63 | Partly: 21 of 24 equal; the rest is result width | PE |
+| #61 | 85 of 98; tracker kept | P4 (canary), R (unaligned loads), P7 |
+| #65 | Slice library and switch prover landed | After the program |
 
-### vs Ghidra
+Standing debt
+-------------
 
-r2sleigh provides: exposed SSA for scripting, integrated symbolic
-execution, automatic taint analysis with risk scoring, vulnerability
-pattern detection, native CLI operation, no JVM dependency, incremental
-results during analysis. Ghidra has: more mature decompiler,
-inter-procedural type propagation (which we're building in Phase 4),
-larger architecture coverage.
+Carried with a cause, not as a baseline:
 
-### vs Binary Ninja
+- The source-gold baseline lists the pointee `const` qualifier machine code does
+  not carry, uncertified pointer parameters, `rotl32`'s signedness and the
+  return widths PE removes. It was approximated with gcc 16 and clang ELF
+  builds; G re-blesses it on CI's gcc 13.
+- The coverage baseline's compiled cells come from CI's clang 17 run of
+  `903718c5`, its pinned and system cells from a local run; G replaces the
+  compiled cells with pinned bytes.
+- Pointer parameters take the width every certified access reads, so `Rec *`
+  renders as `uint32_t *`; correct at the machine level, not the source type
+  (P9).
+- `pdd` on ARM 32-bit is not admitted until the Sleigh tuple is verified.
+- Entry condition flags cannot be booleans until the architecture specification
+  carries a flag fact.
+- `doc/wip/*.patch` are written against the deleted plugin; each is re-derived
+  on the current tree or deleted.
 
-r2sleigh provides: fully open source, no license cost, Sleigh specs
-(broadest architecture coverage), integrated symbolic execution and
-taint analysis, CLI-native workflow, r2pipe scriptability. Binary Ninja
-has: polished GUI, MLIL/HLIL abstraction layers, commercial support.
+Documents
+---------
 
-**The goal**: combine the best of all four — Ghidra's Sleigh specs,
-angr's symbolic execution, Binary Ninja's type inference quality, and
-radare2's CLI-first hackability — into a single transparent analysis
-engine that just works when you type `aaa`.
+| Document | Status |
+|----------|--------|
+| `doc/engine-vision.md` | Live: the why. Its sequencing defers to this file |
+| `doc/handoff/review-fixes/plan.md`, `plan-extension.md` | Live: per-phase specification; order and status here |
+| `doc/adr-access-syntax.md`, `adr-partition-first.md`, `adr-register-identity.md`, `adr-structure-dominator-tree.md`, `adr-floating-point.md` | Live |
+| `doc/adr-location-ssa.md` | Superseded by P1 and P4, remainder in F2 (D9, to confirm) |
+| `doc/adr-semantic-preservation-kernel.md` | Live in principle; its spine still names the radare2 snapshot and `r2sym`/`r2cert`, which no longer exist — to be rewritten against F and R |
+| `doc/architecture-plan.md` | History of the binding-spine rewrite; superseded by R |
+| `doc/phase1-plan.md`, `phase1-design.md`, `handoff-engine-inversion.md`, `handoff-location-ssa.md` | Plugin era; to archive |
+| `doc/beat-angr-end-to-end.md`, `decbench-plan.md` | Numbers measured through the plugin; kept for method, not for numbers |
+| `doc/debugger-build-plan.md` | Proposed; after the program |
 
-References
-----------
+Ownership
+---------
 
-- radare2 ESIL: https://book.rada.re/disassembling/esil.html
-- Ghidra Sleigh: https://ghidra.re/courses/languages/html/sleigh.html
-- P-code reference: https://ghidra.re/courses/languages/html/pcoderef.html
+| Crate | Owns |
+|-------|------|
+| `r2image` | What the container states: bytes, sections, symbols, relocations, entries, CFI, DWARF |
+| `r2abi` | Calling conventions, library prototypes per C library, platform register classes |
+| `r2il` | The low tier and its executable semantics (`r2il::eval`) |
+| `r2sleigh-lift` | Decoding and lifting through Sleigh |
+| `r2ssa` | The medium tier: stable ids, SSA, values, memory, liveness, certificates, refusal evidence |
+| `r2source` | Contracts between the layers, and `Confidence` |
+| `r2types` | Type inference, layouts, signatures |
+| `r2rewrite` | Term rewriting and its rule proofs |
+| `r2dec` | The render plan, structuring and printing — no proof of its own after R |
+| `r2engine` | Requests, discovery, the query database, summaries, emulation |
+| `r2s` | Commands, the verb table, the prompt, and the only implementor of `Program` |
+| `r2s-tui` | The visual mode: layout, keys, drawing; no fact about the program |
+
+One fact, one owner. When two places answer the same question, one of them is
+deleted.

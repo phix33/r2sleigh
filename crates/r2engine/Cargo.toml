@@ -1,0 +1,31 @@
+[package]
+name = "r2engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Request planner and artifact orchestration for r2sleigh"
+
+[dependencies]
+r2abi = { path = "../r2abi" }
+r2il = { path = "../r2il" }
+r2sleigh-lift = { path = "../r2sleigh-lift", default-features = false }
+r2source = { path = "../r2source" }
+r2ssa = { path = "../r2ssa" }
+r2types = { path = "../r2types" }
+r2dec = { path = "../r2dec" }
+serde.workspace = true
+serde_json.workspace = true
+
+[features]
+default = []
+x86 = ["r2sleigh-lift/x86"]
+arm = ["r2sleigh-lift/arm"]
+
+[dev-dependencies]
+r2sleigh-lift = { path = "../r2sleigh-lift", default-features = false, features = [
+    "x86",
+    "arm",
+] }
+
+[lints]
+workspace = true

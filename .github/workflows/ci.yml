@@ -6,39 +6,60 @@ on:
   pull_request:
     branches: [master]
 
+# The jobs read the repository and nothing else: no job writes through the
+# token, so it is granted read access to the contents alone.
+permissions:
+  contents: read
+
 # Cancel in-progress runs for the same branch/PR
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# GitHub-hosted runners: every job starts from a clean image, so nothing here
+# depends on a machine someone has to keep alive. A CI build is never edited
+# and rebuilt in place, so incremental artifacts are dead weight, and the
+# workspace's test build does not fit the runner's disk with debug info on.
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Self-hosted runner optimization: persist incremental build artifacts
-  # across jobs/runs to avoid repeatedly recompiling the full workspace.
-  CARGO_TARGET_DIR: /tmp/r2sleigh-target
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  # The radare2 test binaries the certification gate reads, at the commit it
+  # was last run against: the gate takes the first binaries in name order, so
+  # a moving corpus would move the gate.
+  TESTBINS_URL: https://github.com/radareorg/radare2-testbins
+  TESTBINS_REF: a2a92dc41a06aff40e24cd6a44d372587f01747c
+  # A harness that stalls says where: the steps below that drive one run
+  # under `timeout -s ABRT`, and the fault handler prints every thread's
+  # stack when that signal lands.
+  PYTHONFAULTHANDLER: 1
 
 jobs:
   # ── Quality checks (single compile pipeline) ───────────────────────
   quality:
     name: Format + Clippy + Unit Tests
-    runs-on: self-hosted
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
-      - name: Setup Rust PATH
+      # The image's preinstalled SDKs are not used here, and the workspace's
+      # test build needs the room. Deleting them takes a minute and a half, so
+      # it runs behind the steps that do not need the space yet.
+      - name: Free disk
         run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then
-              echo "$p" >> "$GITHUB_PATH"
-              export PATH="$p:$PATH"
-            fi
-          done
-          if ! command -v cargo &>/dev/null; then
-            echo "::error::cargo not found. See scripts/setup-runner.sh"
-            exit 1
-          fi
-      - name: Prepare shared target dir
-        run: mkdir -p "$CARGO_TARGET_DIR"
+          sudo nohup rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+            >/dev/null 2>&1 &
+      - uses: actions/checkout@v6
+      - name: Install the toolchain the repository pins
+        run: rustup toolchain install --profile minimal --component rustfmt,clippy
+      # r2rewrite's rule proofs link Z3.
+      - name: Install Z3
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libz3-dev
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Print versions
         run: |
           echo "rustc:      $(rustc --version)"
@@ -47,132 +68,278 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy (all features)
         run: cargo clippy --workspace --all-features -- -D warnings
+      - name: Structure (the debt may fall, never rise)
+        run: bash scripts/structure-report.sh
+      # --no-fail-fast, always: without it one crate's known failure hides
+      # every failure after it. nextest runs every test binary's tests side by
+      # side, where `cargo test` runs the binaries one after another; it does
+      # not run doctests, so those run on their own.
       - name: Unit tests
-        run: cargo test --workspace --all-features
+        run: |
+          df -h /
+          cargo nextest run --workspace --all-features --no-fail-fast
+          cargo test --workspace --all-features --doc --no-fail-fast
 
-  # ── Fast snapshot tests (r2r) ───────────────────────────────────────
-  r2r:
-    name: Snapshot Tests (r2r)
-    runs-on: self-hosted
+  # ── One build of the shell every gate grades ───────────────────────
+  #
+  # Built once, with the `ci` profile: optimised, so the gates fit in minutes,
+  # with the debug build's overflow checks and assertions kept, so a panic is
+  # still the function's refusal. Every gate below downloads this binary
+  # instead of compiling its own.
+  build:
+    name: Build the shell
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
-      - name: Setup Rust PATH
-        run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then
-              echo "$p" >> "$GITHUB_PATH"
-              export PATH="$p:$PATH"
-            fi
-          done
-          if ! command -v cargo &>/dev/null; then
-            echo "::error::cargo not found. See scripts/setup-runner.sh"
-            exit 1
-          fi
-      - name: Prepare shared target dir
-        run: mkdir -p "$CARGO_TARGET_DIR"
-      - name: Ensure radare2 + headers
-        run: |
-          check_radare2() {
-            command -v r2 >/dev/null &&
-            command -v r2r >/dev/null &&
-            pkg-config --exists r_anal &&
-            r2 -v >/dev/null 2>&1 &&
-            R2R_OFFLINE=1 r2r -n -L tests/r2r/db/extras >/dev/null 2>&1
-          }
+      - name: Install the toolchain the repository pins
+        run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-shell
+      - name: Build
+        run: cargo build --profile ci -p r2s --features sleigh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r2s
+          path: target/ci/r2s
+          retention-days: 1
+          if-no-files-found: error
 
-          RADARE2_REPO_URL="https://github.com/radareorg/radare2"
-          RADARE2_CACHE_DIR="/tmp/radare2"
-          RADARE2_INSTALL_REF_FILE="$RADARE2_CACHE_DIR/.r2sleigh-installed-ref"
-          RADARE2_REMOTE_REF="$(git ls-remote "$RADARE2_REPO_URL" refs/heads/master | cut -f1)"
-
-          if [ -z "$RADARE2_REMOTE_REF" ]; then
-            echo "::error::Failed to resolve radare2 master ref from GitHub"
-            exit 1
-          fi
-
-          RADARE2_CACHE_REF=""
-          RADARE2_INSTALLED_REF=""
-          if [ -d "$RADARE2_CACHE_DIR/.git" ]; then
-            RADARE2_CACHE_REF="$(git -C "$RADARE2_CACHE_DIR" rev-parse HEAD 2>/dev/null || true)"
-          fi
-          if [ -f "$RADARE2_INSTALL_REF_FILE" ]; then
-            RADARE2_INSTALLED_REF="$(cat "$RADARE2_INSTALL_REF_FILE")"
-          fi
-
-          NEED_RADARE2_INSTALL=0
-          if ! check_radare2; then
-            echo "radare2/r2r/headers missing or unusable"
-            NEED_RADARE2_INSTALL=1
-          fi
-          if [ "$RADARE2_CACHE_REF" != "$RADARE2_REMOTE_REF" ]; then
-            echo "radare2 cache ref mismatch: cache=${RADARE2_CACHE_REF:-missing} remote=$RADARE2_REMOTE_REF"
-            NEED_RADARE2_INSTALL=1
-          fi
-          if [ "$RADARE2_INSTALLED_REF" != "$RADARE2_REMOTE_REF" ]; then
-            echo "radare2 installed ref mismatch: installed=${RADARE2_INSTALLED_REF:-missing} remote=$RADARE2_REMOTE_REF"
-            NEED_RADARE2_INSTALL=1
-          fi
-
-          if [ "$NEED_RADARE2_INSTALL" -eq 0 ]; then
-            echo "radare2 install already matches GitHub master ($RADARE2_REMOTE_REF)"
-          else
-            echo "Refreshing radare2 from GitHub..."
-            rm -rf "$RADARE2_CACHE_DIR"
-            git clone --depth=1 --branch master "$RADARE2_REPO_URL" "$RADARE2_CACHE_DIR"
-            echo "Installed radare2 cache ref: $(git -C "$RADARE2_CACHE_DIR" rev-parse HEAD)"
-            cd "$RADARE2_CACHE_DIR" && sys/install.sh
-            printf '%s\n' "$RADARE2_REMOTE_REF" > "$RADARE2_INSTALL_REF_FILE"
-            cd "$GITHUB_WORKSPACE"
-            check_radare2
-          fi
-
-      - name: Prepare r2r temp dir
-        run: |
-          # Use the runner temp area, but compute the path inside the job since
-          # the `runner` context is not available in job-level `env`.
-          R2R_TMPDIR="$RUNNER_TEMP/r2sleigh-r2r-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}"
-          echo "R2R_TMPDIR=$R2R_TMPDIR" >> "$GITHUB_ENV"
-          rm -rf "$R2R_TMPDIR"
-          mkdir -p "$R2R_TMPDIR"
-      - name: Run r2r snapshot tests
-        env:
-          R2R_JOBS: "2"
-          R2R_OFFLINE: "1"
-        run: make -C tests/r2r run
-
-  # ── Rust E2E / integration tests ────────────────────────────────────
-  e2e:
-    name: Rust E2E Tests
-    runs-on: self-hosted
+  # ── Native certification gate ───────────────────────────────────────
+  #
+  # Every named function is rendered and the proof is read: a rendering may not
+  # read what nothing wrote. radare2 is not run here, which is the point.
+  capture-gate:
+    name: Native Capture Certification Gate
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-      - name: Run Rust E2E tests
-        run: cargo e2e-test
+      - uses: actions/download-artifact@v4
+        with:
+          name: r2s
+          path: target/ci
+      - run: chmod +x target/ci/r2s
+      # radare2's own test corpus, its ELF directory alone; radare2 itself is
+      # not run by this gate.
+      - name: Fetch radare2's test binaries
+        run: |
+          set -eu
+          dir="$RUNNER_TEMP/testbins"
+          git init -q "$dir"
+          git -C "$dir" remote add origin "$TESTBINS_URL"
+          git -C "$dir" sparse-checkout set elf
+          git -C "$dir" fetch -q --depth 1 --filter=blob:none origin "$TESTBINS_REF"
+          git -C "$dir" checkout -q FETCH_HEAD
+          test -d "$dir/elf"
+      # No harness may drive the deleted plugin; the gate reads the proof line
+      # by name; the DecBench backend files every function it is asked for.
+      - name: Harness contracts
+        run: |
+          python3 scripts/test_certify_render.py
+          python3 -m unittest tests/test_no_plugin.py
+          python3 -m unittest discover -s tests/decbench -p 'test_*.py'
+      - name: A rendering may not read what nothing wrote
+        run: |
+          python3 scripts/certify_render.py \
+            --bins "$RUNNER_TEMP/testbins/elf" \
+            --r2s target/ci/r2s \
+            --limit 12 --functions 8
+
+  # ── Source-gold: graded against the source, not against another tool ──
+  #
+  # The same source compiled twice is exact ground truth for free. The debug
+  # build says what every function really is and the stripped build is what the
+  # engine has to work from, so recovery and soundness are measured rather than
+  # asserted. Soundness is the number that matters: a decompiler that guesses
+  # confidently is worse than one that says it does not know.
+  source-gold:
+    name: Source-Gold Correctness Gate
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: r2s
+          path: target/ci
+      - run: chmod +x target/ci/r2s
+      - name: Grade the stripped build against the debug build
+        run: |
+          set -eu
+          mkdir -p target/source-gold
+          cc -g -O0 -o target/source-gold/debug tests/corpus/hashes.c
+          strip -o target/source-gold/stripped target/source-gold/debug
+          python3 scripts/differential_truth.py \
+            --debug-build target/source-gold/debug \
+            --stripped-build target/source-gold/stripped \
+            --r2s target/ci/r2s \
+            --baseline tests/gold/source_gold_baseline.json \
+            --json target/source-gold/report.json
+      - name: Archive the source-gold report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-gold-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/source-gold/report.json
+          if-no-files-found: warn
+
+  # ── Equivalence: the harness's own tests ────────────────────────────
+  #
+  # The gate's self-tests and its pipeline over the stub shell. They need gcc
+  # and x86-64 Linux, not the real shell, so they run beside the build.
+  equivalence-harness:
+    name: Equivalence Harness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v6
+      - name: The harness's contracts, classifier, ratchet and builds
+        run: |
+          tests/equiv/bounded.sh 300 \
+            test_equiv.AnswerStatusTests test_equiv.BatchTests test_equiv.BuildTests \
+            test_equiv.ClassifyTests test_equiv.CompilerVerdictTests \
+            test_equiv.ContractTests test_equiv.DwarfTests test_equiv.RatchetTests
+
+  # ── Equivalence ratchet ─────────────────────────────────────────────
+  #
+  # Every function of the corpus and the gold programs is decompiled from its
+  # stripped build, compiled, and run against the original on the same inputs,
+  # with UBSan and uninitialised-read builds beside it. The population is graded
+  # in six shards, one per compiler and optimisation level, and the merge job
+  # holds their union to the baseline: any change -- a function that stops
+  # being equal, a refusal that stops producing a record, a failure for a new
+  # reason, an improvement not yet blessed -- fails there until the baseline is
+  # re-blessed with its cause. The merge job writes the proposed baseline as an
+  # artifact, so a bless is read from this run, never from a laptop. The
+  # baseline names the compilers it was blessed on (Ubuntu 24.04's gcc 13 and
+  # clang 18, which this image carries); another toolchain is refused.
+  equivalence-shard:
+    name: Equivalence ${{ matrix.compiler }}-${{ matrix.opt }} ${{ matrix.part.name }}
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        opt: [O0, O1, O2]
+        # Split by measured time, not record count (run 37137792784's
+        # `timing:` lines): shapes.c alone takes 1.5 to 4.7 minutes per
+        # configuration, more than the other seven together. The binaries of a
+        # shard render side by side, so a shard lasts about as long as its
+        # slowest binary. The merge job refuses if a baseline record goes
+        # ungraded, so a new source file has to be added to one part here.
+        part:
+          - name: a
+            sources: tests/corpus/branchy.c tests/corpus/hashes.c tests/corpus/values.c tests/gold/flag_materialisation.c tests/gold/review.c tests/gold/manual_limits.c tests/gold/code_pointer_table.c
+          - name: shapes
+            sources: tests/corpus/shapes.c
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: r2s
+          path: target/ci
+      - run: chmod +x target/ci/r2s
+      - name: Print the compilers
+        run: |
+          gcc --version | head -n 1
+          clang --version | head -n 1
+      - name: Grade the shard
+        run: |
+          timeout -s ABRT 8m python3 tests/equiv/run_equiv.py \
+            --r2s target/ci/r2s \
+            --sources ${{ matrix.part.sources }} \
+            --compilers ${{ matrix.compiler }} \
+            --opts ${{ matrix.opt }} \
+            --jobs 4 \
+            --out "$RUNNER_TEMP/equiv"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: equiv-shard-${{ matrix.compiler }}-${{ matrix.opt }}-${{ matrix.part.name }}
+          path: ${{ runner.temp }}/equiv/records.json
+          retention-days: 7
+          if-no-files-found: error
+
+  equivalence:
+    name: Equivalence Ratchet
+    runs-on: ubuntu-24.04
+    needs: equivalence-shard
+    if: ${{ !cancelled() }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: equiv-shard-*
+          path: ${{ runner.temp }}/shards
+      - name: Hold every function to the baseline
+        run: |
+          python3 tests/equiv/merge_shards.py \
+            --baseline tests/equiv/baseline.json \
+            --out "$RUNNER_TEMP/equiv" \
+            "$RUNNER_TEMP"/shards/*/records.json
+      - name: Archive the records and the proposed baseline
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: equivalence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/equiv/records.json
+            ${{ runner.temp }}/equiv/baseline.proposed.json
+          if-no-files-found: warn
+
+  # ── Whole-binary render coverage ────────────────────────────────────
+  #
+  # The other gates score nine hand-picked functions and check that what they
+  # render is correct. This one asks how much of a binary renders at all, which
+  # is the question that went unmeasured while `/bin/ls` halved. It gates on the
+  # two programs the repository ships as bytes, reports the compiled cells, and
+  # reports whatever the runner has at `/bin/ls` without gating on it, because
+  # the runner image decides which program that name points at.
+  #
+  # macOS, because the compiled cells are built for x86-64 and arm64 with
+  # Apple clang's `-arch`, which is what the baseline was blessed with. A
+  # different clang reports the compiled cells without gating them.
+  coverage:
+    name: Whole-Binary Render Coverage
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the toolchain the repository pins
+        run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage-macos
+      - name: Print the compiler
+        run: clang --version | head -n 1
+      - name: Run coverage sweep
+        run: ./tests/coverage/run_coverage.sh
+      - name: Archive coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tests/coverage/artifacts/coverage.json
+          if-no-files-found: error
 
   # ── Release build check ────────────────────────────────────────────
   release:
     name: Release Build
-    runs-on: self-hosted
-    needs: [quality, r2r, e2e]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs: [quality, capture-gate, source-gold, equivalence-harness, equivalence, coverage]
     if: github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v6
-      - name: Setup Rust PATH
-        run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then
-              echo "$p" >> "$GITHUB_PATH"
-              export PATH="$p:$PATH"
-            fi
-          done
-          if ! command -v cargo &>/dev/null; then
-            echo "::error::cargo not found. See scripts/setup-runner.sh"
-            exit 1
-          fi
-      - name: Prepare shared target dir
-        run: mkdir -p "$CARGO_TARGET_DIR"
-
+      - name: Install the toolchain the repository pins
+        run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
       - name: Build release (all architectures)
         run: cargo build --release --features all-archs
-      - name: Build plugin release
-        run: make -C r2plugin RUST_FEATURES=all-archs

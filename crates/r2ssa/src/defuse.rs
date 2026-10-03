@@ -1,32 +1,45 @@
 //! Def-use chain analysis for SSA blocks.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::SSABlock;
-use crate::function::{DefLocation, SSAFunction};
-use crate::op::SSAOp;
 use crate::var::SSAVar;
 
 /// Information about where a variable is defined and used.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DefUseInfo {
-    /// Maps each variable (name_version) to the operation index that defines it.
-    /// A variable with version 0 has no definition (it's an input).
+    /// Presentation-only map from displayed variable names to definition sites.
+    ///
+    /// A displayed name that identifies multiple exact variables is retained
+    /// with no definition instead of selecting one of them as authoritative.
     pub definitions: HashMap<String, Option<usize>>,
 
-    /// Maps each variable (name_version) to the operation indices that use it.
+    /// Presentation-only map from displayed variable names to use sites.
     pub uses: HashMap<String, Vec<usize>>,
 
-    /// Variables that are inputs (used but never defined in this block).
+    /// Presentation names of variables that are inputs.
     pub inputs: HashSet<String>,
 
-    /// Variables that are outputs (defined but never used in this block).
+    /// Presentation names of variables that are outputs.
     pub outputs: HashSet<String>,
 
-    /// Variables that are live (defined and used within this block).
+    /// Presentation names of variables that are live.
     pub live: HashSet<String>,
+
+    /// Exact semantic def-use state. These fields are rebuilt by [`def_use`]
+    /// and intentionally excluded from the legacy presentation serialization.
+    #[serde(skip)]
+    exact_definitions: HashMap<SSAVar, Option<usize>>,
+    #[serde(skip)]
+    exact_uses: HashMap<SSAVar, Vec<usize>>,
+    #[serde(skip)]
+    exact_inputs: HashSet<SSAVar>,
+    #[serde(skip)]
+    exact_outputs: HashSet<SSAVar>,
+    #[serde(skip)]
+    exact_live: HashSet<SSAVar>,
 }
 
 impl DefUseInfo {
@@ -37,29 +50,30 @@ impl DefUseInfo {
 
     /// Get the definition site of a variable.
     pub fn get_def(&self, var: &SSAVar) -> Option<usize> {
-        let key = var.display_name();
-        self.definitions.get(&key).copied().flatten()
+        self.exact_definitions.get(var).copied().flatten()
     }
 
     /// Get all use sites of a variable.
     pub fn get_uses(&self, var: &SSAVar) -> &[usize] {
-        let key = var.display_name();
-        self.uses.get(&key).map(|v| v.as_slice()).unwrap_or(&[])
+        self.exact_uses
+            .get(var)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Check if a variable is an input to this block.
     pub fn is_input(&self, var: &SSAVar) -> bool {
-        self.inputs.contains(&var.display_name())
+        self.exact_inputs.contains(var)
     }
 
     /// Check if a variable is an output from this block.
     pub fn is_output(&self, var: &SSAVar) -> bool {
-        self.outputs.contains(&var.display_name())
+        self.exact_outputs.contains(var)
     }
 
     /// Check if a variable is live (both defined and used).
     pub fn is_live(&self, var: &SSAVar) -> bool {
-        self.live.contains(&var.display_name())
+        self.exact_live.contains(var)
     }
 
     /// Get all input variable names.
@@ -71,48 +85,36 @@ impl DefUseInfo {
     pub fn output_vars(&self) -> impl Iterator<Item = &str> {
         self.outputs.iter().map(|s| s.as_str())
     }
-}
 
-/// Reference to an SSA operation or phi node in a function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum SliceOpRef {
-    /// Phi node at the given index in the block.
-    Phi { block_addr: u64, phi_idx: usize },
-    /// Operation at the given index in the block.
-    Op { block_addr: u64, op_idx: usize },
-}
+    fn rebuild_presentation(&mut self) {
+        self.definitions.clear();
+        self.uses.clear();
+        self.inputs.clear();
+        self.outputs.clear();
+        self.live.clear();
 
-impl SliceOpRef {
-    /// Get the block address for this reference.
-    pub fn block_addr(&self) -> u64 {
-        match self {
-            SliceOpRef::Phi { block_addr, .. } | SliceOpRef::Op { block_addr, .. } => *block_addr,
+        for (var, definition) in &self.exact_definitions {
+            self.definitions
+                .entry(var.display_name())
+                .and_modify(|existing| {
+                    if *existing != *definition {
+                        *existing = None;
+                    }
+                })
+                .or_insert(*definition);
         }
-    }
-}
-
-/// Result of a backward slice: SSA operations and blocks that affect a sink.
-#[derive(Debug, Clone, Default)]
-pub struct BackwardSlice {
-    /// Operations (including phi nodes) in the slice.
-    pub ops: HashSet<SliceOpRef>,
-    /// Blocks that contain slice operations.
-    pub blocks: HashSet<u64>,
-}
-
-impl BackwardSlice {
-    /// Insert an operation into the slice and track its block.
-    pub fn add_op(&mut self, op: SliceOpRef) -> bool {
-        let inserted = self.ops.insert(op);
-        if inserted {
-            self.blocks.insert(op.block_addr());
+        for (var, uses) in &self.exact_uses {
+            let displayed_uses = self.uses.entry(var.display_name()).or_default();
+            displayed_uses.extend(uses);
+            displayed_uses.sort_unstable();
+            displayed_uses.dedup();
         }
-        inserted
-    }
-
-    /// Check if the slice is empty.
-    pub fn is_empty(&self) -> bool {
-        self.ops.is_empty()
+        self.inputs
+            .extend(self.exact_inputs.iter().map(SSAVar::display_name));
+        self.outputs
+            .extend(self.exact_outputs.iter().map(SSAVar::display_name));
+        self.live
+            .extend(self.exact_live.iter().map(SSAVar::display_name));
     }
 }
 
@@ -127,467 +129,52 @@ pub fn def_use(block: &SSABlock) -> DefUseInfo {
     // First pass: record all definitions
     for (idx, op) in block.ops.iter().enumerate() {
         if let Some(dst) = op.dst() {
-            let key = dst.display_name();
-            info.definitions.insert(key, Some(idx));
+            info.exact_definitions.insert(dst.clone(), Some(idx));
         }
     }
 
     // Second pass: record all uses
     for (idx, op) in block.ops.iter().enumerate() {
         for src in op.sources() {
-            let key = src.display_name();
-            info.uses.entry(key).or_default().push(idx);
+            info.exact_uses.entry(src.clone()).or_default().push(idx);
         }
     }
 
     // Identify inputs: variables that are used but not defined
-    for var_name in info.uses.keys() {
-        if !info.definitions.contains_key(var_name) {
-            info.inputs.insert(var_name.clone());
+    for var in info.exact_uses.keys() {
+        if !info.exact_definitions.contains_key(var) {
+            info.exact_inputs.insert(var.clone());
             // Also record that this variable has no definition
-            info.definitions.insert(var_name.clone(), None);
+            info.exact_definitions.insert(var.clone(), None);
         }
     }
 
     // Identify outputs: variables that are defined but not used
-    for (var_name, def) in &info.definitions {
-        if def.is_some() && !info.uses.contains_key(var_name) {
-            info.outputs.insert(var_name.clone());
+    for (var, def) in &info.exact_definitions {
+        if def.is_some() && !info.exact_uses.contains_key(var) {
+            info.exact_outputs.insert(var.clone());
         }
     }
 
     // Identify live variables: defined and used
-    for (var_name, def) in &info.definitions {
-        if def.is_some() && info.uses.contains_key(var_name) {
-            info.live.insert(var_name.clone());
+    for (var, def) in &info.exact_definitions {
+        if def.is_some() && info.exact_uses.contains_key(var) {
+            info.exact_live.insert(var.clone());
         }
     }
+
+    info.rebuild_presentation();
 
     info
-}
-
-/// Dead code analysis: find operations whose results are never used.
-pub fn dead_ops(block: &SSABlock) -> Vec<usize> {
-    let info = def_use(block);
-    let mut dead = Vec::new();
-
-    for (idx, op) in block.ops.iter().enumerate() {
-        // Skip operations with side effects
-        if op.is_control_flow() || op.is_memory_write() {
-            continue;
-        }
-
-        // Check if this operation's output is used
-        if let Some(dst) = op.dst() {
-            let key = dst.display_name();
-            if !info.uses.contains_key(&key) {
-                dead.push(idx);
-            }
-        }
-    }
-
-    dead
-}
-
-/// Constant propagation info: find operations that define constants.
-pub fn find_constants(block: &SSABlock) -> HashMap<String, u64> {
-    let mut constants = HashMap::new();
-
-    for op in &block.ops {
-        if let SSAOp::Copy { dst, src } = op {
-            // Check if source is a constant
-            if src.is_const() {
-                // Parse the constant value from the name (e.g., "const:0x42")
-                if let Some(val_str) = src.name.strip_prefix("const:")
-                    && let Ok(val) = if let Some(hex) = val_str.strip_prefix("0x") {
-                        u64::from_str_radix(hex, 16)
-                    } else {
-                        val_str.parse()
-                    }
-                {
-                    constants.insert(dst.display_name(), val);
-                }
-            }
-        }
-    }
-
-    constants
-}
-
-#[derive(Debug, Clone)]
-struct StoreInfo {
-    block_addr: u64,
-    op_idx: usize,
-    space: String,
-    addr: SSAVar,
-    val: SSAVar,
-    access_size: u32,
-}
-
-fn collect_store_infos(func: &SSAFunction) -> Vec<StoreInfo> {
-    let mut stores = Vec::new();
-
-    for block in func.blocks() {
-        for (op_idx, op) in block.ops.iter().enumerate() {
-            if let SSAOp::Store { space, addr, val } = op {
-                stores.push(StoreInfo {
-                    block_addr: block.addr,
-                    op_idx,
-                    space: space.clone(),
-                    addr: addr.clone(),
-                    val: val.clone(),
-                    access_size: val.size,
-                });
-            }
-        }
-    }
-
-    stores
-}
-
-fn const_value(var: &SSAVar) -> Option<u64> {
-    let val_str = var.name.strip_prefix("const:")?;
-    let val = if let Some(hex) = val_str
-        .strip_prefix("0x")
-        .or_else(|| val_str.strip_prefix("0X"))
-    {
-        u64::from_str_radix(hex, 16).ok()?
-    } else {
-        val_str.parse::<u64>().ok()?
-    };
-    Some(val)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AddressRegion {
-    Const,
-    Stack,
-    Global,
-    Heap,
-    Unknown,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AddressProvenance {
-    region: AddressRegion,
-    base: Option<String>,
-    offset: Option<i64>,
-    absolute: Option<u64>,
-}
-
-fn parse_i64_component(component: &str) -> Option<i64> {
-    let trimmed = component.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Some(hex) = trimmed
-        .strip_prefix("-0x")
-        .or_else(|| trimmed.strip_prefix("-0X"))
-    {
-        let val = i64::from_str_radix(hex, 16).ok()?;
-        return Some(-val);
-    }
-    if let Some(hex) = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-    {
-        return i64::from_str_radix(hex, 16).ok();
-    }
-    trimmed.parse::<i64>().ok()
-}
-
-fn detect_address_provenance(var: &SSAVar) -> AddressProvenance {
-    if let Some(abs) = const_value(var) {
-        return AddressProvenance {
-            region: AddressRegion::Const,
-            base: None,
-            offset: Some(0),
-            absolute: Some(abs),
-        };
-    }
-
-    let lower = var.name.to_ascii_lowercase();
-    if let Some(rest) = lower.strip_prefix("ram:") {
-        return AddressProvenance {
-            region: AddressRegion::Global,
-            base: Some("ram".to_string()),
-            offset: None,
-            absolute: if let Some(hex) = rest.strip_prefix("0x") {
-                u64::from_str_radix(hex, 16).ok()
-            } else {
-                rest.parse::<u64>().ok()
-            },
-        };
-    }
-    if let Some(rest) = lower.strip_prefix("stack:") {
-        let mut parts = rest.split(':');
-        let base = parts.next().map(str::to_string);
-        let offset = parts.next().and_then(parse_i64_component);
-        return AddressProvenance {
-            region: AddressRegion::Stack,
-            base,
-            offset,
-            absolute: None,
-        };
-    }
-    if lower.starts_with("heap:") || lower.contains("malloc") || lower.contains("heap") {
-        return AddressProvenance {
-            region: AddressRegion::Heap,
-            base: Some("heap".to_string()),
-            offset: None,
-            absolute: None,
-        };
-    }
-    if lower.starts_with("obj.")
-        || lower.starts_with("sym.")
-        || lower.starts_with("data.")
-        || lower.starts_with("got.")
-    {
-        return AddressProvenance {
-            region: AddressRegion::Global,
-            base: Some(lower),
-            offset: Some(0),
-            absolute: None,
-        };
-    }
-    if matches!(
-        lower.as_str(),
-        "rbp" | "rsp" | "ebp" | "esp" | "sp" | "fp" | "bp" | "s0" | "x8"
-    ) {
-        return AddressProvenance {
-            region: AddressRegion::Stack,
-            base: Some(lower),
-            offset: Some(0),
-            absolute: None,
-        };
-    }
-
-    AddressProvenance {
-        region: AddressRegion::Unknown,
-        base: None,
-        offset: None,
-        absolute: None,
-    }
-}
-
-fn ranges_overlap(a_base: i128, a_size: u32, b_base: i128, b_size: u32) -> bool {
-    let a_end = a_base + i128::from(a_size.max(1));
-    let b_end = b_base + i128::from(b_size.max(1));
-    a_base < b_end && b_base < a_end
-}
-
-fn addresses_may_alias(a: &SSAVar, a_size: u32, b: &SSAVar, b_size: u32) -> bool {
-    let pa = detect_address_provenance(a);
-    let pb = detect_address_provenance(b);
-
-    if let (Some(a_abs), Some(b_abs)) = (pa.absolute, pb.absolute) {
-        return ranges_overlap(i128::from(a_abs), a_size, i128::from(b_abs), b_size);
-    }
-
-    if pa.region != AddressRegion::Unknown
-        && pb.region != AddressRegion::Unknown
-        && pa.region != pb.region
-    {
-        return false;
-    }
-
-    match (pa.region, pb.region) {
-        (AddressRegion::Stack, AddressRegion::Stack)
-        | (AddressRegion::Global, AddressRegion::Global)
-        | (AddressRegion::Heap, AddressRegion::Heap) => {
-            if pa.base.is_some() && pb.base.is_some() && pa.base != pb.base {
-                return false;
-            }
-            match (pa.offset, pb.offset) {
-                (Some(a_off), Some(b_off)) => {
-                    ranges_overlap(i128::from(a_off), a_size, i128::from(b_off), b_size)
-                }
-                _ => true,
-            }
-        }
-        _ => true,
-    }
-}
-
-fn add_aliasing_stores(
-    slice: &mut BackwardSlice,
-    worklist: &mut VecDeque<SSAVar>,
-    stores: &[StoreInfo],
-    sink_space: &str,
-    sink_addr: &SSAVar,
-    sink_access_size: u32,
-) {
-    for store in stores {
-        if store.space != sink_space {
-            continue;
-        }
-        if !addresses_may_alias(&store.addr, store.access_size, sink_addr, sink_access_size) {
-            continue;
-        }
-        if slice.add_op(SliceOpRef::Op {
-            block_addr: store.block_addr,
-            op_idx: store.op_idx,
-        }) {
-            worklist.push_back(store.addr.clone());
-            worklist.push_back(store.val.clone());
-        }
-    }
-}
-
-fn walk_backward(
-    func: &SSAFunction,
-    stores: &[StoreInfo],
-    slice: &mut BackwardSlice,
-    worklist: &mut VecDeque<SSAVar>,
-    visited_vars: &mut HashSet<String>,
-) {
-    while let Some(var) = worklist.pop_front() {
-        let key = var.display_name();
-        if !visited_vars.insert(key) {
-            continue;
-        }
-
-        let Some((block_addr, def_loc)) = func.find_def(&var) else {
-            continue;
-        };
-
-        match def_loc {
-            DefLocation::Phi(phi_idx) => {
-                if slice.add_op(SliceOpRef::Phi {
-                    block_addr,
-                    phi_idx,
-                }) && let Some(block) = func.get_block(block_addr)
-                    && let Some(phi) = block.phis.get(phi_idx)
-                {
-                    for (_, src) in &phi.sources {
-                        worklist.push_back(src.clone());
-                    }
-                }
-            }
-            DefLocation::Op(op_idx) => {
-                if slice.add_op(SliceOpRef::Op { block_addr, op_idx })
-                    && let Some(block) = func.get_block(block_addr)
-                    && let Some(op) = block.ops.get(op_idx)
-                {
-                    for src in op.sources() {
-                        worklist.push_back(src.clone());
-                    }
-                    if let SSAOp::Load { space, addr, dst } = op {
-                        add_aliasing_stores(
-                            slice,
-                            worklist,
-                            stores,
-                            space.as_str(),
-                            addr,
-                            dst.size,
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Compute a backward slice starting from a sink variable.
-pub fn backward_slice_from_var(func: &SSAFunction, sink: &SSAVar) -> BackwardSlice {
-    let stores = collect_store_infos(func);
-    let mut slice = BackwardSlice::default();
-    let mut worklist = VecDeque::new();
-    let mut visited_vars = HashSet::new();
-
-    worklist.push_back(sink.clone());
-    walk_backward(func, &stores, &mut slice, &mut worklist, &mut visited_vars);
-
-    slice
-}
-
-/// Compute a backward slice starting from a specific SSA operation.
-pub fn backward_slice_from_op(func: &SSAFunction, sink: SliceOpRef) -> BackwardSlice {
-    let stores = collect_store_infos(func);
-    let mut slice = BackwardSlice::default();
-    let mut worklist = VecDeque::new();
-    let mut visited_vars = HashSet::new();
-
-    match sink {
-        SliceOpRef::Phi {
-            block_addr,
-            phi_idx,
-        } => {
-            if let Some(block) = func.get_block(block_addr)
-                && let Some(phi) = block.phis.get(phi_idx)
-            {
-                slice.add_op(SliceOpRef::Phi {
-                    block_addr,
-                    phi_idx,
-                });
-                for (_, src) in &phi.sources {
-                    worklist.push_back(src.clone());
-                }
-            }
-        }
-        SliceOpRef::Op { block_addr, op_idx } => {
-            if let Some(block) = func.get_block(block_addr)
-                && let Some(op) = block.ops.get(op_idx)
-            {
-                slice.add_op(SliceOpRef::Op { block_addr, op_idx });
-                for src in op.sources() {
-                    worklist.push_back(src.clone());
-                }
-                if let SSAOp::Load { space, addr, dst } = op {
-                    add_aliasing_stores(
-                        &mut slice,
-                        &mut worklist,
-                        &stores,
-                        space.as_str(),
-                        addr,
-                        dst.size,
-                    );
-                }
-                if let SSAOp::Store { space, addr, val } = op {
-                    add_aliasing_stores(
-                        &mut slice,
-                        &mut worklist,
-                        &stores,
-                        space.as_str(),
-                        addr,
-                        val.size,
-                    );
-                }
-            }
-        }
-    }
-
-    walk_backward(func, &stores, &mut slice, &mut worklist, &mut visited_vars);
-
-    slice
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SSAFunction;
-    use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
+    use crate::op::SSAOp;
 
     fn make_var(name: &str, version: u32, size: u32) -> SSAVar {
         SSAVar::new(name, version, size)
-    }
-
-    fn make_const_vn(val: u64, size: u32) -> Varnode {
-        Varnode {
-            space: SpaceId::Const,
-            offset: val,
-            size,
-            meta: None,
-        }
-    }
-
-    fn make_reg_vn(offset: u64, size: u32) -> Varnode {
-        Varnode {
-            space: SpaceId::Register,
-            offset,
-            size,
-            meta: None,
-        }
     }
 
     #[test]
@@ -633,15 +220,15 @@ mod tests {
         // RAX_1 = RAX_0 + 1
         block.push(SSAOp::IntAdd {
             dst: rax_1.clone(),
-            a: rax_0.clone(),
-            b: make_var("const:1", 0, 8),
+            a: rax_0,
+            b: SSAVar::constant(1, 8),
         });
 
         // RAX_2 = RAX_1 + RBX_0
         block.push(SSAOp::IntAdd {
             dst: rax_2.clone(),
             a: rax_1.clone(),
-            b: rbx_0.clone(),
+            b: rbx_0,
         });
 
         let info = def_use(&block);
@@ -653,162 +240,5 @@ mod tests {
 
         // RAX_2 is output (defined but not used)
         assert!(info.is_output(&rax_2));
-    }
-
-    #[test]
-    fn test_dead_ops() {
-        let mut block = SSABlock::new(0x1000, 8);
-
-        let rax_0 = make_var("RAX", 0, 8);
-        let rax_1 = make_var("RAX", 1, 8);
-        let rbx_1 = make_var("RBX", 1, 8);
-
-        // RAX_1 = RAX_0 + 1 (used later)
-        block.push(SSAOp::IntAdd {
-            dst: rax_1.clone(),
-            a: rax_0.clone(),
-            b: make_var("const:1", 0, 8),
-        });
-
-        // RBX_1 = RAX_1 + 2 (not used - dead)
-        block.push(SSAOp::IntAdd {
-            dst: rbx_1,
-            a: rax_1.clone(),
-            b: make_var("const:2", 0, 8),
-        });
-
-        // Store RAX_1 (uses RAX_1, has side effect)
-        block.push(SSAOp::Store {
-            space: "ram".to_string(),
-            addr: make_var("const:0x1000", 0, 8),
-            val: rax_1,
-        });
-
-        let dead = dead_ops(&block);
-        assert_eq!(dead, vec![1]); // Only op 1 is dead
-    }
-
-    #[test]
-    fn test_find_constants() {
-        let mut block = SSABlock::new(0x1000, 4);
-
-        let rax_1 = make_var("RAX", 1, 8);
-        let const_42 = make_var("const:0x42", 0, 8);
-
-        block.push(SSAOp::Copy {
-            dst: rax_1,
-            src: const_42,
-        });
-
-        let constants = find_constants(&block);
-        assert_eq!(constants.get("RAX_1"), Some(&0x42));
-    }
-
-    #[test]
-    fn test_backward_slice_var_chain() {
-        let blocks = vec![
-            R2ILBlock {
-                addr: 0x1000,
-                size: 4,
-                ops: vec![R2ILOp::Copy {
-                    dst: make_reg_vn(0, 8),
-                    src: make_const_vn(1, 8),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-            R2ILBlock {
-                addr: 0x1004,
-                size: 4,
-                ops: vec![R2ILOp::IntAdd {
-                    dst: make_reg_vn(8, 8),
-                    a: make_reg_vn(0, 8),
-                    b: make_const_vn(2, 8),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-        ];
-
-        let func = SSAFunction::from_blocks_raw_no_arch(&blocks).unwrap();
-        let block = func.get_block(0x1004).unwrap();
-        let dst = block.ops[0].dst().unwrap().clone();
-
-        let slice = backward_slice_from_var(&func, &dst);
-        assert!(slice.ops.contains(&SliceOpRef::Op {
-            block_addr: 0x1004,
-            op_idx: 0
-        }));
-        assert!(slice.ops.contains(&SliceOpRef::Op {
-            block_addr: 0x1000,
-            op_idx: 0
-        }));
-    }
-
-    #[test]
-    fn test_backward_slice_memory_alias() {
-        let blocks = vec![
-            R2ILBlock {
-                addr: 0x2000,
-                size: 4,
-                ops: vec![R2ILOp::Store {
-                    space: SpaceId::Ram,
-                    addr: make_const_vn(0x1000, 8),
-                    val: make_reg_vn(0, 8),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-            R2ILBlock {
-                addr: 0x2004,
-                size: 4,
-                ops: vec![R2ILOp::Load {
-                    dst: make_reg_vn(8, 8),
-                    space: SpaceId::Ram,
-                    addr: make_const_vn(0x1000, 8),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-        ];
-
-        let func = SSAFunction::from_blocks_raw_no_arch(&blocks).unwrap();
-        let block = func.get_block(0x2004).unwrap();
-        let dst = block.ops[0].dst().unwrap().clone();
-
-        let slice = backward_slice_from_var(&func, &dst);
-        assert!(slice.ops.contains(&SliceOpRef::Op {
-            block_addr: 0x2004,
-            op_idx: 0
-        }));
-        assert!(slice.ops.contains(&SliceOpRef::Op {
-            block_addr: 0x2000,
-            op_idx: 0
-        }));
-    }
-
-    #[test]
-    fn test_alias_provenance_distinguishes_stack_vs_global() {
-        let stack_addr = make_var("stack:rbp:-0x10", 0, 8);
-        let global_addr = make_var("ram:0x401000", 0, 8);
-        assert!(
-            !addresses_may_alias(&stack_addr, 8, &global_addr, 8),
-            "stack and global provenance classes should not alias"
-        );
-    }
-
-    #[test]
-    fn test_alias_range_overlap_for_adjacent_constants() {
-        let base = make_var("const:0x1000", 0, 8);
-        let near = make_var("const:0x1004", 0, 8);
-        let far = make_var("const:0x1100", 0, 8);
-        assert!(
-            addresses_may_alias(&base, 8, &near, 8),
-            "constant ranges that overlap should alias"
-        );
-        assert!(
-            !addresses_may_alias(&base, 8, &far, 8),
-            "distant constant ranges should not alias"
-        );
     }
 }

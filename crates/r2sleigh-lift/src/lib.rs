@@ -25,22 +25,28 @@
 
 pub mod context;
 pub mod disasm;
-pub mod esil;
-pub mod pcode;
+mod internal_control;
 pub mod sleigh;
+pub mod text;
 pub mod translate;
-pub mod userops;
 
 use thiserror::Error;
 
 pub use context::LiftContext;
-pub use disasm::{Disassembler, SemanticMetadataOptions, SemanticMetadataPrecision};
-pub use esil::{format_op, op_to_esil, op_to_esil_named};
-pub use pcode::{PcodeTranslator, RawPcodeOp, RawVarnode};
+pub use disasm::syntax::{NumberSpan, Syntax};
+pub use disasm::{
+    Continuation, Decoded, Disassembler, GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION,
+    GenuineInstructionSpan, GenuineLiftAuthority, GenuineLiftedBlock, GenuineLiftedFunction,
+    GenuineLiftedFunctionAuthority, TrustedLiftedFunction, TrustedSleighProfile,
+};
+pub use disasm::{
+    EmbeddedMachine, embedded_arch_and_disassembler, embedded_machine, embedded_thumb_machine,
+    lifted_register_storage,
+};
 use r2il::ArchSpec;
 use r2il::Endianness;
 pub use sleigh::{SleighInfo, build_arch_spec, extract_arch_spec, get_sleigh_info};
-pub use userops::userop_map_for_arch;
+pub use text::format_op;
 
 /// Errors that can occur during lifting.
 #[derive(Debug, Error)]
@@ -50,9 +56,6 @@ pub enum LiftError {
 
     #[error("Parse error: {0}")]
     Parse(String),
-
-    #[error("P-code translation error: {0}")]
-    Pcode(#[from] pcode::PcodeError),
 
     #[error("Unsupported feature: {0}")]
     Unsupported(String),
@@ -118,12 +121,6 @@ impl Lifter {
         &self.ctx
     }
 
-    /// Set the endianness.
-    pub fn set_big_endian(&mut self, big_endian: bool) -> &mut Self {
-        self.ctx.set_big_endian(big_endian);
-        self
-    }
-
     /// Set instruction endianness.
     pub fn set_instruction_endianness(&mut self, endianness: Endianness) -> &mut Self {
         self.ctx.set_instruction_endianness(endianness);
@@ -159,7 +156,8 @@ impl Lifter {
 /// This provides a minimal x86-64 spec with common registers.
 pub fn create_x86_64_spec() -> ArchSpec {
     let mut ctx = LiftContext::new("x86-64");
-    ctx.set_big_endian(false);
+    ctx.set_instruction_endianness(Endianness::Little);
+    ctx.set_memory_endianness(Endianness::Little);
     ctx.set_addr_size(8);
 
     // Add standard address spaces
@@ -217,7 +215,8 @@ pub fn create_x86_64_spec() -> ArchSpec {
 /// Create a basic ARM architecture specification for testing.
 pub fn create_arm_spec() -> ArchSpec {
     let mut ctx = LiftContext::new("ARM");
-    ctx.set_big_endian(false);
+    ctx.set_instruction_endianness(Endianness::Little);
+    ctx.set_memory_endianness(Endianness::Little);
     ctx.set_addr_size(4);
 
     // Add standard address spaces
@@ -249,7 +248,8 @@ pub fn create_arm_spec() -> ArchSpec {
 
 fn create_riscv_spec(name: &str, addr_size: u32) -> ArchSpec {
     let mut ctx = LiftContext::new(name);
-    ctx.set_big_endian(false);
+    ctx.set_instruction_endianness(Endianness::Little);
+    ctx.set_memory_endianness(Endianness::Little);
     ctx.set_addr_size(addr_size);
 
     // Add standard address spaces
@@ -300,7 +300,6 @@ mod tests {
     fn test_x86_64_spec() {
         let spec = create_x86_64_spec();
         assert_eq!(spec.name, "x86-64");
-        assert!(!spec.big_endian);
         assert_eq!(spec.instruction_endianness, Endianness::Little);
         assert_eq!(spec.memory_endianness, Endianness::Little);
         assert_eq!(spec.addr_size, 8);
@@ -311,11 +310,170 @@ mod tests {
         assert!(spec.get_register("RIP").is_some());
     }
 
+    /// The processor specification's own program-counter role reaches the
+    /// architecture, in the specification's own spelling.
+    ///
+    /// AArch64 writes it `pc` and x86-64 writes it `RIP`, which is exactly why
+    /// it is read rather than guessed: a list of spellings has to know both, and
+    /// every architecture nobody thought of gets no answer or a wrong one.
+    #[test]
+    fn processor_specifications_name_their_own_program_counter() {
+        for (sla, pspec, arch, expected) in [
+            (
+                sleigh_config::processor_aarch64::SLA_AARCH64,
+                sleigh_config::processor_aarch64::PSPEC_AARCH64,
+                "aarch64",
+                "pc",
+            ),
+            (
+                sleigh_config::processor_x86::SLA_X86_64,
+                sleigh_config::processor_x86::PSPEC_X86_64,
+                "x86-64",
+                "RIP",
+            ),
+        ] {
+            let spec = build_arch_spec(sla, pspec, arch).expect("sleigh specification");
+            assert_eq!(
+                spec.program_counter.as_deref(),
+                Some(expected),
+                "{arch} states its program counter"
+            );
+            assert!(
+                spec.get_register(expected).is_some(),
+                "the named register must exist in {arch}"
+            );
+        }
+    }
+
+    /// The specification's own user-operation table reaches the architecture.
+    ///
+    /// A `CallOther` states only an index, and the index is assigned by the
+    /// compiled specification, so this table is the only thing that can say
+    /// which operation an instruction invoked. `NEON_ext`, `NEON_ushl` and `NEON_rev64` are
+    /// the ones the corpus needs; asserting a name resolves back through its own
+    /// index is the property a consumer depends on.
+    #[test]
+    fn aarch64_user_operation_names_reach_the_arch_spec() {
+        let spec = build_arch_spec(
+            sleigh_config::processor_aarch64::SLA_AARCH64,
+            sleigh_config::processor_aarch64::PSPEC_AARCH64,
+            "aarch64",
+        )
+        .expect("aarch64 sleigh specification");
+
+        assert!(
+            !spec.user_ops.is_empty(),
+            "AARCH64 declares user-defined operations"
+        );
+        for name in [
+            "NEON_ext",
+            "NEON_ushl",
+            "NEON_rev64",
+            "NEON_umax",
+            "NEON_umin",
+            "NEON_umaxv",
+            "NEON_uminv",
+            "a64_TBL",
+        ] {
+            let index = spec
+                .user_ops
+                .iter()
+                .position(|declared| declared == name)
+                .unwrap_or_else(|| panic!("AARCH64 declares {name}"));
+            assert_eq!(spec.user_ops[index], name);
+        }
+    }
+
+    /// Every x86 packed-extension operation the lift models is declared, under
+    /// exactly that name, by both x86 specifications, and resolves through its
+    /// own index to the operation the name spells.
+    ///
+    /// The expected operation is read off the name here, independently of the
+    /// table: `vpmovsxbd_avx2` is a sign extension of bytes to doublewords in
+    /// the 256-bit VEX encoding. A specification upgrade that renames one of
+    /// these, or gives it real p-code, fails this rather than silently leaving
+    /// its `CallOther` unmodelled.
+    #[test]
+    fn x86_packed_extension_names_reach_both_x86_specs() {
+        use crate::disasm::user_operation::{
+            EncodingForm, Extension, ModelledUserOperation, PackedExtension,
+            modelled_user_operations, resolve_modelled_user_operations,
+        };
+
+        fn element_bytes(letter: char) -> u32 {
+            match letter {
+                'b' => 1,
+                'w' => 2,
+                'd' => 4,
+                'q' => 8,
+                other => panic!("no element width {other}"),
+            }
+        }
+
+        fn spelled_by(name: &str) -> ModelledUserOperation {
+            let (core, form) = match name.split_once('_') {
+                None => (name, EncodingForm::Legacy),
+                Some((core, "avx")) => (core, EncodingForm::Vex128),
+                Some((core, "avx2")) => (core, EncodingForm::Vex256),
+                Some((core, "avx512vl")) => (core, EncodingForm::EvexVl),
+                Some((core, "avx512f" | "avx512bw")) => (core, EncodingForm::Evex512),
+                Some((_, suffix)) => panic!("{name}: no encoding {suffix}"),
+            };
+            let core = core.strip_prefix('v').unwrap_or(core);
+            let letters = core
+                .strip_prefix("pmov")
+                .unwrap_or_else(|| panic!("{name} is not a packed move"))
+                .chars()
+                .collect::<Vec<_>>();
+            let [kind, 'x', from, to] = letters[..] else {
+                panic!("{name} does not spell a packed extension");
+            };
+            ModelledUserOperation::PackedExtension(PackedExtension {
+                from_bytes: element_bytes(from),
+                to_bytes: element_bytes(to),
+                extension: match kind {
+                    's' => Extension::Sign,
+                    'z' => Extension::Zero,
+                    other => panic!("{name}: no extension {other}"),
+                },
+                form,
+            })
+        }
+
+        let packed = modelled_user_operations()
+            .filter(|(_, operation)| matches!(operation, ModelledUserOperation::PackedExtension(_)))
+            .collect::<Vec<_>>();
+        assert_eq!(packed.len(), 60, "twelve operations in five encodings");
+        for (sla, pspec, arch) in [
+            (
+                sleigh_config::processor_x86::SLA_X86_64,
+                sleigh_config::processor_x86::PSPEC_X86_64,
+                "x86-64",
+            ),
+            (
+                sleigh_config::processor_x86::SLA_X86,
+                sleigh_config::processor_x86::PSPEC_X86,
+                "x86",
+            ),
+        ] {
+            let spec = build_arch_spec(sla, pspec, arch).expect("x86 sleigh specification");
+            let resolved = resolve_modelled_user_operations(&spec.user_ops);
+            for (name, operation) in &packed {
+                let index = spec
+                    .user_ops
+                    .iter()
+                    .position(|declared| declared == name)
+                    .unwrap_or_else(|| panic!("{arch} declares {name}"));
+                assert_eq!(resolved[index], Some(*operation), "{arch} {name}");
+                assert_eq!(*operation, spelled_by(name), "{name}");
+            }
+        }
+    }
+
     #[test]
     fn test_arm_spec() {
         let spec = create_arm_spec();
         assert_eq!(spec.name, "ARM");
-        assert!(!spec.big_endian);
         assert_eq!(spec.instruction_endianness, Endianness::Little);
         assert_eq!(spec.memory_endianness, Endianness::Little);
         assert_eq!(spec.addr_size, 4);
@@ -330,7 +488,6 @@ mod tests {
     fn test_riscv64_spec() {
         let spec = create_riscv64_spec();
         assert_eq!(spec.name, "riscv64");
-        assert!(!spec.big_endian);
         assert_eq!(spec.instruction_endianness, Endianness::Little);
         assert_eq!(spec.memory_endianness, Endianness::Little);
         assert_eq!(spec.addr_size, 8);
@@ -343,7 +500,6 @@ mod tests {
     fn test_riscv32_spec() {
         let spec = create_riscv32_spec();
         assert_eq!(spec.name, "riscv32");
-        assert!(!spec.big_endian);
         assert_eq!(spec.instruction_endianness, Endianness::Little);
         assert_eq!(spec.memory_endianness, Endianness::Little);
         assert_eq!(spec.addr_size, 4);

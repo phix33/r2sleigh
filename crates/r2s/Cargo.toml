@@ -1,0 +1,29 @@
+[package]
+name = "r2s"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Engine shell: a radare2-compatible command surface over the r2sleigh engine"
+
+[[bin]]
+name = "r2s"
+path = "src/main.rs"
+
+[dependencies]
+r2engine = { path = "../r2engine" }
+r2image = { path = "../r2image" }
+r2s-tui = { path = "../r2s-tui" }
+clap.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+
+[features]
+default = []
+sleigh = ["r2engine/x86", "r2engine/arm"]
+
+[lints]
+workspace = true

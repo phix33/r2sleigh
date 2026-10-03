@@ -4,8 +4,7 @@
 mod tests {
     use r2sleigh_lift::Disassembler;
     use r2ssa::block::to_ssa;
-    use r2ssa::taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintSet};
-    use r2ssa::{SSAFunction, SSAOp, SSAVar, def_use};
+    use r2ssa::{SSAOp, SSAVar, def_use};
 
     fn create_x86_64_disasm() -> Disassembler {
         // Use sleigh-config precompiled data
@@ -15,6 +14,44 @@ mod tests {
             "x86-64",
         )
         .expect("Failed to create x86-64 disassembler")
+    }
+
+    /// System V's call effect over the general registers, placed against the lifted arch.
+    fn system_v(arch: &r2il::ArchSpec) -> r2ssa::SourceCallEffect {
+        let place = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| {
+                    let register = arch
+                        .registers
+                        .iter()
+                        .find(|register| register.name.eq_ignore_ascii_case(name))
+                        .expect("a general register");
+                    r2ssa::CanonicalStorageId {
+                        space: r2ssa::CanonicalStorageSpace::Register,
+                        offset: register.offset,
+                        size: register.size,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let clobbered = place(&["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"]);
+        let preserved = place(&["rbx", "rbp", "rsp", "r12", "r13", "r14", "r15"]);
+        r2ssa::SourceCallEffect::new(clobbered, preserved).expect("a call effect")
+    }
+
+    /// Decompile-prepared SSA under System V.
+    fn prepared_under_system_v(blocks: &[r2il::R2ILBlock]) -> r2ssa::SsaArtifact {
+        let arch = r2sleigh_lift::create_x86_64_spec();
+        r2ssa::SsaArtifact::for_decompile_with(
+            blocks,
+            r2ssa::DecompileInputs {
+                arch: Some(&arch),
+                call_effect: Some(system_v(&arch)),
+                ..Default::default()
+            },
+        )
+        .expect("prepared SSA should build")
     }
 
     /// Pad hex bytes to at least 16 bytes (libsla requirement).
@@ -68,11 +105,11 @@ mod tests {
         for op in &ssa_block.ops {
             if let SSAOp::Copy { dst, src } = op {
                 // RAX should be written (version > 0)
-                if dst.name.to_lowercase().contains("rax") {
+                if dst.name().to_lowercase().contains("rax") {
                     assert!(dst.version > 0, "RAX should be written");
                 }
                 // RBX should be read (version 0 initially)
-                if src.name.to_lowercase().contains("rbx") {
+                if src.name().to_lowercase().contains("rbx") {
                     assert_eq!(src.version, 0, "RBX should be read at version 0");
                 }
             }
@@ -90,12 +127,23 @@ mod tests {
         // Verify we got operations
         assert!(!ssa_block.is_empty(), "SSA block should not be empty");
 
-        // The add should produce an IntAdd operation
-        let has_add = ssa_block
+        let add = ssa_block
             .ops
             .iter()
-            .any(|op| matches!(op, SSAOp::IntAdd { .. }));
-        assert!(has_add, "Should have an IntAdd operation");
+            .find_map(|op| match op {
+                SSAOp::IntAdd { dst, a, b } => Some((dst, a, b)),
+                _ => None,
+            })
+            .expect("Should have an IntAdd operation");
+        assert_eq!(add.0.version, 1, "RAX destination should define version 1");
+        assert_eq!(
+            add.1.version, 0,
+            "RAX source should read incoming version 0"
+        );
+        assert_eq!(
+            add.2.version, 0,
+            "RBX source should read incoming version 0"
+        );
     }
 
     #[test]
@@ -120,15 +168,48 @@ mod tests {
     #[test]
     fn test_ssa_multiple_writes() {
         let disasm = create_x86_64_disasm();
-        // inc rax (48 ff c0)
         let bytes = pad_hex("48ffc0");
 
         let block = disasm.lift(&bytes, 0x1000).expect("Failed to lift");
         let ssa_block = to_ssa(&block, &disasm);
 
-        // Each inc should produce a new version
-        // The exact behavior depends on P-code semantics
-        assert!(!ssa_block.is_empty());
+        fn is_rax_family(name: &str) -> bool {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "rax" | "eax" | "ax" | "al" | "ah"
+            )
+        }
+
+        let rax_source_versions: Vec<u32> = ssa_block
+            .ops
+            .iter()
+            .flat_map(|op| op.sources())
+            .filter(|var| is_rax_family(var.name()))
+            .map(|var| var.version)
+            .collect();
+        let rax_dest_versions: Vec<u32> = ssa_block
+            .ops
+            .iter()
+            .filter_map(|op| op.dst())
+            .filter(|var| is_rax_family(var.name()))
+            .map(|var| var.version)
+            .collect();
+
+        assert!(
+            rax_source_versions.contains(&0),
+            "inc rax must read the incoming RAX-family value, got ops={:?}",
+            ssa_block.ops
+        );
+        assert!(
+            rax_dest_versions.iter().any(|version| *version > 0),
+            "inc rax must define a fresh RAX-family version, got ops={:?}",
+            ssa_block.ops
+        );
+        assert!(
+            rax_dest_versions.windows(2).all(|pair| pair[0] < pair[1]),
+            "RAX-family definitions must be monotonic, got versions={rax_dest_versions:?}, ops={:?}",
+            ssa_block.ops
+        );
     }
 
     #[test]
@@ -155,30 +236,76 @@ mod tests {
                 .expect("authenticate exit"),
         ];
 
-        let arch = r2sleigh_lift::create_x86_64_spec();
-        let func = SSAFunction::from_blocks_for_decompile(&blocks, Some(&arch))
-            .expect("prepared SSA should build");
+        let prepared = prepared_under_system_v(&blocks);
+        let func = prepared.function();
         let entry = func.get_block(0x401379).expect("entry block");
 
         assert!(
             entry.ops.iter().any(
-                |op| matches!(op, SSAOp::CallDefine { dst } if dst.name.eq_ignore_ascii_case("rax"))
+                |op| matches!(op, SSAOp::CallDefine { dst } if dst.name().eq_ignore_ascii_case("rax"))
             ),
             "expected decompile-prep SSA to materialize a post-call return-register definition, got ops={:?}",
             entry.ops
         );
+        // `test eax, eax` reads the low lane of the return register, so the
+        // compare's operand is the projection rather than the register itself.
+        let lane = entry
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                SSAOp::Subpiece { dst, src, .. }
+                    if src.name().eq_ignore_ascii_case("rax") && src.version > 0 =>
+                {
+                    Some(dst.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a lane projection of a fresh return register, got ops={:?}",
+                    entry.ops
+                )
+            });
         assert!(
             entry
                 .ops
                 .iter()
                 .any(|op| matches!(op, SSAOp::IntAnd { a, b, .. }
-                    if ((a.name.eq_ignore_ascii_case("rax") && b.name.eq_ignore_ascii_case("rax"))
-                        || (a.name.eq_ignore_ascii_case("eax") && b.name.eq_ignore_ascii_case("eax")))
-                        && a.version > 0
-                        && b.version > 0)),
+                if a.name() == lane.name()
+                    && b.name() == lane.name()
+                    && a.version == lane.version
+                    && b.version == lane.version)),
             "expected post-call compare/test to use a fresh return-register version, got ops={:?}",
             entry.ops
         );
+    }
+
+    /// A body that calls under no stated call effect refuses; a leaf needs none.
+    #[test]
+    fn a_calling_body_without_a_call_effect_refuses_and_a_leaf_builds() {
+        let disasm = create_x86_64_disasm();
+        let arch = r2sleigh_lift::create_x86_64_spec();
+        let prepare = |hex: &str, size: usize| {
+            let block = disasm
+                .lift_block(&pad_hex(hex), 0x1000, size)
+                .expect("lifted body");
+            r2ssa::SsaArtifact::for_decompile_with_interfaces_and_control(
+                &[block],
+                Some(&arch),
+                None,
+                r2ssa::SourceMachineRoles::default(),
+                Vec::new(),
+                None,
+                &r2ssa::SsaExecutionControl::default(),
+            )
+        };
+        // mov rax, rdi; call 0x2000; ret
+        assert_eq!(
+            prepare("4889f8e8f80f0000c3", 9).err(),
+            Some(r2ssa::SsaPrepareError::NoCallEffect)
+        );
+        // mov rax, rdi; ret
+        assert!(prepare("4889f8c3", 4).is_ok());
     }
 
     #[test]
@@ -206,22 +333,21 @@ mod tests {
                 .expect("my_strdup exit"),
         ];
 
-        let arch = r2sleigh_lift::create_x86_64_spec();
-        let func = SSAFunction::from_blocks_for_decompile(&blocks, Some(&arch))
-            .expect("prepared SSA should build");
+        let prepared = prepared_under_system_v(&blocks);
+        let func = prepared.function();
         let entry = func.get_block(0x402272).expect("entry block");
         let copy_arm = func.get_block(0x4022ad).expect("copy arm");
 
         assert!(
             entry.ops.iter().any(
-                |op| matches!(op, SSAOp::CallDefine { dst } if dst.name.eq_ignore_ascii_case("rax"))
+                |op| matches!(op, SSAOp::CallDefine { dst } if dst.name().eq_ignore_ascii_case("rax"))
             ),
             "expected first call boundary to materialize a fresh RAX definition even without a prior explicit RAX write, got ops={:?}",
             entry.ops
         );
         assert!(
             copy_arm.ops.iter().any(
-                |op| matches!(op, SSAOp::CallDefine { dst } if dst.name.eq_ignore_ascii_case("rax"))
+                |op| matches!(op, SSAOp::CallDefine { dst } if dst.name().eq_ignore_ascii_case("rax"))
             ),
             "expected second call boundary to materialize a fresh RAX definition for memcpy, got ops={:?}",
             copy_arm.ops
@@ -233,257 +359,5 @@ mod tests {
         let var = SSAVar::new("RAX", 3, 8);
         assert_eq!(var.display_name(), "RAX_3");
         assert_eq!(format!("{}", var), "RAX_3");
-    }
-
-    // ========== Taint Analysis Integration Tests ==========
-
-    // Helper functions for creating varnodes in tests
-    fn make_reg(offset: u64, size: u32) -> r2il::Varnode {
-        r2il::Varnode {
-            space: r2il::SpaceId::Register,
-            offset,
-            size,
-            meta: None,
-        }
-    }
-
-    fn make_const(val: u64, size: u32) -> r2il::Varnode {
-        r2il::Varnode {
-            space: r2il::SpaceId::Const,
-            offset: val,
-            size,
-            meta: None,
-        }
-    }
-
-    // Simulated register offsets (x86-64 style)
-    const RAX: u64 = 0;
-    const RBX: u64 = 8;
-    const RCX: u64 = 16;
-    const RSI: u64 = 32;
-    const RDI: u64 = 56;
-
-    #[test]
-    fn test_taint_analysis_simple_flow() {
-        // Test: mov rax, rdi; mov [rbx], rax
-        // RDI (arg0) should taint RAX, then flow to store sink
-        use r2il::{R2ILBlock, R2ILOp, SpaceId};
-
-        let blocks = vec![
-            R2ILBlock {
-                addr: 0x1000,
-                size: 3,
-                switch_info: None,
-                op_metadata: Default::default(),
-                ops: vec![
-                    // mov rax, rdi
-                    R2ILOp::Copy {
-                        dst: make_reg(RAX, 8),
-                        src: make_reg(RDI, 8),
-                    },
-                ],
-            },
-            R2ILBlock {
-                addr: 0x1003,
-                size: 3,
-                switch_info: None,
-                op_metadata: Default::default(),
-                ops: vec![
-                    // mov [rbx], rax
-                    R2ILOp::Store {
-                        space: SpaceId::Ram,
-                        addr: make_reg(RBX, 8),
-                        val: make_reg(RAX, 8),
-                    },
-                ],
-            },
-        ];
-
-        let func = SSAFunction::from_blocks(&blocks).expect("Failed to build SSA function");
-        let policy = DefaultTaintPolicy::all_inputs();
-        let analysis = TaintAnalysis::new(&func, policy);
-        let result = analysis.analyze();
-
-        // Should have at least one sink hit (the store)
-        assert!(
-            result.has_violations(),
-            "Should detect taint flowing to store"
-        );
-
-        // The store should have tainted data
-        assert!(!result.sink_hits.is_empty());
-        let hit = &result.sink_hits[0];
-        assert!(matches!(hit.op, SSAOp::Store { .. }));
-    }
-
-    #[test]
-    fn test_taint_analysis_custom_propagate() {
-        // Test custom propagation rule: AND with constant clears taint
-        use r2il::{R2ILBlock, R2ILOp};
-
-        struct MaskingPolicy;
-
-        impl TaintPolicy for MaskingPolicy {
-            fn is_source(&self, var: &SSAVar, _block_addr: u64) -> Option<Vec<TaintLabel>> {
-                if var.version == 0 && var.is_register() {
-                    Some(vec![TaintLabel::new(format!("input:{}", var.name))])
-                } else {
-                    None
-                }
-            }
-
-            fn is_sink(&self, op: &SSAOp, _block_addr: u64) -> bool {
-                matches!(op, SSAOp::Store { .. } | SSAOp::Call { .. })
-            }
-
-            fn propagate(&self, op: &SSAOp, _source_taints: &[&TaintSet]) -> Option<TaintSet> {
-                // AND with a small constant (mask) clears taint
-                if let SSAOp::IntAnd { b, .. } = op
-                    && b.is_const()
-                {
-                    // Masking clears taint
-                    return Some(TaintSet::new());
-                }
-                None // Use default propagation
-            }
-        }
-
-        let blocks = vec![
-            R2ILBlock {
-                addr: 0x1000,
-                size: 3,
-                switch_info: None,
-                op_metadata: Default::default(),
-                ops: vec![
-                    // mov rax, rdi
-                    R2ILOp::Copy {
-                        dst: make_reg(RAX, 8),
-                        src: make_reg(RDI, 8),
-                    },
-                ],
-            },
-            R2ILBlock {
-                addr: 0x1003,
-                size: 4,
-                switch_info: None,
-                op_metadata: Default::default(),
-                ops: vec![
-                    // and rax, 0xff (mask - should clear taint per our policy)
-                    R2ILOp::IntAnd {
-                        dst: make_reg(RAX, 8),
-                        a: make_reg(RAX, 8),
-                        b: make_const(0xff, 8),
-                    },
-                ],
-            },
-            R2ILBlock {
-                addr: 0x1007,
-                size: 3,
-                switch_info: None,
-                op_metadata: Default::default(),
-                ops: vec![
-                    // call rax (would be a sink, but RAX is now clean)
-                    R2ILOp::Call {
-                        target: make_reg(RAX, 8),
-                    },
-                ],
-            },
-        ];
-
-        let func = SSAFunction::from_blocks(&blocks).expect("Failed to build SSA function");
-        let analysis = TaintAnalysis::new(&func, MaskingPolicy);
-        let result = analysis.analyze();
-
-        // The custom propagate() should have cleared taint on the AND
-        // So the call should NOT be a violation
-        assert!(
-            !result.has_violations(),
-            "Masking should clear taint, no violations expected"
-        );
-    }
-
-    #[test]
-    fn test_taint_analysis_multi_path_convergence() {
-        // Test that taint from multiple paths converges correctly
-        // Diamond CFG: entry -> (left | right) -> merge
-        // Left path taints via RDI, right path taints via RSI
-        // Merge should have both taints
-        use r2il::{R2ILBlock, R2ILOp, SpaceId};
-
-        let blocks = vec![
-            // Entry: branch on a non-constant register so SCCP keeps both paths
-            R2ILBlock {
-                addr: 0x1000,
-                size: 2,
-                switch_info: None,
-                op_metadata: Default::default(),
-                ops: vec![R2ILOp::CBranch {
-                    target: make_const(0x1010, 8), // jump to right
-                    cond: make_reg(RBX, 1),        // non-constant condition
-                }],
-            },
-            // Left path (fallthrough): rax = rdi, then jump to merge
-            R2ILBlock {
-                addr: 0x1002,
-                size: 3,
-                switch_info: None,
-                op_metadata: Default::default(),
-                ops: vec![
-                    R2ILOp::Copy {
-                        dst: make_reg(RAX, 8),
-                        src: make_reg(RDI, 8),
-                    },
-                    R2ILOp::Branch {
-                        target: make_const(0x1020, 8),
-                    },
-                ],
-            },
-            // Right path: rax = rsi, then jump to merge
-            R2ILBlock {
-                addr: 0x1010,
-                size: 3,
-                switch_info: None,
-                op_metadata: Default::default(),
-                ops: vec![
-                    R2ILOp::Copy {
-                        dst: make_reg(RAX, 8),
-                        src: make_reg(RSI, 8),
-                    },
-                    R2ILOp::Branch {
-                        target: make_const(0x1020, 8),
-                    },
-                ],
-            },
-            // Merge: store rax
-            R2ILBlock {
-                addr: 0x1020,
-                size: 3,
-                switch_info: None,
-                op_metadata: Default::default(),
-                ops: vec![R2ILOp::Store {
-                    space: SpaceId::Ram,
-                    addr: make_reg(RCX, 8),
-                    val: make_reg(RAX, 8),
-                }],
-            },
-        ];
-
-        let func = SSAFunction::from_blocks(&blocks).expect("Failed to build SSA function");
-        let policy = DefaultTaintPolicy::all_inputs();
-        let analysis = TaintAnalysis::new(&func, policy);
-        let result = analysis.analyze();
-
-        // Should have violations (store of tainted data)
-        assert!(result.has_violations(), "Should detect taint at store");
-
-        // The merged RAX at the store should have taint from both paths
-        // (due to phi node merging)
-        let hit = &result.sink_hits[0];
-        let total_labels: usize = hit.tainted_vars.iter().map(|(_, t)| t.len()).sum();
-        // Should have labels from both RDI and RSI paths
-        assert!(
-            total_labels >= 1,
-            "Should have taint labels from at least one path"
-        );
     }
 }

@@ -11,6 +11,97 @@ use crate::metadata::OpMetadata;
 use crate::space::SpaceId;
 use crate::varnode::Varnode;
 
+/// What an operation does with a number it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ValueUse {
+    /// Moves the number, or a slice or extension of it, somewhere else unchanged.
+    Carries,
+    /// Computes a different number from it.
+    Derives,
+    /// Compares or tests it, yielding a flag or a count rather than a number built on it.
+    Tests,
+    /// Uses it as it stands: an address, a stored value, a target, an argument.
+    Consumes,
+}
+
+/// What a block operation does with each element it reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum BlockTransferKind {
+    /// Each element is read from `source` and written at `destination`.
+    Move,
+    /// Every element is the value `source` holds.
+    Fill,
+    /// Each element at `destination` is compared with the value `source` holds.
+    Scan(BlockStop),
+    /// Each element at `source` is compared with the element at `destination`.
+    Compare(BlockStop),
+}
+
+/// Which comparison ends a scan or a compare early, after the element it compares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum BlockStop {
+    /// The operation stops after a pair that is equal.
+    Equal,
+    /// The operation stops after a pair that differs.
+    Unequal,
+}
+
+impl BlockTransferKind {
+    /// Whether the operation reads memory, at `destination` or at `source`.
+    pub const fn reads_memory(self) -> bool {
+        !matches!(self, Self::Fill)
+    }
+
+    /// Whether the operation writes the elements at `destination`.
+    pub const fn writes_memory(self) -> bool {
+        matches!(self, Self::Move | Self::Fill)
+    }
+
+    /// Whether `source` is an address the operation reads through, rather than a value.
+    pub const fn source_is_address(self) -> bool {
+        matches!(self, Self::Move | Self::Compare(_))
+    }
+
+    /// The comparison that ends the operation early, where it has one.
+    pub const fn stop(self) -> Option<BlockStop> {
+        match self {
+            Self::Scan(stop) | Self::Compare(stop) => Some(stop),
+            Self::Move | Self::Fill => None,
+        }
+    }
+}
+
+/// One repeated string operation over up to `count` elements, ascending when `direction` is zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockTransfer {
+    pub space: SpaceId,
+    pub kind: BlockTransferKind,
+    pub destination: Varnode,
+    pub source: Varnode,
+    pub count: Varnode,
+    pub direction: Varnode,
+    pub element_size: u32,
+    /// A scan's or a compare's count reached, then the destination's and any source's last element (zero where none).
+    pub answer: Option<Varnode>,
+}
+
+/// The operand one operation sends control to, and how it sends it there.
+///
+/// R2IL's statement of which operand of a branch or a call says where control
+/// goes, which the lift's memory canonicalization, the listing's claims and
+/// the body's data references read rather than matching the operations
+/// themselves. Where control goes is executed, not read as data, so no
+/// consumer may look for a constant, a string or an object there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlTransfer<'a> {
+    /// Where control goes: the destination itself where `direct`, else the value that holds it.
+    pub target: &'a Varnode,
+    /// Whether the operation encodes its destination, as a direct branch or call does, rather than computing it at run time.
+    pub direct: bool,
+    /// Whether control comes back after it, as it does from a call.
+    pub call: bool,
+}
+
 /// An r2il operation representing a single semantic action.
 ///
 /// Operations are organized into categories:
@@ -41,6 +132,9 @@ pub enum R2ILOp {
         addr: Varnode,
         val: Varnode,
     },
+
+    /// One repeated string operation, held out of line so it does not widen every operation.
+    BlockTransfer(Box<BlockTransfer>),
 
     /// Memory fence/barrier with ordering semantics.
     Fence { ordering: MemoryOrdering },
@@ -143,7 +237,7 @@ pub enum R2ILOp {
     /// Two's complement negation: dst = -src
     IntNegate { dst: Varnode, src: Varnode },
 
-    /// Addition with carry: dst = a + b + carry
+    /// Unsigned carry: dst = whether a + b overflows their width
     IntCarry {
         dst: Varnode,
         a: Varnode,
@@ -492,9 +586,70 @@ pub enum R2ILOp {
         value: Varnode,
         position: Varnode,
     },
+
+    /// Conditional value merge produced when instruction-local P-code control
+    /// flow is normalized into the linear r2il value graph.
+    Select {
+        dst: Varnode,
+        cond: Varnode,
+        if_true: Varnode,
+        if_false: Varnode,
+    },
 }
 
 impl R2ILOp {
+    /// What this operation does with the numbers it reads.
+    pub fn value_use(&self) -> ValueUse {
+        match self {
+            R2ILOp::Copy { .. }
+            | R2ILOp::IntZExt { .. }
+            | R2ILOp::IntSExt { .. }
+            | R2ILOp::Subpiece { .. }
+            | R2ILOp::Multiequal { .. }
+            | R2ILOp::Indirect { .. }
+            | R2ILOp::Cast { .. }
+            // A selection moves whichever arm it chose, as the SSA operation it becomes says.
+            | R2ILOp::Select { .. } => ValueUse::Carries,
+            R2ILOp::IntAdd { .. }
+            | R2ILOp::IntSub { .. }
+            | R2ILOp::IntMult { .. }
+            | R2ILOp::IntDiv { .. }
+            | R2ILOp::IntSDiv { .. }
+            | R2ILOp::IntRem { .. }
+            | R2ILOp::IntSRem { .. }
+            | R2ILOp::IntNegate { .. }
+            | R2ILOp::IntAnd { .. }
+            | R2ILOp::IntOr { .. }
+            | R2ILOp::IntXor { .. }
+            | R2ILOp::IntNot { .. }
+            | R2ILOp::IntLeft { .. }
+            | R2ILOp::IntRight { .. }
+            | R2ILOp::IntSRight { .. }
+            | R2ILOp::Piece { .. }
+            | R2ILOp::PtrAdd { .. }
+            | R2ILOp::PtrSub { .. }
+            | R2ILOp::SegmentOp { .. }
+            | R2ILOp::Extract { .. }
+            | R2ILOp::Insert { .. } => ValueUse::Derives,
+            R2ILOp::IntEqual { .. }
+            | R2ILOp::IntNotEqual { .. }
+            | R2ILOp::IntLess { .. }
+            | R2ILOp::IntSLess { .. }
+            | R2ILOp::IntLessEqual { .. }
+            | R2ILOp::IntSLessEqual { .. }
+            | R2ILOp::IntCarry { .. }
+            | R2ILOp::IntSCarry { .. }
+            | R2ILOp::IntSBorrow { .. }
+            | R2ILOp::BoolNot { .. }
+            | R2ILOp::BoolAnd { .. }
+            | R2ILOp::BoolOr { .. }
+            | R2ILOp::BoolXor { .. }
+            | R2ILOp::PopCount { .. }
+            | R2ILOp::Lzcount { .. } => ValueUse::Tests,
+            _ => ValueUse::Consumes,
+        }
+    }
+
     /// Returns true if this operation is a control flow operation.
     pub fn is_control_flow(&self) -> bool {
         matches!(
@@ -505,7 +660,54 @@ impl R2ILOp {
                 | R2ILOp::Call { .. }
                 | R2ILOp::CallInd { .. }
                 | R2ILOp::Return { .. }
+                // A trap decides where control goes as surely as a branch
+                // does: to the exception handler, and not back. A block ends
+                // at one, and it names no successor of its own.
+                | R2ILOp::Breakpoint
         )
+    }
+
+    /// Where this operation sends control, where it names a place to send it.
+    ///
+    /// A return is none: it goes back to wherever its caller was, which is no
+    /// address the operation names, and a trap goes to a handler it does not
+    /// name either.
+    pub fn transfer(&self) -> Option<ControlTransfer<'_>> {
+        let (target, direct, call) = match self {
+            R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. } => (target, true, false),
+            R2ILOp::Call { target } => (target, true, true),
+            R2ILOp::BranchInd { target } => (target, false, false),
+            R2ILOp::CallInd { target } => (target, false, true),
+            _ => return None,
+        };
+        Some(ControlTransfer {
+            target,
+            direct,
+            call,
+        })
+    }
+
+    /// The inputs through which this operation can name data: every one but
+    /// the operand that says where control goes.
+    ///
+    /// A branch's, a call's or a return's destination is code the transfer
+    /// executes, so no constant, string or object is looked for there, whether
+    /// the operand is that destination or holds it; only a conditional
+    /// branch's condition is data among a transfer's operands.
+    ///
+    /// This is not the set of storages the operation reads: an indirect
+    /// transfer or a return still reads the register holding its destination,
+    /// so no def-use or liveness question is answered from it. It also takes
+    /// the canonical form the lift gives: a memory slot an indirect transfer
+    /// reads its destination from is data, and the lift loads it explicitly
+    /// first, so the operand here is never that slot.
+    pub fn data_inputs(&self) -> Vec<&Varnode> {
+        match self {
+            R2ILOp::CBranch { cond, .. } => vec![cond],
+            R2ILOp::Return { .. } => Vec::new(),
+            _ if self.transfer().is_some() => Vec::new(),
+            _ => self.inputs(),
+        }
     }
 
     /// Returns true if this operation reads from memory.
@@ -516,7 +718,7 @@ impl R2ILOp {
                 | R2ILOp::LoadLinked { .. }
                 | R2ILOp::LoadGuarded { .. }
                 | R2ILOp::AtomicCAS { .. }
-        )
+        ) || matches!(self, R2ILOp::BlockTransfer(transfer) if transfer.kind.reads_memory())
     }
 
     /// Returns true if this operation writes to memory.
@@ -527,7 +729,23 @@ impl R2ILOp {
                 | R2ILOp::StoreConditional { .. }
                 | R2ILOp::StoreGuarded { .. }
                 | R2ILOp::AtomicCAS { .. }
-        )
+        ) || matches!(self, R2ILOp::BlockTransfer(transfer) if transfer.kind.writes_memory())
+    }
+
+    /// Returns true when this value operation may be evaluated speculatively.
+    ///
+    /// This is intentionally narrower than "has an output": reads, writes,
+    /// allocation, CPU state queries, calls, and control flow may be observable
+    /// even when their result is later discarded.
+    pub fn is_speculatable_value(&self) -> bool {
+        self.output().is_some()
+            && !self.is_control_flow()
+            && !self.is_memory_read()
+            && !self.is_memory_write()
+            && !matches!(
+                self,
+                R2ILOp::CallOther { .. } | R2ILOp::CpuId { .. } | R2ILOp::New { .. }
+            )
     }
 
     /// Returns the output varnode if this operation has one.
@@ -600,9 +818,11 @@ impl R2ILOp {
             | R2ILOp::New { dst, .. }
             | R2ILOp::Cast { dst, .. }
             | R2ILOp::Extract { dst, .. }
-            | R2ILOp::Insert { dst, .. } => Some(dst),
+            | R2ILOp::Insert { dst, .. }
+            | R2ILOp::Select { dst, .. } => Some(dst),
             R2ILOp::StoreConditional { result, .. } => result.as_ref(),
             R2ILOp::CallOther { output, .. } => output.as_ref(),
+            R2ILOp::BlockTransfer(transfer) => transfer.answer.as_ref(),
             _ => None,
         }
     }
@@ -677,9 +897,11 @@ impl R2ILOp {
             | R2ILOp::New { dst, .. }
             | R2ILOp::Cast { dst, .. }
             | R2ILOp::Extract { dst, .. }
-            | R2ILOp::Insert { dst, .. } => Some(dst),
+            | R2ILOp::Insert { dst, .. }
+            | R2ILOp::Select { dst, .. } => Some(dst),
             R2ILOp::StoreConditional { result, .. } => result.as_mut(),
             R2ILOp::CallOther { output, .. } => output.as_mut(),
+            R2ILOp::BlockTransfer(transfer) => transfer.answer.as_mut(),
             _ => None,
         }
     }
@@ -694,6 +916,12 @@ impl R2ILOp {
             R2ILOp::Copy { src, .. } => vec![src],
             R2ILOp::Load { addr, .. } => vec![addr],
             R2ILOp::Store { addr, val, .. } => vec![addr, val],
+            R2ILOp::BlockTransfer(transfer) => vec![
+                &transfer.destination,
+                &transfer.source,
+                &transfer.count,
+                &transfer.direction,
+            ],
             R2ILOp::Fence { .. } => vec![],
             R2ILOp::LoadLinked { addr, .. } => vec![addr],
             R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
@@ -800,6 +1028,12 @@ impl R2ILOp {
                 position,
                 ..
             } => vec![src, value, position],
+            R2ILOp::Select {
+                cond,
+                if_true,
+                if_false,
+                ..
+            } => vec![cond, if_true, if_false],
         }
     }
 
@@ -812,6 +1046,16 @@ impl R2ILOp {
             R2ILOp::Copy { src, .. } => vec![src],
             R2ILOp::Load { addr, .. } => vec![addr],
             R2ILOp::Store { addr, val, .. } => vec![addr, val],
+            R2ILOp::BlockTransfer(transfer) => {
+                let BlockTransfer {
+                    destination,
+                    source,
+                    count,
+                    direction,
+                    ..
+                } = transfer.as_mut();
+                vec![destination, source, count, direction]
+            }
             R2ILOp::Fence { .. } => vec![],
             R2ILOp::LoadLinked { addr, .. } => vec![addr],
             R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
@@ -918,6 +1162,12 @@ impl R2ILOp {
                 position,
                 ..
             } => vec![src, value, position],
+            R2ILOp::Select {
+                cond,
+                if_true,
+                if_false,
+                ..
+            } => vec![cond, if_true, if_false],
         }
     }
 }
@@ -927,6 +1177,33 @@ impl std::fmt::Display for R2ILOp {
         match self {
             // Data movement
             R2ILOp::Copy { dst, src } => write!(f, "{} = COPY {}", dst, src),
+            R2ILOp::BlockTransfer(transfer) => {
+                let BlockTransfer {
+                    space,
+                    kind,
+                    destination,
+                    source,
+                    count,
+                    direction,
+                    element_size,
+                    answer,
+                } = transfer.as_ref();
+                if let Some(answer) = answer {
+                    write!(f, "{answer} = ")?;
+                }
+                let (name, stop) = match kind {
+                    BlockTransferKind::Move => ("MOVE", ""),
+                    BlockTransferKind::Fill => ("FILL", ""),
+                    BlockTransferKind::Scan(BlockStop::Equal) => ("SCAN", " until equal"),
+                    BlockTransferKind::Scan(BlockStop::Unequal) => ("SCAN", " until unequal"),
+                    BlockTransferKind::Compare(BlockStop::Equal) => ("COMPARE", " until equal"),
+                    BlockTransferKind::Compare(BlockStop::Unequal) => ("COMPARE", " until unequal"),
+                };
+                write!(
+                    f,
+                    "BLOCK{name} [{space}]{destination} <- {source} x {count}{stop} ({element_size} bytes each, direction {direction})"
+                )
+            }
             R2ILOp::Load { dst, space, addr } => {
                 write!(f, "{} = LOAD [{}]{}", dst, space, addr)
             }
@@ -1157,6 +1434,12 @@ impl std::fmt::Display for R2ILOp {
             } => {
                 write!(f, "{} = INSERT({}, {}, {})", dst, src, value, position)
             }
+            R2ILOp::Select {
+                dst,
+                cond,
+                if_true,
+                if_false,
+            } => write!(f, "{} = SELECT({}, {}, {})", dst, cond, if_true, if_false),
         }
     }
 }
@@ -1170,15 +1453,15 @@ pub struct SwitchCase {
     pub target: u64,
 }
 
-/// Information about a switch statement (jump table).
+/// The table a dispatch goes through, as the engine derived it.
+///
+/// One owner: `r2sleigh-lift` builds this from the selector's own value range
+/// and the table the engine read, and nothing imports it from another tool.
+/// The case values bound themselves, so no range is carried beside them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwitchInfo {
     /// Address of the switch instruction.
     pub switch_addr: u64,
-    /// Minimum case value.
-    pub min_val: u64,
-    /// Maximum case value.
-    pub max_val: u64,
     /// Default case target (if any).
     pub default_target: Option<u64>,
     /// All switch cases.
@@ -1200,6 +1483,89 @@ pub struct R2ILBlock {
     /// Optional metadata for ops, keyed by operation index.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub op_metadata: BTreeMap<usize, OpMetadata>,
+}
+
+/// Whether these operations leave the return address in `link`.
+///
+/// A machine with no indirect call instruction spells one by writing the
+/// address after the transfer into the link register and then branching:
+/// ARM's `mov lr, pc; sub pc, r3, 0x3f` is a call to whatever `r3 - 0x3f`
+/// names, returning to the instruction after it. Sleigh lifts the branch as a
+/// branch, because that is what the opcode is; what makes it a call is the
+/// register the convention names for the return address holding the address
+/// control comes back to.
+///
+/// Only the constants the lift itself produces are folded -- a copy, and an
+/// addition or subtraction of two constants, which is how a program counter
+/// read becomes a literal. Anything else is not recognised here.
+pub fn returns_to(ops: &[R2ILOp], next: u64, link: &Varnode) -> bool {
+    return_addresses(ops, link).any(|address| address == next)
+}
+
+/// Every constant these operations leave in `link`, folded as [`returns_to`] folds them.
+pub fn return_addresses<'a>(
+    ops: &'a [R2ILOp],
+    link: &'a Varnode,
+) -> impl Iterator<Item = u64> + 'a {
+    let same =
+        |a: &Varnode, b: &Varnode| a.space == b.space && a.offset == b.offset && a.size == b.size;
+    let literal = |vn: &Varnode| (vn.space == SpaceId::Const).then_some(vn.offset);
+    ops.iter().filter_map(move |op| match op {
+        R2ILOp::Copy { dst, src } if same(dst, link) => literal(src),
+        R2ILOp::IntAdd { dst, a, b } if same(dst, link) => {
+            Some(literal(a)?.wrapping_add(literal(b)?))
+        }
+        R2ILOp::IntSub { dst, a, b } if same(dst, link) => {
+            Some(literal(a)?.wrapping_sub(literal(b)?))
+        }
+        _ => None,
+    })
+}
+
+/// The transfer an instruction performs only when its predicate holds.
+///
+/// `ops` are the operations a predicate skips over. A transfer among them is
+/// the instruction's own -- ARM's `bxeq lr` returns, `beq` branches -- and it
+/// runs on one arm of the predicate only.
+///
+/// A call is not one. A predicated call reaches the next instruction either
+/// way, so its predicate guards an effect rather than an edge, and nothing
+/// downstream renders that guard yet.
+pub fn guarded_transfer(ops: &[R2ILOp]) -> Option<&R2ILOp> {
+    ops.iter().find(|op| {
+        matches!(
+            op,
+            R2ILOp::Return { .. } | R2ILOp::Branch { .. } | R2ILOp::BranchInd { .. }
+        )
+    })
+}
+
+/// The transfer these block operations perform only when a predicate holds.
+///
+/// A predicated instruction is lifted as a conditional branch over the
+/// instruction's own operations, targeting the instruction after it. That skip
+/// is one of the block's two machine edges and the transfer it guards is the
+/// other, so every derivation of where the block goes has to read the same
+/// pair. They ask here.
+pub fn predicated_transfer(ops: &[R2ILOp], next: u64) -> Option<&R2ILOp> {
+    guarded_transfer(predicated(ops, next)?)
+}
+
+/// Whether these operations call only when a predicate holds, so control reaches `next` whatever the callee does.
+pub fn predicated_call(ops: &[R2ILOp], next: u64) -> bool {
+    let calls = |op: &R2ILOp| matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. });
+    predicated(ops, next).is_some_and(|guarded| guarded.iter().any(calls))
+}
+
+/// The operations a predicate skips by branching to `next`.
+fn predicated(ops: &[R2ILOp], next: u64) -> Option<&[R2ILOp]> {
+    let skip = ops.iter().position(|op| match op {
+        R2ILOp::CBranch { target, .. } => {
+            matches!(target.space, SpaceId::Const | SpaceId::Ram) && target.offset == next
+        }
+        _ => false,
+    })?;
+    Some(&ops[skip + 1..])
 }
 
 impl R2ILBlock {
@@ -1228,6 +1594,15 @@ impl R2ILBlock {
         }
     }
 
+    /// Record the native instruction the operation at `op_index` was lifted
+    /// from, keeping whatever other metadata it already carries.
+    pub fn stamp_instruction(&mut self, op_index: usize, instruction_addr: u64) {
+        self.op_metadata
+            .entry(op_index)
+            .or_default()
+            .instruction_addr = Some(instruction_addr);
+    }
+
     /// Set metadata for an operation index.
     pub fn set_op_metadata(&mut self, op_index: usize, meta: OpMetadata) {
         self.op_metadata.insert(op_index, meta);
@@ -1246,5 +1621,89 @@ impl R2ILBlock {
     /// Set the switch info for this block.
     pub fn set_switch_info(&mut self, info: SwitchInfo) {
         self.switch_info = Some(info);
+    }
+
+    /// One block from the instructions it runs, in order.
+    ///
+    /// Each part is a single instruction's lift and keeps its own address on
+    /// every operation it contributed, which is what lets a consumer say which
+    /// instruction an operation came from after the parts are one sequence.
+    pub fn join(addr: u64, size: u32, parts: impl IntoIterator<Item = Self>) -> Self {
+        let mut joined = Self::new(addr, size);
+        for part in parts {
+            let base = joined.ops.len();
+            let mut metadata = part.op_metadata;
+            for (index, op) in part.ops.into_iter().enumerate() {
+                joined.ops.push(op);
+                let mut meta = metadata.remove(&index).unwrap_or_default();
+                meta.instruction_addr = Some(part.addr);
+                joined.set_op_metadata(base + index, meta);
+            }
+        }
+        joined
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every transfer the lift spells, and one data operation beside them.
+    fn ops() -> Vec<R2ILOp> {
+        let (to, held, cond) = (
+            Varnode::ram(0x1000, 8),
+            Varnode::register(0, 8),
+            Varnode::register(0x200, 1),
+        );
+        vec![
+            R2ILOp::Branch { target: to.clone() },
+            R2ILOp::CBranch {
+                target: to.clone(),
+                cond,
+            },
+            R2ILOp::Call { target: to.clone() },
+            R2ILOp::BranchInd {
+                target: held.clone(),
+            },
+            R2ILOp::CallInd {
+                target: held.clone(),
+            },
+            R2ILOp::Return {
+                target: held.clone(),
+            },
+            R2ILOp::Load {
+                dst: held,
+                space: SpaceId::Ram,
+                addr: to,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_transfer_names_where_control_goes_and_every_other_input_is_data() {
+        let said = ops()
+            .iter()
+            .map(|op| {
+                let transfer = op
+                    .transfer()
+                    .map(|one| (one.target.offset, one.direct, one.call));
+                let data = op.data_inputs().iter().map(|input| input.offset).collect();
+                (transfer, data)
+            })
+            .collect::<Vec<(_, Vec<u64>)>>();
+        assert_eq!(
+            said,
+            [
+                (Some((0x1000, true, false)), vec![]),
+                // The condition decides whether it goes; it is read, not executed.
+                (Some((0x1000, true, false)), vec![0x200]),
+                (Some((0x1000, true, true)), vec![]),
+                (Some((0, false, false)), vec![]),
+                (Some((0, false, true)), vec![]),
+                // A return names no place of its own, and what it goes back to is still not data.
+                (None, vec![]),
+                (None, vec![0x1000]),
+            ]
+        );
     }
 }

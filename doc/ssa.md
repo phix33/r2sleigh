@@ -216,7 +216,7 @@ pub struct PhiNode {
 ```
 
 **Important:** This is different from the single-instruction `SSABlock` in
-`r2ssa/block.rs`. The decompiler and taint analysis use `FunctionSSABlock`.
+`r2ssa/block.rs`. The decompiler uses `FunctionSSABlock`.
 
 Optimization Pipeline
 ---------------------
@@ -294,33 +294,162 @@ pub struct DefUseInfo {
 
 ### Backward Slicing
 
-The backward slice from a variable answers "what operations affect this
-variable?":
+The backward slice from a seed answers "what operations affect this value?".
+There is one slicer, `r2ssa::backward_slice` (`slice.rs`), over the prepared
+artifact rather than a bare `SSAFunction`:
 
 ```rust
-let slice = backward_slice_from_var(&ssa_func, &target_var);
+let seed = resolve_slice_seed(&artifact, "0x4e3a:7")?; // or `v123`, or an SSA name
+let slice = backward_slice(&artifact, seed);
 ```
 
-The algorithm:
+It follows value inputs through the SSA graph and memory reads through the
+prepared memory SSA (a load reaches the store or memory phi that defined its
+version, filtered by the alias relation), expanding each instruction at most
+once over ordered sets, so the result is deterministic.
 
-1. Start with the target variable
-2. Find its definition (operation or phi node)
-3. Add the definition's source variables to the worklist
-4. For Load operations, find potentially-aliasing Stores
-5. Repeat until the worklist is empty
-6. Return all operations in the slice
+Value Ranges and Block Origins
+------------------------------
+
+Two forward domains answer "what can this value be". `values.rs` solves
+strided intervals over a function's SSA graph; `origin.rs` reads one lifted
+block forward and says where a value came from. The arguments their code
+comments point to are here.
+
+### Strided intervals (`strided.rs`)
+
+An element is a width, a stride and two inclusive bounds read unsigned.
+
+- **meet.** Two elements are arithmetic progressions, so their intersection is
+  one too. `x = l1 (mod s1)` and `x = l2 (mod s2)` share a solution exactly
+  when `g = gcd(s1, s2)` divides `l2 - l1` (Chinese remainder theorem);
+  otherwise the meet is empty, which keeps the even numbers and the odd ones
+  apart where a bounds-only meet would not. When it exists, `l1 + s1*t` lies
+  on the right progression iff `(s1/g)*t = (l2 - l1)/g (mod s2/g)`, solved
+  with the extended Euclidean inverse of `s1/g`, and the common values step by
+  `lcm(s1, s2) = (s1/g)*s2`. The arithmetic runs in `u128`, where that product
+  of two `u64` strides always fits. Cost `O(log stride)`, no search.
+- **widen.** The stride is the join's, `s = gcd(old.stride, new.stride,
+  |old.low - new.low|)`, so every value of both lies on it. A low that fell
+  drops to `new.low mod s`, the least value on that residue; a high that grew
+  rises to `mask - (mask - low) mod s`, the last value below the width's end on
+  it. Both keep the residue, so nothing either side held is lost. Once
+  widened, a bound moves again only when the stride shrinks, and a stride can
+  only shrink to a proper divisor, at most sixty-four times.
+- **shr.** Adding a multiple of `2^k` never carries into the bits a shift by
+  `k` keeps, so the stride survives, divided, exactly when `2^k` divides it.
+  Any other stride lets the dropped bits carry: `{1, 11, 21} >> 2` is
+  `{0, 2, 5}`, which only a unit stride holds.
+- **Kani.** CBMC settles the eight-bit proofs in a gate's time, but every
+  `gcd` step and every product of two symbolic strides is a sixty-four-bit
+  divider or multiplier circuit it does not; join, widen, meet, add, sub, mul
+  and shl are instead checked exhaustively below six bits by unit tests.
+
+### Termination of the value fixpoint (`values.rs`)
+
+The solver widens at the phis of `W`, the targets of the back edges of a
+depth-first walk from the entry. Every transfer reads values defined at a
+dominator of the reader, or, for a phi input, at a dominator of the edge's
+source. Dominators are DFS ancestors, so postorder never rises along a read
+and strictly falls along a phi input on an edge that is not a back edge. A
+cycle of reads therefore passes a phi at a target in `W`, on any graph,
+reducible or not; natural loop headers are in `W`, so a reducible graph widens
+where it always did. A widened phi moves at most once per stride change for
+each bound, and a stride falls through at most sixty-four divisors; every other
+value sits on no cycle that avoids a widened phi, so it moves only when
+something it reads moved, and the ascent ends. The criterion is structural,
+not a count of visits, because a count would be a number nothing derived.
+
+A value wider than sixty-four bits is described at sixty-four, where top means
+unknown rather than "below `2^64`". An operation that would read an unknown one
+as below `2^64` -- a shift, a division, a select's narrowed arm, a piece cut
+from it -- leaves its result unknown, and a comparison never narrows one.
+
+### Branch assumptions
+
+An assumption filed under block `B` by the edge `P -> B` holds at `B` only
+when that edge dominates `B`: `B` is not the entry, which the call also enters,
+and `B` dominates every other predecessor it has. Otherwise `B` is reached by a
+path that never took the branch, as a merge is.
+
+Inheritance down the dominator tree is sound by this lemma: if `def(v)`
+dominates `P` and `P -> B` dominates `B`, then at every `C` that `B` dominates,
+the live instance of `v` is the one tested on the last traversal of `P -> B`.
+A path from a later `def(v)` to `C` that avoids `P -> B`, joined to an
+entry-to-`def(v)` path that avoids `B`, would reach `B` for the first time
+without `P -> B`. Such a prefix exists because `B` cannot dominate `def(v)`,
+or it would dominate `P` and never be entered first through `P -> B`.
+
+### Loop trip counts (`semantic/trips.rs`)
+
+`StructuredLoopFact::trips` claims only this: if control leaves the loop through
+its one exit edge, the header ran `N` times since the loop was entered. The
+hypotheses are a body that neither returns nor branches out of the function, one
+exit edge whose block dominates the one latch, and an exit test comparing an
+induction's merge (`j = 0`) or update (`j = 1`) at its width `w` with a bound.
+Every trip then tests once, and the header's `k`-th run sees
+`X_k = c + (k + j)·s mod 2^w`.
+
+An equality exit is solved in the ring: with `s = 2^t·u`, `u` odd, a solution
+exists only if `2^t` divides `b − c`, and `k* = ((b − c)/2^t · u⁻¹ − j) mod
+2^(w−t)`, exact through wrap. An ordered exit is solved over the integers and
+stated only when the first and last iterates up to `k*` lie inside the width,
+read signed or unsigned as the comparison reads them; monotone iterates then
+never wrap in between. The start and bound are read as affine forms over entry
+values modulo `2^w`, a value `ValueRanges` pins being its constant, so a
+symbolic count arises only from an equality with an odd step. Its zero, which is
+`2^w` trips, is excluded only by an assumption on an edge that dominates the
+header (the rule above) whose two sides differ by an odd multiple of the count;
+entry values never change, so what the edge tested holds at every run.
+
+A count carries its evidence: the predicate, the induction, whether the update
+or the merge is tested, the bound, and for a symbolic count the guarding
+assumption. `StructuredLoopFact::validate_trips` recounts it from the graph. An
+induction is stated only up to sixty-four bits, the widest a `u64` step
+describes exactly, so no count is ever taken modulo a wider width. How control
+leaves a loop is read once, when the loop is recovered (`LoopExits`), and the
+loop's `exits` and the count's single exit edge both come from that walk.
+
+### Block origins (`origin.rs`)
+
+An origin maps a storage only while none of its bytes has been written since
+and no call has intervened, so an older origin never survives a clobber and
+becomes false evidence. Three kinds of operation write:
+
+- **An output.** It forgets every tracked storage sharing a byte with it.
+  Tracked storages never overlap, so at most one starts below the write and
+  reaches into it, and the rest start inside it: one step back and a run
+  forward over the ordered map, `O(log s + k)` for `s` tracked and `k` killed.
+- **A memory write.** Sleigh writes registers through a space as well as by
+  naming them: ARM NEON's `vld1.8 {d0[3]}, [r1]` is `*[register]:1 (&d0 + 3)`.
+  A store, guarded or conditional store or compare-and-swap forgets the bytes
+  it names where its address folds, and every storage in its space where it
+  does not. A block transfer's extent turns on its count and direction, so it
+  forgets its whole space. RAM is never tracked, since `of` reads a RAM
+  varnode as the slot it names.
+- **A call.** A callee may write any register, so every origin is forgotten.
+
+An output's own origin: a copy keeps its source's, clearing the instruction-set
+bit of a loaded value keeps its slot, a load through a folded address is that
+slot, and every other operation `r2il::eval` models holds the number it
+computes wherever all its operands fold, so `movw`/`movt` build one address.
+
+`pdf` carries this fold from a line to the next only where both lie in one
+block of the walked body and the next does not begin it; anywhere else it
+starts afresh. A block is entered only at its top, so the state at a line is
+exact on every execution of it; and the fold is monotone in its entry state,
+so every access `pd` claims from one line alone `pdf` claims too.
 
 Plugin Commands
 ---------------
 
 | Command | Output | Description |
 |---------|--------|-------------|
-| `a:sla.ssa` | JSON | SSA form for current instruction |
-| `a:sla.ssa.func` | JSON | Function SSA with phi nodes |
-| `a:sla.ssa.func.opt` | JSON | Optimized function SSA |
-| `a:sla.defuse` | JSON | Def-use analysis for current instruction |
-| `a:sla.defuse.func` | JSON | Function-wide def-use analysis |
-| `a:sla.dom` | JSON | Dominator tree |
-| `a:sla.cfg` | text | ASCII CFG |
-| `a:sla.cfg.json` | JSON | CFG as JSON |
-| `a:sla.slice [var]` | JSON | Backward slice from variable |
+| `a:sla.debug.ssa` | JSON | SSA form for current instruction |
+| `a:sla.debug.ssa.func` | JSON | Function SSA with phi nodes |
+| `a:sla.debug.ssa.func.opt` | JSON | Optimized function SSA |
+| `a:sla.debug.defuse.func` | JSON | Function-wide def-use analysis |
+| `a:sla.debug.dom` | JSON | Dominator tree |
+| `a:sla.debug.cfg` | text | ASCII CFG |
+| `a:sla.debug.cfg.json` | JSON | CFG as JSON |
+| `a:sla.debug.slice [var]` | JSON | Backward slice from variable |

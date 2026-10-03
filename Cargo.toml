@@ -1,15 +1,20 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/r2abi",
     "crates/r2il",
+    "crates/r2image",
+    "crates/r2s",
+    "crates/r2s-tui",
     "crates/r2sleigh-lift",
     "crates/r2sleigh-export",
     "crates/r2sleigh-cli",
+    "crates/r2source",
     "crates/r2ssa",
-    "crates/r2sym",
     "crates/r2types",
+    "crates/r2engine",
     "crates/r2dec",
-    "r2plugin",
+    "crates/r2rewrite",
 ]
 
 [workspace.package]
@@ -20,18 +25,106 @@ authors = ["radare2 contributors", "0verflowme"]
 repository = "https://github.com/0verflowme/r2sleigh"
 
 [workspace.dependencies]
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 postcard = { version = "1.1", features = ["use-std"] }
 thiserror = "2.0"
 clap = { version = "4", features = ["derive"] }
-libsla = "1.2"
-sleigh-config = "1.0"
-sleigh-compiler = "2.0"
-libloading = "0.9"
+libsla = "=1.2.0"
+sleigh-config = "=1.0.1"
 serde_json = "1"
+hex = "0.4"
+object = { version = "0.37", default-features = false, features = ["read", "std"] }
+z3 = "0.21.0"
+insta = "1"
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+crossterm = "0.28"
+
+[profile.dev]
+# Line tables rather than full debug info. A backtrace still names the file and
+# line, which is what anyone here reads; what goes is the variable-level detail
+# a debugger would use, and nothing in this project's workflow uses it.
+#
+# The reason it is in the manifest rather than in each person's environment is
+# that it was in each person's environment and that did not hold. Several
+# worktrees build this workspace at once, and one that missed the setting grew a
+# twelve gigabyte debug directory against three or four for the others, which is
+# the difference between everyone building and everyone failing on a full disk.
+# A setting every contributor must remember is a setting that is sometimes
+# forgotten, and the cost of forgetting lands on whoever is building next.
+debug = "line-tables-only"
 
 [profile.release]
+# Keep everyday release builds fast enough for local iteration and CI.
+# Use `--profile dist` when a maximum-optimized distributable artifact is needed.
+lto = false
+codegen-units = 16
+panic = "unwind"
+strip = true
+
+# A debug build whose variables a debugger can read. `[profile.dev]` keeps only
+# line tables so that several worktrees of this workspace fit on one disk; this
+# is what to build when a breakpoint has to show a value rather than a line.
+[profile.debugger]
+inherits = "dev"
+debug = "full"
+
+# The build every CI gate grades: optimised, so the gates fit in minutes, with
+# the debug build's overflow checks and debug assertions kept, so an arithmetic
+# overflow is still a panic the engine reports as that function's refusal
+# rather than a wrapped value rendered as if it were proven.
+[profile.ci]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
+
+[profile.dist]
+inherits = "release"
 lto = true
 codegen-units = 1
-panic = "abort"
-strip = true
+
+# A release build that a sampling profiler and a debugger can read. The engine
+# ships as a cdylib radare2 loads, so `sample`/`lldb` need its symbols kept.
+[profile.probe]
+inherits = "release"
+strip = false
+debug = "full"
+opt-level = 1
+
+# Consuming two upstream changes that are raised and under review, so that the
+# work that depends on them is not blocked behind someone else's merge queue:
+#
+#   mnemonikr/libsla-sys#8  exposes the language's user-defined p-code operation
+#                           names, which `SleighBase` already keeps and nothing
+#                           reached.
+#   mnemonikr/libsla#18     the safe passthrough over it.
+#   mnemonikr/libsla-sys#9  resets the address-keyed parser cache while keeping
+#                           the decoded Sleigh specification.
+#   mnemonikr/libsla#19     the safe passthrough over that reset.
+#
+# A `CALLOTHER` carries only the index of the operation it invokes, and that
+# index is assigned by the compiled specification and moves with it, so nothing
+# here can identify an operation without those names. A parsed instruction is
+# cached only by address, so sharing one loaded specification is correct only
+# when that cache is reset before another byte source can be observed. Both
+# branches combine the exact diffs on those pull requests. Drop this block for
+# the released crates once they land.
+[patch.crates-io]
+# The Sleigh dependencies are owned forks; every fix lands on their main branch.
+sleigh-config = { git = "https://github.com/0verflowme/sleigh-config.git", branch = "main" }
+libsla = { git = "https://github.com/0verflowme/libsla.git", branch = "main" }
+libsla-sys = { git = "https://github.com/0verflowme/libsla-sys.git", branch = "main" }
+
+# The structural lints are measured rather than denied.
+#
+# There is more of this debt than one change can clear, so denying them would
+# stop all work and warning on them would break `-D warnings` in CI. They are
+# allowed here and re-enabled by `scripts/structure-report.sh`, which holds the
+# counts and fails when one rises. `clippy.toml` sets the thresholds.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+
+[workspace.lints.clippy]
+excessive_nesting = "allow"
+too_many_arguments = "allow"
+too_many_lines = "allow"
+cognitive_complexity = "allow"

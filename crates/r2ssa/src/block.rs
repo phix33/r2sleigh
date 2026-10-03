@@ -6,10 +6,42 @@ use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
 use r2sleigh_lift::Disassembler;
 use serde::{Deserialize, Serialize};
 
+use crate::function::PhiNode;
+use crate::name::{InternedName, intern_ascii_lowercase, intern_fmt};
 use crate::op::SSAOp;
 use crate::var::SSAVar;
 
+/// The single conditional branch this block turns on, and where it sits.
+///
+/// It ends the block, or it guards the block's tail: a predicated
+/// instruction's branch skips the instruction's own operations, so the
+/// transfer it decides stands after it. `r2il::guarded_transfer` is where the
+/// machine graph reads the same shape, and this is the SSA form of it.
+pub fn branch_condition(block: &SSABlock) -> Option<(usize, &SSAVar)> {
+    let terminal = block.ops.len().checked_sub(1)?;
+    let mut branches = block
+        .ops
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, op)| match op {
+            SSAOp::CBranch { cond, .. } => Some((idx, cond)),
+            _ => None,
+        });
+    let found = branches.next()?;
+    branches.next().is_none().then_some(())?;
+    let guards_tail = block.ops[found.0 + 1..].iter().any(|op| {
+        matches!(
+            op,
+            SSAOp::Return { .. } | SSAOp::Branch { .. } | SSAOp::BranchInd { .. }
+        )
+    });
+    (found.0 == terminal || guards_tail).then_some(found)
+}
+
 /// An SSA basic block containing versioned operations.
+///
+/// Lifting produces one with no phis and renaming fills them in, so the two
+/// stages share a type and a function's blocks can be read without copying.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SSABlock {
     /// The address of the instruction.
@@ -18,13 +50,22 @@ pub struct SSABlock {
     pub size: u32,
     /// The SSA operations.
     pub ops: Vec<SSAOp>,
+    /// Phi nodes at the start of this block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phis: Vec<PhiNode>,
 }
 
 /// Context for SSA conversion, tracking variable versions.
+///
+/// Keyed by the interned spelling rather than by a string of its own: the
+/// name is already stored once, so the version table hashes an identifier
+/// instead of the characters and stores no second copy.
 #[derive(Debug, Default)]
 pub struct SSAContext {
     /// Current version for each variable name.
-    versions: HashMap<String, u32>,
+    versions: HashMap<&'static InternedName, u32>,
+    /// Versions allocated by the current operation but not yet visible to reads.
+    pending_versions: HashMap<&'static InternedName, u32>,
 }
 
 impl SSAContext {
@@ -35,23 +76,40 @@ impl SSAContext {
 
     /// Get the current version of a variable (for reading).
     /// Returns 0 if the variable hasn't been seen yet.
-    pub fn current_version(&self, name: &str) -> u32 {
+    pub fn current_version(&self, name: &'static InternedName) -> u32 {
         *self.versions.get(name).unwrap_or(&0)
     }
 
     /// Allocate a new version for a variable (for writing).
     /// Returns the new version number.
-    pub fn new_version(&mut self, name: &str) -> u32 {
-        let entry = self.versions.entry(name.to_string()).or_insert(0);
+    pub fn new_version(&mut self, name: &'static InternedName) -> u32 {
+        let entry = self.versions.entry(name).or_insert(0);
         *entry += 1;
         *entry
     }
 
+    fn defer_version(&mut self, name: &'static InternedName) -> u32 {
+        let current = self
+            .pending_versions
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| self.current_version(name));
+        let version = current + 1;
+        self.pending_versions.insert(name, version);
+        version
+    }
+
+    fn commit_deferred_versions(&mut self) {
+        for (name, version) in self.pending_versions.drain() {
+            self.versions.insert(name, version);
+        }
+    }
+
     /// Get all variables that have been defined (version > 0).
-    pub fn defined_vars(&self) -> impl Iterator<Item = (&str, u32)> {
+    pub fn defined_vars(&self) -> impl Iterator<Item = (&'static str, u32)> {
         self.versions.iter().filter_map(|(name, &ver)| {
             if ver > 0 {
-                Some((name.as_str(), ver))
+                Some((name.text(), ver))
             } else {
                 None
             }
@@ -66,6 +124,7 @@ impl SSABlock {
             addr,
             size,
             ops: Vec::new(),
+            phis: Vec::new(),
         }
     }
 
@@ -101,8 +160,12 @@ pub fn to_ssa(block: &R2ILBlock, disasm: &Disassembler) -> SSABlock {
     let mut ctx = SSAContext::new();
     let mut ssa_block = SSABlock::new(block.addr, block.size);
 
-    for op in &block.ops {
-        let ssa_op = convert_op(op, disasm, &mut ctx);
+    for (op_index, op) in block.ops.iter().enumerate() {
+        let instruction = block
+            .op_metadata(op_index)
+            .and_then(|metadata| metadata.instruction_addr);
+        let ssa_op = convert_op(op, instruction, disasm, &mut ctx);
+        ctx.commit_deferred_versions();
         ssa_block.push(ssa_op);
     }
 
@@ -114,46 +177,46 @@ pub fn to_ssa(block: &R2ILBlock, disasm: &Disassembler) -> SSABlock {
 /// For registers:
 /// - If a name is found, use the name directly (e.g., "rax", "cf")
 /// - If no name is found, use "reg:offset" fallback (e.g., "reg:10")
-fn varnode_to_name(vn: &Varnode, disasm: &Disassembler) -> String {
+fn varnode_to_name(vn: &Varnode, disasm: &Disassembler) -> &'static InternedName {
     match vn.space {
-        SpaceId::Register => disasm
-            .register_name(vn)
-            .map(|name| name.to_lowercase())
-            .unwrap_or_else(|| format!("reg:{:x}", vn.offset)),
-        SpaceId::Unique => format!("tmp:{:x}", vn.offset),
-        SpaceId::Const => format!("const:{:x}", vn.offset),
-        SpaceId::Ram => format!("ram:{:x}", vn.offset),
-        SpaceId::Custom(id) => format!("space{}:{:x}", id, vn.offset),
+        SpaceId::Register => match disasm.register_spelling(vn) {
+            Some(name) => intern_ascii_lowercase(&name),
+            None => intern_fmt(format_args!("reg:{:x}", vn.offset)),
+        },
+        SpaceId::Unique => intern_fmt(format_args!("tmp:{:x}", vn.offset)),
+        SpaceId::Const => intern_fmt(format_args!("const:{:x}", vn.offset)),
+        SpaceId::Ram => intern_fmt(format_args!("ram:{:x}", vn.offset)),
+        SpaceId::Custom(id) if id == crate::promote::PROMOTED_SLOT_SPACE => intern_fmt(
+            format_args!("{}", crate::naming::frame_slot_name(vn.offset as i64)),
+        ),
+        SpaceId::Custom(id) => intern_fmt(format_args!("space{}:{:x}", id, vn.offset)),
     }
 }
 
 /// Convert a varnode to an SSA variable for reading (uses current version).
 fn read_var(vn: &Varnode, disasm: &Disassembler, ctx: &SSAContext) -> SSAVar {
     let name = varnode_to_name(vn, disasm);
-    let version = ctx.current_version(&name);
-    SSAVar::new(name, version, vn.size)
+    let version = ctx.current_version(name);
+    SSAVar::from_interned(name, version, vn.size)
 }
 
-/// Convert a varnode to an SSA variable for writing (allocates new version).
+/// Convert a varnode to an SSA variable for writing.
+///
+/// The new version remains invisible to reads until the current operation is
+/// fully converted.
 fn write_var(vn: &Varnode, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAVar {
     let name = varnode_to_name(vn, disasm);
-    let version = ctx.new_version(&name);
-    SSAVar::new(name, version, vn.size)
-}
-
-/// Convert a space ID to a string name.
-fn space_name(space: &SpaceId) -> String {
-    match space {
-        SpaceId::Ram => "ram".to_string(),
-        SpaceId::Register => "register".to_string(),
-        SpaceId::Const => "const".to_string(),
-        SpaceId::Unique => "unique".to_string(),
-        SpaceId::Custom(id) => format!("space_{}", id),
-    }
+    let version = ctx.defer_version(name);
+    SSAVar::from_interned(name, version, vn.size)
 }
 
 /// Convert an R2ILOp to an SSAOp.
-fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp {
+fn convert_op(
+    op: &R2ILOp,
+    instruction: Option<u64>,
+    disasm: &Disassembler,
+    ctx: &mut SSAContext,
+) -> SSAOp {
     use R2ILOp::*;
 
     match op {
@@ -164,15 +227,26 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
 
         Load { dst, space, addr } => SSAOp::Load {
             dst: write_var(dst, disasm, ctx),
-            space: space_name(space),
+            space: *space,
             addr: read_var(addr, disasm, ctx),
         },
 
         Store { space, addr, val } => SSAOp::Store {
-            space: space_name(space),
+            space: *space,
             addr: read_var(addr, disasm, ctx),
             val: read_var(val, disasm, ctx),
         },
+        BlockTransfer(transfer) => SSAOp::BlockTransfer(Box::new(crate::op::BlockTransferOp {
+            space: transfer.space,
+            kind: transfer.kind,
+            destination: read_var(&transfer.destination, disasm, ctx),
+            source: read_var(&transfer.source, disasm, ctx),
+            count: read_var(&transfer.count, disasm, ctx),
+            direction: read_var(&transfer.direction, disasm, ctx),
+            element_size: transfer.element_size,
+            // Written after every read, as the fields are evaluated in order.
+            answer: transfer.answer.as_ref().map(|v| write_var(v, disasm, ctx)),
+        })),
         Fence { ordering } => SSAOp::Fence {
             ordering: *ordering,
         },
@@ -183,7 +257,7 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
             ordering,
         } => SSAOp::LoadLinked {
             dst: write_var(dst, disasm, ctx),
-            space: space_name(space),
+            space: *space,
             addr: read_var(addr, disasm, ctx),
             ordering: *ordering,
         },
@@ -195,7 +269,7 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
             ordering,
         } => SSAOp::StoreConditional {
             result: result.as_ref().map(|v| write_var(v, disasm, ctx)),
-            space: space_name(space),
+            space: *space,
             addr: read_var(addr, disasm, ctx),
             val: read_var(val, disasm, ctx),
             ordering: *ordering,
@@ -207,14 +281,14 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
             expected,
             replacement,
             ordering,
-        } => SSAOp::AtomicCAS {
+        } => SSAOp::AtomicCAS(Box::new(crate::op::AtomicCasOp {
             dst: write_var(dst, disasm, ctx),
-            space: space_name(space),
+            space: *space,
             addr: read_var(addr, disasm, ctx),
             expected: read_var(expected, disasm, ctx),
             replacement: read_var(replacement, disasm, ctx),
             ordering: *ordering,
-        },
+        })),
         LoadGuarded {
             dst,
             space,
@@ -223,7 +297,7 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
             ordering,
         } => SSAOp::LoadGuarded {
             dst: write_var(dst, disasm, ctx),
-            space: space_name(space),
+            space: *space,
             addr: read_var(addr, disasm, ctx),
             guard: read_var(guard, disasm, ctx),
             ordering: *ordering,
@@ -235,7 +309,7 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
             guard,
             ordering,
         } => SSAOp::StoreGuarded {
-            space: space_name(space),
+            space: *space,
             addr: read_var(addr, disasm, ctx),
             val: read_var(val, disasm, ctx),
             guard: read_var(guard, disasm, ctx),
@@ -441,6 +515,7 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
 
         Branch { target } => SSAOp::Branch {
             target: read_var(target, disasm, ctx),
+            instruction,
         },
 
         CBranch { target, cond } => SSAOp::CBranch {
@@ -450,14 +525,17 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
 
         BranchInd { target } => SSAOp::BranchInd {
             target: read_var(target, disasm, ctx),
+            instruction,
         },
 
         Call { target } => SSAOp::Call {
             target: read_var(target, disasm, ctx),
+            instruction,
         },
 
         CallInd { target } => SSAOp::CallInd {
             target: read_var(target, disasm, ctx),
+            instruction,
         },
 
         Return { target } => SSAOp::Return {
@@ -658,12 +736,29 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
             src,
             value,
             position,
-        } => SSAOp::Insert {
+        } => SSAOp::Insert(Box::new(crate::op::InsertOp {
             dst: write_var(dst, disasm, ctx),
             src: read_var(src, disasm, ctx),
             value: read_var(value, disasm, ctx),
             position: read_var(position, disasm, ctx),
-        },
+        })),
+
+        Select {
+            dst,
+            cond,
+            if_true,
+            if_false,
+        } => {
+            let cond = read_var(cond, disasm, ctx);
+            let if_true = read_var(if_true, disasm, ctx);
+            let if_false = read_var(if_false, disasm, ctx);
+            SSAOp::Select(Box::new(crate::op::SelectOp {
+                dst: write_var(dst, disasm, ctx),
+                cond,
+                if_true,
+                if_false,
+            }))
+        }
     }
 }
 
@@ -674,21 +769,34 @@ mod tests {
     #[test]
     fn test_ssa_context_versioning() {
         let mut ctx = SSAContext::new();
+        let rax = crate::name::intern("RAX");
+        let rbx = crate::name::intern("RBX");
 
         // First read should get version 0
-        assert_eq!(ctx.current_version("RAX"), 0);
+        assert_eq!(ctx.current_version(rax), 0);
 
         // First write should get version 1
-        assert_eq!(ctx.new_version("RAX"), 1);
+        assert_eq!(ctx.new_version(rax), 1);
 
         // Next read should get version 1
-        assert_eq!(ctx.current_version("RAX"), 1);
+        assert_eq!(ctx.current_version(rax), 1);
 
         // Second write should get version 2
-        assert_eq!(ctx.new_version("RAX"), 2);
+        assert_eq!(ctx.new_version(rax), 2);
 
         // Different variable starts at 0
-        assert_eq!(ctx.current_version("RBX"), 0);
+        assert_eq!(ctx.current_version(rbx), 0);
+    }
+
+    #[test]
+    fn test_deferred_write_is_not_visible_to_same_op_reads() {
+        let mut ctx = SSAContext::new();
+        let rax = crate::name::intern("RAX");
+
+        assert_eq!(ctx.defer_version(rax), 1);
+        assert_eq!(ctx.current_version(rax), 0);
+        ctx.commit_deferred_versions();
+        assert_eq!(ctx.current_version(rax), 1);
     }
 
     #[test]
