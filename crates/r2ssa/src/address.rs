@@ -20,11 +20,12 @@
 //! `i + 1` where the addition wrapped. A sign extension and a truncation are
 //! terms of their own.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 use r2il::SpaceId;
 use serde::{Deserialize, Serialize};
 
+use crate::graph::InstPayload;
 use crate::view::ValueViews;
 use crate::{
     CanonicalStorageId, SSAFunction, SSAOp, SSAVar, SourceMachineContext, SsaGraph,
@@ -86,21 +87,21 @@ pub struct PointeeAddressExpression {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AddressProvenanceFacts {
-    pub parameter_expressions: BTreeMap<ValueId, ParameterAddressExpression>,
+    pub parameter_expressions: crate::dense::IdMap<ValueId, ParameterAddressExpression>,
     /// Addresses reached through at least one load from a parameter. Kept
     /// apart from `parameter_expressions` so that everything reading the
     /// latter keeps its meaning: a parameter expression is directly
     /// parameter-relative, a pointee expression never is.
-    pub pointee_expressions: BTreeMap<ValueId, PointeeAddressExpression>,
+    pub pointee_expressions: crate::dense::IdMap<ValueId, PointeeAddressExpression>,
 }
 
 impl AddressProvenanceFacts {
     pub fn parameter_expression(&self, value: ValueId) -> Option<&ParameterAddressExpression> {
-        self.parameter_expressions.get(&value)
+        self.parameter_expressions.get(value)
     }
 
     pub fn pointee_expression(&self, value: ValueId) -> Option<&PointeeAddressExpression> {
-        self.pointee_expressions.get(&value)
+        self.pointee_expressions.get(value)
     }
 }
 
@@ -174,6 +175,13 @@ impl AddressExpression {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a sparse affine form: a few terms each, where a dense index would cost O(values) per form"
+    )
+)]
 struct AffineScalar {
     terms: BTreeMap<ValueId, i128>,
     constant: i128,
@@ -189,21 +197,14 @@ struct SpillSlotKey {
     width: u32,
 }
 
-fn memory_space_order(space: SpaceId) -> (u8, u32) {
-    match space {
-        SpaceId::Ram => (0, 0),
-        SpaceId::Register => (1, 0),
-        SpaceId::Unique => (2, 0),
-        SpaceId::Const => (3, 0),
-        SpaceId::Custom(id) => (4, id),
-    }
-}
-
 impl Ord for SpillSlotKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.root
             .cmp(&other.root)
-            .then_with(|| memory_space_order(self.space).cmp(&memory_space_order(other.space)))
+            .then_with(|| {
+                crate::semantic::memory_space_order(self.space)
+                    .cmp(&crate::semantic::memory_space_order(other.space))
+            })
             .then_with(|| self.width.cmp(&other.width))
     }
 }
@@ -254,39 +255,61 @@ impl AffineScalar {
 
 struct AddressCollector<'a> {
     function: &'a SSAFunction,
+    /// The function's prep facts, where it was prepared.
+    prep: Option<&'a crate::DecompilePrepFacts>,
     graph: &'a SsaGraph,
     /// Which values carry the same bits; absent only where no preparation
     /// ran, and then there is no formal to propagate either.
-    views: Option<&'a ValueViews>,
-    definitions: HashMap<SSAVar, SSAOp>,
-    expressions: BTreeMap<ValueId, AddressExpression>,
+    views: Option<&'a ValueViews<ValueId>>,
+    /// Each value's expression as the solve has it: absent while nothing
+    /// has ruled one in or out.
+    expressions: crate::dense::IdMap<ValueId, Cell>,
     /// The values whose expression is the formal they are, placed before any
-    /// block is read; every other expression is derived by the block that
-    /// defines its value, from what that block is entered with.
-    seeded: BTreeSet<ValueId>,
-    scalar_memo: HashMap<ValueId, Option<AffineScalar>>,
-    scalar_visiting: HashSet<ValueId>,
-    stack_in: BTreeMap<u64, BTreeMap<SpillSlotKey, AddressExpression>>,
-    stack_out: BTreeMap<u64, BTreeMap<SpillSlotKey, AddressExpression>>,
+    /// block is read and fixed.
+    seeded: crate::dense::IdSet<ValueId>,
+    scalar_memo: crate::dense::IdMap<ValueId, Option<AffineScalar>>,
+    scalar_visiting: crate::dense::IdSet<ValueId>,
+    /// What each block's spill slots hold where control leaves it.
+    stack_out: BTreeMap<u64, Spills>,
     /// The number of loads in the function: the most dereferences any chain
     /// can take, and so the bound on a pointee path.
     load_count: usize,
 }
 
+/// A value's settled expression: one, or none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Cell {
+    Expr(AddressExpression),
+    Not,
+}
+
+/// A value's expression as derived from its inputs now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Derived {
+    Pending,
+    Expr(AddressExpression),
+    Not,
+}
+
+/// What a spill slot holds: one expression, or one still pending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Held {
+    Pending,
+    Expr(AddressExpression),
+}
+
+/// Each spill slot's content where control stands.
+type Spills = BTreeMap<SpillSlotKey, Held>;
+
 impl<'a> AddressCollector<'a> {
     fn new(
         function: &'a SSAFunction,
+        prep: Option<&'a crate::DecompilePrepFacts>,
         graph: &'a SsaGraph,
         _machine_context: Option<&SourceMachineContext>,
     ) -> Self {
-        let definitions = function
-            .blocks()
-            .iter()
-            .flat_map(|block| block.ops.iter())
-            .filter_map(|op| op.dst().map(|dst| (dst.clone(), op.clone())))
-            .collect();
-        let mut expressions = BTreeMap::new();
-        if let Some(prep) = function.decompile_prep_facts() {
+        let mut expressions = crate::dense::IdMap::default();
+        if let Some(prep) = prep {
             // Every formal, not only those that arrived at their ABI storage's
             // full width. A narrow parameter -- an `unsigned` in `w1` where
             // the convention names `x1` -- is a lane projection rather than a
@@ -295,83 +318,135 @@ impl<'a> AddressCollector<'a> {
             // through it stated a reach nothing could scale. The storage kept
             // beside the index is still the value's own, so a consumer that
             // maps storage back to an argument sees what it saw before.
-            for (var, parameter) in prep
+            for (value, parameter) in prep
                 .formal_parameter_bases
                 .iter()
                 .chain(prep.formal_parameters.iter())
             {
-                if let Some(value) = graph.value_id_for_var(var) {
-                    expressions
-                        .entry(value)
-                        .or_insert_with(|| AddressExpression {
-                            base: AddressBase::Parameter {
-                                index: *parameter,
-                                storage: graph
-                                    .value(value)
-                                    .and_then(|value| value.canonical_storage),
-                            },
-                            terms: Vec::new(),
-                            offset: 0,
-                        });
-                }
+                expressions.get_or_insert_with(value, || AddressExpression {
+                    base: AddressBase::Parameter {
+                        index: *parameter,
+                        storage: graph.value(value).and_then(|value| value.canonical_storage),
+                    },
+                    terms: Vec::new(),
+                    offset: 0,
+                });
             }
         }
-        let load_count = function
-            .blocks()
+        let load_count = graph
+            .insts
             .iter()
-            .flat_map(|block| block.ops.iter())
-            .filter(|op| {
+            .filter(|inst| {
                 matches!(
-                    op,
-                    SSAOp::Load { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. }
+                    inst.payload,
+                    InstPayload::Op(
+                        SSAOp::Load { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. }
+                    )
                 )
             })
             .count();
         Self {
             function,
+            prep,
             graph,
-            views: function.decompile_prep_facts().map(|prep| &prep.views),
-            definitions,
-            seeded: expressions.keys().copied().collect(),
-            expressions,
-            scalar_memo: HashMap::new(),
-            scalar_visiting: HashSet::new(),
-            stack_in: BTreeMap::new(),
+            views: prep.map(|prep| &prep.views),
+            seeded: expressions.keys().collect(),
+            expressions: expressions
+                .into_iter()
+                .map(|(value, expression)| (value, Cell::Expr(expression)))
+                .collect(),
+            scalar_memo: crate::dense::IdMap::default(),
+            scalar_visiting: crate::dense::IdSet::default(),
             stack_out: BTreeMap::new(),
             load_count,
         }
     }
 
+    /// Solve every value's expression and every block's spill slots together
+    /// (doc/adr-fixpoint.md, K2).
+    ///
+    /// The two feed each other: a reload's expression is what its slot
+    /// holds, and a slot holds the expression of the value stored there. Both
+    /// are solved optimistically. A value is pending until something rules
+    /// its expression in or out; a merge keeps what its known inputs agree
+    /// on; a slot survives a merge where every reached predecessor holds it.
+    /// A cell or slot only descends -- pending, one expression, none -- so
+    /// each moves at most twice, which bounds the work. A value's change
+    /// re-reads every block that reads it, wherever it is, and a block whose
+    /// slots change re-reads its successors.
     fn collect(mut self) -> AddressProvenanceFacts {
-        let mut ready = self
-            .function
-            .block_addrs()
+        let order = self.function.block_addrs().to_vec();
+        let rank = order
             .iter()
-            .copied()
-            .collect::<VecDeque<_>>();
-        let mut queued = ready.iter().copied().collect::<BTreeSet<_>>();
-        while let Some(block_addr) = ready.pop_front() {
-            queued.remove(&block_addr);
-            let input = self.merge_predecessor_stack(block_addr);
-            let input_changed = self.stack_in.get(&block_addr) != Some(&input);
-            if input_changed {
-                self.stack_in.insert(block_addr, input.clone());
-            }
-            let (output, expression_changed) = self.transfer_block(block_addr, input);
-            let output_changed = self.stack_out.get(&block_addr) != Some(&output);
-            if output_changed {
-                self.stack_out.insert(block_addr, output);
-            }
-            if input_changed || output_changed || expression_changed {
-                for successor in self.function.successors(block_addr) {
-                    if queued.insert(successor) {
-                        ready.push_back(successor);
+            .enumerate()
+            .map(|(index, addr)| (*addr, index))
+            .collect::<BTreeMap<_, _>>();
+        let mut readers = crate::dense::IdMap::<ValueId, BTreeSet<usize>>::default();
+        let mut slots = 0usize;
+        for (index, &addr) in order.iter().enumerate() {
+            for inst in self.block_insts(addr) {
+                for input in &inst.inputs {
+                    for value in [*input, self.same_integer_root(*input)] {
+                        readers
+                            .get_or_insert_with(value, BTreeSet::new)
+                            .insert(index);
                     }
                 }
+                slots += usize::from(matches!(
+                    inst.payload,
+                    InstPayload::Op(SSAOp::Store { .. } | SSAOp::StoreGuarded { .. })
+                ));
+            }
+        }
+        let budget = order
+            .len()
+            .saturating_mul(
+                self.graph
+                    .values
+                    .len()
+                    .saturating_add(slots)
+                    .saturating_mul(2)
+                    .saturating_add(1),
+            )
+            .max(1);
+        let mut work = (0..order.len()).collect::<BTreeSet<_>>();
+        let mut visits = 0usize;
+        while let Some(index) = work.pop_first() {
+            visits += 1;
+            if visits > budget {
+                r2il::refusal_evidence!(
+                    "address-provenance",
+                    "{:#x}: did not settle within {budget} block visits",
+                    self.function.entry
+                );
+                return AddressProvenanceFacts::default();
+            }
+            let block_addr = order[index];
+            if self.graph.block_id_for_addr(block_addr).is_none() {
+                continue;
+            }
+            let Some(mut spills) = self.entering(block_addr) else {
+                continue;
+            };
+            let moved = self.transfer_ops(block_addr, &mut spills);
+            for value in moved {
+                work.extend(readers.get(value).into_iter().flatten().copied());
+            }
+            if self.stack_out.get(&block_addr) != Some(&spills) {
+                self.stack_out.insert(block_addr, spills);
+                work.extend(
+                    self.function
+                        .successors(block_addr)
+                        .into_iter()
+                        .filter_map(|succ| rank.get(&succ).copied()),
+                );
             }
         }
         let mut facts = AddressProvenanceFacts::default();
-        for (value, expression) in self.expressions {
+        for (value, cell) in self.expressions {
+            let Cell::Expr(expression) = cell else {
+                continue;
+            };
             match expression.base {
                 AddressBase::Parameter { index, storage } => {
                     facts.parameter_expressions.insert(
@@ -405,264 +480,246 @@ impl<'a> AddressCollector<'a> {
         facts
     }
 
-    fn merge_predecessor_stack(
-        &self,
-        block_addr: u64,
-    ) -> BTreeMap<SpillSlotKey, AddressExpression> {
-        let predecessors = self.function.predecessors(block_addr);
-        let known = predecessors
-            .iter()
-            .filter_map(|pred| self.stack_out.get(pred))
-            .collect::<Vec<_>>();
-        let Some(first) = known.first() else {
-            return BTreeMap::new();
-        };
-        first
-            .iter()
-            .filter(|(slot, expression)| {
-                known
-                    .iter()
-                    .skip(1)
-                    .all(|state| state.get(slot) == Some(*expression))
-            })
-            .map(|(slot, expression)| (*slot, expression.clone()))
-            .collect()
-    }
-
-    fn transfer_block(
-        &mut self,
-        block_addr: u64,
-        mut stack: BTreeMap<SpillSlotKey, AddressExpression>,
-    ) -> (BTreeMap<SpillSlotKey, AddressExpression>, bool) {
-        let Some(block) = self.function.get_block(block_addr) else {
-            return (stack, false);
-        };
-        // What this block derived the last time it was read was derived from
-        // the input it had then. The fixpoint starts from the predecessors it
-        // has seen, so a loop header is first read before its latch, under a
-        // spill the latch overwrites; keeping what was derived then would
-        // leave a reload of an overwritten home naming the formal for ever.
-        // So the block's own values are derived again from this input alone,
-        // and it has changed exactly where one of them came out different.
-        let defined = block
-            .phis
-            .iter()
-            .map(|phi| &phi.dst)
-            .chain(block.ops.iter().filter_map(SSAOp::dst))
-            .filter_map(|var| self.graph.value_id_for_var(var))
-            .filter(|value| !self.seeded.contains(value))
-            .collect::<Vec<_>>();
-        let before = defined
-            .iter()
-            .filter_map(|value| Some((*value, self.expressions.remove(value)?)))
-            .collect::<BTreeMap<_, _>>();
-        self.transfer_ops(block, &mut stack);
-        let changed = defined
-            .iter()
-            .any(|value| self.expressions.get(value) != before.get(value));
-        (stack, changed)
-    }
-
-    /// Derive the expressions of one block's values and its stack state, in
-    /// program order, from `stack` as the block is entered.
-    fn transfer_ops(
-        &mut self,
-        block: &crate::block::SSABlock,
-        stack: &mut BTreeMap<SpillSlotKey, AddressExpression>,
-    ) {
-        for phi in &block.phis {
-            let expressions = phi
-                .sources
-                .iter()
-                .map(|(_, source)| self.expression_for_var(source))
-                .collect::<Option<Vec<_>>>();
-            let expression = expressions.and_then(|expressions| {
-                let first = expressions.first()?.clone();
-                expressions
-                    .iter()
-                    .all(|value| *value == first)
-                    .then_some(first)
-            });
-            if let Some(expression) = expression {
-                self.insert_expression(&phi.dst, expression);
-            }
+    /// The spill slots a block is entered with: what every reached
+    /// predecessor agrees on, nothing at the function's root, and `None`
+    /// where no predecessor has been reached yet.
+    fn entering(&self, block_addr: u64) -> Option<Spills> {
+        if block_addr == self.function.root() {
+            return Some(Spills::new());
         }
-        for op in &block.ops {
-            match op {
-                SSAOp::Store { space, addr, val }
-                | SSAOp::StoreGuarded {
-                    space, addr, val, ..
-                } => {
-                    if let Some(root) = self.stack_root(addr) {
-                        // A store replaces whatever any read of the place
-                        // would have found, at every width.
-                        stack.retain(|slot, _| slot.root != root || slot.space != *space);
-                        if let Some(expression) = self.expression_for_var(val) {
-                            let slot = SpillSlotKey {
-                                root,
-                                space: *space,
-                                width: val.size,
-                            };
-                            stack.insert(slot, expression);
-                        }
+        let mut reached = self
+            .function
+            .predecessors(block_addr)
+            .into_iter()
+            .filter_map(|pred| self.stack_out.get(&pred));
+        let first = reached.next()?.clone();
+        Some(reached.fold(first, |held, other| {
+            held.into_iter()
+                .filter_map(|(slot, cell)| {
+                    let merged = match (cell, other.get(&slot)?) {
+                        (Held::Pending, theirs) => theirs.clone(),
+                        (mine, Held::Pending) => mine,
+                        (Held::Expr(a), Held::Expr(b)) if a == *b => Held::Expr(a),
+                        _ => return None,
+                    };
+                    Some((slot, merged))
+                })
+                .collect()
+        }))
+    }
+
+    /// The instructions of the block at `addr`, phis first, in order.
+    fn block_insts(&self, addr: u64) -> impl Iterator<Item = &'a crate::graph::GraphInst> + 'a {
+        let graph = self.graph;
+        graph
+            .block_id_for_addr(addr)
+            .and_then(|block| graph.blocks.get(block.0 as usize))
+            .into_iter()
+            .flat_map(move |block| block.insts.iter().filter_map(move |inst| graph.inst(*inst)))
+    }
+
+    /// Derive one block's values and its slots, in program order, from the
+    /// slots it is entered with; returns the values whose cell moved.
+    fn transfer_ops(&mut self, block_addr: u64, stack: &mut Spills) -> Vec<ValueId> {
+        let mut moved = Vec::new();
+        for inst in self.block_insts(block_addr) {
+            let Some(dst) = inst.output else {
+                if let InstPayload::Op(
+                    SSAOp::Store { space, addr, val }
+                    | SSAOp::StoreGuarded {
+                        space, addr, val, ..
+                    },
+                ) = inst.payload
+                {
+                    self.store(space, addr, val, stack);
+                }
+                continue;
+            };
+            let derived = match &inst.payload {
+                // What the sources known so far agree on.
+                InstPayload::Phi { .. } => inst
+                    .inputs
+                    .iter()
+                    .map(|source| self.cell(*source))
+                    .fold(Derived::Pending, |held, source| match (held, source) {
+                        (Derived::Pending, other) | (other, Derived::Pending) => other,
+                        (Derived::Expr(a), Derived::Expr(b)) if a == b => Derived::Expr(a),
+                        _ => Derived::Not,
+                    }),
+                InstPayload::Op(
+                    SSAOp::Load { dst, space, addr }
+                    | SSAOp::LoadLinked {
+                        dst, space, addr, ..
                     }
-                }
-                SSAOp::Load { dst, space, addr }
-                | SSAOp::LoadLinked {
-                    dst, space, addr, ..
-                }
-                | SSAOp::LoadGuarded {
-                    dst, space, addr, ..
-                } => {
-                    if let Some(expression) = self.stack_root(addr).and_then(|root| {
-                        stack
-                            .get(&SpillSlotKey {
-                                root,
-                                space: *space,
-                                width: dst.size,
-                            })
-                            .cloned()
-                    }) {
-                        self.insert_expression(dst, expression);
-                    } else if *space == SpaceId::Ram
-                        && let Some(expression) = self.expression_for_var(addr)
-                        && expression.path_len() < self.load_count
-                        && let Some(pointee) = expression.dereferenced(dst.size)
-                    {
-                        // The value read at a known address, taken as a
-                        // pointer: its own address is one step further along
-                        // the chain from the parameter.
-                        self.insert_expression(dst, pointee);
-                    }
-                }
-                _ => {}
+                    | SSAOp::LoadGuarded {
+                        dst, space, addr, ..
+                    },
+                ) => self.load(*dst, *space, *addr, stack),
+                InstPayload::Op(op) => self.derive_op_expression(op),
+            };
+            self.settle(dst, derived, &mut moved);
+        }
+        moved
+    }
+
+    /// A store replaces whatever any read of the place would have found, at
+    /// every width, and the slot then holds the stored value's expression.
+    fn store(&self, space: SpaceId, addr: ValueId, val: ValueId, stack: &mut Spills) {
+        let Some(root) = self.stack_root(addr) else {
+            return;
+        };
+        stack.retain(|slot, _| slot.root != root || slot.space != space);
+        let slot = SpillSlotKey {
+            root,
+            space,
+            width: self.graph.var(val).size,
+        };
+        match self.cell(val) {
+            Derived::Expr(expression) => {
+                stack.insert(slot, Held::Expr(expression));
             }
-            if let Some((dst, expression)) = self.derive_op_expression(op) {
-                self.insert_expression(dst, expression);
+            Derived::Pending => {
+                stack.insert(slot, Held::Pending);
             }
+            Derived::Not => {}
         }
     }
 
-    fn derive_op_expression<'b>(
-        &mut self,
-        op: &'b SSAOp,
-    ) -> Option<(&'b SSAVar, AddressExpression)> {
-        match op {
-            SSAOp::IntAdd { dst, a, b } => self
-                .derive_additive_expression(a, b, 1, 1)
-                .map(|expression| (dst, expression)),
+    /// A load reads its slot's expression, or, at a known address in RAM,
+    /// one step further along the chain from the parameter.
+    fn load(&self, dst: ValueId, space: SpaceId, addr: ValueId, stack: &Spills) -> Derived {
+        let width = self.graph.var(dst).size;
+        let slot = self
+            .stack_root(addr)
+            .and_then(|root| stack.get(&SpillSlotKey { root, space, width }));
+        match slot {
+            Some(Held::Expr(expression)) => Derived::Expr(expression.clone()),
+            Some(Held::Pending) => Derived::Pending,
+            None if space == SpaceId::Ram => match self.cell(addr) {
+                // The value read at a known address, taken as a pointer: its
+                // own address is one step further along the chain from the
+                // parameter.
+                Derived::Expr(expression) if expression.path_len() < self.load_count => expression
+                    .dereferenced(width)
+                    .map_or(Derived::Not, Derived::Expr),
+                Derived::Pending => Derived::Pending,
+                _ => Derived::Not,
+            },
+            None => Derived::Not,
+        }
+    }
+
+    /// Record what was derived for `var`, never rising: a cell only moves
+    /// from pending to one expression to none, and two different
+    /// expressions for one value meet to none.
+    fn settle(&mut self, value: ValueId, derived: Derived, moved: &mut Vec<ValueId>) {
+        if self.seeded.contains(value) {
+            return;
+        }
+        let next = match (self.expressions.get(value), derived) {
+            (_, Derived::Pending) => return,
+            (None, Derived::Expr(expression)) => Cell::Expr(expression),
+            (Some(Cell::Expr(held)), Derived::Expr(expression)) if *held == expression => return,
+            (Some(Cell::Not), _) => return,
+            _ => Cell::Not,
+        };
+        self.expressions.insert(value, next);
+        moved.push(value);
+    }
+
+    fn derive_op_expression(&mut self, op: &SSAOp<ValueId>) -> Derived {
+        match *op {
+            SSAOp::IntAdd { a, b, .. } => self.derive_additive_expression(a, b, 1, 1),
             SSAOp::PtrAdd {
-                dst,
                 base,
                 index,
                 element_size,
-            } => self
-                .derive_additive_expression(base, index, 1, i128::from(*element_size))
-                .map(|expression| (dst, expression)),
-            SSAOp::IntSub { dst, a, b } => self
-                .derive_additive_expression(a, b, -1, 1)
-                .map(|expression| (dst, expression)),
+                ..
+            } => self.derive_additive_expression(base, index, 1, i128::from(element_size)),
+            SSAOp::IntSub { a, b, .. } => self.derive_additive_expression(a, b, -1, 1),
             SSAOp::PtrSub {
-                dst,
                 base,
                 index,
                 element_size,
-            } => self
-                .derive_additive_expression(base, index, -1, i128::from(*element_size))
-                .map(|expression| (dst, expression)),
+                ..
+            } => self.derive_additive_expression(base, index, -1, i128::from(element_size)),
             // Any other definition is its same-integer root's address, where
             // the view says it has one: a copy, a same-width cast or a zero
             // extension of a full-width root. A narrowed, sign-extended or
             // otherwise converted pointer is a scalar the body computes with.
-            op => {
-                let dst = op.dst()?;
+            ref op => {
+                let Some(dst) = op.dst().copied() else {
+                    return Derived::Not;
+                };
                 let root = self.same_integer_root(dst);
-                (root != dst)
-                    .then(|| self.expression_for_var(root))
-                    .flatten()
-                    .map(|expression| (dst, expression))
+                match root != dst {
+                    true => self.cell(root),
+                    false => Derived::Not,
+                }
             }
         }
     }
 
-    /// The value `var` equals as an unsigned integer, by the view.
-    fn same_integer_root<'v>(&self, var: &'v SSAVar) -> &'v SSAVar
-    where
-        'a: 'v,
-    {
+    /// The same integer root `value` has, by the view.
+    fn same_integer_root(&self, value: ValueId) -> ValueId {
         match self.views {
-            Some(views) => views.same_integer_root(var),
-            None => var,
+            Some(views) => views.same_integer_root(value),
+            None => value,
         }
     }
 
+    /// An address plus a scalar: one operand is an address and the other a
+    /// scalar the analysis can state. An operand still pending is taken as
+    /// no address for now, which can only take the answer down later; two
+    /// addresses are not one.
     fn derive_additive_expression(
         &mut self,
-        left: &SSAVar,
-        right: &SSAVar,
+        left: ValueId,
+        right: ValueId,
         right_sign: i128,
         right_scale: i128,
-    ) -> Option<AddressExpression> {
-        let left_base = self.expression_for_var(left);
-        let right_base = self.expression_for_var(right);
-        if left_base.is_some() && right_base.is_some() {
-            return None;
-        }
-        if let Some(base) = left_base {
-            let delta = self
-                .scalar_for_var(right)?
-                .scale(right_sign.checked_mul(right_scale)?)?;
-            return add_delta(base, delta);
-        }
-        if right_sign > 0
-            && let Some(base) = right_base
-        {
-            let delta = self.scalar_for_var(left)?;
-            return add_delta(base, delta);
-        }
-        None
-    }
-
-    fn expression_for_var(&self, var: &SSAVar) -> Option<AddressExpression> {
-        let value = self.graph.value_id_for_var(var)?;
-        self.expressions.get(&value).cloned()
-    }
-
-    fn insert_expression(&mut self, var: &SSAVar, expression: AddressExpression) -> bool {
-        let Some(value) = self.graph.value_id_for_var(var) else {
-            return false;
+    ) -> Derived {
+        let (left_cell, right_cell) = (self.cell(left), self.cell(right));
+        let derived = match (&left_cell, &right_cell) {
+            (Derived::Expr(_), Derived::Expr(_)) => return Derived::Not,
+            (Derived::Expr(base), _) => self
+                .scalar_for_value(right)
+                .and_then(|delta| delta.scale(right_sign.checked_mul(right_scale)?))
+                .and_then(|delta| add_delta(base.clone(), delta)),
+            (_, Derived::Expr(base)) if right_sign > 0 => self
+                .scalar_for_value(left)
+                .and_then(|delta| add_delta(base.clone(), delta)),
+            (Derived::Pending, _) | (_, Derived::Pending) => return Derived::Pending,
+            _ => None,
         };
-        match self.expressions.get(&value) {
-            Some(existing) if *existing == expression => false,
-            Some(_) => false,
-            None => {
-                self.expressions.insert(value, expression);
-                true
-            }
+        derived.map_or(Derived::Not, Derived::Expr)
+    }
+
+    /// What the solve has for `value` so far.
+    fn cell(&self, value: ValueId) -> Derived {
+        match self.expressions.get(value) {
+            Some(Cell::Expr(expression)) => Derived::Expr(expression.clone()),
+            Some(Cell::Not) => Derived::Not,
+            // A value nothing defines -- an entry value no formal seeded --
+            // is no address the analysis can state, and never will be.
+            None if self.graph.def_inst(value).is_none() => Derived::Not,
+            None => Derived::Pending,
         }
     }
 
-    fn stack_root(&self, var: &SSAVar) -> Option<StackAddressRoot> {
-        let prep = self.function.decompile_prep_facts()?;
-        prep.stack_address_root_of(var)
-            .or_else(|| prep.stack_address_root_of(prep.canonical_root(var)))
-            .copied()
-    }
-
-    fn scalar_for_var(&mut self, var: &SSAVar) -> Option<AffineScalar> {
-        let value = self.graph.value_id_for_var(var)?;
-        self.scalar_for_value(value)
+    fn stack_root(&self, value: ValueId) -> Option<StackAddressRoot> {
+        crate::semantic::resolve_stack_root(self.prep, value)
     }
 
     fn scalar_for_value(&mut self, value: ValueId) -> Option<AffineScalar> {
-        if let Some(cached) = self.scalar_memo.get(&value) {
+        if let Some(cached) = self.scalar_memo.get(value) {
             return cached.clone();
         }
         if !self.scalar_visiting.insert(value) {
             return None;
         }
         let result = self.compute_scalar(value);
-        self.scalar_visiting.remove(&value);
+        self.scalar_visiting.remove(value);
         self.scalar_memo.insert(value, result.clone());
         result
     }
@@ -675,30 +732,32 @@ impl<'a> AddressCollector<'a> {
         // The same integer as its root: the root's form where the widths
         // agree, and where the root was widened, its unsigned value as one
         // term -- the root's form holds only modulo its own width.
-        let root = self.same_integer_root(&var).clone();
-        if root != var {
-            if root.size == var.size {
-                return self.scalar_for_var(&root);
+        let root = self.same_integer_root(value);
+        if root != value {
+            if self.graph.var(root).size == var.size {
+                return self.scalar_for_value(root);
             }
-            return Some(match self.graph.value_id_for_var(&root) {
-                Some(root) => AffineScalar::term(root),
-                None => AffineScalar::term(value),
-            });
+            return Some(AffineScalar::term(root));
         }
-        let Some(op) = self.definitions.get(&var).cloned() else {
+        let graph = self.graph;
+        let Some(InstPayload::Op(op)) = graph
+            .def_inst(value)
+            .and_then(|inst| graph.inst(inst))
+            .map(|inst| &inst.payload)
+        else {
             return Some(AffineScalar::term(value));
         };
-        match op {
-            SSAOp::IntNegate { src, .. } => self.scalar_for_var(&src)?.scale(-1),
+        match *op {
+            SSAOp::IntNegate { src, .. } => self.scalar_for_value(src)?.scale(-1),
             SSAOp::IntAdd { a, b, .. } => self
-                .scalar_for_var(&a)?
-                .combine(self.scalar_for_var(&b)?, 1),
+                .scalar_for_value(a)?
+                .combine(self.scalar_for_value(b)?, 1),
             SSAOp::IntSub { a, b, .. } => self
-                .scalar_for_var(&a)?
-                .combine(self.scalar_for_var(&b)?, -1),
+                .scalar_for_value(a)?
+                .combine(self.scalar_for_value(b)?, -1),
             SSAOp::IntMult { a, b, .. } => {
-                let left = self.scalar_for_var(&a)?;
-                let right = self.scalar_for_var(&b)?;
+                let left = self.scalar_for_value(a)?;
+                let right = self.scalar_for_value(b)?;
                 if left.terms.is_empty() {
                     right.scale(left.constant)
                 } else if right.terms.is_empty() {
@@ -708,18 +767,25 @@ impl<'a> AddressCollector<'a> {
                 }
             }
             SSAOp::IntLeft { a, b, .. } => {
-                let shift = self.scalar_for_var(&b)?;
+                let shift = self.scalar_for_value(b)?;
                 if !shift.terms.is_empty() {
                     return None;
                 }
                 let shift = u32::try_from(shift.constant).ok()?;
-                self.scalar_for_var(&a)?.scale(1i128.checked_shl(shift)?)
+                self.scalar_for_value(a)?.scale(1i128.checked_shl(shift)?)
             }
             _ => Some(AffineScalar::term(value)),
         }
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a sparse affine form: a few terms each, where a dense index would cost O(values) per form"
+    )
+)]
 fn add_delta(mut base: AddressExpression, delta: AffineScalar) -> Option<AddressExpression> {
     let mut terms = base
         .terms
@@ -762,10 +828,11 @@ fn signed_constant(var: &SSAVar) -> Option<i64> {
 
 pub(crate) fn collect_address_provenance(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
 ) -> AddressProvenanceFacts {
-    AddressCollector::new(function, graph, machine_context).collect()
+    AddressCollector::new(function, prep, graph, machine_context).collect()
 }
 
 #[cfg(test)]
@@ -1024,9 +1091,9 @@ mod tests {
         let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
             .expect("decompile artifact");
         let loaded_values = artifact
-            .get_block(0x1100)
+            .named_block(0x1100)
             .expect("entry block")
-            .ops
+            .ops()
             .iter()
             .filter_map(|op| match op {
                 SSAOp::Load { dst, space, .. } if *space == SpaceId::Custom(7) => artifact
@@ -1529,15 +1596,16 @@ mod tests {
         )
         .expect("source-bound artifact");
         let (load_index, _) = artifact
-            .get_block(0x1000)
+            .named_block(0x1000)
             .expect("block")
-            .ops
+            .ops()
             .iter()
             .enumerate()
             .find(|(_, op)| matches!(op, SSAOp::Load { .. }))
             .expect("load");
         let uses = artifact
-            .memory_uses_for_op_site(0x1000, load_index)
+            .inst_at(0x1000, load_index)
+            .and_then(|inst| artifact.memory_uses_for_inst(inst))
             .expect("memory use");
         assert_eq!(uses.len(), 1);
         assert_eq!(uses[0].version.version, 0);
@@ -1575,24 +1643,26 @@ mod tests {
             exact_parameter_interface(b"distinct-parameter-bases", 2),
         )
         .expect("source-bound artifact");
-        let block = artifact.get_block(0x1000).expect("block");
+        let block = artifact.named_block(0x1000).expect("block");
         let store_index = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Store { .. }))
             .expect("store");
         let load_index = block
-            .ops
+            .ops()
             .iter()
             .position(|op| matches!(op, SSAOp::Load { .. }))
             .expect("load");
         let written = artifact
-            .memory_defs_for_op_site(0x1000, store_index)
+            .inst_at(0x1000, store_index)
+            .and_then(|inst| artifact.memory_defs_for_inst(inst))
             .and_then(|defs| defs.first())
             .expect("memory def")
             .next_version;
         let uses = artifact
-            .memory_uses_for_op_site(0x1000, load_index)
+            .inst_at(0x1000, load_index)
+            .and_then(|inst| artifact.memory_uses_for_inst(inst))
             .expect("memory use");
         assert_eq!(uses.len(), 1);
         assert_eq!(uses[0].version, written);

@@ -234,7 +234,7 @@ pub(super) fn unspecified_reads(
                     r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. })
                 )
             })
-        }) && !call_results.contains_key(&value.id)
+        }) && !call_results.contains(value.id)
         {
             UnspecifiedRead::LeftByCall
         } else {
@@ -1124,7 +1124,7 @@ impl BindingPlan {
                         value: graph_value.id,
                     },
                 };
-            } else if stack_geometry_values.contains(&graph_value.id) {
+            } else if stack_geometry_values.contains(graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
                     reason: crate::ledger::ElisionReason::DeadStackBase,
                     proof: ValueElisionProof {
@@ -1143,7 +1143,7 @@ impl BindingPlan {
                         value: graph_value.id,
                     },
                 };
-            } else if unobserved_values.contains(&graph_value.id) {
+            } else if unobserved_values.contains(graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
                     reason: elision_for(
                         graph_value.id,
@@ -1154,7 +1154,7 @@ impl BindingPlan {
                         value: graph_value.id,
                     },
                 };
-            } else if structural_unused.contains(&graph_value.id) {
+            } else if structural_unused.contains(graph_value.id) {
                 dispositions[index] = ValueDisposition::Elided {
                     reason: elision_for(
                         graph_value.id,
@@ -1315,7 +1315,7 @@ impl BindingPlan {
             // A member with no defining instruction entered this function
             // already holding its value, so the object exists from entry; so
             // does a lane of an entry register, which is minted from its root
-            // (doc/adr-register-identity.md §8, 6).
+            // (doc/adr-register-identity.md §6).
             let caller_supplied = super::rules::is_caller_supplied(
                 source_owned,
                 graph,

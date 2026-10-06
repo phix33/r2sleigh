@@ -393,8 +393,12 @@ fn x86_64_result_call_effect() -> r2ssa::SourceCallEffect {
         offset,
         size: 8,
     };
-    r2ssa::SourceCallEffect::new([storage(0)], [storage(0x28), storage(0x30)])
-        .expect("a call effect")
+    r2ssa::SourceCallEffect::new(
+        [storage(0)],
+        [storage(0x28), storage(0x30)],
+        r2ssa::SourceBoundaryReads::new([], []).expect("no reads"),
+    )
+    .expect("a call effect")
 }
 
 fn x86_64_result_arch() -> r2il::ArchSpec {
@@ -424,81 +428,24 @@ fn x86_64_exact_rdi_arch() -> r2il::ArchSpec {
     arch
 }
 
+/// A render target is the lifted machine's identity and width, whatever the name.
 #[test]
-fn engine_render_target_canonicalizes_arch_without_renderer_config_type() {
+fn a_render_target_is_the_machines_identity_and_width() {
     let mut arch = r2il::ArchSpec::new("amd64");
     arch.addr_size = 8;
-    let (arch_name, ptr_bits, target) = EngineRenderTarget::for_arch(Some(&arch));
+    let requested = EngineRenderTarget::for_arch(Some(&arch), 64);
+    assert_eq!(requested.architecture, "amd64");
+    assert_eq!(requested.to_decompiler_config().ptr_size, 64);
 
-    assert_eq!(arch_name, "x86-64");
-    assert_eq!(ptr_bits, 64);
-    assert_eq!(
-        target,
-        EngineRenderTarget {
-            arch_name: "x86-64".to_string(),
-            ptr_bits: 64,
-        }
-    );
-
-    let x86 = EngineRenderTarget::for_arch_name("i386", 32);
-    assert_eq!(x86.arch_name, "x86");
-    assert_eq!(x86.ptr_bits, 32);
-
-    let (unknown_arch_name, unknown_target) = EngineRenderTarget::for_arch_with_ptr_bits(None, 32);
-    assert_eq!(unknown_arch_name, "unknown");
-    assert_eq!(
-        unknown_target,
-        EngineRenderTarget {
-            arch_name: "unknown".to_string(),
-            ptr_bits: 32,
-        }
-    );
-
-    let riscv = EngineRenderTarget::for_arch_name("riscv32", 32).to_decompiler_config();
-    assert_eq!(riscv.ptr_size, 32);
-    assert_eq!(riscv.fp_name, "s0");
-    assert_eq!(riscv.arg_regs.first().map(String::as_str), Some("a0"));
-
-    let mut arm64 = r2il::ArchSpec::new("arm64");
-    arm64.addr_size = 8;
-    assert_eq!(
-        engine_normalized_arch_name(Some(&arm64)).as_deref(),
-        Some("aarch64")
-    );
-    let mut rv64 = r2il::ArchSpec::new("riscv:LE:64:default");
-    rv64.addr_size = 8;
-    assert_eq!(
-        engine_normalized_arch_name(Some(&rv64)).as_deref(),
-        Some("riscv64")
-    );
-
-    let mut contradictory = r2il::ArchSpec::new("x86-64");
-    contradictory.addr_size = 4;
     let prepared =
-        r2ssa::SsaArtifact::for_decompile(&const_return_blocks(0x401000, 0), Some(&contradictory))
-            .expect("mismatched family/width remains analyzable");
-    assert!(EngineRenderTarget::for_prepared(&prepared).is_none());
-}
-
-#[test]
-fn engine_interproc_summary_json_preserves_supplied_scope_report() {
-    let existing_scope = serde_json::json!({
-        "payloads": [{ "function_addr": 0x403000u64, "function_name": "seeded" }],
-        "seeds": [{ "id": 0x403000u64, "name": "seeded" }],
-    });
-
-    let interproc = interproc_summary_json(EngineInterprocSummaryJsonInput {
-        callsite_count: 2,
-        iterations: 0,
-        max_iterations: 0,
-        converged: true,
-        summary: None,
-        scope_report: Some(&existing_scope),
-    });
-
-    assert_eq!(interproc.iterations, 1);
-    assert_eq!(interproc.max_iterations, 1);
-    assert_eq!(interproc.scope, Some(existing_scope));
+        r2ssa::SsaArtifact::for_decompile(&const_return_blocks(0x401000, 0), Some(&arch))
+            .expect("prepared");
+    assert_eq!(EngineRenderTarget::for_prepared(&prepared), Some(requested));
+    assert!(
+        EngineRenderTarget::for_arch(None, 32)
+            .architecture
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1008,7 +955,10 @@ fn controlled_r2dec_sealed() -> SealedFunctionAnalysis {
         source_owned_facts,
         trusted_ssa: None,
         input_quality: None,
-        render_target: EngineRenderTarget::default(),
+        render_target: EngineRenderTarget {
+            architecture: "x86-64".to_string(),
+            ptr_bits: 64,
+        },
         metrics: EngineMetrics::default(),
     }
 }
@@ -1313,23 +1263,52 @@ fn r2dec_stop_mapping_preserves_all_decompiler_phases_and_reasons() {
     }
 }
 
-/// Eleven obligations: six rendered, two elided, one refused, one of the
-/// rendered with a conflicting second answer, and two nothing spoke about.
-fn stop_test_ledger() -> r2dec::ledger::ObligationLedger {
-    let at = |op: u64| r2ssa::SemanticObligationId {
+/// A function at 0x401000 of sixteen operations, each storing to memory,
+/// whose obligations the ledger tests name by place.
+fn ledger_test_artifact() -> r2ssa::SsaArtifact {
+    let mut block = r2il::R2ILBlock::new(0x401000, 4);
+    for index in 0..16u64 {
+        block.push(r2il::R2ILOp::Store {
+            space: r2il::SpaceId::Ram,
+            addr: r2il::Varnode::constant(0x500000 + index * 8, 8),
+            val: r2il::Varnode::constant(index, 8),
+        });
+    }
+    block.push(r2il::R2ILOp::Return {
+        target: r2il::Varnode::constant(0, 8),
+    });
+    r2ssa::SsaArtifact::raw(&[block], None).expect("ledger test artifact")
+}
+
+/// The memory-write obligation of operation `index` of that function.
+fn ledger_test_obligation(
+    artifact: &r2ssa::SsaArtifact,
+    index: usize,
+) -> r2ssa::SemanticObligationId {
+    let op = artifact
+        .function()
+        .get_block(0x401000)
+        .and_then(|block| block.op_id(index))
+        .expect("the test operation");
+    r2ssa::SemanticObligationId {
         instruction: r2ssa::CanonicalInstructionId {
             block_addr: 0x401000,
             site: r2ssa::CanonicalInstructionSite::Op(op),
         },
         kind: r2ssa::SemanticObligationKind::ObservableMemoryWrite,
         component: r2ssa::SemanticObligationComponent::Whole,
-    };
-    let ids = (0..11).map(at).collect::<Vec<_>>();
-    let mut ledger = r2dec::ledger::ObligationLedger::over(ids.iter().copied());
-    let rendered = r2dec::ledger::Outcome::Rendered {
-        block_addr: 0x401000,
-        op_idx: 0,
-    };
+    }
+}
+
+/// Eleven obligations: six rendered, two elided, one refused, one of the
+/// rendered with a conflicting second answer, and two nothing spoke about.
+fn stop_test_ledger() -> r2dec::ledger::ObligationLedger {
+    let artifact = ledger_test_artifact();
+    let ids = (0..11)
+        .map(|index| ledger_test_obligation(&artifact, index))
+        .collect::<Vec<_>>();
+    let mut ledger = r2dec::ledger::ObligationLedger::over(ids.iter().copied(), artifact.graph());
+    let rendered = r2dec::ledger::Outcome::Rendered;
     for id in &ids[..5] {
         ledger.record(*id, rendered);
     }
@@ -1347,25 +1326,13 @@ fn stop_test_ledger() -> r2dec::ledger::ObligationLedger {
 
 #[test]
 fn refused_effect_obligations_produce_a_typed_engine_refusal() {
-    let obligation = r2ssa::SemanticObligationId {
-        instruction: r2ssa::CanonicalInstructionId {
-            block_addr: 0x401000,
-            site: r2ssa::CanonicalInstructionSite::Op(7),
-        },
-        kind: r2ssa::SemanticObligationKind::ObservableMemoryWrite,
-        component: r2ssa::SemanticObligationComponent::Whole,
-    };
     // The ledger is the fact the refusal is read from, so the test builds
     // one that closes to two refusals, one unaccounted and one conflict.
-    let sibling = |op: u64| r2ssa::SemanticObligationId {
-        instruction: r2ssa::CanonicalInstructionId {
-            block_addr: 0x401000,
-            site: r2ssa::CanonicalInstructionSite::Op(op),
-        },
-        ..obligation
-    };
-    let ids = (7..16).map(sibling).collect::<Vec<_>>();
-    let mut ledger = r2dec::ledger::ObligationLedger::over(ids.iter().copied());
+    let artifact = ledger_test_artifact();
+    let ids = (7..16)
+        .map(|index| ledger_test_obligation(&artifact, index))
+        .collect::<Vec<_>>();
+    let mut ledger = r2dec::ledger::ObligationLedger::over(ids.iter().copied(), artifact.graph());
     ledger.record(ids[0], r2dec::ledger::Outcome::Refused);
     ledger.record(ids[1], r2dec::ledger::Outcome::Refused);
     ledger.record(
@@ -1373,21 +1340,9 @@ fn refused_effect_obligations_produce_a_typed_engine_refusal() {
         r2dec::ledger::Outcome::Elided(r2dec::ledger::ElisionReason::StackFrame),
     );
     for id in &ids[3..7] {
-        ledger.record(
-            *id,
-            r2dec::ledger::Outcome::Rendered {
-                block_addr: 0x401000,
-                op_idx: 0,
-            },
-        );
+        ledger.record(*id, r2dec::ledger::Outcome::Rendered);
     }
-    ledger.record(
-        ids[7],
-        r2dec::ledger::Outcome::Rendered {
-            block_addr: 0x401000,
-            op_idx: 1,
-        },
-    );
+    ledger.record(ids[7], r2dec::ledger::Outcome::Rendered);
     ledger.record_conflict(ids[7]);
     let obligation_ledger = Some(ledger);
     let effect_obligations = effect_obligations_of(obligation_ledger.as_ref());

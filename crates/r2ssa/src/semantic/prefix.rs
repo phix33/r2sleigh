@@ -8,43 +8,39 @@ pub(crate) struct MemoryPrefix {
     pub(crate) call_sites: CallSiteFacts,
     pub(crate) declared_slots: DeclaredStackSlots,
     pub(crate) predicates: PredicateFacts,
-    /// Each loop header with the blocks that branch back to it.
-    pub(crate) latches_by_header: BTreeMap<u64, BTreeSet<u64>>,
     pub(crate) values: crate::values::ValueRanges,
     pub(crate) objects: ObjectModel,
     pub(crate) memory: MemorySSAFacts,
     pub(crate) memory_accesses: BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
-    pub(crate) member_run_stores: BTreeMap<InstId, MemberRunStoreCertificate>,
+    pub(crate) member_run_stores: crate::dense::IdMap<InstId, MemberRunStoreCertificate>,
 }
 
 impl MemoryPrefix {
     pub(super) fn collect<C: crate::SsaWorkControl + ?Sized>(
-        function: &SSAFunction,
-        graph: &SsaGraph,
-        machine_context: Option<&SourceMachineContext>,
+        body: Body<'_>,
         phases: &mut PhaseRecorder,
         control: &C,
     ) -> Result<Self, crate::SsaExecutionStopReason> {
+        let Body {
+            function,
+            prep,
+            graph,
+            machine_context,
+        } = body;
         macro_rules! phase {
             ($name:literal, $size:expr) => {{
                 phases.mark($name, $size);
                 control.poll()?;
             }};
         }
-        let addresses = collect_address_provenance(function, graph, machine_context);
+        let addresses = collect_address_provenance(function, prep, graph, machine_context);
         phase!("addresses", graph.insts.len());
-        let call_sites = collect_call_sites(
-            function,
-            graph,
-            function.decompile_prep_facts(),
-            machine_context,
-        );
+        let call_sites = collect_call_sites(function, graph, prep, machine_context);
         phase!("call_sites", call_sites.by_id.len());
         let declared_slots = collect_declared_stack_slots(machine_context);
-        let mut predicates = collect_predicate_facts(function, graph);
+        let mut predicates = collect_predicate_facts(function, prep, graph);
         phase!("predicates", 0);
-        let latches_by_header = latches_by_header(function);
-        let values = crate::values::solve_value_ranges(graph, function, &predicates);
+        let values = crate::values::solve_value_ranges(graph, function, prep, &predicates);
         // A table dispatch switches on what indexes the table's read, known only now.
         for (block_addr, selector) in crate::indirect::dispatch_selectors(function, graph, &values)
         {
@@ -57,6 +53,7 @@ impl MemoryPrefix {
         phase!("values", bounded);
         let (objects, memory) = collect_object_and_memory_facts(
             function,
+            prep,
             graph,
             &addresses,
             machine_context,
@@ -78,7 +75,6 @@ impl MemoryPrefix {
             call_sites,
             declared_slots,
             predicates,
-            latches_by_header,
             values,
             objects,
             memory,

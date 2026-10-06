@@ -10,6 +10,36 @@ use r2ssa::PhiNode;
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The operation a fixture names by its block and its place in the block.
+/// System V's integer argument registers, in order, as a prepared machine spells them.
+pub(super) fn system_v_argument_registers() -> Vec<String> {
+    ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
+        .map(str::to_string)
+        .to_vec()
+}
+
+/// System V's integer argument registers, by slot.
+pub(super) fn system_v_argument_slots() -> HashMap<String, usize> {
+    system_v_argument_registers()
+        .into_iter()
+        .enumerate()
+        .map(|(slot, name)| (name, slot))
+        .collect()
+}
+
+/// AAPCS64's integer argument registers, by slot.
+pub(super) fn aapcs64_argument_slots() -> HashMap<String, usize> {
+    (0..8).map(|slot| (format!("x{slot}"), slot)).collect()
+}
+
+fn op_at(blocks: &[SSABlock], block_addr: u64, index: usize) -> r2ssa::OpId {
+    blocks
+        .iter()
+        .find(|block| block.addr == block_addr)
+        .and_then(|block| block.op_id(index))
+        .expect("the fixture's operation")
+}
+
 fn parse_test_type(spelling: &str, ptr_bits: u32) -> CTypeLike {
     parse_c_type_like(spelling, ptr_bits).expect("test type spelling should parse")
 }
@@ -111,10 +141,10 @@ fn detached_advisory_analysis_drops_invalid_interproc_schema() {
 fn local_pointee_type_evidence_requires_exact_ram_space() {
     let ram_addr = SSAVar::new("ram_addr", 1, 8);
     let custom_addr = SSAVar::new("custom_addr", 1, 8);
-    let blocks = [SSABlock {
-        addr: 0x1000,
-        phis: Vec::new(),
-        ops: vec![
+    let blocks = [SSABlock::from_parts(
+        0x1000,
+        0,
+        vec![
             SSAOp::Store {
                 space: r2il::SpaceId::Ram,
                 addr: ram_addr.clone(),
@@ -126,10 +156,14 @@ fn local_pointee_type_evidence_requires_exact_ram_space() {
                 val: SSAVar::new("custom_value", 1, 8),
             },
         ],
-        size: 0,
-    }];
+        Vec::new(),
+    )];
 
-    let types = local_pointer_pointee_types(&blocks, 64, &HashMap::new());
+    let types = local_pointer_pointee_types(
+        &blocks,
+        64,
+        &crate::signedness::NamedSignedness::of(&[], false, &|_| false),
+    );
     assert_eq!(
         types.get(&ram_addr),
         Some(&BTreeSet::from(["int32_t".to_string()]))
@@ -153,22 +187,20 @@ fn test_signature_spec(param_name: &str, param_bits: u32) -> FunctionSignatureSp
     }
 }
 
-fn three_prepared_frame_slot_roots() -> r2ssa::DecompilePrepFacts {
-    r2ssa::DecompilePrepFacts {
-        stack_address_roots: [(1, -8), (2, -12), (3, -16)]
-            .into_iter()
-            .map(|(version, offset)| {
-                (
-                    SSAVar::new("tmp:slot", version, 8),
-                    r2ssa::StackAddressRoot {
-                        base: r2ssa::StackAddressBase::FramePointer,
-                        offset,
-                    },
-                )
-            })
-            .collect(),
-        ..r2ssa::DecompilePrepFacts::default()
-    }
+fn three_prepared_frame_slot_roots() -> std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>
+{
+    [(1, -8), (2, -12), (3, -16)]
+        .into_iter()
+        .map(|(version, offset)| {
+            (
+                SSAVar::new("tmp:slot", version, 8),
+                r2ssa::StackAddressRoot {
+                    base: r2ssa::StackAddressBase::FramePointer,
+                    offset,
+                },
+            )
+        })
+        .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>()
 }
 
 /// Storage that an access states only the width of is a type C spells at
@@ -226,8 +258,6 @@ fn phi_scalar_pointer_value_preserves_max_confidence() {
     let pointer_value_names = HashMap::new();
     let array_addr_exprs = HashMap::new();
     let array_addr_expr_names = HashMap::new();
-    let stack_addr_offsets = HashMap::new();
-    let stack_addr_offset_names = HashMap::new();
     let block_ops = HashMap::new();
     let value_ops = HashMap::new();
 
@@ -254,8 +284,7 @@ fn phi_scalar_pointer_value_preserves_max_confidence() {
         pointer_value_names: &pointer_value_names,
         array_addr_exprs: &array_addr_exprs,
         array_addr_expr_names: &array_addr_expr_names,
-        stack_addr_offsets: &stack_addr_offsets,
-        stack_addr_offset_names: &stack_addr_offset_names,
+        stack_roots: None,
         block_ops: &block_ops,
         value_ops: &value_ops,
     };

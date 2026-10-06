@@ -232,10 +232,11 @@ pub(crate) fn certified_boundary_read_values(
     at: InstId,
 ) -> BTreeSet<ValueId> {
     let graph = source.graph();
-    let Some(site) = graph.op_site_for_inst(at) else {
-        return BTreeSet::new();
-    };
-    let Some(inst) = graph.inst(at) else {
+    // A phi reads nothing at a boundary.
+    let Some(inst) = graph
+        .inst(at)
+        .filter(|inst| matches!(inst.payload, r2ssa::InstPayload::Op(_)))
+    else {
         return BTreeSet::new();
     };
     let payload = &inst.payload;
@@ -244,11 +245,10 @@ pub(crate) fn certified_boundary_read_values(
 
     if let Some(certificate) = certificates
         .returns_by_inst
-        .get(&at)
+        .get(at)
         .and_then(|index| certificates.returns.get(*index))
         .filter(|certificate| {
             certificate.at == at
-                && (certificate.block_addr, certificate.op_index) == site
                 && matches!(payload, r2ssa::InstPayload::Op(r2ssa::SSAOp::Return { .. }))
         })
     {
@@ -267,7 +267,7 @@ pub(crate) fn certified_boundary_read_values(
         values.extend(carriers.iter().copied().filter(|value| {
             certificates
                 .call_results
-                .get(value)
+                .get(*value)
                 .is_some_and(|carrier| carrier.relation.is_identity())
         }));
     }
@@ -285,8 +285,8 @@ pub(crate) fn certified_boundary_read_values(
         values.insert(selector);
     }
 
-    if let Some(certificate) = certified_call_site(source, at)
-        .filter(|certificate| (certificate.block_addr, certificate.op_index) == site)
+    if let Some(certificate) =
+        certified_call_site(source, at).filter(|certificate| certificate.at == at)
     {
         values.extend(
             certificate
@@ -433,7 +433,7 @@ pub(crate) fn certified_lane_read(
         && source
             .structured()
             .member_run_stores
-            .get(&access.inst)
+            .get(access.inst)
             .is_some_and(|run| {
                 run.members.iter().any(|member| {
                     member.access == access && member.source == r2ssa::MemberRunSource::Lane(value)
@@ -457,11 +457,11 @@ fn certified_return_transfer_sites(source: &r2ssa::SsaArtifact) -> BTreeSet<UseS
         .filter_map(|(at, boundary)| {
             let fact = boundary.return_address?;
             let site = UseSite {
-                inst: *at,
+                inst: at,
                 input_idx: 0,
             };
-            (boundary.at == *at
-                && graph.inst(*at).is_some_and(|inst| {
+            (boundary.at == at
+                && graph.inst(at).is_some_and(|inst| {
                     matches!(
                         inst.payload,
                         r2ssa::InstPayload::Op(r2ssa::SSAOp::Return { .. })
@@ -676,7 +676,7 @@ pub(super) fn certified_direct_control_target_sites(
                 }
                 _ => return None,
             };
-            let value = graph.value_id_for_var(target)?;
+            let value = *target;
             let site = UseSite {
                 inst: inst.id,
                 input_idx: 0,
@@ -703,7 +703,7 @@ pub(crate) fn certified_call_site(
     let certificates = source.certificates();
     let certificate = certificates
         .callsites
-        .get(certificates.callsites_by_inst.get(&at)?)?;
+        .get(source.call_sites().by_inst.get(at)?)?;
     (certificate.at == at).then_some(certificate)
 }
 
@@ -785,7 +785,11 @@ pub(super) fn certified_direct_call_target_insts(source: &r2ssa::SsaArtifact) ->
 /// call site falls through to, and it precedes that call in its own block.
 /// Nothing else in a function stores its own continuation address.
 pub(super) fn certified_call_return_address_insts(source: &r2ssa::SsaArtifact) -> BTreeSet<InstId> {
-    source.certificates().call_return_address_stores.clone()
+    source
+        .certificates()
+        .call_return_address_stores
+        .iter()
+        .collect()
 }
 
 /// The return addresses those pushes write.
@@ -824,9 +828,7 @@ pub(super) fn certified_call_return_address_values(
 /// unused in `murmur3_32` and `xxhash32` at -O0: the slots an argument is
 /// spilled into and then read back out of through the object rather than the
 /// slot.
-pub(super) fn certified_dead_frame_slot_accesses(
-    source: &r2ssa::SsaArtifact,
-) -> BTreeSet<(u64, usize)> {
+pub(super) fn certified_dead_frame_slot_accesses(source: &r2ssa::SsaArtifact) -> BTreeSet<InstId> {
     let certificates = source.certificates();
     let mut accesses = BTreeSet::new();
     for slot in certificates.stack_slots.values() {
@@ -844,11 +846,7 @@ pub(super) fn certified_dead_frame_slot_accesses(
         if owned.is_empty() || owned.iter().any(|access| !access.is_write) {
             continue;
         }
-        accesses.extend(
-            owned
-                .iter()
-                .map(|access| (access.block_addr, access.op_index)),
-        );
+        accesses.extend(owned.iter().map(|access| access.access.inst));
     }
     accesses
 }
@@ -903,11 +901,8 @@ impl CertifiedSilence {
     pub(crate) fn for_function(source: &r2ssa::SsaArtifact) -> Self {
         let graph = source.graph();
         let certificates = source.certificates();
-        let mut insts: BTreeSet<r2ssa::InstId> = certificates
-            .stack_frame_round_trip_by_inst
-            .keys()
-            .copied()
-            .collect();
+        let mut insts: BTreeSet<r2ssa::InstId> =
+            certificates.stack_frame_round_trip_by_inst.keys().collect();
         // Every instruction a return-control certificate answers for, not only
         // the ones it claims exclusively: the prologue's save of the return
         // address is shared with the frame's own setup and with every other
@@ -915,23 +910,23 @@ impl CertifiedSilence {
         // only about exclusive claims left it to be rendered as a store to a
         // slot the plan had already elided.
         insts.extend(certified_return_control_insts(source));
-        insts.extend(certificates.stack_geometry.insts.iter().copied());
+        insts.extend(certificates.stack_geometry.insts.iter());
         // The copy that puts a callee's address in a temporary before the
         // call. The call spells the callee's name, so this assigns an object
         // the plan has elided and no statement can name.
         insts.extend(certified_direct_call_target_insts(source));
         // The push that records where the call comes back to. The call
         // statement is the transfer.
-        insts.extend(certificates.call_return_address_stores.iter().copied());
+        insts.extend(certificates.call_return_address_stores.iter());
         // The halves of a memory round trip. The object ends holding what it
         // held, so the store assigns nothing and the read it puts back
         // produces a value no statement names.
         for certificate in certificates.memory_round_trips.values() {
-            let sites = [certificate.write_op_index, certificate.read_op_index]
-                .into_iter()
-                .chain(certificate.redundant_read_op_indexes.iter().copied());
             insts.extend(
-                sites.filter_map(|op| graph.inst_id_for_op_site(certificate.block_addr, op)),
+                [certificate.write, certificate.read]
+                    .into_iter()
+                    .chain(certificate.redundant_reads.iter().copied())
+                    .map(|access| access.inst),
             );
         }
         // The dispatch of a certified switch: scaling the selector, addressing
@@ -1001,67 +996,35 @@ pub(super) fn certified_elided_read_instructions(
                 .values()
                 .flat_map(|certificate| certificate.insts.iter().copied()),
         )
-        .chain(certificates.stack_geometry.insts.iter().copied())
+        .chain(certificates.stack_geometry.insts.iter())
         .chain(certified_return_control_insts(source))
         .chain(certified_call_return_address_insts(source))
         .chain(certified_direct_call_target_insts(source))
-        // A store into a frame slot the function owns and never reads. The
-        // effect ledger already answers for the store itself with
-        // `DeadFrameSlotStore`, and the statement is not emitted; a value
-        // folded into it goes with it. This certificate is keyed by site
-        // rather than by instruction, so the sites are resolved back here.
         // A store that puts back what it read, and the read it puts back. The
         // certificate says the object ends holding what it held, so neither
         // renders and a value folded into either goes with it.
-        .chain({
-            let round_trips = source
-                .certificates()
+        .chain(
+            certificates
                 .memory_round_trips
                 .values()
                 .flat_map(|certificate| {
-                    [
-                        (certificate.block_addr, certificate.write_op_index),
-                        (certificate.block_addr, certificate.read_op_index),
-                    ]
-                    .into_iter()
-                    .chain(
-                        certificate
-                            .redundant_read_op_indexes
-                            .iter()
-                            .map(|op_index| (certificate.block_addr, *op_index)),
-                    )
+                    [certificate.write, certificate.read]
+                        .into_iter()
+                        .chain(certificate.redundant_reads.iter().copied())
                 })
-                .collect::<BTreeSet<_>>();
-            source
-                .graph()
-                .insts
-                .iter()
-                .filter(|inst| {
-                    source
-                        .inst_op_site(inst.id)
-                        .is_some_and(|site| round_trips.contains(&site))
-                })
-                .map(|inst| inst.id)
-                .collect::<Vec<_>>()
-        })
-        .chain({
-            let dead_slots = certified_dead_frame_slot_accesses(source);
-            source
-                .graph()
-                .insts
-                .iter()
-                .filter(|inst| {
-                    source
-                        .inst_op_site(inst.id)
-                        .is_some_and(|site| dead_slots.contains(&site))
-                })
-                .map(|inst| inst.id)
-                .collect::<Vec<_>>()
-        })
+                .map(|access| access.inst),
+        )
+        // A store into a frame slot the function owns and never reads. The
+        // effect ledger already answers for the store itself with
+        // `DeadFrameSlotStore`, and the statement is not emitted; a value
+        // folded into it goes with it.
+        .chain(certified_dead_frame_slot_accesses(source))
         .collect()
 }
 
-pub(super) fn certified_stack_geometry_values(source: &r2ssa::SsaArtifact) -> &BTreeSet<ValueId> {
+pub(super) fn certified_stack_geometry_values(
+    source: &r2ssa::SsaArtifact,
+) -> &r2ssa::dense::IdSet<ValueId> {
     &source.certificates().stack_geometry.values
 }
 
@@ -1448,10 +1411,10 @@ pub(crate) struct BindingPlan {
     /// Derived from the projection and the dispositions, so it is one answer
     /// for one plan; built on first use because it is a function of fields
     /// the constructor settles first.
-    typed: std::cell::OnceCell<r2rewrite::TypedBoundaries>,
+    typed: std::cell::OnceCell<crate::typed::TypedBoundaries>,
 }
 
-impl r2rewrite::RenderTypes for BindingPlan {
+impl crate::typed::RenderTypes for BindingPlan {
     fn declaration_type(&self, value: ValueId) -> Option<r2types::CTypeLike> {
         match self.disposition(value)? {
             ValueDisposition::Bound { binding } => {
@@ -1487,9 +1450,9 @@ impl r2rewrite::RenderTypes for BindingPlan {
 impl BindingPlan {
     /// What every rendered expression has and what every operator requires
     /// of its operands, from the projection and this plan's declarations.
-    pub(crate) fn typed_boundaries(&self) -> &r2rewrite::TypedBoundaries {
+    pub(crate) fn typed_boundaries(&self) -> &crate::typed::TypedBoundaries {
         self.typed.get_or_init(|| {
-            r2rewrite::typed_boundaries(
+            crate::typed::typed_boundaries(
                 &self.machine_projection,
                 self.partition.canonical.arena(),
                 self,

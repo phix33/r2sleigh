@@ -7,16 +7,17 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::{OpenProgram, Source, SymbolKind};
+use super::{OpenProgram, ProgramInputs, Source, SymbolKind, View};
 use crate::discovery::{Basis, Confidence, Discovered};
 use crate::isolation::isolated;
 use crate::native::{NativeRefusal, Prepared};
+use crate::query::db::{Db, Query};
 use crate::query::references::Indexing;
 use crate::query::{
     Answer, Answered, Completion, Coverage, Decoders, Line, Listing, Memory, Proved, References,
     Stop, Unread, WalkedBody, Work,
 };
-use crate::{EngineDecompileResponse, EngineSession, RenderTier, SealedFunctionAnalysis};
+use crate::{EngineDecompileResponse, RenderTier, SealedFunctionAnalysis};
 
 /// One function listed block by block, and why the analysis its lines would
 /// carry was refused, where it was.
@@ -82,7 +83,7 @@ struct Shape {
     dispatches: std::collections::BTreeSet<u64>,
 }
 
-fn shape_of(blocks: &[r2ssa::body::BodyBlock], dispatches: impl Iterator<Item = u64>) -> Shape {
+fn shape_of(blocks: &[crate::body::BodyBlock], dispatches: impl Iterator<Item = u64>) -> Shape {
     let blocks = blocks
         .iter()
         .map(|block| {
@@ -141,10 +142,14 @@ pub struct AnalysisRefused {
     pub unresolved: Vec<u64>,
 }
 
-/// A function rendered at one tier, and the analysis it was rendered from.
+/// A function rendered at one tier, with what of its analysis the rendering is shown with.
+#[derive(Clone)]
 pub struct Rendering {
-    pub prepared: Arc<Prepared>,
     pub response: EngineDecompileResponse,
+    /// The name the C defines the function under.
+    pub definition: String,
+    /// The callees the analysis could not read.
+    pub unread: Vec<crate::native::Unread>,
 }
 
 impl Rendering {
@@ -152,20 +157,22 @@ impl Rendering {
     ///
     /// `name` is the program's name for the function at `entry`.
     pub fn answer(&self, name: &str, entry: u64) -> crate::RenderedFunctionJson {
-        let function = self.prepared.artifact().artifact().function();
-        let definition = r2dec::rendered_name_of(function.name.as_deref(), entry);
+        let definition = self.definition.clone();
         crate::RenderedFunctionJson::of(&self.response, name, entry, definition)
     }
 }
 
 /// Every function discovery found, and whether each body was walked as Thumb or why it could not be walked.
+#[derive(Debug)]
 pub(super) struct Survey {
     functions: Vec<Discovered>,
     walked: BTreeMap<u64, Result<bool, NativeRefusal>>,
     /// Each walked body's blocks and their bytes, as the walk traced them.
-    extents: BTreeMap<u64, r2ssa::body::TraceExtent>,
+    extents: BTreeMap<u64, crate::body::TraceExtent>,
     /// Each walked body's instructions that enter the supervisor, where it has any.
     supervisor: BTreeMap<u64, std::collections::BTreeSet<u64>>,
+    /// Which walked bodies hold each address.
+    holders: crate::discovery::Holders,
 }
 
 /// One instruction that enters the kernel, with the call it makes where the
@@ -190,11 +197,7 @@ impl Decoders for Walked<'_> {
 }
 
 /// A body's blocks listed in address order, each one run folded across its instructions.
-fn listed_by_block(
-    answered: &Answered<'_>,
-    blocks: &[r2il::R2ILBlock],
-    revision: crate::query::Revision,
-) -> Answer<Vec<Line>> {
+fn listed_by_block(answered: &Answered<'_>, blocks: &[r2il::R2ILBlock]) -> Answer<Vec<Line>> {
     let mut extents = blocks
         .iter()
         .filter(|block| block.size > 0)
@@ -202,13 +205,13 @@ fn listed_by_block(
         .collect::<Vec<_>>();
     extents.sort_unstable();
     extents.dedup();
-    let mut whole = Answer::complete(Vec::new(), revision);
+    let mut whole = Answer::complete(Vec::new());
     for (start, end) in extents {
         let listing = Listing {
             start,
             stop: Stop::At(end),
         };
-        let answer = crate::query::listing(answered, listing, Work::Function, revision);
+        let answer = crate::query::listing(answered, listing, Work::Function);
         whole.value.extend(answer.value);
         if whole.completion == Completion::Complete {
             whole.completion = answer.completion;
@@ -217,7 +220,7 @@ fn listed_by_block(
     whole
 }
 
-impl<S: Source> OpenProgram<S> {
+impl<S: Source + 'static> OpenProgram<S> {
     /// One function's analysis, done once per state of this program.
     pub fn prepared(&mut self, entry: u64) -> Result<Arc<Prepared>, String> {
         self.start_request();
@@ -225,55 +228,48 @@ impl<S: Source> OpenProgram<S> {
     }
 
     /// The analysis, within a request already started.
-    fn prepare(&mut self, entry: u64) -> Result<Arc<Prepared>, String> {
-        self.ensure_decodable()?;
-        self.ensure_assembled(entry)?;
-        let target = self.target(entry)?;
-        self.analysed(&target, entry)
-            .map_err(|refusal| refusal.to_string())
+    fn prepare(&self, entry: u64) -> Result<Arc<Prepared>, String> {
+        self.loaded()?;
+        self.assembled()?;
+        self.analysed(entry).map_err(|refusal| refusal.to_string())
     }
 
     /// Read one prepared function's sealed type analysis; a refusal may be this request's stop, so it is not held.
     ///
-    /// Sealing and reading are isolation boundaries: a panic in either is this
-    /// function's refusal, saying where it was raised, and a sealing that
-    /// unwound is never held. The refusal names the phase its boundary begins
-    /// at: sealing is the type analysis on, reading is everything after it.
+    /// Reading is an isolation boundary: a panic in it is this function's refusal at the structuring phase.
     fn read_sealed<R>(
         &self,
         entry: u64,
         prepared: &Arc<Prepared>,
         read: impl FnOnce(&SealedFunctionAnalysis) -> R,
     ) -> Result<Result<R, Box<EngineDecompileResponse>>, String> {
-        let target = self.target(entry)?;
-        let refused = |phase| {
-            move |panicked: crate::isolation::Panicked| {
-                let name = prepared.name();
-                Box::new(crate::panicked_decompile_response(name, &panicked, phase))
+        let sealed = match self.sealing(entry) {
+            super::analysis::Sealing::Sealed(sealed) => sealed.0,
+            super::analysis::Sealing::Refused { response, .. } => {
+                return Ok(Err(Box::new((*response).clone())));
+            }
+            super::analysis::Sealing::Unanalysed => {
+                return Err("the function has no analysis to seal".to_owned());
             }
         };
-        let seal = || {
-            isolated(|| crate::native::sealed(&target, entry, prepared, &self.control))
-                .unwrap_or_else(|panicked| Err(refused(crate::EnginePhase::Types)(panicked)))
+        let refused = |panicked: crate::isolation::Panicked| {
+            let name = prepared.name();
+            let phase = crate::EnginePhase::Structuring;
+            Box::new(crate::panicked_decompile_response(name, &panicked, phase))
         };
-        let read = |sealed: &SealedFunctionAnalysis| {
-            isolated(|| read(sealed)).map_err(refused(crate::EnginePhase::Structuring))
-        };
-        Ok(self
-            .memo
-            .read_sealed(prepared, seal, read)
-            .and_then(|read| read))
+        Ok(isolated(|| read(&sealed)).map_err(refused))
     }
 
     /// One function rendered at one tier.
     pub fn rendered(&mut self, entry: u64, tier: RenderTier) -> Result<Rendering, String> {
         self.start_request();
-        let prepared = self.prepare(entry)?;
-        let render = |sealed: &_| EngineSession::new().render_sealed(sealed, tier, &self.control);
-        let response = self
-            .read_sealed(entry, &prepared, render)?
-            .unwrap_or_else(|refused| *refused);
-        Ok(Rendering { prepared, response })
+        self.loaded()?;
+        self.assembled()?;
+        let key = (entry, self.view().thumb_at(entry), tier);
+        let render = self.db.get::<super::analysis::Rendered>(&key);
+        let render = render.map_err(|cycle| format!("{cycle:?}"))?;
+        let drawn = render.0.as_ref().map_err(Clone::clone)?;
+        Ok(Rendering::clone(&drawn.rendering))
     }
 
     /// What one function is, read off the sealed analysis every rendering draws from.
@@ -292,8 +288,8 @@ impl<S: Source> OpenProgram<S> {
     /// The operations Sleigh produced for one function, before any analysis.
     pub fn lifted(&mut self, entry: u64) -> Result<String, String> {
         self.start_request();
-        self.ensure_decodable()?;
-        self.ensure_assembled(entry)?;
+        self.loaded()?;
+        self.assembled()?;
         crate::native::lifted(&self.target(entry)?, self, entry)
             .map_err(|refusal| refusal.to_string())
     }
@@ -302,16 +298,15 @@ impl<S: Source> OpenProgram<S> {
     /// shows. Nothing is walked or prepared.
     pub fn listing(&mut self, request: Listing) -> Result<Answer<Vec<Line>>, String> {
         self.start_request();
-        self.ensure_decodable()?;
+        self.loaded()?;
         // A machine it cannot assemble still lists, with no callee parameters and nothing saying what a call clobbers.
-        if let Err(reason) = self.ensure_assembled(request.start) {
+        if let Err(reason) = self.assembled() {
             r2il::refusal_evidence!("call-effect", "{:#x}: {reason}", request.start);
         }
         Ok(crate::query::listing(
             &self.answered(None),
             request,
             Work::BlockLocal,
-            self.revision(),
         ))
     }
 
@@ -380,11 +375,11 @@ impl<S: Source> OpenProgram<S> {
     }
 
     /// The listing and the shape of the body it lists, within a request already started.
-    fn listed_body(&mut self, entry: u64) -> Result<(FunctionListing, Shape), String> {
-        self.ensure_decodable()?;
-        self.ensure_assembled(entry)?;
+    fn listed_body(&self, entry: u64) -> Result<(FunctionListing, Shape), String> {
+        self.loaded()?;
+        self.assembled()?;
         let target = self.target(entry)?;
-        let reason = match self.analysed(&target, entry) {
+        let reason = match self.analysed(entry) {
             // A defect reading what the analysis proved is an analysis defect like any other.
             Ok(prepared) => match isolated(|| self.proved_listing(&target, &prepared)) {
                 Ok(listing) => {
@@ -418,7 +413,7 @@ impl<S: Source> OpenProgram<S> {
             ..self.answered(Some(&proved))
         };
         FunctionListing {
-            lines: listed_by_block(&answered, &lifted, self.revision()),
+            lines: listed_by_block(&answered, &lifted),
             refused: None,
         }
     }
@@ -432,12 +427,12 @@ impl<S: Source> OpenProgram<S> {
         entry: u64,
         reason: NativeRefusal,
     ) -> Result<(FunctionListing, Shape), String> {
-        let body = r2ssa::body::lift_body(entry, target.disasm, self, &BTreeMap::new())
+        let body = crate::body::lift_body(entry, target.disasm, self, &BTreeMap::new())
             .map_err(|error| NativeRefusal::Body(error).to_string())?;
         let unresolved = body
             .unresolved
             .iter()
-            .filter(|stop| stop.reason == r2ssa::body::UnresolvedReason::IndirectBranch)
+            .filter(|stop| stop.reason == crate::body::UnresolvedReason::IndirectBranch)
             .map(|stop| stop.addr)
             .collect();
         // The plain walk reads no table, so it follows no dispatch.
@@ -453,7 +448,7 @@ impl<S: Source> OpenProgram<S> {
             ..self.answered(None)
         };
         let listing = FunctionListing {
-            lines: listed_by_block(&answered, &lifted, self.revision()),
+            lines: listed_by_block(&answered, &lifted),
             refused: Some(AnalysisRefused { reason, unresolved }),
         };
         Ok((listing, shape))
@@ -463,7 +458,16 @@ impl<S: Source> OpenProgram<S> {
     /// what the bodies reach.
     pub fn functions(&mut self) -> Result<Vec<Discovered>, String> {
         self.start_request();
-        Ok(self.surveyed()?.functions)
+        Ok(self.surveyed()?.functions.clone())
+    }
+
+    /// The entries of every believed body whose walk decoded this address as
+    /// one of its instructions, in address order: more than one where bodies
+    /// share a tail, none outside every body. O(log n) once discovery has
+    /// walked the program at this state of its bytes.
+    pub fn functions_holding(&mut self, vaddr: u64) -> Result<Vec<u64>, String> {
+        self.start_request();
+        Ok(self.surveyed()?.holders.at(vaddr).to_vec())
     }
 
     /// Every function's basic blocks and their bytes, from the walk discovery
@@ -471,9 +475,9 @@ impl<S: Source> OpenProgram<S> {
     ///
     /// The walk follows no dispatch table, so a jump table's arms are not
     /// counted; one resolved body for every consumer is P6.
-    pub fn function_extents(&mut self) -> Result<BTreeMap<u64, r2ssa::body::TraceExtent>, String> {
+    pub fn function_extents(&mut self) -> Result<BTreeMap<u64, crate::body::TraceExtent>, String> {
         self.start_request();
-        Ok(self.surveyed()?.extents)
+        Ok(self.surveyed()?.extents.clone())
     }
 
     /// Every instruction in a believed body that enters the kernel, with the
@@ -486,8 +490,8 @@ impl<S: Source> OpenProgram<S> {
     /// A site two bodies share takes their number where they agree.
     pub fn syscalls(&mut self) -> Result<Vec<Syscall>, String> {
         self.start_request();
-        let sites = self.surveyed()?.supervisor;
-        let container = self.source.container();
+        let sites = self.surveyed()?.supervisor.clone();
+        let container = self.source().container();
         let table = r2abi::Syscalls::for_platform(
             super::kernel(container),
             &container.arch.name,
@@ -550,80 +554,170 @@ impl<S: Source> OpenProgram<S> {
     pub fn references(&mut self) -> Result<Answer<Arc<References>>, String> {
         self.start_request();
         // A callee's body is read in the instruction set discovery settled, so that is settled first.
-        self.ensure_decodable()?;
-        let revision = self.revision();
-        if let Some((at, held)) = &self.references
-            && *at == revision
-        {
-            return Ok(Answer::complete(Arc::clone(held), revision));
-        }
-        let index = Arc::new(self.indexed(revision)?);
-        self.references = Some((revision, Arc::clone(&index)));
-        Ok(Answer::complete(index, revision))
-    }
-
-    /// Read every believed body's references, at one revision.
-    fn indexed(&mut self, revision: crate::query::Revision) -> Result<References, String> {
-        let walked = self.surveyed()?.walked;
-        let mut index = Indexing::default();
-        let mut coverage = Coverage::default();
-        index.read_words(&self.source.container().loader_writes);
-        // A program that states no function is never assembled, and has nothing to index.
-        if walked.is_empty() {
-            return Ok(index.finish(coverage));
-        }
-        let program = &*self;
-        let walker = super::returns::Walking::new(program, true)?;
-        for (entry, walked) in walked {
-            // Each body is lifted as `pdf` walks it, one at a time: discovery kept where control goes and not what it lifted.
-            let lifted = walked.and_then(|thumb| {
-                let target = walker.target(thumb);
-                let body = r2ssa::body::lift_body(entry, target.disasm, program, &BTreeMap::new());
-                body.map(|body| (thumb, body)).map_err(NativeRefusal::Body)
-            });
-            let (thumb, body) = match lifted {
-                Ok(lifted) => lifted,
-                Err(refusal) => {
-                    coverage.unread.insert(entry, Unread::Refused(refusal));
-                    continue;
-                }
-            };
-            if !body.unresolved.is_empty() {
-                coverage.unresolved.insert(entry, body.unresolved);
-            }
-            let machine = walker.machine(thumb).ok_or("no machine")?;
-            let decoder = (walker.target(thumb), machine);
-            match claimed_by(program, decoder, body.blocks, revision) {
-                Ok(lines) => {
-                    coverage.read.push(entry);
-                    index.read(entry, lines);
-                }
-                Err(unread) => {
-                    coverage.unread.insert(entry, unread);
-                }
-            }
-        }
-        Ok(index.finish(coverage))
+        self.loaded()?;
+        let index = self.db.get::<ReferenceIndex>(&());
+        let index = index.map_err(|cycle| format!("{cycle:?}"))?;
+        let index = index.as_ref().clone()?;
+        Ok(Answer::complete(index.0))
     }
 
     /// Discovery over the whole program, which settles each function's instruction set and whether it returns.
-    pub(super) fn surveyed(&mut self) -> Result<Survey, String> {
-        self.ensure_current()?;
-        let seeds = self.stated_functions();
-        let Some(&(first, _, _)) = seeds.first() else {
-            return Ok(Survey {
+    pub(super) fn surveyed(&self) -> Result<Arc<Survey>, String> {
+        self.loaded()?;
+        let answer = self
+            .db
+            .get::<SurveyQuery>(&())
+            .map_err(|cycle| format!("{cycle:?}"))?;
+        answer.as_ref().clone().map(|surveyed| surveyed.0)
+    }
+
+    fn answered<'a>(&'a self, proved: Option<&'a Proved<'a>>) -> Answered<'a> {
+        Answered {
+            decoders: self,
+            memory: Memory {
+                program: self,
+                endian: self.endian(),
+            },
+            call_effect: self
+                .db
+                .inputs()
+                .assembled()
+                .and_then(|held| held.call_effect.as_ref()),
+            proved,
+            body: None,
+            holdings: true,
+            parameters: Some(self),
+        }
+    }
+}
+
+/// Every reference the program makes, from every function discovery believes, with the coverage it was read over.
+pub(super) struct ReferenceIndex;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for ReferenceIndex {
+    type Key = ();
+    type Value = Result<super::analysis::Shared<References>, String>;
+    const NAME: &'static str = "reference-index";
+
+    fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
+        indexed(&View::new(db, true)).map(|index| super::analysis::Shared(Arc::new(index)))
+    }
+}
+
+/// Read every believed body's references.
+fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String> {
+    let survey = view.db.get::<SurveyQuery>(&());
+    let survey = survey.map_err(|cycle| format!("{cycle:?}"))?;
+    let survey = survey.as_ref().clone()?.0;
+    let walked = &survey.walked;
+    let mut index = Indexing::default();
+    let mut coverage = Coverage::default();
+    index.read_words(&view.source().container().loader_writes);
+    // A program that states no function is never assembled, and has nothing to index.
+    if walked.is_empty() {
+        return Ok(index.finish(coverage));
+    }
+    let walker = super::returns::Walking::new(view.clone(), true)?;
+    for (&entry, walked) in walked {
+        // Each body is lifted as `pdf` walks it, one at a time: discovery kept where control goes and not what it lifted.
+        let lifted = walked.clone().and_then(|thumb| {
+            let target = walker.target(thumb);
+            let body = crate::body::lift_body(entry, target.disasm, view, &BTreeMap::new());
+            body.map(|body| (thumb, body)).map_err(NativeRefusal::Body)
+        });
+        let (thumb, body) = match lifted {
+            Ok(lifted) => lifted,
+            Err(refusal) => {
+                coverage.unread.insert(entry, Unread::Refused(refusal));
+                continue;
+            }
+        };
+        if !body.unresolved.is_empty() {
+            coverage.unresolved.insert(entry, body.unresolved);
+        }
+        let machine = walker.machine(thumb).ok_or("no machine")?;
+        let decoder = (walker.target(thumb), machine);
+        match claimed_by(view, decoder, body.blocks) {
+            Ok(lines) => {
+                coverage.read.push(entry);
+                index.read(entry, lines);
+            }
+            Err(unread) => {
+                coverage.unread.insert(entry, unread);
+            }
+        }
+    }
+    Ok(index.finish(coverage))
+}
+
+/// One body listed as the reference index reads it, or why it is unread.
+fn claimed_by<S: Source + 'static>(
+    view: &View<'_, S>,
+    (target, machine): (
+        &crate::native::NativeTarget<'_>,
+        &r2sleigh_lift::EmbeddedMachine,
+    ),
+    blocks: Vec<crate::body::BodyBlock>,
+) -> Result<Vec<Line>, Unread> {
+    let lifted = blocks
+        .into_iter()
+        .map(|block| block.lifted)
+        .collect::<Vec<_>>();
+    let body = WalkedBody::new(&lifted, target.arch);
+    let answered = Answered {
+        decoders: &Walked(machine),
+        memory: Memory {
+            program: view,
+            endian: super::view::endian(view.source()),
+        },
+        call_effect: target.call_effect,
+        proved: None,
+        body: Some(&body),
+        holdings: false,
+        parameters: Some(view),
+    };
+    let lines = listed_by_block(&answered, &lifted).value;
+    // A number whose fate needed the def-use that did not build is unsettled, so the body is unread.
+    if body.failed() {
+        return Err(Unread::NoSsa);
+    }
+    Ok(lines)
+}
+
+/// Every function discovery finds, compared by identity: a new survey is a new answer.
+#[derive(Clone)]
+pub(super) struct Surveyed(Arc<Survey>);
+
+impl PartialEq for Surveyed {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// Discovery over the whole program from what it states; its returns are deposited for `ComesBack`.
+pub(super) struct SurveyQuery;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
+    type Key = ();
+    type Value = Result<Surveyed, String>;
+    const NAME: &'static str = "survey";
+
+    fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
+        // Discovery decides each body's instruction set itself, so it reads no modes.
+        let view = View::new(db, false);
+        let seeds = stated_functions(&view);
+        if seeds.is_empty() {
+            return Ok(Surveyed(Arc::new(Survey {
                 functions: Vec::new(),
                 walked: BTreeMap::new(),
                 extents: BTreeMap::new(),
                 supervisor: BTreeMap::new(),
-            });
-        };
-        // Both instruction sets share one convention and one compiler
-        // specification, so one assembly serves either decoder.
-        self.ensure_assembled(first)?;
-        let program = &*self;
-        let walker = super::returns::Walking::new(program, true)?;
-        let found = crate::discovery::functions(program, seeds, &walker);
+                holders: crate::discovery::Holders::default(),
+            })));
+        }
+        let walker = super::returns::Walking::new(view.clone(), true)?;
+        let found = crate::discovery::functions(&view, seeds, &walker);
+        db.deposit::<super::returns::ComesBack>(found.returns);
         let extents = found
             .walks
             .iter()
@@ -637,98 +731,73 @@ impl<S: Source> OpenProgram<S> {
                 (!calls.is_empty()).then(|| (*entry, calls.clone()))
             })
             .collect();
+        let holders =
+            crate::discovery::Holders::of(found.walks.iter().flat_map(|(entry, walk)| {
+                let spans = walk.as_ref().map(|walk| walk.spans()).unwrap_or_default();
+                spans.into_iter().map(move |span| (*entry, span))
+            }));
         let walked = found
             .walks
             .into_iter()
             .map(|(entry, walk)| (entry, walk.map(|walk| walk.thumb)))
             .collect();
-        let at = (self.source.identity(), self.source.byte_revision());
-        self.hold_returns(at, found.returns);
-        if self.thumb_machine.is_some() {
-            let modes = found
-                .functions
-                .iter()
-                .map(|one| (one.address, one.thumb))
-                .collect::<BTreeMap<_, _>>();
-            self.entries_revision += u64::from(self.modes_at.is_some() && modes != self.modes);
-            self.modes = modes;
-            self.modes_at = Some(self.source.byte_revision());
-        }
-        Ok(Survey {
+        Ok(Surveyed(Arc::new(Survey {
             functions: found.functions,
             walked,
             extents,
             supervisor,
-        })
+            holders,
+        })))
     }
+}
 
-    /// Where the program states a function begins, and whether it states the
-    /// code there is Thumb: its entry points, the symbols it types as
-    /// functions, and a linkage stub per import, which the loader's own table
-    /// places.
-    fn stated_functions(&self) -> Vec<(u64, Confidence, bool)> {
-        let container = self.source.container();
-        container
-            .entries
-            .iter()
-            .map(|entry| (entry.vaddr, entry.thumb))
-            .chain(
-                container
-                    .symbols
-                    .iter()
-                    .filter(|symbol| symbol.defined && symbol.kind == SymbolKind::Function)
-                    .map(|symbol| (symbol.vaddr, symbol.thumb)),
-            )
-            .chain(self.imports.keys().map(|vaddr| (*vaddr, false)))
-            .map(|(vaddr, thumb)| (vaddr, Confidence::of(Basis::Stated), thumb))
-            .collect()
-    }
+/// Whether each function the survey found is Thumb; empty where the machine has one instruction set.
+pub(super) struct Modes;
 
-    fn answered<'a>(&'a self, proved: Option<&'a Proved<'a>>) -> Answered<'a> {
-        Answered {
-            decoders: self,
-            memory: Memory {
-                program: self,
-                endian: self.endian(),
-            },
-            call_effect: self
-                .assembled
-                .as_ref()
-                .and_then(|held| held.call_effect.as_ref()),
-            proved,
-            body: None,
-            holdings: true,
-            parameters: Some(self),
+impl<S: Source + 'static> Query<ProgramInputs<S>> for Modes {
+    type Key = ();
+    type Value = BTreeMap<u64, bool>;
+    const NAME: &'static str = "modes";
+
+    fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
+        if db
+            .inputs()
+            .machines()
+            .map_or(true, |machines| machines.thumb.is_none())
+        {
+            return BTreeMap::new();
+        }
+        match db
+            .get::<SurveyQuery>(&())
+            .expect("the survey reads no modes")
+            .as_ref()
+        {
+            Ok(surveyed) => surveyed
+                .0
+                .functions
+                .iter()
+                .map(|one| (one.address, one.thumb))
+                .collect(),
+            Err(_) => BTreeMap::new(),
         }
     }
 }
 
-/// One body listed as the reference index reads it, or why it is unread.
-fn claimed_by<S: Source>(
-    program: &OpenProgram<S>,
-    (target, machine): (
-        &crate::native::NativeTarget<'_>,
-        &r2sleigh_lift::EmbeddedMachine,
-    ),
-    blocks: Vec<r2ssa::body::BodyBlock>,
-    revision: crate::query::Revision,
-) -> Result<Vec<Line>, Unread> {
-    let lifted = blocks
-        .into_iter()
-        .map(|block| block.lifted)
-        .collect::<Vec<_>>();
-    let body = WalkedBody::new(&lifted, target.arch);
-    let answered = Answered {
-        decoders: &Walked(machine),
-        body: Some(&body),
-        holdings: false,
-        call_effect: target.call_effect,
-        ..program.answered(None)
-    };
-    let lines = listed_by_block(&answered, &lifted, revision).value;
-    // A number whose fate needed the def-use that did not build is unsettled, so the body is unread.
-    if body.failed() {
-        return Err(Unread::NoSsa);
-    }
-    Ok(lines)
+/// Where the program states a function begins, and whether it states the code there is Thumb.
+fn stated_functions<S: Source + 'static>(view: &View<'_, S>) -> Vec<(u64, Confidence, bool)> {
+    let container = view.source().container();
+    container
+        .entries
+        .iter()
+        .map(|entry| (entry.vaddr, entry.thumb))
+        .chain(
+            container
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.defined && symbol.kind == SymbolKind::Function)
+                .map(|symbol| (symbol.vaddr, symbol.thumb)),
+        )
+        .chain(view.imports().keys().map(|vaddr| (*vaddr, false)))
+        .map(|(vaddr, thumb)| (vaddr, Confidence::of(Basis::Stated), thumb))
+        .collect()
 }

@@ -8,7 +8,7 @@
 use r2sleigh_lift::Continuation;
 
 use super::records::{Answered, Line, Listing, Stop};
-use super::{Answer, Completion, Revision, Work};
+use super::{Answer, Completion, Work};
 
 /// Sleigh fetches a whole window whatever the instruction needs.
 const DECODE_WINDOW: usize = 16;
@@ -16,12 +16,7 @@ const DECODE_WINDOW: usize = 16;
 /// Decode a run of instructions, saying as much about each as `work` allows.
 ///
 /// A line keeps the decoder context the line before it left, as the walk does; a run's first line starts afresh.
-pub fn listing(
-    answered: &Answered<'_>,
-    request: Listing,
-    work: Work,
-    revision: Revision,
-) -> Answer<Vec<Line>> {
+pub fn listing(answered: &Answered<'_>, request: Listing, work: Work) -> Answer<Vec<Line>> {
     let mut run = Run::read(answered, request, work);
     let mut beyond = Lookahead {
         answered,
@@ -37,7 +32,6 @@ pub fn listing(
     super::annotate::over_run(answered, work, &lifted, &mut beyond, &mut run.lines);
     Answer {
         value: run.lines,
-        revision,
         completion: run.completion,
     }
 }
@@ -130,6 +124,7 @@ fn decoded(
             |(lift, context)| (None, Some(lift), Some(context)),
         ),
     };
+    let flow = lift.as_ref().map(r2sleigh_lift::flow::of);
     let size = match (&syntax, &lift) {
         (Some(syntax), _) => syntax.size,
         (None, Some(lift)) => usize::try_from(lift.size).unwrap_or(0),
@@ -141,6 +136,7 @@ fn decoded(
                 address: pc,
                 bytes: fetch[..1].to_vec(),
                 syntax: None,
+                flow: None,
                 annotations: Vec::new(),
             },
             lift: None,
@@ -154,6 +150,7 @@ fn decoded(
             address: pc,
             bytes: fetch[..size].to_vec(),
             syntax,
+            flow,
             annotations: Vec::new(),
         },
         lift,
@@ -225,11 +222,11 @@ impl Lookahead<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::body::Program;
     use crate::query::Support;
     use crate::query::records::{AnnotationKind, Decoders, Memory, WalkedBody};
     use r2il::Endianness;
     use r2sleigh_lift::{EmbeddedMachine, embedded_machine};
-    use r2ssa::body::Program;
 
     /// A flat run of bytes mapped at one address and nothing else.
     struct Mapped {
@@ -257,11 +254,11 @@ mod tests {
         }
 
         /// The one run of bytes is code.
-        fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+        fn region(&self, vaddr: u64) -> Option<crate::body::Region> {
             let end = self.base + self.bytes.len() as u64;
             (self.base..end)
                 .contains(&vaddr)
-                .then_some(r2ssa::body::Region {
+                .then_some(crate::body::Region {
                     start: self.base,
                     end,
                     file_end: end,
@@ -327,7 +324,6 @@ mod tests {
                 stop: Stop::After(count),
             },
             work,
-            Revision::default(),
         )
     }
 
@@ -378,7 +374,6 @@ mod tests {
                 stop: Stop::After(2),
             },
             Work::Decode,
-            Revision::default(),
         );
         assert_eq!(answer.value[0].bytes.len(), 4);
         assert_eq!(answer.value[1].address, BASE + 4);
@@ -392,7 +387,7 @@ mod tests {
         bytes.resize(32, 0);
         let program = Mapped::new(BASE, bytes);
         let thumb = Everywhere(embedded_machine("arm-thumb").expect("Thumb is compiled in"));
-        let body = r2ssa::body::lift_body(BASE, &thumb.0.disasm, &program, &Default::default())
+        let body = crate::body::lift_body(BASE, &thumb.0.disasm, &program, &Default::default())
             .expect("the body walks");
         let mut walked = std::collections::BTreeMap::<u64, Vec<r2il::R2ILOp>>::new();
         for lifted in body.blocks.iter().map(|block| &block.lifted) {
@@ -650,7 +645,7 @@ mod tests {
         let mut image = code.to_vec();
         image.resize(0x1100, 0);
         let program = Mapped::new(BASE, image);
-        let walked = r2ssa::body::lift_body(BASE, &machine.0.disasm, &program, &Default::default());
+        let walked = crate::body::lift_body(BASE, &machine.0.disasm, &program, &Default::default());
         let blocks = walked.expect("it walks").blocks.into_iter();
         let blocks = blocks.map(|block| block.lifted).collect::<Vec<_>>();
         let body = WalkedBody::new(&blocks, &machine.0.arch);
@@ -670,7 +665,7 @@ mod tests {
             start: BASE,
             stop: Stop::At(BASE + code.len() as u64),
         };
-        let lines = listing(&answered, request, work, Revision::default()).value;
+        let lines = listing(&answered, request, work).value;
         let kinds = |line: &Line| {
             line.annotations
                 .iter()
@@ -750,13 +745,7 @@ mod tests {
             start: BASE,
             stop: Stop::After(1),
         };
-        let line = &listing(
-            &answered,
-            request,
-            Work::InstructionLocal,
-            Revision::default(),
-        )
-        .value[0];
+        let line = &listing(&answered, request, Work::InstructionLocal).value[0];
         assert!(
             line.annotations.iter().any(|annotation| annotation.kind
                 == AnnotationKind::Reads {

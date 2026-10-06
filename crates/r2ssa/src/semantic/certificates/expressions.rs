@@ -51,8 +51,8 @@ pub(crate) fn constant_root_through_copies(graph: &SsaGraph, value: ValueId) -> 
 pub(crate) fn collect_two_way_selection_certificates(
     function: &SSAFunction,
     graph: &SsaGraph,
-) -> BTreeMap<InstId, TwoWaySelectionCertificate> {
-    let mut certificates = BTreeMap::new();
+) -> crate::dense::IdMap<InstId, TwoWaySelectionCertificate> {
+    let mut certificates = crate::dense::IdMap::default();
     for inst in &graph.insts {
         let crate::graph::InstPayload::Phi { predecessors } = &inst.payload else {
             continue;
@@ -217,16 +217,17 @@ pub(crate) fn collect_two_way_selection_certificates(
 
 pub(crate) fn collect_renderable_expression_values(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     structured: &StructuredDataflowFacts,
-) -> BTreeSet<ValueId> {
+) -> crate::dense::IdSet<ValueId> {
     let certified_memory_read_insts = structured
         .memory_accesses
         .values()
         .filter(|access| !access.is_write && access.width > 0)
         .map(|access| access.id.inst)
-        .collect::<BTreeSet<_>>();
-    let mut renderable = BTreeSet::new();
+        .collect::<crate::dense::IdSet<_>>();
+    let mut renderable = crate::dense::IdSet::new(graph.values.len());
     let mut ready = VecDeque::new();
 
     for value in &graph.values {
@@ -264,7 +265,7 @@ pub(crate) fn collect_renderable_expression_values(
                     | SSAOp::Cast { .. }
             )
         ) {
-            let input_renderable = inst.inputs.iter().all(|i| renderable.contains(i));
+            let input_renderable = inst.inputs.iter().all(|i| renderable.contains(*i));
             if input_renderable {
                 renderable.insert(output);
                 ready.push_back(output);
@@ -273,7 +274,7 @@ pub(crate) fn collect_renderable_expression_values(
                 missing_inputs[inst.id.0 as usize] = inst
                     .inputs
                     .iter()
-                    .filter(|input| !renderable.contains(input))
+                    .filter(|input| !renderable.contains(**input))
                     .count();
             }
         } else {
@@ -281,7 +282,7 @@ pub(crate) fn collect_renderable_expression_values(
             missing_inputs[inst.id.0 as usize] = inst
                 .inputs
                 .iter()
-                .filter(|input| !renderable.contains(input))
+                .filter(|input| !renderable.contains(**input))
                 .count();
             if missing_inputs[inst.id.0 as usize] == 0 && renderable.insert(output) {
                 ready.push_back(output);
@@ -289,6 +290,24 @@ pub(crate) fn collect_renderable_expression_values(
         }
     }
 
+    // A loop phi is renderable once what enters it is and its back edge is
+    // modulo itself, which reads the back edge's whole expression; so the
+    // loop phis are tested again after each propagation. A round either adds
+    // one or ends this, so there are at most one more round than loop phis,
+    // and a round tests only those.
+    let mut loop_phis = graph
+        .insts
+        .iter()
+        .filter(|inst| matches!(inst.payload, InstPayload::Phi { .. }))
+        .filter(|inst| {
+            graph.block(inst.block).is_some_and(|block| {
+                structured
+                    .loops
+                    .values()
+                    .any(|fact| fact.header == block.addr)
+            })
+        })
+        .collect::<Vec<_>>();
     loop {
         while let Some(value) = ready.pop_front() {
             for use_site in graph.use_sites(value) {
@@ -309,15 +328,19 @@ pub(crate) fn collect_renderable_expression_values(
         }
 
         let mut added_loop_phi = false;
-        for inst in &graph.insts {
+        loop_phis.retain(|inst| {
+            inst.output
+                .is_some_and(|output| !renderable.contains(output))
+        });
+        for inst in &loop_phis {
             let Some(output) = inst.output else {
                 continue;
             };
-            if renderable.contains(&output) {
+            if renderable.contains(output) {
                 continue;
             }
             if expression_loop_phi_is_renderable(
-                function,
+                prep,
                 graph,
                 structured,
                 inst,
@@ -354,13 +377,13 @@ pub(crate) fn expression_inst_is_renderable(
     _function: &SSAFunction,
     _graph: &SsaGraph,
     inst: &crate::graph::GraphInst,
-    certified_memory_read_insts: &BTreeSet<InstId>,
+    certified_memory_read_insts: &crate::dense::IdSet<InstId>,
 ) -> bool {
     match &inst.payload {
         InstPayload::Phi { .. } => true,
         InstPayload::Op(op) => {
             expression_op_is_pure(op)
-                || (op.is_memory_read() && certified_memory_read_insts.contains(&inst.id))
+                || (op.is_memory_read() && certified_memory_read_insts.contains(inst.id))
         }
     }
 }
@@ -376,34 +399,40 @@ pub(crate) fn expression_phi_is_identity_renderable(
 }
 
 pub(crate) fn expression_phi_is_renderable(
-    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     inst: &crate::graph::GraphInst,
 ) -> bool {
     expression_phi_is_identity_renderable(graph, inst)
-        || expression_phi_has_single_canonical_root(function, graph, inst)
+        || expression_phi_has_single_canonical_root(prep, graph, inst)
 }
 
 pub(crate) fn expression_phi_has_single_canonical_root(
-    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     inst: &crate::graph::GraphInst,
 ) -> bool {
-    let Some(prep_facts) = function.decompile_prep_facts() else {
+    let Some(prep_facts) = prep else {
         return false;
     };
     // The inputs are one value when they name one representative: the same
     // bits at the same width, as the view states them. A representative the
     // graph holds no value for -- the literal a constant lane determines --
     // is compared as the variable it is.
-    let mut roots = inst.inputs.iter().filter_map(|input| {
-        let var = graph.value(*input).map(|value| &value.var)?;
-        Some((prep_facts.canonical_root(var), *input))
-    });
+    let mut roots = inst
+        .inputs
+        .iter()
+        .filter(|input| graph.value(**input).is_some())
+        .map(|input| {
+            (
+                crate::view::class_key(graph, &prep_facts.views, *input),
+                *input,
+            )
+        });
     let Some((first_root, first_input)) = roots.next() else {
         return false;
     };
-    let first = graph.value_id_for_var(first_root).unwrap_or(first_input);
+    let first = crate::view::class_value(graph, Some(&prep_facts.views), first_input);
     if expression_value_depends_on_memory_read(graph, first) {
         return false;
     }
@@ -416,6 +445,13 @@ pub(crate) fn expression_phi_has_single_canonical_root(
 /// and each value is expanded once, so the walk is linear in it. A depth bound
 /// here would answer "no memory read" for a dependence it declined to look
 /// at, which is the one answer that must never be guessed.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn expression_value_depends_on_memory_read(graph: &SsaGraph, value: ValueId) -> bool {
     let mut stack = vec![value];
     let mut visited = BTreeSet::new();
@@ -440,12 +476,12 @@ pub(crate) fn expression_value_depends_on_memory_read(graph: &SsaGraph, value: V
 }
 
 pub(crate) fn expression_loop_phi_is_renderable(
-    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     structured: &StructuredDataflowFacts,
     inst: &crate::graph::GraphInst,
-    renderable: &BTreeSet<ValueId>,
-    certified_memory_read_insts: &BTreeSet<InstId>,
+    renderable: &crate::dense::IdSet<ValueId>,
+    certified_memory_read_insts: &crate::dense::IdSet<InstId>,
 ) -> bool {
     let InstPayload::Phi { predecessors } = &inst.payload else {
         return false;
@@ -465,7 +501,7 @@ pub(crate) fn expression_loop_phi_is_renderable(
 
     let latches = loop_fact.latches.iter().copied().collect::<BTreeSet<_>>();
     let env = ExpressionRenderEnv {
-        function,
+        prep,
         graph,
         certified_memory_read_insts,
     };
@@ -477,13 +513,13 @@ pub(crate) fn expression_loop_phi_is_renderable(
         };
         if latches.contains(&pred_addr) {
             saw_backedge = true;
-            let mut visited = BTreeSet::new();
+            let mut visited = crate::dense::IdSet::default();
             if !value_renderable_modulo_loop_phi(&env, input, output, renderable, &mut visited, 0) {
                 return false;
             }
         } else {
             saw_entry = true;
-            if !renderable.contains(&input) {
+            if !renderable.contains(input) {
                 return false;
             }
         }
@@ -493,20 +529,20 @@ pub(crate) fn expression_loop_phi_is_renderable(
 }
 
 pub(crate) struct ExpressionRenderEnv<'a> {
-    pub(crate) function: &'a SSAFunction,
+    pub(crate) prep: Option<&'a crate::DecompilePrepFacts>,
     pub(crate) graph: &'a SsaGraph,
-    pub(crate) certified_memory_read_insts: &'a BTreeSet<InstId>,
+    pub(crate) certified_memory_read_insts: &'a crate::dense::IdSet<InstId>,
 }
 
 pub(crate) fn value_renderable_modulo_loop_phi(
     env: &ExpressionRenderEnv<'_>,
     value: ValueId,
     loop_phi: ValueId,
-    renderable: &BTreeSet<ValueId>,
-    visited: &mut BTreeSet<ValueId>,
+    renderable: &crate::dense::IdSet<ValueId>,
+    visited: &mut crate::dense::IdSet<ValueId>,
     depth: usize,
 ) -> bool {
-    if value == loop_phi || renderable.contains(&value) {
+    if value == loop_phi || renderable.contains(value) {
         return true;
     }
     if depth >= 32 || !visited.insert(value) {
@@ -519,13 +555,11 @@ pub(crate) fn value_renderable_modulo_loop_phi(
         .and_then(|inst_id| env.graph.inst(inst_id))
         .is_some_and(|inst| {
             let eligible = match &inst.payload {
-                InstPayload::Phi { .. } => {
-                    expression_phi_is_renderable(env.function, env.graph, inst)
-                }
+                InstPayload::Phi { .. } => expression_phi_is_renderable(env.prep, env.graph, inst),
                 InstPayload::Op(op) => {
                     expression_op_is_pure(op)
                         || (op.is_memory_read()
-                            && env.certified_memory_read_insts.contains(&inst.id))
+                            && env.certified_memory_read_insts.contains(inst.id))
                 }
             };
             eligible
@@ -541,11 +575,11 @@ pub(crate) fn value_renderable_modulo_loop_phi(
                 })
         });
 
-    visited.remove(&value);
+    visited.remove(value);
     result
 }
 
-pub(crate) fn expression_op_is_pure(op: &SSAOp) -> bool {
+pub(crate) fn expression_op_is_pure<V>(op: &SSAOp<V>) -> bool {
     matches!(
         op,
         SSAOp::Copy { .. }

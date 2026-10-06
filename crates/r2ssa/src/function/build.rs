@@ -22,6 +22,11 @@ impl SSAFunction {
                             .then(|| SSABlock::new(crate::cfg::ENTRY_EDGE, 0))
                     })
             })
+            .collect::<Vec<SSABlock>>();
+        let mut values = crate::value_table::ValueTable::default();
+        let ordered = ordered
+            .iter()
+            .map(|block| block.map_operands(&mut |var| values.intern(var)))
             .collect::<Vec<_>>();
         Self {
             call_preserved_carriers: None,
@@ -32,16 +37,15 @@ impl SSAFunction {
             entry,
             cfg,
             domtree,
+            natural_loops: std::sync::OnceLock::new(),
             block_index: block_index_of(&ordered),
-            blocks: Blocks::new(ordered),
+            blocks: Blocks::adopting(ordered),
+            values,
             block_order,
-            op_instruction_addrs: BTreeMap::new(),
-            canonical_storage_by_var: BTreeMap::new(),
-            formal_projections: BTreeMap::new(),
-            formal_roots: BTreeMap::new(),
-            decompile_prep_facts: None,
-            prep_interface: None,
-            query_index: RwLock::new(None),
+            formal_projections: crate::dense::IdMap::default(),
+            formal_roots: crate::dense::IdMap::default(),
+            entry_lanes: crate::dense::IdMap::default(),
+            written: crate::lanes::Written::default(),
         }
     }
 
@@ -52,17 +56,17 @@ impl SSAFunction {
 
     /// Build an SSA function from blocks with constructor-time SCCP enabled.
     pub fn from_blocks_with_arch(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
-        let mut func = Self::from_blocks_raw(blocks, arch)?;
+        let func = Self::from_blocks_raw(blocks, arch)?;
         // Constructor path applies SCCP by default while keeping legacy SSA consumers stable.
         let cfg = crate::optimize::OptimizationConfig {
-            max_iterations: 1,
             enable_sccp: true,
             enable_inst_combine: false,
             preserve_memory_reads: false,
         };
-        func.optimize(&cfg);
-        validate_ssa_function(&func).ok()?;
-        Some(func)
+        Lifted::new(func)
+            .optimize_and_validate(&cfg, &UncheckedSsaWorkControl)
+            .ok()
+            .map(Prepared::into_function)
     }
 
     /// Build SSA prepared for decompilation.
@@ -95,6 +99,7 @@ impl SSAFunction {
             None,
             control,
         )
+        .map(Prepared::into_function)
     }
 
     /// Decompile-prepared SSA under a machine context the test built.
@@ -114,6 +119,7 @@ impl SSAFunction {
             &UncheckedSsaWorkControl,
         )
         .ok()
+        .map(Prepared::into_function)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -127,7 +133,7 @@ impl SSAFunction {
         callees: &CalleeBoundaries,
         declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
         control: &C,
-    ) -> Result<Self, SsaPrepareError> {
+    ) -> Result<Prepared, SsaPrepareError> {
         let call_preserved_carriers = machine_context.call_preserved_carriers();
         let stack_pointer_carrier = machine_context.stack_pointer_carrier();
         // The lifted text as it arrived, for a reader tracing a defect that
@@ -152,24 +158,7 @@ impl SSAFunction {
         // every caller reads the result register and writes the argument
         // registers, so the whole of each is used even where the body's own
         // operations name only a lane of one.
-        let abi_carriers = questions
-            .for_argument_placement()
-            .into_iter()
-            .flat_map(|interface| {
-                interface
-                    .parameters()
-                    .iter()
-                    .filter_map(crate::SourceAbiParameterSpec::register_storage)
-            })
-            .chain(questions.for_return_boundary().and_then(|interface| {
-                match interface.return_kind() {
-                    crate::SourceFunctionReturn::Register { storage } => Some(storage),
-                    crate::SourceFunctionReturn::Void | crate::SourceFunctionReturn::Unproven => {
-                        None
-                    }
-                }
-            }))
-            .collect::<Vec<_>>();
+        let abi_carriers = questions.construction_carriers();
 
         let cfg = lifted_cfg(blocks, declared_successors)?;
         // Which frame slots behave like variables. Asked of the lifted text,
@@ -238,26 +227,17 @@ impl SSAFunction {
         func.stack_pointer_carrier = stack_pointer_carrier;
         // Before preparation, so the arithmetic above the constant folds with it.
         func.forward_proven_call_return_addresses(callees);
-        // Preparation reads the interface for the return projection only.
-        func.prepare_for_decompile_with_interface_and_control(
+        // Preparation reads the interface for the return projection only;
+        // the prep facts, collected when the function is sealed, read it for
+        // the declared stack bases.
+        let prepared = Lifted::new(func).prepare(
             &crate::optimize::DecompilePrepConfig::default(),
-            questions.for_return_boundary(),
+            questions.return_carrier(),
             control,
         )?;
-        phase("prepared", func.num_blocks());
-        // The prep facts read it for the declared stack bases.
-        func.refresh_decompile_prep_facts_with_interface_and_control(
-            questions.for_frame_geometry(),
-            control,
-        )?;
-        phase("prep_facts", func.num_blocks());
-        validate_ssa_function(&func).map_err(|error| {
-            r2il::refusal_evidence!("ssa-integrity", "{error:?}");
-            malformed_ssa_input()
-        })?;
-        phase("validated", 0);
+        phase("prepared", prepared.num_blocks());
         control.poll()?;
-        Ok(func)
+        Ok(prepared)
     }
 
     /// Build SSA prepared for pattern/type inference.
@@ -276,7 +256,7 @@ impl SSAFunction {
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
-        let mut func = Self::from_blocks_raw_with_policy_and_control(
+        let func = Self::from_blocks_raw_with_policy_and_control(
             lifted_cfg(blocks, None)?,
             arch,
             None,
@@ -285,18 +265,13 @@ impl SSAFunction {
             control,
         )?;
         let cfg = crate::optimize::OptimizationConfig {
-            max_iterations: 1,
             enable_sccp: true,
             enable_inst_combine: false,
             preserve_memory_reads: true,
         };
-        func.decompile_prep_facts = None;
-        func.invalidate_query_index();
-        crate::optimize::optimize_function_with_control(&mut func, &cfg, control)?;
-        validate_ssa_function(&func).map_err(|_| malformed_ssa_input())?;
-        func.refresh_decompile_prep_facts_with_control(control)?;
+        let prepared = Lifted::new(func).optimize_and_validate(&cfg, control)?;
         control.poll()?;
-        Ok(func)
+        Ok(prepared.into_function())
     }
 
     /// Build an SSA function from blocks without running optimization passes.
@@ -390,6 +365,13 @@ impl SSAFunction {
     }
 
     /// Construct SSA over the graph `lifted_cfg` built from the lifted blocks.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "keyed by name where there is no value table: renaming builds the names the table interns, the table's own interning index, or a one-instruction block"
+        )
+    )]
     fn from_blocks_raw_with_policy_and_control<C: SsaWorkControl + ?Sized>(
         cfg: CFG,
         arch: Option<&ArchSpec>,
@@ -450,18 +432,15 @@ impl SSAFunction {
                 control,
             )?;
 
-        // Place phi nodes
-        let mut phi_placement = PhiPlacement::compute_with_storage_and_control(
-            &cfg,
-            &domtree,
-            &defs,
-            &storage_by_identity,
-            control,
-        )?;
-        // A call defines its convention's registers, and renaming writes those
-        // definitions after placement has run, so the merges they need are
-        // added here -- pruned, because an unread merge only invents a live-in.
-        if let Some(call_boundaries) = call_boundaries {
+        // Place phi nodes: at the iterated dominance frontier of each
+        // identity's definitions, and, where the convention says what calls
+        // and returns read, only where the identity is live on entry to the
+        // merge (pruned SSA, Choi et al.). A merge nothing reads names no
+        // program state: a Sleigh temporary never outlives its instruction,
+        // so none of its merges is live. A call defines its convention's
+        // registers, and renaming writes those definitions after placement,
+        // so their sites are added to the definitions first.
+        let phi_placement = if let Some(call_boundaries) = call_boundaries {
             crate::phi::add_call_boundary_def_sites(
                 &cfg,
                 call_boundaries,
@@ -470,22 +449,35 @@ impl SSAFunction {
                 &mut defs,
                 &mut storage_by_identity,
             );
-            let complete = PhiPlacement::compute_with_storage_and_control(
+            let live_in = crate::phi::live_in_by_block(
+                &cfg,
+                call_boundaries,
+                crate::phi::IdentityNaming {
+                    reg_names: reg_names_ref,
+                    families: families_ref,
+                },
+                promoted,
+                &defs,
+            );
+            PhiPlacement::compute_with_storage_and_control(
                 &cfg,
                 &domtree,
                 &defs,
                 &storage_by_identity,
                 control,
-            )?;
-            let live_in = crate::phi::live_in_by_block(
+            )?
+            .retain_live(&live_in)
+        } else {
+            // Without a convention nothing says what a return observes, so
+            // every merge a definition reaches is kept.
+            PhiPlacement::compute_with_storage_and_control(
                 &cfg,
-                call_boundaries,
-                reg_names_ref,
-                families_ref,
+                &domtree,
                 &defs,
-            );
-            phi_placement.merge_live_additions(complete, &live_in);
-        }
+                &storage_by_identity,
+                control,
+            )?
+        };
 
         // Rename variables
         let renamed = rename_function(
@@ -506,41 +498,31 @@ impl SSAFunction {
         // cloned: holding both copies doubled every operation of the function,
         // and each operation owns up to four named variables.
         let mut renamed_blocks = renamed.blocks;
-        let mut renamed_addrs = renamed.instruction_addrs;
+        let mut renamed_origins = renamed.origins;
         let renamed_block_order = renamed.block_order;
         let renamed_storage = renamed.canonical_storage_by_var;
-        let mut ssa_blocks = Vec::with_capacity(renamed_block_order.len());
-        let mut op_instruction_addrs = BTreeMap::new();
+        let mut shaped = Vec::with_capacity(renamed_block_order.len());
         for &addr in &renamed_block_order {
             control.poll()?;
             let cfg_block = cfg.get_block(addr).ok_or_else(malformed_ssa_input)?;
             let ops = renamed_blocks.remove(&addr).unwrap_or_default();
-            let mut instruction_addrs = renamed_addrs.remove(&addr).unwrap_or_default();
-            // Renaming keeps the two in step; an operation with no address
-            // beside it would silently take the next operation's, so the
-            // shorter vector is padded rather than trusted.
-            instruction_addrs.resize(ops.len(), None);
+            let origins = renamed_origins.remove(&addr).unwrap_or_default();
+            // Renaming keeps the two in step; an operation without its origin
+            // beside it is malformed input, not an operation of no origin.
+            if origins.len() != ops.len() {
+                return Err(malformed_ssa_input());
+            }
 
-            // Separate phi nodes from other ops. The addresses travel with
-            // them: a phi is dropped and every other operation keeps the
-            // instruction it was emitted for, at its new index.
+            // Separate phi nodes from other ops; the origins travel with them.
             let (phi_ops, other_ops): (Vec<_>, Vec<_>) = ops
                 .into_iter()
-                .zip(instruction_addrs)
+                .zip(origins)
                 .partition(|(op, _)| matches!(op, SSAOp::Phi { .. }));
-            let phi_ops = phi_ops.into_iter().map(|(op, _)| op).collect::<Vec<_>>();
-            op_instruction_addrs.extend(
-                other_ops
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(op_idx, (_, from))| Some(((addr, op_idx), (*from)?))),
-            );
-            let other_ops = other_ops.into_iter().map(|(op, _)| op).collect::<Vec<_>>();
 
             // Convert phi ops to PhiNode structs
             let preds = cfg.predecessors(addr);
             let mut phis = Vec::with_capacity(phi_ops.len());
-            for (phi_idx, op) in phi_ops.into_iter().enumerate() {
+            for (phi_idx, (op, _)) in phi_ops.into_iter().enumerate() {
                 let SSAOp::Phi { dst, sources } = op else {
                     unreachable!("phi partition contains only phi operations");
                 };
@@ -562,16 +544,26 @@ impl SSAFunction {
                     canonical_storage,
                 });
             }
-
-            let ssa_block = SSABlock {
+            shaped.push(ShapedBlock {
                 addr,
                 size: cfg_block.size,
-                ops: other_ops,
                 phis,
-            };
-            ssa_blocks.push(ssa_block);
+                ops: other_ops,
+            });
         }
-
+        let (arena, named_blocks) = mint_renamed_blocks(shaped);
+        // The operations enter the function here, so this is where each
+        // variable they name gets its id.
+        let mut values = crate::value_table::ValueTable::default();
+        let ssa_blocks = named_blocks
+            .iter()
+            .map(|block| block.map_operands(&mut |var| values.intern(var)))
+            .collect::<Vec<_>>();
+        // What the renamer learned of each variable's lifted storage joins
+        // its row, including variables no operation names any more.
+        for (var, storage) in renamed_storage {
+            values.intern_with_storage(&var, storage);
+        }
         let mut cfg = cfg;
         cfg.release_operations();
         let mut function = Self {
@@ -585,16 +577,15 @@ impl SSAFunction {
             entry,
             cfg,
             domtree,
+            natural_loops: std::sync::OnceLock::new(),
             block_index: block_index_of(&ssa_blocks),
             block_order: renamed_block_order,
-            blocks: Blocks::new(ssa_blocks),
-            op_instruction_addrs,
-            canonical_storage_by_var: renamed_storage,
-            formal_projections: BTreeMap::new(),
-            formal_roots: BTreeMap::new(),
-            decompile_prep_facts: None,
-            prep_interface: None,
-            query_index: RwLock::new(None),
+            blocks: Blocks::new(ssa_blocks, arena),
+            values,
+            formal_projections: crate::dense::IdMap::default(),
+            formal_roots: crate::dense::IdMap::default(),
+            entry_lanes: crate::dense::IdMap::default(),
+            written: crate::lanes::Written::default(),
         };
         function.zero_scratch_insert_roots(abi_carriers);
         // The validator answers with a typed integrity error naming the block
@@ -617,63 +608,21 @@ impl SSAFunction {
     pub fn from_blocks_raw_no_arch(blocks: &[R2ILBlock]) -> Option<Self> {
         Self::from_blocks_raw(blocks, None)
     }
+}
 
-    pub fn refresh_after_cfg_mutation(&mut self) {
-        self.blocks
-            .edit()
-            .retain(|block| self.cfg.get_block(block.addr).is_some());
-        self.block_order = self.cfg.reverse_postorder();
-        self.reorder_blocks();
-        self.domtree = DomTree::compute(&self.cfg);
-        self.decompile_prep_facts = None;
-        self.invalidate_query_index();
-    }
-
-    /// Prepare SSA for decompilation using provenance-preserving defaults.
-    pub fn prepare_for_decompile(
-        &mut self,
-        config: &crate::optimize::DecompilePrepConfig,
-    ) -> crate::optimize::OptimizationStats {
-        self.prepare_for_decompile_with_control(config, &UncheckedSsaWorkControl)
-            .expect("unchecked decompiler preparation cannot stop")
-    }
-
-    fn prepare_for_decompile_with_control<C: SsaWorkControl + ?Sized>(
-        &mut self,
-        config: &crate::optimize::DecompilePrepConfig,
-        control: &C,
-    ) -> Result<crate::optimize::OptimizationStats, SsaExecutionStopReason> {
-        self.prepare_for_decompile_with_interface_and_control(config, None, control)
-    }
-
-    fn prepare_for_decompile_with_interface_and_control<C: SsaWorkControl + ?Sized>(
-        &mut self,
-        config: &crate::optimize::DecompilePrepConfig,
-        function_interface: Option<&SourceFunctionInterface>,
-        control: &C,
-    ) -> Result<crate::optimize::OptimizationStats, SsaExecutionStopReason> {
-        control.poll()?;
-        self.decompile_prep_facts = None;
-        self.invalidate_query_index();
-        let cfg: crate::optimize::OptimizationConfig = config.into();
-        crate::optimize::optimize_function_with_interface_and_control(
-            self,
-            &cfg,
-            function_interface,
-            control,
-        )
-    }
-
-    pub(crate) fn install_exact_formal_parameters(
+impl DecompilePrepFacts {
+    /// Install the canonical source-boundary parameter projection. This
+    /// deliberately accepts `ValueId` facts, then resolves the graph value
+    /// back to its `SSAVar`; no register spelling participates in slot
+    /// identity.
+    pub(super) fn install_exact_formal_parameters(
         &mut self,
         graph: &SsaGraph,
         parameters: &BTreeMap<u32, crate::semantic::SourceFormalParameterFact>,
     ) {
-        let Some(prep) = self.decompile_prep_facts.as_mut() else {
-            return;
-        };
-        prep.formal_parameters.clear();
-        prep.formal_parameter_bases.clear();
+        let prep = self;
+        prep.formal_parameters = crate::dense::IdMap::new(graph.values.len());
+        prep.formal_parameter_bases = crate::dense::IdMap::new(graph.values.len());
         for (slot, parameter) in parameters {
             let Ok(index) = usize::try_from(*slot) else {
                 continue;
@@ -690,83 +639,11 @@ impl SSAFunction {
             if parameter.index != *slot || !(entry_value || projection) {
                 continue;
             }
-            prep.formal_parameters.insert(value.var.clone(), index);
+            prep.formal_parameters.insert(parameter.value, index);
             if parameter.graph_storage == parameter.abi_storage {
-                prep.formal_parameter_bases.insert(value.var.clone(), index);
+                prep.formal_parameter_bases.insert(parameter.value, index);
             }
         }
-    }
-
-    /// Record every value that is a formal parameter, and which one.
-    ///
-    /// A formal reaches its uses through more than the storage it entered in:
-    /// a copy, a widening, a lane projection and the reload of the slot the
-    /// prologue spilled it to all deliver the same value. Four call sites each
-    /// answered that question with their own partial walk, and none of them
-    /// reached the reload. The address facts already answer it exactly -- they
-    /// seed from the ABI storages and propagate through those steps, across
-    /// the frame included -- so a value is the formal when its parameter
-    /// expression names one with nothing added to it. What
-    /// `install_exact_formal_parameters` proved is authoritative and is not
-    /// overwritten here.
-    pub(crate) fn install_formal_parameter_identity(
-        &mut self,
-        graph: &SsaGraph,
-        addresses: &crate::AddressProvenanceFacts,
-    ) {
-        let Some(prep) = self.decompile_prep_facts.as_mut() else {
-            return;
-        };
-        let exact = prep.formal_parameters.len();
-        for (value, expression) in &addresses.parameter_expressions {
-            if !expression.terms.is_empty() || expression.offset != 0 {
-                continue;
-            }
-            let Some(var) = graph.value(*value).map(|value| value.var.clone()) else {
-                continue;
-            };
-            prep.formal_parameters
-                .entry(var)
-                .or_insert(expression.parameter);
-        }
-        r2il::refusal_evidence!(
-            "formal-identity",
-            "{} values are a formal, {exact} of them proved at entry, from {} parameter expressions",
-            prep.formal_parameters.len(),
-            addresses.parameter_expressions.len()
-        );
-    }
-
-    /// Refresh the cached decompiler-prep facts for the current SSA state.
-    pub fn refresh_decompile_prep_facts(&mut self) {
-        self.refresh_decompile_prep_facts_with_interface_and_control(
-            None,
-            &UncheckedSsaWorkControl,
-        )
-        .expect("unchecked decompiler fact collection cannot stop");
-    }
-
-    fn refresh_decompile_prep_facts_with_control<C: SsaWorkControl + ?Sized>(
-        &mut self,
-        control: &C,
-    ) -> Result<(), SsaExecutionStopReason> {
-        self.refresh_decompile_prep_facts_with_interface_and_control(None, control)
-    }
-
-    pub(crate) fn refresh_decompile_prep_facts_with_interface_and_control<
-        C: SsaWorkControl + ?Sized,
-    >(
-        &mut self,
-        function_interface: Option<&SourceFunctionInterface>,
-        control: &C,
-    ) -> Result<(), SsaExecutionStopReason> {
-        let mut facts =
-            self.collect_decompile_prep_facts_with_control(function_interface, control)?;
-        control.poll()?;
-        facts.revision = self.blocks.revision();
-        self.decompile_prep_facts = Some(facts);
-        self.prep_interface = function_interface.cloned();
-        Ok(())
     }
 }
 
@@ -779,4 +656,89 @@ fn lifted_cfg(
 ) -> Result<CFG, SsaPrepareError> {
     CFG::from_blocks_with_declared_successors(blocks, declared_successors)
         .ok_or_else(malformed_ssa_input)
+}
+
+/// One renamed block before its operations have ids: its address, size,
+/// phis, and each operation with where renaming says it came from.
+struct ShapedBlock {
+    addr: u64,
+    size: u32,
+    phis: Vec<PhiNode>,
+    ops: Vec<(SSAOp, crate::rename::RenamedOrigin)>,
+}
+
+/// Mint every operation of a freshly renamed function its id.
+///
+/// The lifted operations first, blocks in reverse postorder and each block's
+/// in lift order, so that ids `0..n` are the lift's own operations in R2IL
+/// order; then each block's phis and the operations renaming added, in the
+/// order they stand. Both walks are over vectors, so the numbering is a
+/// function of the IR alone.
+fn mint_renamed_blocks(shaped: Vec<ShapedBlock>) -> (OpArena, Vec<SSABlock>) {
+    use crate::arena::OpOrigin;
+    use crate::rename::RenamedOrigin;
+    let mut arena = OpArena::default();
+    let lifted = shaped
+        .iter()
+        .map(|ShapedBlock { addr, ops, .. }| {
+            ops.iter()
+                .filter_map(|(_, origin)| match *origin {
+                    RenamedOrigin::Lifted { index, instruction } => Some((
+                        index,
+                        arena.mint(OpOrigin::Lifted {
+                            block: *addr,
+                            index,
+                            instruction,
+                        }),
+                    )),
+                    _ => None,
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .collect::<Vec<_>>();
+    let blocks = shaped
+        .into_iter()
+        .zip(lifted)
+        .map(
+            |(
+                ShapedBlock {
+                    addr,
+                    size,
+                    phis,
+                    ops,
+                },
+                lifted,
+            )| {
+                let phis = phis
+                    .into_iter()
+                    .map(|phi| {
+                        let id = arena.mint(OpOrigin::Derived {
+                            from: None,
+                            pass: Pass::PhiPlacement,
+                        });
+                        (id, phi)
+                    })
+                    .collect();
+                let ops = ops
+                    .into_iter()
+                    .map(|(op, origin)| {
+                        let id = match origin {
+                            RenamedOrigin::Lifted { index, .. } => lifted[&index],
+                            RenamedOrigin::Derived { index } => arena.mint(OpOrigin::Derived {
+                                from: lifted.get(&index).copied(),
+                                pass: Pass::Rename,
+                            }),
+                            RenamedOrigin::Phi => arena.mint(OpOrigin::Derived {
+                                from: None,
+                                pass: Pass::PhiPlacement,
+                            }),
+                        };
+                        (id, op)
+                    })
+                    .collect();
+                SSABlock::from_sited(addr, size, ops, phis)
+            },
+        )
+        .collect();
+    (arena, blocks)
 }

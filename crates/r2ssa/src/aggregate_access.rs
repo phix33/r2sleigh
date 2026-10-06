@@ -123,9 +123,7 @@ fn exact_access_binding(
     access: &StructuredMemoryAccessFact,
     expected_space: SpaceId,
 ) -> Option<AggregateAccessBinding> {
-    if access.id.ordinal != 0
-        || graph.op_site_for_inst(access.id.inst) != Some((access.block_addr, access.op_index))
-    {
+    if access.id.ordinal != 0 {
         return None;
     }
     let instruction = graph.inst(access.id.inst)?;
@@ -133,26 +131,18 @@ fn exact_access_binding(
         return None;
     }
     match (&instruction.payload, access.is_write) {
-        (InstPayload::Op(SSAOp::Load { dst, space, addr }), false) => {
-            let address = graph.value_id_for_var(addr)?;
-            let result = graph.value_id_for_var(dst)?;
-            (*space == expected_space
-                && address == access.address
-                && access.value == Some(result)
-                && instruction.output == Some(result)
-                && dst.size == access.width)
-                .then_some(AggregateAccessBinding::Read { result })
-        }
-        (InstPayload::Op(SSAOp::Store { space, addr, val }), true) => {
-            let address = graph.value_id_for_var(addr)?;
-            let value = graph.value_id_for_var(val)?;
-            (*space == expected_space
-                && address == access.address
-                && access.value == Some(value)
-                && instruction.output.is_none()
-                && val.size == access.width)
-                .then_some(AggregateAccessBinding::Write { value })
-        }
+        (InstPayload::Op(SSAOp::Load { dst, space, addr }), false) => (*space == expected_space
+            && *addr == access.address
+            && access.value == Some(*dst)
+            && instruction.output == Some(*dst)
+            && graph.var(*dst).size == access.width)
+            .then_some(AggregateAccessBinding::Read { result: *dst }),
+        (InstPayload::Op(SSAOp::Store { space, addr, val }), true) => (*space == expected_space
+            && *addr == access.address
+            && access.value == Some(*val)
+            && instruction.output.is_none()
+            && graph.var(*val).size == access.width)
+            .then_some(AggregateAccessBinding::Write { value: *val }),
         _ => None,
     }
 }
@@ -172,10 +162,7 @@ pub(crate) fn collect_aggregate_access_projections(
     let revision = interface.revision_identity().to_vec().into_boxed_slice();
     let mut projections = BTreeMap::new();
     for (access_id, access) in accesses {
-        let Some(space) = machine_context.memory_space_at(access.block_addr, access.op_index)
-        else {
-            continue;
-        };
+        let space = access.space;
         if *access_id != access.id || !access.provenance_complete || space != SpaceId::Ram {
             continue;
         }
@@ -464,15 +451,14 @@ mod tests {
         block_addr: u64,
         matches: impl Fn(&crate::SSAOp) -> bool,
     ) -> crate::InstId {
-        let block = artifact.function().get_block(block_addr).expect("block");
-        let index = block
-            .ops
-            .iter()
-            .position(matches)
+        let block = artifact.function().named_block(block_addr).expect("block");
+        let (id, _) = block
+            .sited()
+            .find(|(_, op)| matches(op))
             .expect("an operation of the requested kind");
         artifact
             .graph()
-            .inst_id_for_op_site(block_addr, index)
+            .inst_for_op(id)
             .expect("instruction for the operation")
     }
 

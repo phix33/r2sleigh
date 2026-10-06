@@ -11,27 +11,22 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use r2ssa::SSAOp;
 use r2ssa::cfg::BlockTerminator;
 use r2ssa::domtree::DomTree;
+use r2ssa::natural_loops::NaturalLoop;
 
 use crate::ast::{CExpr, CStmt, SwitchCase, UnaryOp};
 use crate::structured_region::{StructuredRegionKind, StructuredRegionMarker};
 
 use super::{ControlFlowStructureResult, ControlFlowStructurer};
 
-/// One natural loop: the target of a back edge and everything that reaches a
-/// latch without passing through it.
-pub(crate) struct NaturalLoop {
-    pub(crate) header: u64,
-    pub(crate) body: BTreeSet<u64>,
-    pub(crate) latches: BTreeSet<u64>,
-}
-
 /// Where every block and every edge of a function goes, decided before any
 /// text is written.
-pub(crate) struct Placement {
+pub(crate) struct Placement<'f> {
     entry: u64,
-    dom: DomTree,
+    /// The function's own dominator tree; placement computes none.
+    dom: &'f DomTree,
     rpo: HashMap<u64, usize>,
-    loops: Vec<NaturalLoop>,
+    /// The function's natural loops, outermost first.
+    loops: Vec<&'f NaturalLoop>,
     /// The loops containing each block, outermost first.
     loops_of: HashMap<u64, Vec<usize>>,
     header_of: HashMap<u64, usize>,
@@ -45,11 +40,11 @@ pub(crate) struct Placement {
     labelled: BTreeSet<u64>,
 }
 
-impl Placement {
-    pub(crate) fn compute(func: &r2ssa::RewrittenFunction<'_>) -> Self {
+impl<'f> Placement<'f> {
+    pub(crate) fn compute(func: &'f r2ssa::RewrittenFunction<'_>) -> Self {
         let cfg = func.cfg();
         let entry = func.root();
-        let dom = DomTree::compute(cfg);
+        let dom = func.domtree();
         let rpo: HashMap<u64, usize> = cfg
             .reverse_postorder()
             .into_iter()
@@ -65,44 +60,7 @@ impl Placement {
         let placed = |addr: u64| placed_set.contains(&addr);
         let is_back_edge = |from: u64, to: u64| dom.dominates(to, from);
 
-        // Natural loops, one per header, from the back edges.
-        let mut by_header = BTreeMap::<u64, NaturalLoop>::new();
-        for from in cfg.block_addrs() {
-            if !placed(from) {
-                continue;
-            }
-            for to in cfg.successors(from) {
-                if !is_back_edge(from, to) {
-                    continue;
-                }
-                let entry = by_header.entry(to).or_insert_with(|| NaturalLoop {
-                    header: to,
-                    body: BTreeSet::from([to]),
-                    latches: BTreeSet::new(),
-                });
-                entry.latches.insert(from);
-                let mut pending = vec![from];
-                while let Some(block) = pending.pop() {
-                    if !entry.body.insert(block) {
-                        continue;
-                    }
-                    pending.extend(
-                        cfg.predecessors(block)
-                            .into_iter()
-                            .filter(|pred| placed(*pred)),
-                    );
-                }
-            }
-        }
-        let mut loops: Vec<NaturalLoop> = by_header.into_values().collect();
-        // Outermost first: two natural loops are disjoint or nested, so size
-        // orders nesting.
-        loops.sort_by(|a, b| {
-            b.body
-                .len()
-                .cmp(&a.body.len())
-                .then(a.header.cmp(&b.header))
-        });
+        let loops = func.natural_loops().outermost_first();
         let header_of: HashMap<u64, usize> = loops
             .iter()
             .enumerate()
@@ -180,7 +138,7 @@ impl Placement {
         placement
     }
 
-    pub(crate) fn loops(&self) -> &[NaturalLoop] {
+    pub(crate) fn loops(&self) -> &[&'f NaturalLoop] {
         &self.loops
     }
 
@@ -345,7 +303,7 @@ impl ControlFlowStructurer<'_, '_> {
         // Materialised merge copies can follow the call, so the terminating
         // operation is the last call, not the last operation.
         let last_call = block
-            .ops
+            .ops()
             .iter()
             .rposition(|op| matches!(op, SSAOp::Call { .. }));
         let Some(last) = last_call else {
@@ -454,7 +412,7 @@ impl ControlFlowStructurer<'_, '_> {
             .callsites
             .values()
             .any(|certificate| {
-                certificate.block_addr == from
+                prepared.graph().block_addr_of(certificate.at) == Some(from)
                     && certificate.transfer == r2ssa::CallSiteTransfer::TailCall
             })
     }
@@ -623,7 +581,7 @@ impl ControlFlowStructurer<'_, '_> {
     /// `switch` on the target address is exact where no selector is certified.
     fn dispatch_operand_expr(&mut self, addr: u64) -> Option<CExpr> {
         let block = self.func.get_block(addr)?;
-        let target = block.ops.iter().find_map(|op| match op {
+        let target = block.ops().iter().find_map(|op| match op {
             SSAOp::BranchInd { target, .. } => Some(target.clone()),
             _ => None,
         })?;

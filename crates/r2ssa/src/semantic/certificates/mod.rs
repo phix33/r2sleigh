@@ -84,6 +84,13 @@ pub struct ForLoopCertificate {
 /// only be decided once its readers are known. The selector stops the walk
 /// twice over -- the switch spells it, and the guard that bounds the index
 /// reads it too.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 fn dispatch_operations(
     graph: &crate::SsaGraph,
     block_addr: u64,
@@ -106,15 +113,18 @@ fn dispatch_operations(
     }) else {
         return Vec::new();
     };
-    let mut found = vec![transfer];
-    loop {
-        let candidates: Vec<ValueId> = found
-            .iter()
-            .filter_map(|inst| graph.inst(*inst))
-            .flat_map(|inst| inst.inputs.iter().copied())
-            .collect();
-        let mut grew = false;
-        for value in candidates {
+    // The operations of this block the transfer is computed by, other than
+    // the selector: a definition joins once every use of its value is an
+    // operation already found. A worklist: each value keeps the uses not
+    // yet found, and its definition joins when the last one is.
+    let mut found = BTreeSet::from([transfer]);
+    let mut outstanding = crate::dense::IdMap::<ValueId, BTreeSet<InstId>>::default();
+    let mut pending = vec![transfer];
+    while let Some(inst) = pending.pop() {
+        let Some(inputs) = graph.inst(inst).map(|inst| inst.inputs.clone()) else {
+            continue;
+        };
+        for value in inputs {
             if selector == Some(value) {
                 continue;
             }
@@ -123,22 +133,23 @@ fn dispatch_operations(
             };
             if found.contains(&definition)
                 || graph.inst(definition).map(|inst| inst.block) != Some(block.id)
-                || !graph
-                    .use_sites(value)
-                    .iter()
-                    .all(|site| found.contains(&site.inst))
             {
                 continue;
             }
-            found.push(definition);
-            grew = true;
-        }
-        if !grew {
-            break;
+            let uses = outstanding.get_or_insert_with(value, || {
+                graph
+                    .use_sites(value)
+                    .iter()
+                    .map(|site| site.inst)
+                    .collect()
+            });
+            uses.remove(&inst);
+            if uses.iter().all(|user| found.contains(user)) && found.insert(definition) {
+                pending.push(definition);
+            }
         }
     }
-    found.sort_unstable();
-    found
+    found.into_iter().collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,8 +251,6 @@ pub struct ExpressionCertificate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryAccessCertificate {
     pub access: StructuredAccessId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub space: SpaceId,
     pub object: ObjectId,
     pub address: ValueId,
@@ -275,10 +284,10 @@ pub struct StackSlotCertificate {
     /// A load whose reaching memory version is one store, at the slot's own
     /// location and width, holds what that store wrote; so does a copy of it.
     /// Rendering them and the slot as one variable asserts only that equality.
-    pub reload_values: BTreeSet<ValueId>,
+    pub reload_values: crate::dense::IdSet<ValueId>,
     /// Values a full-width store writes into the slot. Each is offered to the
     /// slot's object on its own, judged by identity and liveness.
-    pub stored_values: BTreeSet<ValueId>,
+    pub stored_values: crate::dense::IdSet<ValueId>,
     /// Exact proof that a source-less object lies wholly inside storage owned
     /// by this callee at every access. This is deliberately separate from a
     /// source slot: compiler-created spills and temporaries are real machine
@@ -293,8 +302,6 @@ pub struct StackSlotCertificate {
 pub struct CallsiteCertificate {
     pub call_site: CallSiteId,
     pub at: InstId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub target: ValueId,
     pub direct_target: Option<u64>,
     pub fallthrough: Option<u64>,
@@ -371,29 +378,29 @@ pub struct PreparedFunctionCertificates {
     pub loops: BTreeMap<LoopId, LoopCertificate>,
     pub switches: BTreeMap<u64, SwitchCertificate>,
     pub if_regions: BTreeMap<PredicateId, IfRegionCertificate>,
-    pub expressions: BTreeMap<ValueId, ExpressionCertificate>,
+    pub expressions: crate::dense::IdMap<ValueId, ExpressionCertificate>,
     pub memory_accesses: BTreeMap<StructuredAccessId, MemoryAccessCertificate>,
-    pub memory_accesses_by_op: BTreeMap<(u64, usize, bool), Vec<StructuredAccessId>>,
+    /// The accesses one instruction performs, by direction.
+    pub memory_accesses_by_inst: BTreeMap<(InstId, bool), Vec<StructuredAccessId>>,
     pub stack_slots: BTreeMap<ObjectId, StackSlotCertificate>,
     pub stack_frame_round_trips: BTreeMap<ObjectId, StackFrameRoundTripCertificate>,
-    pub stack_frame_round_trip_by_inst: BTreeMap<InstId, ObjectId>,
+    pub stack_frame_round_trip_by_inst: crate::dense::IdMap<InstId, ObjectId>,
     /// Accesses that together leave the object exactly as they found it.
     pub memory_round_trips: BTreeMap<StructuredAccessId, MemoryRoundTripCertificate>,
     pub stack_geometry: StackGeometryCertificate,
-    pub machine_return_controls: BTreeMap<InstId, MachineReturnControlCertificate>,
-    pub machine_return_control_by_inst: BTreeMap<InstId, InstId>,
+    pub machine_return_controls: crate::dense::IdMap<InstId, MachineReturnControlCertificate>,
+    pub machine_return_control_by_inst: crate::dense::IdMap<InstId, InstId>,
     pub callsites: BTreeMap<CallSiteId, CallsiteCertificate>,
-    pub callsites_by_inst: BTreeMap<InstId, CallSiteId>,
     /// Every call's return-address store, for the ledgers that ask per op.
-    pub call_return_address_stores: BTreeSet<InstId>,
-    pub call_results: BTreeMap<ValueId, CallResultCertificate>,
-    pub call_results_by_inst: BTreeMap<InstId, ValueId>,
+    pub call_return_address_stores: crate::dense::IdSet<InstId>,
+    pub call_results: crate::dense::IdMap<ValueId, CallResultCertificate>,
+    pub call_results_by_inst: crate::dense::IdMap<InstId, ValueId>,
     pub call_results_by_callsite: BTreeMap<CallSiteId, Vec<ValueId>>,
-    pub stack_reloads: BTreeMap<ValueId, StackReloadSourceCertificate>,
+    pub stack_reloads: crate::dense::IdMap<ValueId, StackReloadSourceCertificate>,
     pub returns: Vec<ReturnValueCertificate>,
-    pub returns_by_inst: BTreeMap<InstId, usize>,
+    pub returns_by_inst: crate::dense::IdMap<InstId, usize>,
     /// Merges of two values that the one condition above them selects between.
-    pub two_way_selections: BTreeMap<InstId, TwoWaySelectionCertificate>,
+    pub two_way_selections: crate::dense::IdMap<InstId, TwoWaySelectionCertificate>,
     pub failures: Vec<PreparedProofFailure>,
 }
 
@@ -474,6 +481,13 @@ pub(crate) fn stack_array_element_index(
 }
 
 /// Decide array geometry once, beside the object and memory facts that own it.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub(crate) fn stack_array_layout(
     graph: &SsaGraph,
     values: &crate::values::ValueRanges,
@@ -611,6 +625,13 @@ pub(crate) fn stack_array_layout(
     })
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn counted_for_loop_certificate(
     function: &SSAFunction,
     graph: &SsaGraph,
@@ -630,7 +651,7 @@ pub(crate) fn counted_for_loop_certificate(
     let lhs_reads = dependence_cone(graph, comparison.lhs);
     let rhs_reads = dependence_cone(graph, comparison.rhs);
     let (carrier, induction) = loop_fact.carriers.iter().find_map(|carrier| {
-        let induction = structured.inductions.get(&carrier.phi)?;
+        let induction = structured.inductions.get(carrier.phi)?;
         (lhs_reads.contains(&carrier.phi) != rhs_reads.contains(&carrier.phi))
             .then_some((carrier, induction))
     })?;
@@ -700,17 +721,18 @@ pub(crate) fn movable_for_clause_value(
     if function.successors(block_addr).as_slice() != [loop_header] {
         return false;
     }
-    let Some((definition_block, op_index)) = graph
-        .def_inst(value)
-        .and_then(|inst| graph.op_site_for_inst(inst))
-    else {
+    let Some(definition) = graph.def_inst(value) else {
         return false;
     };
-    definition_block == block_addr
+    let Some(op) = graph.op_for_inst(definition) else {
+        return false;
+    };
+    graph.block_addr_of(definition) == Some(block_addr)
         && function.get_block(block_addr).is_some_and(|block| {
-            let Some(suffix) = op_index
-                .checked_add(1)
-                .and_then(|start| block.ops.get(start..))
+            let Some(suffix) = block
+                .position(op)
+                .and_then(|index| index.checked_add(1))
+                .and_then(|start| block.ops().get(start..))
             else {
                 return false;
             };
@@ -731,6 +753,7 @@ pub(crate) fn collect_prepared_function_certificates(
 ) -> PreparedFunctionCertificates {
     let Body {
         function,
+        prep,
         graph,
         machine_context,
     } = body;
@@ -805,7 +828,8 @@ pub(crate) fn collect_prepared_function_certificates(
         })
         .collect();
 
-    let renderable_expressions = collect_renderable_expression_values(function, graph, structured);
+    let renderable_expressions =
+        collect_renderable_expression_values(function, prep, graph, structured);
     let expressions = graph
         .values
         .iter()
@@ -822,27 +846,25 @@ pub(crate) fn collect_prepared_function_certificates(
                     defining_inst,
                     inputs,
                     width: value.var.size,
-                    renderable: renderable_expressions.contains(&value.id),
+                    renderable: renderable_expressions.contains(value.id),
                 },
             )
         })
         .collect();
 
-    let mut memory_accesses_by_op = BTreeMap::<(u64, usize, bool), Vec<StructuredAccessId>>::new();
+    let mut memory_accesses_by_inst = BTreeMap::<(InstId, bool), Vec<StructuredAccessId>>::new();
     let memory_accesses = structured
         .memory_accesses
         .iter()
         .map(|(id, fact)| {
-            memory_accesses_by_op
-                .entry((fact.block_addr, fact.op_index, fact.is_write))
+            memory_accesses_by_inst
+                .entry((id.inst, fact.is_write))
                 .or_default()
                 .push(*id);
             (
                 *id,
                 MemoryAccessCertificate {
                     access: *id,
-                    block_addr: fact.block_addr,
-                    op_index: fact.op_index,
                     space: fact.space,
                     object: fact.object,
                     address: fact.address,
@@ -868,6 +890,7 @@ pub(crate) fn collect_prepared_function_certificates(
         .collect::<BTreeMap<_, _>>();
     let callee_stack_allocations = collect_callee_stack_allocation_certificates(
         function,
+        prep,
         graph,
         machine_context,
         objects,
@@ -912,7 +935,7 @@ pub(crate) fn collect_prepared_function_certificates(
         );
     let stack_geometry = collect_stack_geometry_certificate(
         boundaries,
-        function,
+        prep,
         graph,
         objects,
         structured,
@@ -1023,8 +1046,8 @@ pub(crate) fn collect_prepared_function_certificates(
                             .cloned()
                             .unwrap_or(StackArrayLayoutDisposition::NotIndexed),
                         source_slot: exact_stack_slots.get(&(base, offset)).copied(),
-                        reload_values: BTreeSet::new(),
-                        stored_values: BTreeSet::new(),
+                        reload_values: crate::dense::IdSet::default(),
+                        stored_values: crate::dense::IdSet::default(),
                         callee_allocation: callee_stack_allocations.get(object).cloned(),
                     },
                 ))
@@ -1048,7 +1071,8 @@ pub(crate) fn collect_prepared_function_certificates(
     let stack_pointer = machine_context
         .filter(|context| context.call_moves_stack_pointer())
         .and_then(SourceMachineContext::stack_pointer_carrier);
-    let mut constant_stack_stores: BTreeMap<crate::BlockId, Vec<(usize, InstId)>> = BTreeMap::new();
+    let mut constant_stack_stores =
+        crate::dense::IdMap::<crate::BlockId, Vec<(usize, InstId)>>::default();
     if let Some(stack_pointer) = stack_pointer {
         for inst in &graph.insts {
             let InstPayload::Op(SSAOp::Store { val, .. }) = &inst.payload else {
@@ -1060,10 +1084,9 @@ pub(crate) fn collect_prepared_function_certificates(
                     .and_then(|value| value.canonical_storage)
                     .is_some_and(|storage| storage.location() == stack_pointer.location())
             });
-            if val.constant_bits().is_some() && through_stack_pointer {
+            if graph.var(*val).constant_bits().is_some() && through_stack_pointer {
                 constant_stack_stores
-                    .entry(inst.block)
-                    .or_default()
+                    .get_or_insert_with(inst.block, Default::default)
                     .push((inst.ordinal, inst.id));
             }
         }
@@ -1071,20 +1094,19 @@ pub(crate) fn collect_prepared_function_certificates(
     let return_address_store_before = |call: InstId| {
         let call = graph.inst(call)?;
         constant_stack_stores
-            .get(&call.block)?
+            .get(call.block)?
             .iter()
             .filter(|(ordinal, _)| *ordinal < call.ordinal)
             .max_by_key(|(ordinal, _)| *ordinal)
             .map(|(_, inst)| *inst)
     };
-    let mut callsites_by_inst = BTreeMap::new();
     let callsites = call_sites
         .by_id
         .iter()
         .map(|(id, fact)| {
-            let (block_addr, op_index) = graph.op_site_for_inst(fact.at).unwrap_or_default();
             let stack_argument_values = collect_stack_call_argument_values(
                 function,
+                prep,
                 graph,
                 objects,
                 structured,
@@ -1098,7 +1120,7 @@ pub(crate) fn collect_prepared_function_certificates(
             // The arguments are certified wherever they were proved, whatever became of the results.
             let complete_arguments = boundary.filter(|boundary| boundary.arguments_complete);
             let (mut argument_certificates, declared_stack_arguments) = complete_arguments
-                .map(|boundary| exact_register_call_arguments(boundary, graph))
+                .map(|boundary| exact_register_call_arguments(boundary, graph, machine_context))
                 .unwrap_or_default();
             // A stack argument the prototype declared: the boundary proved
             // which value reaches which coordinate, and the outgoing-store
@@ -1144,7 +1166,8 @@ pub(crate) fn collect_prepared_function_certificates(
                     None => {
                         r2il::refusal_evidence!(
                             "call-argument-stack-object",
-                            "callsite ({block_addr:#x}, {op_index}) argument {} at entry offset {} has no outgoing store object among {:?}",
+                            "callsite {:?} argument {} at entry offset {} has no outgoing store object among {:?}",
+                            fact.at,
                             declared.index,
                             declared.entry_offset,
                             stack_argument_values
@@ -1202,14 +1225,11 @@ pub(crate) fn collect_prepared_function_certificates(
                 boundary.map_or((false, false), |boundary| {
                     (boundary.arguments_complete, boundary.results_complete)
                 });
-            callsites_by_inst.insert(fact.at, *id);
             (
                 *id,
                 CallsiteCertificate {
                     call_site: *id,
                     at: fact.at,
-                    block_addr,
-                    op_index,
                     target: fact.target,
                     direct_target: fact.direct_target,
                     fallthrough: fact.fallthrough,
@@ -1233,13 +1253,12 @@ pub(crate) fn collect_prepared_function_certificates(
     let call_return_address_stores = callsites
         .values()
         .filter_map(|certificate: &CallsiteCertificate| certificate.return_address_store)
-        .collect::<BTreeSet<_>>();
+        .collect::<crate::dense::IdSet<_>>();
 
     let (call_results, call_results_by_inst, call_results_by_callsite) =
         collect_call_result_certificates(body, derived);
     let stack_reloads = collect_stack_reload_source_certificates(
-        function,
-        graph,
+        body,
         objects,
         memory,
         &structured.memory_accesses,
@@ -1315,7 +1334,7 @@ pub(crate) fn collect_prepared_function_certificates(
         if_regions,
         expressions,
         memory_accesses,
-        memory_accesses_by_op,
+        memory_accesses_by_inst,
         memory_round_trips,
         stack_slots,
         stack_frame_round_trips,
@@ -1324,7 +1343,6 @@ pub(crate) fn collect_prepared_function_certificates(
         machine_return_controls,
         machine_return_control_by_inst,
         callsites,
-        callsites_by_inst,
         call_return_address_stores,
         call_results,
         call_results_by_inst,
@@ -1337,9 +1355,51 @@ pub(crate) fn collect_prepared_function_certificates(
     }
 }
 
+/// Whether a value is what a register slot holds: its storage, a root whose low lane it is, an entry lane's projection, or a lane inserted there (B3).
+fn holds(
+    graph: &SsaGraph,
+    machine_context: Option<&SourceMachineContext>,
+    value: &crate::graph::GraphValue,
+    storage: CanonicalStorageId,
+) -> bool {
+    if let Some(own) = value.canonical_storage
+        && own.space == CanonicalStorageSpace::Register
+    {
+        return own == storage
+            || machine_context.is_some_and(|context| context.is_low_lane_of(storage, own));
+    }
+    if graph.formal_projection_storage(value.id) == Some(storage) {
+        return true;
+    }
+    // A temporary names no register: it holds the slot where an insert puts it there.
+    graph.use_sites(value.id).iter().any(|site| {
+        let Some(inst) = graph.inst(site.inst) else {
+            return false;
+        };
+        let crate::graph::InstPayload::Op(crate::op::SSAOp::Insert(insert)) = &inst.payload else {
+            return false;
+        };
+        let root = inst
+            .output
+            .and_then(|out| graph.value(out)?.canonical_storage);
+        let position = graph
+            .value(insert.position)
+            .and_then(|position| position.var.constant_bits());
+        let (Some(root), Some(bits)) = (root, position) else {
+            return false;
+        };
+        insert.value == value.id
+            && bits % 8 == 0
+            && root.space == storage.space
+            && root.offset.checked_add(bits / 8) == Some(storage.offset)
+            && value.var.size == storage.size
+    })
+}
+
 pub(crate) fn exact_register_call_arguments(
     boundary: &SourceCallBoundaryFact,
     graph: &SsaGraph,
+    machine_context: Option<&SourceMachineContext>,
 ) -> (Vec<CallArgumentCertificate>, Vec<BoundaryStackArgument>) {
     macro_rules! give_up {
         ($reason:literal $(, $arg:expr)* $(,)?) => {{
@@ -1382,7 +1442,7 @@ pub(crate) fn exact_register_call_arguments(
         let Some(graph_value) = graph.value(value) else {
             give_up!("slot {} value {:?} is not in the graph", index, value);
         };
-        if graph_value.canonical_storage != Some(storage) {
+        if !holds(graph, machine_context, graph_value, storage) {
             give_up!(
                 "slot {} wants {:?} but {:?} is at {:?}",
                 index,

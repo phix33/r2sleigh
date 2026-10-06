@@ -3,20 +3,20 @@
 //! This module applies a sequence of lightweight, SSA-safe optimizations
 //! intended to simplify analysis and decompilation output.
 
-use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 
-use crate::control::{SsaExecutionStopReason, SsaWorkControl, UncheckedSsaWorkControl};
+use crate::control::{SsaExecutionStopReason, SsaWorkControl};
+use crate::dense::{Csr, IdMap, IdSet, IdVec};
+use crate::function::{EditPlan, ShapeEdit};
+use crate::value_table::{Minting, VarId};
 use crate::{
     BlockTerminator, CanonicalStorageId, CanonicalStorageSpace, PhiNode, SSAFunction, SSAOp,
-    SSAVar, SourceCarrierKind, SourceFunctionInterface, SourceFunctionReturn, SourceSite,
-    SourceTypeKind,
+    SourceCarrierKind, SourceFunctionInterface, SourceFunctionReturn, SourceSite, SourceTypeKind,
 };
 
 /// Configuration for SSA optimization passes.
 #[derive(Debug, Clone)]
 pub struct OptimizationConfig {
-    pub max_iterations: usize,
     pub enable_sccp: bool,
     pub enable_inst_combine: bool,
     pub preserve_memory_reads: bool,
@@ -29,14 +29,12 @@ pub struct OptimizationConfig {
 /// simplification passes and only allows explicitly opted-in transforms.
 #[derive(Debug, Clone)]
 pub struct DecompilePrepConfig {
-    pub max_iterations: usize,
     pub enable_inst_combine: bool,
 }
 
 impl Default for OptimizationConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 4,
             enable_sccp: true,
             enable_inst_combine: true,
             preserve_memory_reads: false,
@@ -47,7 +45,6 @@ impl Default for OptimizationConfig {
 impl Default for DecompilePrepConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 1,
             enable_inst_combine: true,
         }
     }
@@ -56,7 +53,6 @@ impl Default for DecompilePrepConfig {
 impl From<&DecompilePrepConfig> for OptimizationConfig {
     fn from(value: &DecompilePrepConfig) -> Self {
         Self {
-            max_iterations: value.max_iterations.max(1),
             enable_sccp: false,
             enable_inst_combine: value.enable_inst_combine,
             preserve_memory_reads: true,
@@ -77,8 +73,12 @@ pub struct OptimizationStats {
 }
 
 /// Run the SSA optimization pipeline on a function.
-pub fn optimize_function(func: &mut SSAFunction, config: &OptimizationConfig) -> OptimizationStats {
-    optimize_function_with_control(func, config, &UncheckedSsaWorkControl)
+#[cfg(test)]
+pub(crate) fn optimize_function(
+    func: &mut SSAFunction,
+    config: &OptimizationConfig,
+) -> OptimizationStats {
+    optimize_function_with_control(func, config, &crate::control::UncheckedSsaWorkControl)
         .expect("unchecked SSA optimization cannot stop")
 }
 
@@ -87,36 +87,51 @@ pub(crate) fn optimize_function_with_control<C: SsaWorkControl + ?Sized>(
     config: &OptimizationConfig,
     control: &C,
 ) -> Result<OptimizationStats, SsaExecutionStopReason> {
-    optimize_function_with_interface_and_control(func, config, None, control)
+    optimize_function_with_return_and_control(func, config, None, control)
 }
 
-pub(crate) fn optimize_function_with_interface_and_control<C: SsaWorkControl + ?Sized>(
+/// Optimise, keeping every source of a merge of `return_carrier` in a
+/// returning block as it is: what the function hands back is read whole
+/// there, so a constant folded into one source is no longer a value of
+/// the carrier the caller reads.
+pub(crate) fn optimize_function_with_return_and_control<C: SsaWorkControl + ?Sized>(
     func: &mut SSAFunction,
     config: &OptimizationConfig,
-    function_interface: Option<&SourceFunctionInterface>,
+    return_carrier: Option<CanonicalStorageId>,
     control: &C,
 ) -> Result<OptimizationStats, SsaExecutionStopReason> {
     control.poll()?;
     let mut stats = OptimizationStats::default();
-    let max_iters = config.max_iterations.max(1);
-
     // Constants and folds feed each other: a fold through a definition can
     // turn a lane read into a constant copy, which is a constant the next
-    // propagation round carries to its readers. Both run until neither moves.
-    for _ in 0..max_iters {
+    // propagation round carries to its readers. The passes run in one stated
+    // order until a round moves nothing (doc/adr-fixpoint.md, K3). A round
+    // that moves rewrites at least one operation, so the rounds are budgeted
+    // by the operations; every round preserves the function's meaning, so a
+    // run that meets the budget leaves a correct function, less simplified,
+    // and says so.
+    let budget = func
+        .blocks()
+        .iter()
+        .map(|block| block.ops().len())
+        .sum::<usize>()
+        .saturating_add(1);
+    loop {
+        if stats.iterations >= budget {
+            r2il::refusal_evidence!(
+                "optimize",
+                "{:#x}: still moving after {budget} rounds",
+                func.entry
+            );
+            break;
+        }
         control.poll()?;
         let mut changed = false;
 
         if config.enable_sccp {
             let (consts, executable_edges) = sccp_with_control(func, control)?;
             control.poll()?;
-            if apply_sccp_results(
-                func,
-                &consts,
-                &executable_edges,
-                function_interface,
-                &mut stats,
-            ) {
+            if apply_sccp_results(func, &consts, &executable_edges, return_carrier, &mut stats) {
                 changed = true;
             }
         }
@@ -146,15 +161,10 @@ pub(crate) fn optimize_function_with_interface_and_control<C: SsaWorkControl + ?
     Ok(stats)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct VarKey {
-    name: String,
-    version: u32,
-    size: u32,
-    rename_disambiguator: u32,
-}
+/// An operation as the function holds it: operands are the function's ids.
+type Op = SSAOp<VarId>;
 
-type SccpResult = (HashMap<VarKey, u64>, HashSet<(u64, u64)>);
+type SccpResult = (IdMap<VarId, u64>, HashSet<(u64, u64)>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LatticeValue {
@@ -185,42 +195,19 @@ enum UseLocation {
     Op { block_addr: u64, op_idx: usize },
 }
 
-impl VarKey {
-    fn from_var(var: &SSAVar) -> Self {
-        Self {
-            name: var.name().to_string(),
-            version: var.version,
-            size: var.size,
-            rename_disambiguator: var.rename_disambiguator(),
-        }
-    }
+/// The constant a variable is spelled as, where it is one.
+fn const_value(values: &Minting<'_>, id: VarId) -> Option<u64> {
+    values.var(id).constant_bits()
 }
 
-impl Ord for VarKey {
-    fn cmp(&self, other: &Self) -> Ordering {
-        (
-            self.name.as_str(),
-            self.version,
-            self.size,
-            self.rename_disambiguator,
-        )
-            .cmp(&(
-                other.name.as_str(),
-                other.version,
-                other.size,
-                other.rename_disambiguator,
-            ))
-    }
+/// A variable's width in bytes.
+fn width(values: &Minting<'_>, id: VarId) -> u32 {
+    values.var(id).size
 }
 
-impl PartialOrd for VarKey {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-fn build_use_map(func: &SSAFunction) -> HashMap<VarKey, Vec<UseLocation>> {
-    let mut uses = HashMap::new();
+/// Every read of each variable, in block order: a compressed row per id.
+fn build_use_map(func: &SSAFunction) -> Csr<VarId, UseLocation> {
+    let mut uses = Vec::new();
     for block in func.blocks() {
         block.for_each_source(|src| {
             let use_loc = match src.site {
@@ -233,48 +220,49 @@ fn build_use_map(func: &SSAFunction) -> HashMap<VarKey, Vec<UseLocation>> {
                     op_idx,
                 },
             };
-            uses.entry(VarKey::from_var(src.var))
-                .or_insert_with(Vec::new)
-                .push(use_loc);
+            uses.push((*src.var, use_loc));
         });
     }
-    uses
+    Csr::from_pairs(func.values().len(), uses)
 }
 
-fn get_lattice_value(var: &SSAVar, lattice: &HashMap<VarKey, LatticeValue>) -> LatticeValue {
-    if let Some(val) = const_value(var) {
+fn get_lattice_value(
+    values: &Minting<'_>,
+    id: VarId,
+    lattice: &IdVec<VarId, LatticeValue>,
+) -> LatticeValue {
+    if let Some(val) = const_value(values, id) {
         return LatticeValue::Const(val);
     }
-    lattice
-        .get(&VarKey::from_var(var))
-        .copied()
-        .unwrap_or(LatticeValue::Top)
+    lattice[id]
 }
 
-fn init_if_input(var: &SSAVar, lattice: &mut HashMap<VarKey, LatticeValue>) {
-    if var.version == 0 && var.constant_bits().is_none() {
-        lattice
-            .entry(VarKey::from_var(var))
-            .or_insert(LatticeValue::Bottom);
+fn init_if_input(values: &Minting<'_>, id: VarId, lattice: &mut IdVec<VarId, LatticeValue>) {
+    let var = values.var(id);
+    if var.version == 0 && var.constant_bits().is_none() && lattice[id] == LatticeValue::Top {
+        lattice[id] = LatticeValue::Bottom;
     }
 }
 
 fn update_lattice(
-    lattice: &mut HashMap<VarKey, LatticeValue>,
-    var: &SSAVar,
+    lattice: &mut IdVec<VarId, LatticeValue>,
+    id: VarId,
     new_val: LatticeValue,
 ) -> bool {
-    let key = VarKey::from_var(var);
-    let old_val = lattice.get(&key).copied().unwrap_or(LatticeValue::Top);
+    let old_val = lattice[id];
     let merged = old_val.meet(new_val);
     if merged != old_val {
-        lattice.insert(key, merged);
+        lattice[id] = merged;
         return true;
     }
     false
 }
 
-fn evaluate_op_sccp(op: &SSAOp, lattice: &HashMap<VarKey, LatticeValue>) -> LatticeValue {
+fn evaluate_op_sccp(
+    op: &Op,
+    values: &Minting<'_>,
+    lattice: &IdVec<VarId, LatticeValue>,
+) -> LatticeValue {
     if matches!(
         op,
         SSAOp::Load { .. }
@@ -290,21 +278,22 @@ fn evaluate_op_sccp(op: &SSAOp, lattice: &HashMap<VarKey, LatticeValue>) -> Latt
 
     let mut has_top = false;
     let mut has_bottom = false;
-    let mut temp_consts = HashMap::new();
     for src in op.sources() {
-        match get_lattice_value(src, lattice) {
+        match get_lattice_value(values, *src, lattice) {
             LatticeValue::Bottom => has_bottom = true,
             LatticeValue::Top => has_top = true,
-            LatticeValue::Const(c) => {
-                temp_consts.insert(VarKey::from_var(src), c);
-            }
+            LatticeValue::Const(_) => {}
         }
     }
 
     // An absorbing constant decides the result without the other operand,
     // so it is tried before an unknown operand is allowed to make the
     // result unknown; the evaluator answers only from the constants it has.
-    if let Some(c) = eval_const_op(op, &temp_consts) {
+    let known = |id: VarId| match get_lattice_value(values, id, lattice) {
+        LatticeValue::Const(c) => Some(c),
+        LatticeValue::Top | LatticeValue::Bottom => None,
+    };
+    if let Some(c) = eval_const_op(op, values, known) {
         return LatticeValue::Const(c);
     }
     if has_bottom {
@@ -317,9 +306,10 @@ fn evaluate_op_sccp(op: &SSAOp, lattice: &HashMap<VarKey, LatticeValue>) -> Latt
 }
 
 fn evaluate_phi_sccp(
-    phi: &PhiNode,
+    phi: &PhiNode<VarId>,
     executable: &HashSet<(u64, u64)>,
-    lattice: &HashMap<VarKey, LatticeValue>,
+    values: &Minting<'_>,
+    lattice: &IdVec<VarId, LatticeValue>,
     block_addr: u64,
 ) -> LatticeValue {
     let mut value = LatticeValue::Top;
@@ -327,22 +317,23 @@ fn evaluate_phi_sccp(
         if !executable.contains(&(*pred_addr, block_addr)) {
             continue;
         }
-        value = value.meet(get_lattice_value(src, lattice));
+        value = value.meet(get_lattice_value(values, *src, lattice));
     }
     value
 }
 
 fn find_cbranch_condition(
     func: &SSAFunction,
+    values: &Minting<'_>,
     block_addr: u64,
-    lattice: &HashMap<VarKey, LatticeValue>,
+    lattice: &IdVec<VarId, LatticeValue>,
 ) -> LatticeValue {
     let Some(block) = func.get_block(block_addr) else {
         return LatticeValue::Bottom;
     };
-    for op in block.ops.iter().rev() {
+    for op in block.ops().iter().rev() {
         if let SSAOp::CBranch { cond, .. } = op {
-            return get_lattice_value(cond, lattice);
+            return get_lattice_value(values, *cond, lattice);
         }
     }
     LatticeValue::Bottom
@@ -350,8 +341,9 @@ fn find_cbranch_condition(
 
 fn evaluate_terminator_sccp(
     func: &SSAFunction,
+    values: &Minting<'_>,
     block_addr: u64,
-    lattice: &HashMap<VarKey, LatticeValue>,
+    lattice: &IdVec<VarId, LatticeValue>,
     cfg_worklist: &mut VecDeque<(u64, u64)>,
 ) {
     let Some(cfg_block) = func.cfg().get_block(block_addr) else {
@@ -362,7 +354,7 @@ fn evaluate_terminator_sccp(
         BlockTerminator::ConditionalBranch {
             true_target,
             false_target,
-        } => match find_cbranch_condition(func, block_addr, lattice) {
+        } => match find_cbranch_condition(func, values, block_addr, lattice) {
             LatticeValue::Const(0) => cfg_worklist.push_back((block_addr, *false_target)),
             LatticeValue::Const(_) => cfg_worklist.push_back((block_addr, *true_target)),
             LatticeValue::Top | LatticeValue::Bottom => {
@@ -379,136 +371,184 @@ fn evaluate_terminator_sccp(
 }
 
 #[cfg(test)]
-fn sccp(func: &SSAFunction) -> (HashMap<VarKey, u64>, HashSet<(u64, u64)>) {
-    sccp_with_control(func, &UncheckedSsaWorkControl).expect("unchecked SCCP cannot stop")
+fn sccp(func: &SSAFunction) -> SccpResult {
+    sccp_with_control(func, &crate::control::UncheckedSsaWorkControl)
+        .expect("unchecked SCCP cannot stop")
 }
 
+/// The state of one SCCP run: the lattice, which edges and blocks are
+/// executable, and the two worklists.
+struct Sccp<'f> {
+    func: &'f SSAFunction,
+    values: Minting<'f>,
+    lattice: IdVec<VarId, LatticeValue>,
+    executable: HashSet<(u64, u64)>,
+    block_visited: HashSet<u64>,
+    cfg_worklist: VecDeque<(u64, u64)>,
+    ssa_worklist: VecDeque<VarId>,
+}
+
+impl Sccp<'_> {
+    /// Lower `var` to `value`, queueing its readers when it falls.
+    fn lower(&mut self, var: VarId, value: LatticeValue) {
+        if update_lattice(&mut self.lattice, var, value) {
+            self.ssa_worklist.push_back(var);
+        }
+    }
+
+    fn evaluate_phi(&mut self, phi: &PhiNode<VarId>, block_addr: u64) {
+        let value = evaluate_phi_sccp(
+            phi,
+            &self.executable,
+            &self.values,
+            &self.lattice,
+            block_addr,
+        );
+        self.lower(phi.dst, value);
+    }
+
+    fn evaluate_op(&mut self, op: &Op) {
+        if let Some(dst) = op.dst() {
+            let value = evaluate_op_sccp(op, &self.values, &self.lattice);
+            self.lower(*dst, value);
+        }
+    }
+
+    fn evaluate_terminator(&mut self, block_addr: u64) {
+        evaluate_terminator_sccp(
+            self.func,
+            &self.values,
+            block_addr,
+            &self.lattice,
+            &mut self.cfg_worklist,
+        );
+    }
+
+    /// The edge `from -> to` is executable: its merges are re-evaluated, and
+    /// the block's operations the first time any edge reaches it.
+    fn enter<C: SsaWorkControl + ?Sized>(
+        &mut self,
+        from: u64,
+        to: u64,
+        control: &C,
+    ) -> Result<(), SsaExecutionStopReason> {
+        if !self.executable.insert((from, to)) {
+            return Ok(());
+        }
+        let func = self.func;
+        let Some(block) = func.get_block(to) else {
+            return Ok(());
+        };
+        for phi in block.phis() {
+            control.poll()?;
+            self.evaluate_phi(phi, to);
+        }
+        if self.block_visited.insert(to) {
+            for op in block.ops() {
+                control.poll()?;
+                self.evaluate_op(op);
+            }
+            self.evaluate_terminator(to);
+        }
+        Ok(())
+    }
+
+    /// A value read at `use_loc` fell: re-evaluate the reader, where its
+    /// block is executable.
+    fn revisit(&mut self, use_loc: &UseLocation) {
+        let func = self.func;
+        match *use_loc {
+            UseLocation::Phi {
+                block_addr,
+                phi_idx,
+            } => {
+                if !self.block_visited.contains(&block_addr) {
+                    return;
+                }
+                if let Some(phi) = func
+                    .get_block(block_addr)
+                    .and_then(|block| block.phis().get(phi_idx))
+                {
+                    self.evaluate_phi(phi, block_addr);
+                }
+            }
+            UseLocation::Op { block_addr, op_idx } => {
+                if !self.block_visited.contains(&block_addr) {
+                    return;
+                }
+                let Some(op) = func
+                    .get_block(block_addr)
+                    .and_then(|block| block.ops().get(op_idx))
+                else {
+                    return;
+                };
+                self.evaluate_op(op);
+                if matches!(op, SSAOp::CBranch { .. }) {
+                    self.evaluate_terminator(block_addr);
+                }
+            }
+        }
+    }
+}
+
+/// Wegman and Zadeck's sparse conditional constants over the function's
+/// ids. The lattice is a dense vector, so a value's state is one index; each
+/// value falls at most twice (Top, Const, Bottom), and each fall revisits its
+/// readers, so the walk is `O(n + e)` in operations, uses and edges.
 fn sccp_with_control<C: SsaWorkControl + ?Sized>(
     func: &SSAFunction,
     control: &C,
 ) -> Result<SccpResult, SsaExecutionStopReason> {
     control.poll()?;
-    let mut lattice = HashMap::new();
-    let mut executable = HashSet::new();
-    let mut block_visited = HashSet::new();
-    let mut cfg_worklist = VecDeque::new();
-    let mut ssa_worklist = VecDeque::new();
+    let mut sccp = Sccp {
+        func,
+        values: Minting::new(func.values()),
+        lattice: IdVec::filled(func.values().len(), LatticeValue::Top),
+        executable: HashSet::new(),
+        block_visited: HashSet::new(),
+        cfg_worklist: VecDeque::new(),
+        ssa_worklist: VecDeque::new(),
+    };
     let use_map = build_use_map(func);
 
     for block in func.blocks() {
         control.poll()?;
-        block.for_each_def(|def| init_if_input(def.var, &mut lattice));
-        block.for_each_source(|src| init_if_input(src.var, &mut lattice));
+        let (values, lattice) = (&sccp.values, &mut sccp.lattice);
+        block.for_each_def(|def| init_if_input(values, *def.var, lattice));
+        block.for_each_source(|src| init_if_input(values, *src.var, lattice));
     }
 
     // The pseudo-edge into the root; nothing names it as a merge source.
-    cfg_worklist.push_back((u64::MAX, func.root()));
+    sccp.cfg_worklist.push_back((u64::MAX, func.root()));
 
-    while !cfg_worklist.is_empty() || !ssa_worklist.is_empty() {
+    while !sccp.cfg_worklist.is_empty() || !sccp.ssa_worklist.is_empty() {
         control.poll()?;
-        while let Some((from, to)) = cfg_worklist.pop_front() {
+        while let Some((from, to)) = sccp.cfg_worklist.pop_front() {
             control.poll()?;
-            if !executable.insert((from, to)) {
-                continue;
-            }
-
-            let Some(block) = func.get_block(to) else {
-                continue;
-            };
-
-            for phi in &block.phis {
-                control.poll()?;
-                let new_val = evaluate_phi_sccp(phi, &executable, &lattice, to);
-                if update_lattice(&mut lattice, &phi.dst, new_val) {
-                    ssa_worklist.push_back(VarKey::from_var(&phi.dst));
-                }
-            }
-
-            if block_visited.insert(to) {
-                for op in &block.ops {
-                    control.poll()?;
-                    if let Some(dst) = op.dst() {
-                        let new_val = evaluate_op_sccp(op, &lattice);
-                        if update_lattice(&mut lattice, dst, new_val) {
-                            ssa_worklist.push_back(VarKey::from_var(dst));
-                        }
-                    }
-                }
-                evaluate_terminator_sccp(func, to, &lattice, &mut cfg_worklist);
-            }
+            sccp.enter(from, to, control)?;
         }
-
-        while let Some(var_key) = ssa_worklist.pop_front() {
+        while let Some(var) = sccp.ssa_worklist.pop_front() {
             control.poll()?;
-            let Some(use_locs) = use_map.get(&var_key) else {
-                continue;
-            };
-            for use_loc in use_locs {
+            for use_loc in use_map.get(var) {
                 control.poll()?;
-                match use_loc {
-                    UseLocation::Phi {
-                        block_addr,
-                        phi_idx,
-                    } => {
-                        if !block_visited.contains(block_addr) {
-                            continue;
-                        }
-                        let Some(block) = func.get_block(*block_addr) else {
-                            continue;
-                        };
-                        let Some(phi) = block.phis.get(*phi_idx) else {
-                            continue;
-                        };
-                        let new_val = evaluate_phi_sccp(phi, &executable, &lattice, *block_addr);
-                        if update_lattice(&mut lattice, &phi.dst, new_val) {
-                            ssa_worklist.push_back(VarKey::from_var(&phi.dst));
-                        }
-                    }
-                    UseLocation::Op { block_addr, op_idx } => {
-                        if !block_visited.contains(block_addr) {
-                            continue;
-                        }
-                        let Some(block) = func.get_block(*block_addr) else {
-                            continue;
-                        };
-                        let Some(op) = block.ops.get(*op_idx) else {
-                            continue;
-                        };
-
-                        if let Some(dst) = op.dst() {
-                            let new_val = evaluate_op_sccp(op, &lattice);
-                            if update_lattice(&mut lattice, dst, new_val) {
-                                ssa_worklist.push_back(VarKey::from_var(dst));
-                            }
-                        }
-
-                        if matches!(op, SSAOp::CBranch { .. }) {
-                            evaluate_terminator_sccp(
-                                func,
-                                *block_addr,
-                                &lattice,
-                                &mut cfg_worklist,
-                            );
-                        }
-                    }
-                }
+                sccp.revisit(use_loc);
             }
         }
     }
 
-    let consts = lattice
-        .iter()
-        .filter_map(|(k, v)| match v {
-            LatticeValue::Const(c) => Some((k.clone(), *c)),
-            LatticeValue::Top | LatticeValue::Bottom => None,
-        })
-        .collect();
+    let Sccp {
+        lattice,
+        executable,
+        ..
+    } = sccp;
+    let mut consts = IdMap::new(func.values().len());
+    for (id, value) in lattice.iter() {
+        if let LatticeValue::Const(c) = value {
+            consts.insert(id, *c);
+        }
+    }
     control.poll()?;
     Ok((consts, executable))
-}
-
-fn const_value(var: &SSAVar) -> Option<u64> {
-    var.constant_bits()
 }
 
 fn mask_for_bits(bits: u32) -> u64 {
@@ -521,15 +561,8 @@ fn mask_for_bits(bits: u32) -> u64 {
     }
 }
 
-fn const_for_var(var: &SSAVar, consts: &HashMap<VarKey, u64>) -> Option<u64> {
-    if let Some(val) = const_value(var) {
-        return Some(val);
-    }
-    consts.get(&VarKey::from_var(var)).copied()
-}
-
 /// Whether the optimizer folds this operation over constants; a flag over literals is r2rewrite's `literal.flag` to fold.
-fn folds_over_constants(op: &SSAOp) -> bool {
+fn folds_over_constants<V>(op: &SSAOp<V>) -> bool {
     op.operation().is_some()
         && !matches!(
             op,
@@ -537,21 +570,26 @@ fn folds_over_constants(op: &SSAOp) -> bool {
         )
 }
 
-fn eval_const_op(op: &SSAOp, consts: &HashMap<VarKey, u64>) -> Option<u64> {
+/// The value `op` computes from the operands `known` answers, literals
+/// included.
+fn eval_const_op(
+    op: &Op,
+    values: &Minting<'_>,
+    known: impl Fn(VarId) -> Option<u64>,
+) -> Option<u64> {
     use SSAOp::*;
 
     let dst = op.dst()?;
-    let mask = mask_for_bits(dst.size.saturating_mul(8));
-    let known = |var: &SSAVar| const_for_var(var, consts);
+    let mask = mask_for_bits(width(values, *dst).saturating_mul(8));
     // Absorbing elements decide the value whatever the other operand holds: `or rax, -1` reads nothing.
     match op {
         IntMult { a, b, .. } | IntAnd { a, b, .. }
-            if known(a) == Some(0) || known(b) == Some(0) =>
+            if known(*a) == Some(0) || known(*b) == Some(0) =>
         {
             return Some(0);
         }
         IntOr { a, b, .. }
-            if [known(a), known(b)]
+            if [known(*a), known(*b)]
                 .into_iter()
                 .flatten()
                 .any(|value| value & mask == mask) =>
@@ -566,21 +604,21 @@ fn eval_const_op(op: &SSAOp, consts: &HashMap<VarKey, u64>) -> Option<u64> {
     let operands = op
         .sources()
         .into_iter()
-        .map(known)
+        .map(|id| known(*id))
         .collect::<Option<Vec<_>>>()?;
-    crate::constant::computed(op, &operands)
+    crate::constant::computed(
+        op,
+        |id: &VarId| crate::op::var_facts(values.var(*id)),
+        &operands,
+    )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TerminalStorageProjection {
-    carrier: CanonicalStorageId,
-    logical: CanonicalStorageId,
-}
-
-fn coherent_return_projection(
-    function_interface: Option<&SourceFunctionInterface>,
-) -> Option<TerminalStorageProjection> {
-    let interface = function_interface?;
+/// The register a source interface states the result in, where its logical
+/// value describes that register coherently: the whole of it, or the low
+/// bits of an integer.
+pub(crate) fn coherent_return_carrier(
+    interface: &SourceFunctionInterface,
+) -> Option<CanonicalStorageId> {
     let SourceFunctionReturn::Register { storage } = interface.return_kind() else {
         return None;
     };
@@ -601,113 +639,112 @@ fn coherent_return_projection(
     {
         return None;
     }
-    let logical = match carrier.kind() {
-        SourceCarrierKind::Full if carrier.size_bits() == storage_bits => storage,
+    match carrier.kind() {
+        SourceCarrierKind::Full if carrier.size_bits() == storage_bits => Some(storage),
         SourceCarrierKind::LowBits
             if carrier.size_bits() < storage_bits
                 && matches!(
                     source_type.kind(),
-                    SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger
+                    SourceTypeKind::SignedInteger
+                        | SourceTypeKind::UnsignedInteger
+                        | SourceTypeKind::Char { .. }
                 ) =>
         {
-            CanonicalStorageId {
-                space: storage.space,
-                offset: storage.offset,
-                size: u32::try_from(carrier.size_bits() / 8).ok()?,
-            }
+            Some(storage)
         }
-        _ => return None,
-    };
-    Some(TerminalStorageProjection {
-        carrier: storage,
-        logical,
-    })
+        _ => None,
+    }
 }
 
+/// The plan that reads every constant SCCP proved where its value was read.
 fn replace_sources_with_constants(
-    func: &mut SSAFunction,
-    consts: &HashMap<VarKey, u64>,
-    function_interface: Option<&SourceFunctionInterface>,
+    func: &SSAFunction,
+    consts: &IdMap<VarId, u64>,
+    return_storage: Option<CanonicalStorageId>,
     stats: &mut OptimizationStats,
-) -> bool {
-    let mut changed = false;
-    let block_addrs = func.block_addrs().to_vec();
-    let return_storage =
-        coherent_return_projection(function_interface).map(|projection| projection.carrier);
+) -> EditPlan {
+    let mut plan = EditPlan::new();
+    let mut values = Minting::new(func.values());
 
-    for addr in block_addrs {
+    for &addr in func.block_addrs() {
         let is_return_block = func
             .cfg()
             .get_block(addr)
             .is_some_and(|cfg_block| cfg_block.is_return());
-        let Some(block) = func.get_block_mut(addr) else {
+        let Some(block) = func.get_block(addr) else {
             continue;
         };
 
-        for phi in &mut block.phis {
+        for (id, phi) in block.sited_phis() {
             let preserve_phi_sources = is_return_block
                 && return_storage.is_some_and(|storage| phi.canonical_storage == Some(storage));
-            for (_, src) in &mut phi.sources {
-                if preserve_phi_sources {
-                    continue;
-                }
-                let key = VarKey::from_var(src);
-                if let Some(val) = consts.get(&key).copied() {
-                    let new_var = SSAVar::constant(val, src.size);
-                    if &new_var != src {
+            if preserve_phi_sources {
+                continue;
+            }
+            let mut replaced = phi.clone();
+            let mut changed = false;
+            for (_, src) in &mut replaced.sources {
+                if let Some(val) = consts.get(*src).copied() {
+                    let new_var = values.constant(val, width(&values, *src));
+                    if new_var != *src {
                         *src = new_var;
                         stats.constants_propagated += 1;
                         changed = true;
                     }
                 }
             }
+            if changed {
+                plan.reshape(ShapeEdit::ReplacePhi {
+                    block: addr,
+                    id,
+                    phi: replaced,
+                });
+            }
         }
 
-        for op in &mut block.ops {
-            let new_op = map_sources_in_op(op, &|var| {
-                let key = VarKey::from_var(var);
-                if let Some(val) = consts.get(&key).copied() {
-                    SSAVar::constant(val, var.size)
-                } else {
-                    var.clone()
-                }
+        for (id, op) in block.sited() {
+            let new_op = op.map_sources(|var: &VarId| match consts.get(*var).copied() {
+                Some(val) => values.constant(val, width(&values, *var)),
+                None => *var,
             });
             if &new_op != op {
                 let delta = count_source_replacements(op, &new_op);
                 if delta > 0 {
                     stats.constants_propagated += delta;
                 }
-                *op = new_op;
-                changed = true;
+                plan.replace(id, new_op);
             }
         }
     }
 
-    changed
+    plan.adopt(values.finish());
+    plan
 }
 
 fn apply_sccp_results(
     func: &mut SSAFunction,
-    consts: &HashMap<VarKey, u64>,
+    consts: &IdMap<VarId, u64>,
     executable_edges: &HashSet<(u64, u64)>,
-    function_interface: Option<&SourceFunctionInterface>,
+    return_carrier: Option<CanonicalStorageId>,
     stats: &mut OptimizationStats,
 ) -> bool {
     let mut changed = false;
     let mut cfg_changed = false;
 
-    if replace_sources_with_constants(func, consts, function_interface, stats) {
+    let constants = replace_sources_with_constants(func, consts, return_carrier, stats);
+    if !constants.is_empty() {
         changed = true;
     }
+    func.apply_edits(constants);
     stats.sccp_constants_found = consts.len();
 
     #[derive(Debug, Clone, Copy)]
     struct BranchRewrite {
         block_addr: u64,
-        op_idx: usize,
+        op_id: crate::arena::OpId,
         keep_target: u64,
         dead_target: u64,
-        take_true: bool,
+        replaced: Option<VarId>,
     }
 
     let mut rewrites = Vec::new();
@@ -726,9 +763,9 @@ fn apply_sccp_results(
             continue;
         };
 
-        for (op_idx, op) in block.ops.iter().enumerate() {
-            if let SSAOp::CBranch { cond, .. } = op
-                && let Some(value) = const_value(cond)
+        for (op_id, op) in block.sited() {
+            if let SSAOp::CBranch { cond, target } = op
+                && let Some(value) = func.var(*cond).constant_bits()
             {
                 let take_true = value != 0;
                 let (keep_target, dead_target) = if take_true {
@@ -738,60 +775,71 @@ fn apply_sccp_results(
                 };
                 rewrites.push(BranchRewrite {
                     block_addr: addr,
-                    op_idx,
+                    op_id,
                     keep_target,
                     dead_target,
-                    take_true,
+                    replaced: take_true.then_some(*target),
                 });
                 break;
             }
         }
     }
 
+    // A decided branch: the edge it no longer takes, and what each merge at
+    // the far end read along it, go with it.
+    let mut decided = EditPlan::new();
     for rw in rewrites {
-        if let Some(block) = func.get_block_mut(rw.block_addr)
-            && let Some(op) = block.ops.get_mut(rw.op_idx)
-        {
-            if rw.take_true {
-                if let SSAOp::CBranch { target, .. } = op {
-                    // The branch that remains was never a call site the source
-                    // named, so it keeps no instruction identity.
-                    *op = SSAOp::Branch {
-                        target: target.clone(),
-                        instruction: None,
-                    };
-                }
-            } else {
-                *op = SSAOp::Nop;
-            }
-        }
-
-        func.cfg_mut().remove_edge(rw.block_addr, rw.dead_target);
-        func.cfg_mut().set_terminator(
-            rw.block_addr,
-            BlockTerminator::Branch {
+        // The branch that remains was never a call site the source named, so
+        // it keeps no instruction identity.
+        let op = match rw.replaced {
+            Some(target) => SSAOp::Branch {
+                target,
+                instruction: None,
+            },
+            None => SSAOp::Nop,
+        };
+        decided.replace(rw.op_id, op);
+        decided.reshape(ShapeEdit::RemoveEdge {
+            from: rw.block_addr,
+            to: rw.dead_target,
+        });
+        decided.reshape(ShapeEdit::SetTerminator {
+            block: rw.block_addr,
+            terminator: BlockTerminator::Branch {
                 target: rw.keep_target,
             },
-        );
-        func.remove_phi_source(rw.dead_target, rw.block_addr);
+        });
+        decided.reshape(ShapeEdit::DropPhiSources {
+            block: rw.dead_target,
+            pred: rw.block_addr,
+        });
         stats.sccp_edges_pruned += 1;
         changed = true;
         cfg_changed = true;
     }
+    func.apply_edits(decided);
 
-    let block_addrs = func.block_addrs().to_vec();
-    for addr in block_addrs {
-        let succs = func.successors(addr);
-        for succ in succs {
+    // Every edge SCCP never found executable, read off the graph the
+    // decided branches left.
+    let mut unexecuted = EditPlan::new();
+    for &addr in func.block_addrs() {
+        for succ in func.successors(addr) {
             if !executable_edges.contains(&(addr, succ)) {
-                func.cfg_mut().remove_edge(addr, succ);
-                func.remove_phi_source(succ, addr);
+                unexecuted.reshape(ShapeEdit::RemoveEdge {
+                    from: addr,
+                    to: succ,
+                });
+                unexecuted.reshape(ShapeEdit::DropPhiSources {
+                    block: succ,
+                    pred: addr,
+                });
                 stats.sccp_edges_pruned += 1;
                 changed = true;
                 cfg_changed = true;
             }
         }
     }
+    func.apply_edits(unexecuted);
 
     let mut reachable = HashSet::new();
     let mut queue = VecDeque::new();
@@ -805,28 +853,32 @@ fn apply_sccp_results(
         }
     }
 
-    let all_addrs = func.block_addrs().to_vec();
-    for addr in all_addrs {
+    // A block no edge reaches any more goes, and the merges it fed stop
+    // reading it; the reorder then drops its operations.
+    let mut unreachable = EditPlan::new();
+    for &addr in func.block_addrs() {
         if !reachable.contains(&addr) {
-            let succs = func.successors(addr);
-            for succ in succs {
-                func.remove_phi_source(succ, addr);
+            for succ in func.successors(addr) {
+                unreachable.reshape(ShapeEdit::DropPhiSources {
+                    block: succ,
+                    pred: addr,
+                });
             }
-            func.remove_block(addr);
+            unreachable.reshape(ShapeEdit::RemoveBlock(addr));
             stats.sccp_blocks_removed += 1;
             changed = true;
             cfg_changed = true;
         }
     }
-
     if cfg_changed {
-        func.refresh_after_cfg_mutation();
+        unreachable.reorder();
     }
+    func.apply_edits(unreachable);
 
     changed
 }
 
-fn count_source_replacements(before: &SSAOp, after: &SSAOp) -> usize {
+fn count_source_replacements<V: PartialEq>(before: &SSAOp<V>, after: &SSAOp<V>) -> usize {
     let mut count = 0;
     let before_sources = before.sources();
     let after_sources = after.sources();
@@ -838,58 +890,90 @@ fn count_source_replacements(before: &SSAOp, after: &SSAOp) -> usize {
     count
 }
 
+/// Each variable's defining operation, by its id.
+fn definitions(func: &SSAFunction) -> IdMap<VarId, Op> {
+    let mut defs = IdMap::new(func.values().len());
+    for op in func.all_ops() {
+        if let Some(dst) = op.dst() {
+            defs.insert(*dst, op.clone());
+        }
+    }
+    defs
+}
+
 fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
     let mut changed = false;
     let block_addrs = func.block_addrs().to_vec();
-    let mut defs = func
-        .blocks()
-        .iter()
-        .flat_map(|block| block.ops.iter())
-        .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
-        .collect::<HashMap<_, _>>();
+    let mut defs = definitions(func);
 
+    // Each operation is rewritten until a step moves nothing. A step folds a
+    // definition into it or simplifies it, and every step keeps its meaning;
+    // nothing proves the rules cannot undo each other, so the steps on one
+    // operation are budgeted by the definitions there are to fold, and an
+    // operation that meets the budget keeps its last form and says so.
+    let budget = defs.len().saturating_add(1);
+    let mut combined = EditPlan::new();
+    let mut values = Minting::new(func.values());
     for addr in &block_addrs {
-        let Some(block) = func.get_block_mut(*addr) else {
+        let Some(block) = func.get_block(*addr) else {
             continue;
         };
-        for op in &mut block.ops {
-            loop {
-                let Some(new_op) = substitute_constant_temporaries(op, &defs)
-                    .or_else(|| fold_through_definition(op, &defs))
-                    .or_else(|| simplify_op(op))
+        for (id, original) in block.sited() {
+            let mut op = original.clone();
+            for step in 0.. {
+                if step == budget {
+                    r2il::refusal_evidence!(
+                        "inst-combine",
+                        "{:#x}: {:?} still rewriting after {budget} steps",
+                        func.entry,
+                        op.map(&mut |id| values.var(*id).clone())
+                    );
+                    break;
+                }
+                let Some(new_op) = substitute_constant_temporaries(&op, &defs, &mut values)
+                    .or_else(|| fold_through_definition(&op, &defs, &mut values))
+                    .or_else(|| simplify_op(&op, &mut values))
                 else {
                     break;
                 };
-                if &new_op == op {
+                if new_op == op {
                     break;
                 }
                 if let Some(dst) = new_op.dst() {
-                    defs.insert(VarKey::from_var(dst), new_op.clone());
+                    defs.insert(*dst, new_op.clone());
                 }
-                *op = new_op;
+                op = new_op;
                 stats.ops_simplified += 1;
                 changed = true;
             }
+            if &op != original {
+                combined.replace(id, op);
+            }
         }
     }
+    combined.adopt(values.finish());
+    func.apply_edits(combined);
 
     // A lane temporary that a fold made a copy of another value is that
     // value: it is the construction's own scaffolding, not a move the
     // program made, so its readers take the value and the copy goes dead.
-    let mut lane_copies = HashMap::new();
-    for (key, op) in &defs {
+    let mut lane_copies = IdMap::new(func.values().len());
+    for (key, op) in defs.iter() {
         if let SSAOp::Copy { dst, src } = op
-            && crate::rename::is_lane_temp(dst)
+            && crate::rename::is_lane_temp(func.var(*dst))
         {
-            lane_copies.insert(key.clone(), src.clone());
+            lane_copies.insert(key, *src);
         }
     }
     if !lane_copies.is_empty() {
-        let resolve = |var: &SSAVar| {
-            let mut current = var.clone();
+        // A chain of lane copies ends where a value is no lane copy; the
+        // hops are bounded by the copies there are, which a cycle -- which
+        // SSA cannot hold -- would meet.
+        let resolve = |var: &VarId| {
+            let mut current = *var;
             let mut hops = 0;
-            while let Some(next) = lane_copies.get(&VarKey::from_var(&current)) {
-                current = next.clone();
+            while let Some(next) = lane_copies.get(current) {
+                current = *next;
                 hops += 1;
                 if hops > lane_copies.len() {
                     break;
@@ -899,18 +983,20 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
         };
         // A merge keeps its copy: its edge assignment is a statement of the
         // copied object, not an expression read.
+        let mut forwarded = EditPlan::new();
         for addr in &block_addrs {
-            let Some(block) = func.get_block_mut(*addr) else {
+            let Some(block) = func.get_block(*addr) else {
                 continue;
             };
-            for op in &mut block.ops {
-                let new_op = map_sources_in_op(op, &resolve);
+            for (id, op) in block.sited() {
+                let new_op = op.map_sources(resolve);
                 if &new_op != op {
-                    *op = new_op;
+                    forwarded.replace(id, new_op);
                     changed = true;
                 }
             }
         }
+        func.apply_edits(forwarded);
     }
 
     changed
@@ -928,7 +1014,7 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
 /// One equality test a block ends in: `selector == value` sends control to
 /// `equal`, anything else to `other`.
 struct EqualityTest {
-    selector: SSAVar,
+    selector: VarId,
     value: u64,
     equal: u64,
     other: u64,
@@ -947,31 +1033,27 @@ struct EqualityTest {
 /// each rejoin the same successor structure as `else if`, and that is what the
 /// source most likely wrote.
 fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
-    let defs = func
-        .blocks()
-        .iter()
-        .flat_map(|block| block.ops.iter())
-        .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
-        .collect::<HashMap<_, _>>();
-    let define = |var: &SSAVar| defs.get(&VarKey::from_var(var));
+    let defs = definitions(func);
+    let define = |var: VarId| defs.get(var);
+    let constant = |var: VarId| func.var(var).constant_bits();
     // The value a copy chain carries: a promoted slot's reload is a copy of
     // the store, and the store a copy of the register. The value view's copy
     // root, which dominates the copy, so the fused switch may branch on it.
     let views = crate::view::ValueViews::compute(func);
-    let root = |var: &SSAVar| views.copy_root(var).clone();
+    let root = |var: VarId| views.copy_root(var);
     // `x == c`, or the zero flag of `x - c` where the difference also lands in
     // a register and so was left as the flag fold found it.
-    let against_constant = |a: &SSAVar, b: &SSAVar| {
-        let (selector, value) = match (const_value(a), const_value(b)) {
+    let against_constant = |a: VarId, b: VarId| {
+        let (selector, value) = match (constant(a), constant(b)) {
             (None, Some(value)) => (a, value),
             (Some(value), None) => (b, value),
             _ => return None,
         };
         if value == 0
-            && let Some(SSAOp::IntSub { a: x, b: c, .. }) = define(&root(selector))
-            && let Some(c) = const_value(&root(c))
+            && let Some(SSAOp::IntSub { a: x, b: c, .. }) = define(root(selector))
+            && let Some(c) = constant(root(*c))
         {
-            return Some((root(x), c));
+            return Some((root(*x), c));
         }
         Some((root(selector), value))
     };
@@ -979,25 +1061,25 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
     // reads an operand of the operation before it, and `define` names no
     // phi, so the walk runs down one acyclic definition chain; the visited
     // set states that bound instead of a count.
-    let equality = |var: &SSAVar| {
+    let equality = |var: VarId| {
         let mut current = root(var);
         let mut negated = false;
-        let mut visited = HashSet::new();
+        let mut visited = IdSet::new(func.values().len());
         loop {
-            if !visited.insert(VarKey::from_var(&current)) {
+            if !visited.insert(current) {
                 return None;
             }
-            match define(&current)? {
+            match define(current)? {
                 SSAOp::BoolNot { src, .. } => {
                     negated = !negated;
-                    current = root(src);
+                    current = root(*src);
                 }
                 SSAOp::IntEqual { a, b, .. } => {
-                    let (selector, value) = against_constant(a, b)?;
+                    let (selector, value) = against_constant(*a, *b)?;
                     return Some((selector, value, negated));
                 }
                 SSAOp::IntNotEqual { a, b, .. } => {
-                    let (selector, value) = against_constant(a, b)?;
+                    let (selector, value) = against_constant(*a, *b)?;
                     return Some((selector, value, !negated));
                 }
                 _ => return None,
@@ -1006,7 +1088,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
     };
     let test_of = |addr: u64| {
         let block = func.get_block(addr)?;
-        let SSAOp::CBranch { cond, .. } = block.ops.last()? else {
+        let SSAOp::CBranch { cond, .. } = block.ops().last()? else {
             return None;
         };
         let BlockTerminator::ConditionalBranch {
@@ -1019,7 +1101,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
         if true_target == false_target {
             return None;
         }
-        let (selector, value, negated) = equality(cond)?;
+        let (selector, value, negated) = equality(*cond)?;
         let (equal, other) = if negated {
             (false_target, true_target)
         } else {
@@ -1036,10 +1118,10 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
     // no memory and no call, and it is entered from the chain alone.
     let pure_link = |addr: u64| {
         let block = func.get_block(addr)?;
-        if !block.phis.is_empty() || func.predecessors(addr).len() != 1 {
+        if !block.phis().is_empty() || func.predecessors(addr).len() != 1 {
             return None;
         }
-        let (last, body) = block.ops.split_last()?;
+        let (last, body) = block.ops().split_last()?;
         let pure = body.iter().all(|op| {
             op.dst().is_some()
                 && !matches!(
@@ -1054,12 +1136,12 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
                         | SSAOp::StoreConditional { .. }
                 )
         }) || body.iter().all(|op| matches!(op, SSAOp::Nop));
-        pure.then_some(last)
+        pure.then(|| last.clone())
     };
 
     struct Fusion {
         block: u64,
-        selector: SSAVar,
+        selector: VarId,
         cases: Vec<(u64, u64)>,
         default: u64,
         links: Vec<u64>,
@@ -1111,15 +1193,15 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
                     // One selector is one value's bits, whichever copy of
                     // them a test reads: the copies of an extension share
                     // its view, not a root any of them can be named by.
-                    if !views.same_bits(&test.selector, &head.selector)
+                    if !views.same_bits(test.selector, head.selector)
                         || cases.iter().any(|(value, _)| *value == test.value)
                     {
                         r2il::refusal_evidence!(
                             "fuse-compare-chain",
                             "{addr:#x}: {cur:#x} tests {} == {}, not {}",
-                            test.selector.display_name(),
+                            func.var(test.selector).display_name(),
                             test.value,
-                            head.selector.display_name()
+                            func.var(head.selector).display_name()
                         );
                         break;
                     }
@@ -1164,7 +1246,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
             .collect::<BTreeSet<_>>();
         let phis_agree = targets.iter().all(|target| {
             func.get_block(*target).is_none_or(|block| {
-                block.phis.iter().all(|phi| {
+                block.phis().iter().all(|phi| {
                     let mut carried = phi
                         .sources
                         .iter()
@@ -1200,34 +1282,44 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
             "{:#x}: {} cases on {} through {} links, default {:#x}",
             fusion.block,
             fusion.cases.len(),
-            fusion.selector.display_name(),
+            func.var(fusion.selector).display_name(),
             fusion.links.len(),
             fusion.default
         );
         // The links' values stay defined: they are pure, the head dominates
         // every reader, and the merges at the targets still name them.
+        // Each hoisted value is derived from the link operation it copies,
+        // and so executes for that operation's instruction.
         let hoisted = fusion
             .links
             .iter()
-            .filter_map(|link| Some((*link, func.get_block(*link)?)))
-            .flat_map(|(link, block)| {
-                block.ops[..block.ops.len().saturating_sub(1)]
-                    .iter()
-                    .enumerate()
+            .filter_map(|link| func.get_block(*link))
+            .flat_map(|block| {
+                let body = block.len().saturating_sub(1);
+                block
+                    .sited()
+                    .take(body)
                     .filter(|(_, op)| !matches!(op, SSAOp::Nop))
-                    .map(|(index, op)| (op.clone(), func.instruction_at(link, index)))
+                    .map(|(id, op)| (op.clone(), Some(id)))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        let terminator = func.get_block_mut(fusion.block).map(|block| {
-            let terminator = block.ops.len() - 1;
-            block.ops[terminator] = SSAOp::Switch {
-                selector: fusion.selector.clone(),
-            };
-            terminator
-        });
-        if let Some(terminator) = terminator {
-            func.insert_ops(fusion.block, terminator, hoisted);
+        let mut plan = EditPlan::new();
+        if let Some((terminator, _)) = func
+            .get_block(fusion.block)
+            .and_then(|block| block.sited().next_back())
+        {
+            plan.insert(
+                crate::function::Anchor::Before(terminator),
+                crate::arena::Pass::FuseCompareChain,
+                hoisted,
+            );
+            plan.replace(
+                terminator,
+                SSAOp::Switch {
+                    selector: fusion.selector,
+                },
+            );
         }
         let targets = fusion
             .cases
@@ -1236,119 +1328,138 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
             .chain(std::iter::once(fusion.default))
             .collect::<BTreeSet<_>>();
         for target in &targets {
-            if let Some(block) = func.get_block_mut(*target) {
-                for phi in &mut block.phis {
-                    let carried = phi
-                        .sources
-                        .iter()
-                        .find(|(pred, _)| *pred == fusion.block || fusion.links.contains(pred))
-                        .map(|(_, var)| var.clone());
-                    phi.sources
-                        .retain(|(pred, _)| *pred != fusion.block && !fusion.links.contains(pred));
-                    if let Some(var) = carried {
-                        phi.sources.push((fusion.block, var));
-                    }
-                    // A merge lists its sources in predecessor order.
-                    phi.sources.sort_by_key(|(pred, _)| *pred);
+            let Some(block) = func.get_block(*target) else {
+                continue;
+            };
+            for (id, phi) in block.sited_phis() {
+                let mut merged = phi.clone();
+                let carried = merged
+                    .sources
+                    .iter()
+                    .find(|(pred, _)| *pred == fusion.block || fusion.links.contains(pred))
+                    .map(|(_, var)| *var);
+                merged
+                    .sources
+                    .retain(|(pred, _)| *pred != fusion.block && !fusion.links.contains(pred));
+                if let Some(var) = carried {
+                    merged.sources.push((fusion.block, var));
                 }
+                // A merge lists its sources in predecessor order.
+                merged.sources.sort_by_key(|(pred, _)| *pred);
+                plan.reshape(ShapeEdit::ReplacePhi {
+                    block: *target,
+                    id,
+                    phi: merged,
+                });
             }
         }
         for link in &fusion.links {
-            func.cfg_mut().remove_block(*link);
+            plan.reshape(ShapeEdit::RemoveBlock(*link));
         }
-        func.cfg_mut().set_terminator(
-            fusion.block,
-            BlockTerminator::Switch {
+        plan.reshape(ShapeEdit::SetTerminator {
+            block: fusion.block,
+            terminator: BlockTerminator::Switch {
                 cases: fusion.cases.clone(),
                 default: Some(fusion.default),
             },
-        );
+        });
+        func.apply_edits(plan);
         stats.chains_fused += 1;
     }
-    func.refresh_after_cfg_mutation();
+    let mut reorder = EditPlan::new();
+    reorder.reorder();
+    func.apply_edits(reorder);
     true
 }
 
+/// What a condition-code fold reads of the function: each value's
+/// definition, its copy root, and which values the pass must keep readable.
+struct FlagFacts<'f> {
+    func: &'f SSAFunction,
+    defs: IdMap<VarId, Op>,
+    views: crate::view::ValueViews<VarId>,
+    kept: IdSet<VarId>,
+    combined: IdSet<VarId>,
+}
+
 fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
-    let defs = func
-        .blocks()
-        .iter()
-        .flat_map(|block| block.ops.iter())
-        .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
-        .collect::<HashMap<_, _>>();
+    let len = func.values().len();
+    let defs = definitions(func);
     // Values a statement other than a flag test reads. A difference read only
     // by the flags of its own instruction does go unread once they fold; one a
     // register receives does not.
-    let kept = func
-        .blocks()
-        .iter()
-        .flat_map(|block| block.ops.iter())
-        .filter(|op| {
-            !matches!(
-                op,
-                SSAOp::IntEqual { .. }
-                    | SSAOp::IntNotEqual { .. }
-                    | SSAOp::IntSLess { .. }
-                    | SSAOp::IntSLessEqual { .. }
-                    | SSAOp::IntLess { .. }
-                    | SSAOp::IntLessEqual { .. }
-                    | SSAOp::IntSBorrow { .. }
-                    | SSAOp::IntCarry { .. }
-            )
-        })
-        .flat_map(|op| op.sources())
-        .map(VarKey::from_var)
-        .collect::<HashSet<_>>();
+    let mut kept = IdSet::new(len);
+    for op in func.all_ops().filter(|op| {
+        !matches!(
+            op,
+            SSAOp::IntEqual { .. }
+                | SSAOp::IntNotEqual { .. }
+                | SSAOp::IntSLess { .. }
+                | SSAOp::IntSLessEqual { .. }
+                | SSAOp::IntLess { .. }
+                | SSAOp::IntLessEqual { .. }
+                | SSAOp::IntSBorrow { .. }
+                | SSAOp::IntCarry { .. }
+        )
+    }) {
+        for source in op.sources() {
+            kept.insert(*source);
+        }
+    }
     // Flags a disjunction reads: those are halves of one combined condition.
     // The machine copies a flag out of its scratch register before testing it,
     // so the disjunction names the copy and the fold has to look through it.
-    let mut combined = func
-        .blocks()
-        .iter()
-        .flat_map(|block| block.ops.iter())
+    let mut combined = IdSet::new(len);
+    let mut pending = Vec::new();
+    for op in func
+        .all_ops()
         .filter(|op| matches!(op, SSAOp::IntOr { .. } | SSAOp::BoolOr { .. }))
-        .flat_map(|op| op.sources())
-        .map(VarKey::from_var)
-        .collect::<HashSet<_>>();
-    loop {
-        let grown = func
-            .blocks()
-            .iter()
-            .flat_map(|block| block.ops.iter())
-            .filter_map(|op| match op {
-                SSAOp::Copy { dst, src } if combined.contains(&VarKey::from_var(dst)) => {
-                    Some(VarKey::from_var(src))
-                }
-                _ => None,
-            })
-            .filter(|key| !combined.contains(key))
-            .collect::<Vec<_>>();
-        if grown.is_empty() {
-            break;
+    {
+        for source in op.sources() {
+            if combined.insert(*source) {
+                pending.push(*source);
+            }
         }
-        combined.extend(grown);
+    }
+    // Back through the copies, once: each copy's source joins the set when
+    // its destination is in it. Each value joins at most once, so the walk
+    // is linear in the copies.
+    while let Some(var) = pending.pop() {
+        if let Some(SSAOp::Copy { src, .. }) = defs.get(var)
+            && combined.insert(*src)
+        {
+            pending.push(*src);
+        }
     }
     // Which values are copies of which, as the value view states it once for
     // the whole function. The folds below rewrite comparisons, never a copy,
     // so the view stays true while they run.
     let views = crate::view::ValueViews::compute(func);
-    let mut changed = false;
-    for addr in func.block_addrs().to_vec() {
-        let Some(block) = func.get_block_mut(addr) else {
+    let facts = FlagFacts {
+        func,
+        views,
+        defs,
+        kept,
+        combined,
+    };
+    let mut folds = EditPlan::new();
+    for &addr in func.block_addrs() {
+        let Some(block) = func.get_block(addr) else {
             continue;
         };
-        for op in &mut block.ops {
-            let Some(folded) = fold_condition_codes(op, &defs, &views, &kept, &combined) else {
+        for (id, op) in block.sited() {
+            let Some(folded) = fold_condition_codes(op, &facts) else {
                 continue;
             };
             if &folded == op {
                 continue;
             }
-            *op = folded;
+            folds.replace(id, folded);
             stats.ops_simplified += 1;
-            changed = true;
         }
     }
+    let changed = !folds.edits_no_operation();
+    func.apply_edits(folds);
     changed
 }
 
@@ -1366,76 +1477,70 @@ fn fold_condition_codes_in_function(func: &mut SSAFunction, stats: &mut Optimiza
 ///
 /// The flag definitions are left where they are. They become unread, and the
 /// passes that remove unread values already know what to do with them.
-fn fold_condition_codes(
-    op: &SSAOp,
-    defs: &HashMap<VarKey, SSAOp>,
-    views: &crate::view::ValueViews,
-    kept: &HashSet<VarKey>,
-    combined: &HashSet<VarKey>,
-) -> Option<SSAOp> {
-    let define = |var: &SSAVar| defs.get(&VarKey::from_var(var));
-    let is_zero = |var: &SSAVar| const_value(var) == Some(0);
+fn fold_condition_codes(op: &Op, facts: &FlagFacts<'_>) -> Option<Op> {
+    let define = |var: VarId| facts.defs.get(var);
+    let is_zero = |var: VarId| facts.func.var(var).constant_bits() == Some(0);
     // `d = a - b`, whether the flag reads the difference by name or the
     // subtraction was folded into it.
-    let subtraction = |var: &SSAVar| match define(var)? {
-        SSAOp::IntSub { a, b, .. } => Some((a.clone(), b.clone())),
+    let subtraction = |var: VarId| match define(var)? {
+        SSAOp::IntSub { a, b, .. } => Some((*a, *b)),
         _ => None,
     };
     // A flag read through the copies the machine makes of it: arm64 tests
     // `ZR`, which is a copy of the `tmpZR` the subtraction wrote. The value
     // view's copy root is the end of that chain, however long.
-    let define_through_copies = |var: &SSAVar| define(views.copy_root(var));
+    let define_through_copies = |var: VarId| define(facts.views.copy_root(var));
     // The sign flag: `(a - b) <s 0`.
-    let sign_flag = |var: &SSAVar| match define_through_copies(var)? {
-        SSAOp::IntSLess { a: d, b: zero, .. } if is_zero(zero) => subtraction(d),
+    let sign_flag = |var: VarId| match define_through_copies(var)? {
+        SSAOp::IntSLess { a: d, b: zero, .. } if is_zero(*zero) => subtraction(*d),
         _ => None,
     };
     // The overflow flag: `sborrow(a, b)`.
-    let overflow_flag = |var: &SSAVar| match define_through_copies(var)? {
-        SSAOp::IntSBorrow { a, b, .. } => Some((a.clone(), b.clone())),
+    let overflow_flag = |var: VarId| match define_through_copies(var)? {
+        SSAOp::IntSBorrow { a, b, .. } => Some((*a, *b)),
         _ => None,
     };
     // The zero flag: `(a - b) == 0`, or already the equality this pass made
     // of it, since the two halves of a disjunction fold in one walk.
-    let zero_flag = |var: &SSAVar| match define_through_copies(var)? {
-        SSAOp::IntEqual { a: d, b: zero, .. } if is_zero(zero) => subtraction(d),
-        SSAOp::IntEqual { a, b, .. } => Some((a.clone(), b.clone())),
+    let zero_flag = |var: VarId| match define_through_copies(var)? {
+        SSAOp::IntEqual { a: d, b: zero, .. } if is_zero(*zero) => subtraction(*d),
+        SSAOp::IntEqual { a, b, .. } => Some((*a, *b)),
         _ => None,
     };
     // The unsigned ordering: the carry of `a - b` is `b <= a`, and the machine
     // tests its negation for `a < b`.
-    let unsigned_order = |var: &SSAVar| match define_through_copies(var)? {
-        SSAOp::IntLess { a, b, .. } => Some((a.clone(), b.clone())),
-        SSAOp::BoolNot { src, .. } => match define_through_copies(src)? {
-            SSAOp::IntLessEqual { a: y, b: x, .. } => Some((x.clone(), y.clone())),
+    let unsigned_order = |var: VarId| match define_through_copies(var)? {
+        SSAOp::IntLess { a, b, .. } => Some((*a, *b)),
+        SSAOp::BoolNot { src, .. } => match define_through_copies(*src)? {
+            SSAOp::IntLessEqual { a: y, b: x, .. } => Some((*x, *y)),
             _ => None,
         },
         _ => None,
     };
     // `SF != OF` is `a <s b`, and `SF == OF` is `b <=s a`. Either order.
-    let signed_order = |x: &SSAVar, y: &SSAVar| {
+    let signed_order = |x: VarId, y: VarId| {
         sign_flag(x)
             .zip(overflow_flag(y))
             .or_else(|| sign_flag(y).zip(overflow_flag(x)))
             .filter(|(sign, overflow)| sign == overflow)
             .map(|(sign, _)| sign)
     };
-    match op {
+    match *op {
         // `jl` / `jge`: the sign and overflow flags alone.
         SSAOp::IntNotEqual { dst, a, b } => {
             if let Some((left, right)) = signed_order(a, b) {
                 return Some(SSAOp::IntSLess {
-                    dst: dst.clone(),
+                    dst,
                     a: left,
                     b: right,
                 });
             }
-            if kept.contains(&VarKey::from_var(a)) && !combined.contains(&VarKey::from_var(dst)) {
+            if facts.kept.contains(a) && !facts.combined.contains(dst) {
                 return None;
             }
             let (left, right) = is_zero(b).then(|| subtraction(a)).flatten()?;
             Some(SSAOp::IntNotEqual {
-                dst: dst.clone(),
+                dst,
                 a: left,
                 b: right,
             })
@@ -1443,7 +1548,7 @@ fn fold_condition_codes(
         SSAOp::IntEqual { dst, a, b } => {
             if let Some((left, right)) = signed_order(a, b) {
                 return Some(SSAOp::IntSLessEqual {
-                    dst: dst.clone(),
+                    dst,
                     a: right,
                     b: left,
                 });
@@ -1458,12 +1563,12 @@ fn fold_condition_codes(
             // Unless the flag is half of a combined condition: `jle` and
             // `jbe` are an ordering beside this test, and that fold needs the
             // test in its operand form to recognise the pair.
-            if kept.contains(&VarKey::from_var(a)) && !combined.contains(&VarKey::from_var(dst)) {
+            if facts.kept.contains(a) && !facts.combined.contains(dst) {
                 return None;
             }
             let (left, right) = is_zero(b).then(|| subtraction(a)).flatten()?;
             Some(SSAOp::IntEqual {
-                dst: dst.clone(),
+                dst,
                 a: left,
                 b: right,
             })
@@ -1475,13 +1580,13 @@ fn fold_condition_codes(
             // The ordering half is either still the flag pair or already the
             // comparison this pass made of it, because the two are folded in
             // one walk and the operand may have been reached first.
-            let ordered = |ordering: &SSAVar, zero: &SSAVar| {
+            let ordered = |ordering: VarId, zero: VarId| {
                 let (left, right, signed) = match define(ordering)? {
                     SSAOp::IntNotEqual { a: x, b: y, .. } => {
-                        let (l, r) = signed_order(x, y)?;
+                        let (l, r) = signed_order(*x, *y)?;
                         (l, r, true)
                     }
-                    SSAOp::IntSLess { a: x, b: y, .. } => (x.clone(), y.clone(), true),
+                    SSAOp::IntSLess { a: x, b: y, .. } => (*x, *y, true),
                     _ => {
                         let (l, r) = unsigned_order(ordering)?;
                         (l, r, false)
@@ -1495,13 +1600,13 @@ fn fold_condition_codes(
             let (left, right, signed) = ordered(a, b).or_else(|| ordered(b, a))?;
             Some(if signed {
                 SSAOp::IntSLessEqual {
-                    dst: dst.clone(),
+                    dst,
                     a: left,
                     b: right,
                 }
             } else {
                 SSAOp::IntLessEqual {
-                    dst: dst.clone(),
+                    dst,
                     a: left,
                     b: right,
                 }
@@ -1510,22 +1615,22 @@ fn fold_condition_codes(
         // `jg` / `ja`: the non-strict ordering with the zero flag denied beside
         // it, which is the strict ordering.
         SSAOp::BoolAnd { dst, a, b } | SSAOp::IntAnd { dst, a, b } => {
-            let denied_zero = |var: &SSAVar| match define_through_copies(var)? {
-                SSAOp::BoolNot { src, .. } => zero_flag(src),
+            let denied_zero = |var: VarId| match define_through_copies(var)? {
+                SSAOp::BoolNot { src, .. } => zero_flag(*src),
                 _ => None,
             };
             // The ordering half: the signed pair, or the comparison this pass
             // already made of either pair.
-            let ordered = |var: &SSAVar| match define_through_copies(var)? {
+            let ordered = |var: VarId| match define_through_copies(var)? {
                 SSAOp::IntEqual { a: x, b: y, .. } => {
-                    let (l, r) = signed_order(x, y)?;
+                    let (l, r) = signed_order(*x, *y)?;
                     Some((r, l, true))
                 }
-                SSAOp::IntSLessEqual { a: x, b: y, .. } => Some((x.clone(), y.clone(), true)),
-                SSAOp::IntLessEqual { a: x, b: y, .. } => Some((x.clone(), y.clone(), false)),
+                SSAOp::IntSLessEqual { a: x, b: y, .. } => Some((*x, *y, true)),
+                SSAOp::IntLessEqual { a: x, b: y, .. } => Some((*x, *y, false)),
                 _ => None,
             };
-            let strict = |ordering: &SSAVar, zero: &SSAVar| {
+            let strict = |ordering: VarId, zero: VarId| {
                 let (left, right, signed) = ordered(ordering)?;
                 let (zero_left, zero_right) = denied_zero(zero)?;
                 let same = (zero_left == left && zero_right == right)
@@ -1535,13 +1640,13 @@ fn fold_condition_codes(
             let (left, right, signed) = strict(a, b).or_else(|| strict(b, a))?;
             Some(if signed {
                 SSAOp::IntSLess {
-                    dst: dst.clone(),
+                    dst,
                     a: left,
                     b: right,
                 }
             } else {
                 SSAOp::IntLess {
-                    dst: dst.clone(),
+                    dst,
                     a: left,
                     b: right,
                 }
@@ -1555,58 +1660,65 @@ fn fold_condition_codes(
 /// pipeline runs no constant propagation, so `x9 = 4; (x9 == 0)` is decided
 /// here where the operation that reads the result is simplified.
 fn constant_through_definitions(
-    var: &SSAVar,
-    defs: &HashMap<VarKey, SSAOp>,
+    var: VarId,
+    defs: &IdMap<VarId, Op>,
+    values: &Minting<'_>,
     depth: u32,
 ) -> Option<u64> {
-    if let Some(value) = const_value(var) {
+    if let Some(value) = const_value(values, var) {
         return Some(value);
     }
     if depth > 8 {
         return None;
     }
-    let op = defs.get(&VarKey::from_var(var))?;
-    let mut consts = HashMap::new();
+    let op = defs.get(var)?;
+    let mut known = Vec::new();
     for source in op.sources() {
-        consts.insert(
-            VarKey::from_var(source),
-            constant_through_definitions(source, defs, depth + 1)?,
-        );
+        known.push((
+            *source,
+            constant_through_definitions(*source, defs, values, depth + 1)?,
+        ));
     }
-    eval_const_op(op, &consts)
+    eval_const_op(op, values, |id| {
+        known
+            .iter()
+            .find(|(source, _)| *source == id)
+            .map(|(_, value)| *value)
+    })
 }
 
 /// A mask over a boolean keeps it or kills it, and nothing in between.
-fn fold_mask_over_boolean(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSAOp> {
-    let SSAOp::IntAnd { dst, a, b } = op else {
+fn fold_mask_over_boolean(
+    op: &Op,
+    defs: &IdMap<VarId, Op>,
+    values: &mut Minting<'_>,
+) -> Option<Op> {
+    let SSAOp::IntAnd { dst, a, b } = *op else {
         return None;
     };
-    let (mask, value) = match (const_value(a), const_value(b)) {
+    let (mask, value) = match (const_value(values, a), const_value(values, b)) {
         (Some(mask), _) => (mask, b),
         (_, Some(mask)) => (mask, a),
         _ => return None,
     };
-    if !is_boolean_valued(value, defs) {
+    if !is_boolean_valued(value, defs, values) {
         return None;
     }
     let src = if mask & 1 == 1 {
-        value.clone()
+        value
     } else {
-        SSAVar::constant(0, dst.size)
+        values.constant(0, width(values, dst))
     };
-    Some(SSAOp::Copy {
-        dst: dst.clone(),
-        src,
-    })
+    Some(SSAOp::Copy { dst, src })
 }
 
 /// Whether a value is known to be `0` or `1` rather than merely narrow.
-fn is_boolean_valued(var: &SSAVar, defs: &HashMap<VarKey, SSAOp>) -> bool {
-    if let Some(value) = const_value(var) {
+fn is_boolean_valued(var: VarId, defs: &IdMap<VarId, Op>, values: &Minting<'_>) -> bool {
+    if let Some(value) = const_value(values, var) {
         return value <= 1;
     }
     matches!(
-        defs.get(&VarKey::from_var(var)),
+        defs.get(var),
         Some(
             SSAOp::IntEqual { .. }
                 | SSAOp::IntNotEqual { .. }
@@ -1626,177 +1738,211 @@ fn is_boolean_valued(var: &SSAVar, defs: &HashMap<VarKey, SSAOp>) -> bool {
 }
 
 /// Read every temporary operand as the constant its definitions make it.
-fn substitute_constant_temporaries(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSAOp> {
+fn substitute_constant_temporaries(
+    op: &Op,
+    defs: &IdMap<VarId, Op>,
+    values: &mut Minting<'_>,
+) -> Option<Op> {
     // A phi arm is an edge, not an operand.
     if matches!(op, SSAOp::Phi { .. }) {
         return None;
     }
-    let substituted = std::cell::Cell::new(false);
-    let mapped = map_sources_in_op(op, &|var: &SSAVar| {
-        if !var.is_temp() || const_value(var).is_some() {
-            return var.clone();
+    let mut substituted = false;
+    let mapped = op.map_sources(|var: &VarId| {
+        let (temporary, literal, size) = {
+            let spelled = values.var(*var);
+            (
+                spelled.is_temp(),
+                spelled.constant_bits().is_some(),
+                spelled.size,
+            )
+        };
+        if !temporary || literal {
+            return *var;
         }
-        match constant_through_definitions(var, defs, 0) {
+        match constant_through_definitions(*var, defs, values, 0) {
             Some(value) => {
-                substituted.set(true);
-                SSAVar::constant(value, var.size)
+                substituted = true;
+                values.constant(value, size)
             }
-            None => var.clone(),
+            None => *var,
         }
     });
-    substituted.get().then_some(mapped)
+    substituted.then_some(mapped)
 }
 
-fn fold_through_definition(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSAOp> {
+fn fold_through_definition(
+    op: &Op,
+    defs: &IdMap<VarId, Op>,
+    values: &mut Minting<'_>,
+) -> Option<Op> {
     // A selection on a condition its definitions decide is the arm decided.
     if let SSAOp::Select(select) = op {
-        let chosen = match constant_through_definitions(&select.cond, defs, 0)? {
-            0 => &select.if_false,
-            _ => &select.if_true,
+        let chosen = match constant_through_definitions(select.cond, defs, values, 0)? {
+            0 => select.if_false,
+            _ => select.if_true,
         };
         return Some(SSAOp::Copy {
-            dst: select.dst.clone(),
-            src: chosen.clone(),
+            dst: select.dst,
+            src: chosen,
         });
     }
-    if let Some(folded) = fold_mask_over_boolean(op, defs) {
+    if let Some(folded) = fold_mask_over_boolean(op, defs, values) {
         return Some(folded);
     }
-    let SSAOp::Subpiece { dst, src, offset } = op else {
+    let SSAOp::Subpiece { dst, src, offset } = *op else {
         return None;
     };
-    let producer = defs.get(&VarKey::from_var(src))?;
-    let lane_start = u64::from(*offset) * 8;
-    let lane_bits = u64::from(dst.size) * 8;
+    let values: &Minting<'_> = values;
+    let producer = defs.get(src)?;
+    let lane_start = u64::from(offset) * 8;
+    let lane_bits = u64::from(width(values, dst)) * 8;
     let lane_end = lane_start + lane_bits;
-    let subpiece = |src: &SSAVar, offset: u64| {
+    let subpiece = |src: VarId, offset: u64| {
         let offset = u32::try_from(offset).ok()?;
-        Some(if u64::from(src.size) * 8 == lane_bits && offset == 0 {
-            SSAOp::Copy {
-                dst: dst.clone(),
-                src: src.clone(),
-            }
-        } else {
-            SSAOp::Subpiece {
-                dst: dst.clone(),
-                src: src.clone(),
-                offset,
-            }
-        })
+        Some(
+            if u64::from(width(values, src)) * 8 == lane_bits && offset == 0 {
+                SSAOp::Copy { dst, src }
+            } else {
+                SSAOp::Subpiece { dst, src, offset }
+            },
+        )
     };
     match producer {
-        SSAOp::Copy { src: value, .. } if value.constant_bits().is_some() => {
-            subpiece(value, u64::from(*offset))
+        SSAOp::Copy { src: value, .. } if const_value(values, *value).is_some() => {
+            subpiece(*value, u64::from(offset))
         }
         SSAOp::Insert(insert) => {
-            let (root, value) = (&insert.src, &insert.value);
-            let position = insert.position.constant_bits()?;
-            let inserted_end = position.checked_add(u64::from(value.size) * 8)?;
+            let (root, value) = (insert.src, insert.value);
+            let position = const_value(values, insert.position)?;
+            let inserted_end = position.checked_add(u64::from(width(values, value)) * 8)?;
             if position <= lane_start && lane_end <= inserted_end {
                 subpiece(value, (lane_start - position) / 8)
             } else if lane_end <= position || inserted_end <= lane_start {
-                subpiece(root, u64::from(*offset))
+                subpiece(root, u64::from(offset))
             } else {
                 None
             }
         }
         SSAOp::IntZExt { src: narrow, .. } | SSAOp::IntSExt { src: narrow, .. }
-            if lane_end <= u64::from(narrow.size) * 8 =>
+            if lane_end <= u64::from(width(values, *narrow)) * 8 =>
         {
-            subpiece(narrow, u64::from(*offset))
+            subpiece(*narrow, u64::from(offset))
         }
         SSAOp::Subpiece {
             src: wider,
             offset: inner,
             ..
-        } => subpiece(wider, u64::from(*offset) + u64::from(*inner)),
+        } => subpiece(*wider, u64::from(offset) + u64::from(*inner)),
         _ => None,
     }
 }
 
-fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
+/// What an operation simplifies to before its constant is minted.
+enum Simplified {
+    Constant(u64),
+    Copy(VarId),
+}
+
+fn simplify_op(op: &Op, values: &mut Minting<'_>) -> Option<Op> {
     use SSAOp::*;
+    use Simplified::{Constant, Copy as CopyOf};
 
-    let dst = op.dst()?.clone();
-    let mask = mask_for_bits(dst.size.saturating_mul(8));
-
-    let const_of = |var: &SSAVar| const_value(var);
-
-    let make_const = |val: u64| SSAOp::Copy {
-        dst: dst.clone(),
-        src: SSAVar::constant(val & mask, dst.size),
-    };
-
-    let make_copy = |src: &SSAVar| SSAOp::Copy {
-        dst: dst.clone(),
-        src: src.clone(),
-    };
+    let dst = *op.dst()?;
+    let size = width(values, dst);
+    let mask = mask_for_bits(size.saturating_mul(8));
 
     if matches!(op, Copy { .. }) {
         return None;
     }
-    // Over constants the value is what `r2il::eval` says the operation computes, or nothing.
-    if folds_over_constants(op)
-        && let Some(values) = op
-            .sources()
-            .into_iter()
-            .map(const_of)
-            .collect::<Option<Vec<_>>>()
-    {
-        return crate::constant::computed(op, &values).map(make_const);
-    }
+    let simplified = {
+        let values: &Minting<'_> = values;
+        let const_of = |var: &VarId| const_value(values, *var);
+        // Over constants the value is what `r2il::eval` says the operation computes, or nothing.
+        if folds_over_constants(op)
+            && let Some(operands) = op
+                .sources()
+                .into_iter()
+                .map(const_of)
+                .collect::<Option<Vec<_>>>()
+        {
+            Constant(crate::constant::computed(
+                op,
+                |id: &VarId| crate::op::var_facts(values.var(*id)),
+                &operands,
+            )?)
+        } else {
+            identity(op, values, mask)?
+        }
+    };
 
-    // What remains are identities, which hold whatever the unknown operand is.
-    let simplified = match op {
+    Some(match simplified {
+        Constant(value) => SSAOp::Copy {
+            dst,
+            src: values.constant(value & mask, size),
+        },
+        CopyOf(src) => SSAOp::Copy { dst, src },
+    })
+}
+
+/// What remains once no operand is all constants: identities, which hold
+/// whatever the unknown operand is.
+fn identity(op: &Op, values: &Minting<'_>, mask: u64) -> Option<Simplified> {
+    use SSAOp::*;
+    use Simplified::{Constant, Copy as CopyOf};
+
+    let const_of = |var: &VarId| const_value(values, *var);
+    let size = width(values, *op.dst()?);
+    Some(match op {
         // A selection on a decided condition is the arm it decided.
         Select(select) => match const_of(&select.cond) {
-            Some(0) => make_copy(&select.if_false),
-            Some(_) => make_copy(&select.if_true),
+            Some(0) => CopyOf(select.if_false),
+            Some(_) => CopyOf(select.if_true),
             None => return None,
         },
         IntAdd { a, b, .. } => match (const_of(a), const_of(b)) {
-            (Some(0), _) => make_copy(b),
-            (_, Some(0)) => make_copy(a),
+            (Some(0), _) => CopyOf(*b),
+            (_, Some(0)) => CopyOf(*a),
             _ => return None,
         },
         IntSub { a, b, .. } => match const_of(b) {
-            Some(0) => make_copy(a),
-            _ if a == b => make_const(0),
+            Some(0) => CopyOf(*a),
+            _ if a == b => Constant(0),
             _ => return None,
         },
         IntMult { a, b, .. } => match (const_of(a), const_of(b)) {
-            (Some(0), _) | (_, Some(0)) => make_const(0),
-            (Some(1), _) => make_copy(b),
-            (_, Some(1)) => make_copy(a),
+            (Some(0), _) | (_, Some(0)) => Constant(0),
+            (Some(1), _) => CopyOf(*b),
+            (_, Some(1)) => CopyOf(*a),
             _ => return None,
         },
         IntDiv { a, b, .. } | IntSDiv { a, b, .. } => match const_of(b) {
-            Some(1) => make_copy(a),
+            Some(1) => CopyOf(*a),
             _ => return None,
         },
         IntAnd { a, b, .. } => match (const_of(a), const_of(b)) {
-            (Some(0), _) | (_, Some(0)) => make_const(0),
-            (Some(av), _) if av == mask => make_copy(b),
-            (_, Some(bv)) if bv == mask => make_copy(a),
+            (Some(0), _) | (_, Some(0)) => Constant(0),
+            (Some(av), _) if av == mask => CopyOf(*b),
+            (_, Some(bv)) if bv == mask => CopyOf(*a),
             _ => return None,
         },
         IntOr { a, b, .. } => match (const_of(a), const_of(b)) {
-            (Some(0), _) => make_copy(b),
-            (_, Some(0)) => make_copy(a),
+            (Some(0), _) => CopyOf(*b),
+            (_, Some(0)) => CopyOf(*a),
             // All ones absorbs: `or rax, -1` is the constant whatever `rax` held.
-            (Some(av), _) if av == mask => make_const(mask),
-            (_, Some(bv)) if bv == mask => make_const(mask),
+            (Some(av), _) if av == mask => Constant(mask),
+            (_, Some(bv)) if bv == mask => Constant(mask),
             _ => return None,
         },
         IntXor { a, b, .. } => match (const_of(a), const_of(b)) {
-            (Some(0), _) => make_copy(b),
-            (_, Some(0)) => make_copy(a),
-            _ if a == b => make_const(0),
+            (Some(0), _) => CopyOf(*b),
+            (_, Some(0)) => CopyOf(*a),
+            _ if a == b => Constant(0),
             _ => return None,
         },
         IntLeft { a, b, .. } | IntRight { a, b, .. } | IntSRight { a, b, .. } => {
             match const_of(b) {
-                Some(0) => make_copy(a),
+                Some(0) => CopyOf(*a),
                 _ => return None,
             }
         }
@@ -1812,485 +1958,58 @@ fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
                 op,
                 IntEqual { .. } | IntLessEqual { .. } | IntSLessEqual { .. }
             );
-            make_const(u64::from(reflexive))
+            Constant(u64::from(reflexive))
         }
         BoolAnd { a, b, .. } | BoolOr { a, b, .. } => {
             // Nought decides a conjunction and one a disjunction, whatever the other operand is.
             let absorbing = u64::from(matches!(op, BoolOr { .. }));
             match (const_of(a), const_of(b)) {
-                (Some(av), _) | (_, Some(av)) if av == absorbing => make_const(absorbing),
+                (Some(av), _) | (_, Some(av)) if av == absorbing => Constant(absorbing),
                 _ => return None,
             }
         }
-        IntZExt { src, .. } | IntSExt { src, .. } if src.size == dst.size => make_copy(src),
+        IntZExt { src, .. } | IntSExt { src, .. } if width(values, *src) == size => CopyOf(*src),
         _ => return None,
-    };
-
-    Some(simplified)
-}
-
-pub(crate) fn map_sources_in_op<F>(op: &SSAOp, map: &F) -> SSAOp
-where
-    F: Fn(&SSAVar) -> SSAVar,
-{
-    use SSAOp::*;
-
-    match op {
-        Phi { dst, sources } => Phi {
-            dst: dst.clone(),
-            sources: sources.iter().map(map).collect(),
-        },
-        Copy { dst, src } => Copy {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        Load { dst, space, addr } => Load {
-            dst: dst.clone(),
-            space: *space,
-            addr: map(addr),
-        },
-        Store { space, addr, val } => Store {
-            space: *space,
-            addr: map(addr),
-            val: map(val),
-        },
-        BlockTransfer(transfer) => BlockTransfer(Box::new(crate::op::BlockTransferOp {
-            space: transfer.space,
-            kind: transfer.kind,
-            destination: map(&transfer.destination),
-            source: map(&transfer.source),
-            count: map(&transfer.count),
-            direction: map(&transfer.direction),
-            element_size: transfer.element_size,
-            answer: transfer.answer.clone(),
-        })),
-        Fence { ordering } => Fence {
-            ordering: *ordering,
-        },
-        LoadLinked {
-            dst,
-            space,
-            addr,
-            ordering,
-        } => LoadLinked {
-            dst: dst.clone(),
-            space: *space,
-            addr: map(addr),
-            ordering: *ordering,
-        },
-        StoreConditional {
-            result,
-            space,
-            addr,
-            val,
-            ordering,
-        } => StoreConditional {
-            result: result.clone(),
-            space: *space,
-            addr: map(addr),
-            val: map(val),
-            ordering: *ordering,
-        },
-        AtomicCAS(swap) => AtomicCAS(Box::new(crate::op::AtomicCasOp {
-            dst: swap.dst.clone(),
-            space: swap.space,
-            addr: map(&swap.addr),
-            expected: map(&swap.expected),
-            replacement: map(&swap.replacement),
-            ordering: swap.ordering,
-        })),
-        LoadGuarded {
-            dst,
-            space,
-            addr,
-            guard,
-            ordering,
-        } => LoadGuarded {
-            dst: dst.clone(),
-            space: *space,
-            addr: map(addr),
-            guard: map(guard),
-            ordering: *ordering,
-        },
-        StoreGuarded {
-            space,
-            addr,
-            val,
-            guard,
-            ordering,
-        } => StoreGuarded {
-            space: *space,
-            addr: map(addr),
-            val: map(val),
-            guard: map(guard),
-            ordering: *ordering,
-        },
-        IntAdd { dst, a, b } => IntAdd {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntSub { dst, a, b } => IntSub {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntMult { dst, a, b } => IntMult {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntDiv { dst, a, b } => IntDiv {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntSDiv { dst, a, b } => IntSDiv {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntRem { dst, a, b } => IntRem {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntSRem { dst, a, b } => IntSRem {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntNegate { dst, src } => IntNegate {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        IntCarry { dst, a, b } => IntCarry {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntSCarry { dst, a, b } => IntSCarry {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntSBorrow { dst, a, b } => IntSBorrow {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntAnd { dst, a, b } => IntAnd {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntOr { dst, a, b } => IntOr {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntXor { dst, a, b } => IntXor {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntNot { dst, src } => IntNot {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        IntLeft { dst, a, b } => IntLeft {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntRight { dst, a, b } => IntRight {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntSRight { dst, a, b } => IntSRight {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntEqual { dst, a, b } => IntEqual {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntNotEqual { dst, a, b } => IntNotEqual {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntLess { dst, a, b } => IntLess {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntSLess { dst, a, b } => IntSLess {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntLessEqual { dst, a, b } => IntLessEqual {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntSLessEqual { dst, a, b } => IntSLessEqual {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        IntZExt { dst, src } => IntZExt {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        IntSExt { dst, src } => IntSExt {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        BoolNot { dst, src } => BoolNot {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        BoolAnd { dst, a, b } => BoolAnd {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        BoolOr { dst, a, b } => BoolOr {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        BoolXor { dst, a, b } => BoolXor {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        Piece { dst, hi, lo } => Piece {
-            dst: dst.clone(),
-            hi: map(hi),
-            lo: map(lo),
-        },
-        Subpiece { dst, src, offset } => Subpiece {
-            dst: dst.clone(),
-            src: map(src),
-            offset: *offset,
-        },
-        PopCount { dst, src } => PopCount {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        Lzcount { dst, src } => Lzcount {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        Branch {
-            target,
-            instruction,
-        } => Branch {
-            target: map(target),
-            instruction: *instruction,
-        },
-        CBranch { target, cond } => CBranch {
-            target: map(target),
-            cond: map(cond),
-        },
-        BranchInd {
-            target,
-            instruction,
-        } => BranchInd {
-            target: map(target),
-            instruction: *instruction,
-        },
-        Switch { selector } => Switch {
-            selector: map(selector),
-        },
-        Call {
-            target,
-            instruction,
-        } => Call {
-            target: map(target),
-            instruction: *instruction,
-        },
-        CallInd {
-            target,
-            instruction,
-        } => CallInd {
-            target: map(target),
-            instruction: *instruction,
-        },
-        CallDefine { dst } => CallDefine { dst: dst.clone() },
-        CallUse { src } => CallUse { src: map(src) },
-        CallRestore { dst, src } => CallRestore {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        Return { target } => Return {
-            target: map(target),
-        },
-        FloatAdd { dst, a, b } => FloatAdd {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        FloatSub { dst, a, b } => FloatSub {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        FloatMult { dst, a, b } => FloatMult {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        FloatDiv { dst, a, b } => FloatDiv {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        FloatNeg { dst, src } => FloatNeg {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        FloatAbs { dst, src } => FloatAbs {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        FloatSqrt { dst, src } => FloatSqrt {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        FloatCeil { dst, src } => FloatCeil {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        FloatFloor { dst, src } => FloatFloor {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        FloatRound { dst, src } => FloatRound {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        FloatNaN { dst, src } => FloatNaN {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        FloatEqual { dst, a, b } => FloatEqual {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        FloatNotEqual { dst, a, b } => FloatNotEqual {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        FloatLess { dst, a, b } => FloatLess {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        FloatLessEqual { dst, a, b } => FloatLessEqual {
-            dst: dst.clone(),
-            a: map(a),
-            b: map(b),
-        },
-        Int2Float { dst, src } => Int2Float {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        Float2Int { dst, src } => Float2Int {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        FloatFloat { dst, src } => FloatFloat {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        Trunc { dst, src } => Trunc {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        CallOther {
-            output,
-            userop,
-            inputs,
-        } => CallOther {
-            output: output.clone(),
-            userop: *userop,
-            inputs: inputs.iter().map(map).collect(),
-        },
-        CpuId { dst } => CpuId { dst: dst.clone() },
-        PtrAdd {
-            dst,
-            base,
-            index,
-            element_size,
-        } => PtrAdd {
-            dst: dst.clone(),
-            base: map(base),
-            index: map(index),
-            element_size: *element_size,
-        },
-        PtrSub {
-            dst,
-            base,
-            index,
-            element_size,
-        } => PtrSub {
-            dst: dst.clone(),
-            base: map(base),
-            index: map(index),
-            element_size: *element_size,
-        },
-        SegmentOp {
-            dst,
-            segment,
-            offset,
-        } => SegmentOp {
-            dst: dst.clone(),
-            segment: map(segment),
-            offset: map(offset),
-        },
-        New { dst, src } => New {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        Cast { dst, src } => Cast {
-            dst: dst.clone(),
-            src: map(src),
-        },
-        Extract { dst, src, position } => Extract {
-            dst: dst.clone(),
-            src: map(src),
-            position: map(position),
-        },
-        Insert(insert) => Insert(Box::new(crate::op::InsertOp {
-            dst: insert.dst.clone(),
-            src: map(&insert.src),
-            value: map(&insert.value),
-            position: map(&insert.position),
-        })),
-        Select(select) => Select(Box::new(crate::op::SelectOp {
-            dst: select.dst.clone(),
-            cond: map(&select.cond),
-            if_true: map(&select.if_true),
-            if_false: map(&select.if_false),
-        })),
-        Nop => Nop,
-        Unimplemented => Unimplemented,
-        Breakpoint => Breakpoint,
-    }
+    })
 }
 
 #[cfg(test)]
 mod sccp_tests {
     use super::*;
+    use crate::SSAVar;
+    use crate::value_table::ValueTable;
+
+    /// A rule over ids, run on an operation a test spells by name, with the
+    /// definitions it may fold through, and its answer named back.
+    fn through_ids(
+        op: &SSAOp,
+        definitions: &[SSAOp],
+        rule: impl FnOnce(&Op, &IdMap<VarId, Op>, &mut Minting<'_>) -> Option<Op>,
+    ) -> Option<SSAOp> {
+        let mut table = ValueTable::default();
+        let definitions = definitions
+            .iter()
+            .map(|op| op.map(&mut |var| table.intern(var)))
+            .collect::<Vec<_>>();
+        let op = op.map(&mut |var| table.intern(var));
+        let mut defs = IdMap::new(table.len());
+        for definition in definitions {
+            if let Some(dst) = definition.dst() {
+                defs.insert(*dst, definition.clone());
+            }
+        }
+        let mut values = Minting::new(&table);
+        let answer = rule(&op, &defs, &mut values)?;
+        Some(answer.map(&mut |id| values.var(*id).clone()))
+    }
+
+    fn simplify(op: &SSAOp) -> Option<SSAOp> {
+        through_ids(op, &[], |op, _, values| simplify_op(op, values))
+    }
+
+    fn fold(op: &SSAOp, definitions: &[SSAOp]) -> Option<SSAOp> {
+        through_ids(op, definitions, fold_through_definition)
+    }
     use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
 
     fn make_const(val: u64, size: u32) -> Varnode {
@@ -2363,17 +2082,15 @@ mod sccp_tests {
 
     #[test]
     fn sccp_constant_identity_ignores_display_names() {
-        let spoofed = SSAVar::new("const:2a", 0, 8);
-        assert_eq!(const_value(&spoofed), None);
-        let mut lattice = HashMap::new();
-        init_if_input(&spoofed, &mut lattice);
-        assert_eq!(
-            lattice.get(&VarKey::from_var(&spoofed)),
-            Some(&LatticeValue::Bottom)
-        );
-
-        let renamed = SSAVar::constant(0x2a, 8).renamed("renamed-value");
-        assert_eq!(const_value(&renamed), Some(0x2a));
+        let mut table = ValueTable::default();
+        let spoofed = table.intern(&SSAVar::new("const:2a", 0, 8));
+        let renamed = table.intern(&SSAVar::constant(0x2a, 8).renamed("renamed-value"));
+        let values = Minting::new(&table);
+        assert_eq!(const_value(&values, spoofed), None);
+        let mut lattice = IdVec::filled(table.len(), LatticeValue::Top);
+        init_if_input(&values, spoofed, &mut lattice);
+        assert_eq!(lattice[spoofed], LatticeValue::Bottom);
+        assert_eq!(const_value(&values, renamed), Some(0x2a));
     }
 
     #[test]
@@ -2409,11 +2126,18 @@ mod sccp_tests {
 
         let (consts, _) = sccp(&func);
         assert!(
-            consts.values().any(|v| *v == u64::MAX),
+            consts
+                .iter()
+                .map(|(_, value)| value)
+                .any(|v| *v == u64::MAX),
             "SCCP should fold `x | -1` to all ones: {consts:?}"
         );
         assert_eq!(
-            consts.values().filter(|v| **v == 0).count(),
+            consts
+                .iter()
+                .map(|(_, value)| value)
+                .filter(|v| **v == 0)
+                .count(),
             2,
             "SCCP should fold `x & 0` and `0 * x` to zero: {consts:?}"
         );
@@ -2448,7 +2172,7 @@ mod sccp_tests {
         }]);
         let (consts, _) = sccp(&func);
         let sized = |size| {
-            let found = consts.iter().filter(|(key, _)| key.size == size);
+            let found = consts.iter().filter(|(key, _)| func.var(*key).size == size);
             found.map(|(_, value)| *value).collect::<Vec<_>>()
         };
         assert_eq!(sized(1), [0], "{consts:?}");
@@ -2466,13 +2190,13 @@ mod sccp_tests {
             dst: flag,
             src: constant(0, 1),
         };
-        assert_eq!(simplify_op(&signed_less), Some(folded));
+        assert_eq!(simplify(&signed_less), Some(folded));
         let divided = SSAOp::IntSDiv {
             dst: quotient,
             a: constant(1 << 63, 8),
             b: constant(u64::MAX, 8),
         };
-        assert_eq!(simplify_op(&divided), None);
+        assert_eq!(simplify(&divided), None);
     }
 
     #[test]
@@ -2496,7 +2220,7 @@ mod sccp_tests {
 
         let (consts, _) = sccp(&func);
         assert!(
-            consts.values().any(|v| *v == 8),
+            consts.iter().map(|(_, value)| value).any(|v| *v == 8),
             "SCCP should discover y = 8"
         );
     }
@@ -2568,7 +2292,10 @@ mod sccp_tests {
             "false edge should be non-executable"
         );
         assert!(
-            consts.values().any(|v| *v == 2 || *v == 3),
+            consts
+                .iter()
+                .map(|(_, value)| value)
+                .any(|v| *v == 2 || *v == 3),
             "phi should resolve to live input constant on the executable edge"
         );
     }
@@ -2594,7 +2321,7 @@ mod sccp_tests {
 
         let (consts, _) = sccp(&func);
         assert!(
-            !consts.keys().any(|k| k.name == "reg:8"),
+            !consts.keys().any(|k| func.var(k).name() == "reg:8"),
             "param-derived values should not be treated as constants"
         );
     }
@@ -2620,7 +2347,7 @@ mod sccp_tests {
 
         let (consts, _) = sccp(&func);
         assert!(
-            !consts.keys().any(|k| k.name == "reg:8"),
+            !consts.keys().any(|k| func.var(k).name() == "reg:8"),
             "loads are conservative Bottom in SCCP"
         );
     }
@@ -2707,7 +2434,7 @@ mod sccp_tests {
         let changed = apply_sccp_results(&mut func, &consts, &executable, None, &mut stats);
         assert!(changed);
         assert!(
-            func.get_block(0x1004).is_none(),
+            func.named_block(0x1004).is_none(),
             "dead branch block should be removed"
         );
         assert!(!func.cfg().has_edge(0x1000, 0x1004));
@@ -2728,11 +2455,7 @@ mod sccp_tests {
             src: root.clone(),
             offset,
         };
-        let defined_by = |op: SSAOp| {
-            let mut defs = HashMap::new();
-            defs.insert(VarKey::from_var(&root), op);
-            defs
-        };
+        let defined_by = |op: SSAOp| vec![op];
 
         // A constant copied into the root: the lane is that constant's bytes.
         let constant = defined_by(SSAOp::Copy {
@@ -2740,7 +2463,7 @@ mod sccp_tests {
             src: SSAVar::constant(0x1122_3344_5566_7788, 8),
         });
         assert_eq!(
-            fold_through_definition(&read(4, 4), &constant),
+            fold(&read(4, 4), &constant),
             Some(SSAOp::Subpiece {
                 dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
                 src: SSAVar::constant(0x1122_3344_5566_7788, 8),
@@ -2757,14 +2480,14 @@ mod sccp_tests {
             position: SSAVar::constant(32, 4),
         })));
         assert_eq!(
-            fold_through_definition(&read(4, 4), &inserted),
+            fold(&read(4, 4), &inserted),
             Some(SSAOp::Copy {
                 dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
                 src: lane.clone(),
             })
         );
         assert_eq!(
-            fold_through_definition(&read(5, 1), &inserted),
+            fold(&read(5, 1), &inserted),
             Some(SSAOp::Subpiece {
                 dst: SSAVar::new("tmp:lane:1000:3:0", 1, 1),
                 src: lane.clone(),
@@ -2772,14 +2495,14 @@ mod sccp_tests {
             })
         );
         assert_eq!(
-            fold_through_definition(&read(0, 4), &inserted),
+            fold(&read(0, 4), &inserted),
             Some(SSAOp::Subpiece {
                 dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
                 src: older.clone(),
                 offset: 0,
             })
         );
-        assert_eq!(fold_through_definition(&read(2, 4), &inserted), None);
+        assert_eq!(fold(&read(2, 4), &inserted), None);
 
         // A widened value: a read within the narrow width is the narrow value.
         let widened = defined_by(SSAOp::IntZExt {
@@ -2787,21 +2510,21 @@ mod sccp_tests {
             src: lane.clone(),
         });
         assert_eq!(
-            fold_through_definition(&read(0, 4), &widened),
+            fold(&read(0, 4), &widened),
             Some(SSAOp::Copy {
                 dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
                 src: lane.clone(),
             })
         );
         assert_eq!(
-            fold_through_definition(&read(0, 1), &widened),
+            fold(&read(0, 1), &widened),
             Some(SSAOp::Subpiece {
                 dst: SSAVar::new("tmp:lane:1000:3:0", 1, 1),
                 src: lane,
                 offset: 0,
             })
         );
-        assert_eq!(fold_through_definition(&read(0, 8), &widened), None);
+        assert_eq!(fold(&read(0, 8), &widened), None);
 
         // A slice of a slice is one slice.
         let sliced = defined_by(SSAOp::Subpiece {
@@ -2810,7 +2533,7 @@ mod sccp_tests {
             offset: 8,
         });
         assert_eq!(
-            fold_through_definition(&read(2, 1), &sliced),
+            fold(&read(2, 1), &sliced),
             Some(SSAOp::Subpiece {
                 dst: SSAVar::new("tmp:lane:1000:3:0", 1, 1),
                 src: SSAVar::new("XMM0", 1, 16),
@@ -2823,7 +2546,7 @@ mod sccp_tests {
             dst: root.clone(),
             src: older,
         });
-        assert_eq!(fold_through_definition(&read(0, 4), &copied), None);
+        assert_eq!(fold(&read(0, 4), &copied), None);
         let _ = byte;
     }
 }
@@ -2933,23 +2656,23 @@ mod chain_tests {
             }
         );
         assert!(matches!(
-            func.get_block(0x1000).expect("head").ops.last(),
+            func.named_block(0x1000).expect("head").ops().last(),
             Some(SSAOp::Switch { .. })
         ));
-        assert!(func.get_block(0x1004).is_none());
-        assert!(func.get_block(0x1008).is_none());
+        assert!(func.named_block(0x1004).is_none());
+        assert!(func.named_block(0x1008).is_none());
         let mut successors = func.successors(0x1000);
         successors.sort_unstable();
         successors.dedup();
         assert_eq!(successors, vec![0x100c, 0x1020, 0x1030, 0x1040]);
-        let merge = func.get_block(0x1020).expect("case 2");
+        let merge = func.named_block(0x1020).expect("case 2");
         assert!(
-            merge.phis.iter().all(|phi| phi
+            merge.phis().iter().all(|phi| phi
                 .sources
                 .iter()
                 .all(|(pred, _)| *pred == 0x1000 || *pred == 0x100c)),
             "phi sources: {:?}",
-            merge.phis
+            merge.phis()
         );
     }
 
@@ -2960,7 +2683,7 @@ mod chain_tests {
             func.cfg().get_block(0x1000).expect("head").terminator,
             BlockTerminator::ConditionalBranch { .. }
         ));
-        assert!(func.get_block(0x1004).is_some());
+        assert!(func.named_block(0x1004).is_some());
     }
 }
 
@@ -3083,12 +2806,12 @@ mod signed_flag_tests {
     }
 
     fn condition_op(func: &SSAFunction) -> SSAOp {
-        let block = func.get_block(0x1000).expect("head");
-        let SSAOp::CBranch { cond, .. } = block.ops.last().expect("branch") else {
+        let block = func.named_block(0x1000).expect("head");
+        let SSAOp::CBranch { cond, .. } = block.ops().last().expect("branch") else {
             panic!("no branch");
         };
         block
-            .ops
+            .ops()
             .iter()
             .find(|op| op.dst() == Some(cond))
             .cloned()
@@ -3137,11 +2860,11 @@ mod signed_flag_tests {
                 ..OptimizationConfig::default()
             },
         );
-        let block = func.get_block(0x1000).expect("block");
+        let block = func.named_block(0x1000).expect("block");
         assert!(
-            block.ops.iter().any(|op| matches!(op, SSAOp::Copy { dst, src } if dst.display_name().contains("40") && src.display_name().contains("30"))),
+            block.ops().iter().any(|op| matches!(op, SSAOp::Copy { dst, src } if dst.display_name().contains("40") && src.display_name().contains("30"))),
             "ops: {:?}",
-            block.ops
+            block.ops()
         );
     }
 
@@ -3149,7 +2872,7 @@ mod signed_flag_tests {
     fn sign_equals_overflow_through_copies_is_the_non_strict_ordering() {
         assert!(matches!(
             condition_op(&compare(false)),
-            SSAOp::IntSLessEqual { a, b, .. } if const_value(&a) == Some(1) && b.display_name().starts_with("reg")
+            SSAOp::IntSLessEqual { a, b, .. } if a.constant_bits() == Some(1) && b.display_name().starts_with("reg")
         ));
     }
 
@@ -3229,7 +2952,7 @@ mod signed_flag_tests {
         assert!(
             matches!(
                 &condition,
-                SSAOp::IntSLessEqual { a, b, .. } if const_value(a) == Some(1) && b.display_name().starts_with("reg")
+                SSAOp::IntSLessEqual { a, b, .. } if a.constant_bits() == Some(1) && b.display_name().starts_with("reg")
             ),
             "{condition:?}"
         );
@@ -3239,7 +2962,7 @@ mod signed_flag_tests {
     fn not_zero_and_sign_equals_overflow_is_the_strict_ordering() {
         assert!(matches!(
             condition_op(&compare(true)),
-            SSAOp::IntSLess { a, b, .. } if const_value(&a) == Some(1) && b.display_name().starts_with("reg")
+            SSAOp::IntSLess { a, b, .. } if a.constant_bits() == Some(1) && b.display_name().starts_with("reg")
         ));
     }
 }

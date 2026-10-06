@@ -15,25 +15,34 @@
 //! - [`rename`]: SSA renaming algorithm
 //! - [`var`]: SSA variable representation
 
+// A fact about a function's values, instructions or blocks is an index over
+// their dense ids (doc/adr-one-ir.md, ROADMAP D11). The exceptions say why
+// at the item that keeps one.
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
+
 pub(crate) mod abi;
 pub(crate) mod address;
 pub(crate) mod aggregate_access;
+pub mod arena;
 pub(crate) mod assumption;
 pub mod block;
-pub mod body;
+pub(crate) mod bytes;
 pub mod cfg;
 pub(crate) mod constant;
 pub(crate) mod control;
 pub(crate) mod deadphi;
 pub(crate) mod defuse;
 pub(crate) mod demand;
+pub mod dense;
 pub mod domtree;
 pub mod fate;
+pub mod fixpoint;
 pub mod function;
 pub mod graph;
 pub mod indirect;
 pub(crate) mod integrity;
 pub mod interproc;
+pub mod lanes;
 pub mod liveness;
 pub(crate) mod liveout;
 pub(crate) mod machine;
@@ -41,6 +50,7 @@ pub(crate) mod machine_context;
 pub(crate) mod mirror;
 pub mod name;
 mod naming;
+pub mod natural_loops;
 pub(crate) mod obligation;
 pub(crate) mod op;
 pub(crate) mod optimize;
@@ -57,6 +67,7 @@ pub mod span;
 mod strided;
 #[cfg(test)]
 pub(crate) mod testing;
+pub mod value_table;
 mod values;
 pub(crate) mod var;
 pub mod view;
@@ -70,11 +81,12 @@ pub use aggregate_access::{
     AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION, AggregateAccessBinding, AggregateAccessProjection,
     AggregateAccessProjectionFacts, AggregateElementIndexProjection,
 };
+pub use arena::{OpArena, OpId, OpOrigin, OpSlot, Pass};
 pub use assumption::{
     AnalysisAssumption, AnalysisAssumptionConflict, AssumptionProvenance, AssumptionScope,
     AssumptionSet, AssumptionSubject, AssumptionUsageReport, AssumptionValue,
 };
-pub use block::{SSABlock, branch_condition};
+pub use block::{BlockMut, SSABlock, branch_condition};
 pub use cfg::{BasicBlock, BlockTerminator, CFG, CFGEdge, DeclaredSuccessors};
 pub use control::{
     SsaCancellationToken, SsaExecutionControl, SsaExecutionStopReason, SsaPrepareError,
@@ -82,11 +94,12 @@ pub use control::{
 };
 pub use defuse::{DefUseInfo, def_use};
 pub use function::{
-    CFGRiskSummary, CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts, DefRef, DefSite,
-    GenuineNativeInstructionSpan, IrRevision, PhiNode, RegisterFamilyInfo, RegisterFamilySlot,
-    RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction,
-    SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind,
-    StackAddressBase, StackAddressRoot, TrustedSsaArtifact, def_use_graph,
+    CFGRiskSummary, CalleeEvidence, CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts,
+    DefRef, DefSite, GenuineNativeInstructionSpan, Lifted, NamedBlockMut, PhiNode, Prepared,
+    RegisterFamilyInfo, RegisterFamilySlot, RegisterIdentityCensus, RewrittenFunction,
+    SSABlock as FunctionSSABlock, SSAFunction, Sealed, SourceRef, SourceSite, SsaArtifact,
+    SsaArtifactAuthority, SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot,
+    TrustedSsaArtifact, def_use_graph,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,
@@ -118,10 +131,10 @@ pub use machine::{
 };
 pub use machine_context::{
     MACHINE_CONTEXT_SCHEMA_VERSION, MachineAbiModel, MachineAbiRegisterSlot,
-    MachineArchitectureFamily, MachineMemoryEndianness, MachineMemoryModel, MachineMemorySpace,
-    MachineRegisterGeometryState, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
-    SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceAbiClass,
-    SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceCallArgumentSpec,
+    MachineMemoryEndianness, MachineMemoryModel, MachineMemorySpace, MachineRegisterGeometryState,
+    SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION, SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION,
+    SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceAbiClass, SourceAbiParameterSpec,
+    SourceAggregateLayout, SourceAggregateMember, SourceBoundaryReads, SourceCallArgumentSpec,
     SourceCallEffect, SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
     SourceCallSiteInterfaceError, SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature,
     SourceConventionSlots, SourceFormatParameterRule, SourceFunctionInterface,
@@ -136,10 +149,11 @@ pub use obligation::{
     ObligationInventoryFailureKind, SEMANTIC_OBLIGATION_SCHEMA_VERSION,
     SemanticInstructionDisposition, SemanticInstructionState, SemanticMemoryOrdering,
     SemanticObligation, SemanticObligationComponent, SemanticObligationId,
-    SemanticObligationInventory, SemanticObligationKind, SemanticSourceSite,
+    SemanticObligationInventory, SemanticObligationKind, SemanticSourceSite, SpelledInstruction,
+    SpelledObligation,
 };
 pub use op::{AtomicCasOp, BlockTransferOp, InsertOp, SSAOp, SelectOp};
-pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats, optimize_function};
+pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats};
 pub use promote::promoted_slot_offset;
 pub use r2sleigh_lift::{
     GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION, GenuineLiftedFunction, GenuineLiftedFunctionAuthority,
@@ -175,6 +189,7 @@ pub use semantic::{
 };
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use strided::StridedInterval;
+pub use value_table::{ValueTable, VarId};
 pub use values::{InstructionBound, ValueRanges, instruction_bound, solve_value_ranges};
 pub use var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar, SSAVarNameKind};
-pub use view::{ValueView, ValueViews, ViewExtension, ViewRelation};
+pub use view::{Representative, ValueView, ValueViews, ViewExtension, ViewRelation};

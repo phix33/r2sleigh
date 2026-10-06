@@ -180,7 +180,12 @@ fn source_owned_from_blocks_with_interface(
     } else {
         vec![storage(0x30)]
     };
-    let call_effect = r2ssa::SourceCallEffect::new([], preserved).expect("a call effect");
+    let call_effect = r2ssa::SourceCallEffect::new(
+        [],
+        preserved,
+        r2ssa::SourceBoundaryReads::new([], []).expect("no reads"),
+    )
+    .expect("a call effect");
     let source = Arc::new(
         SsaArtifact::for_decompile_with(
             blocks,
@@ -239,8 +244,7 @@ fn journal_fixture_for_source(
     let plan = BindingPlan::build_shadow(&source).expect("sealed binding plan");
     let function = CFunction::new("journal", CType::Void);
     let function_source = source.source().function();
-    let normalized =
-        r2ssa::RewrittenFunction::new(function_source, function_source.blocks().to_vec());
+    let normalized = r2ssa::RewrittenFunction::new(function_source, function_source.named_blocks());
     let origins = NormalizationOrigins::for_unchanged(function_source, source.source());
     let names = test_binding_names(&source, Rc::new(plan.clone()), Rc::clone(&function.symbols));
     let journal = LegacyObservationJournal::new(
@@ -477,8 +481,7 @@ fn mixed_use_return_control_elides_only_the_exact_return_use() {
         Some(ValueDisposition::Bound { .. })
     ));
     let function_source = source.source().function();
-    let normalized =
-        r2ssa::RewrittenFunction::new(function_source, function_source.blocks().to_vec());
+    let normalized = r2ssa::RewrittenFunction::new(function_source, function_source.named_blocks());
     let origins = NormalizationOrigins::for_unchanged(function_source, source.source());
     let function = CFunction::new("mixed_return_control", CType::Void);
     let names = test_binding_names(&source, Rc::new(plan), Rc::clone(&function.symbols));
@@ -558,8 +561,7 @@ fn certified_value_read_rejects_forged_expression_at_allocation_and_seal() {
         other => panic!("certified return must be bound, got {other:?}"),
     };
     let function_source = source.source().function();
-    let normalized =
-        r2ssa::RewrittenFunction::new(function_source, function_source.blocks().to_vec());
+    let normalized = r2ssa::RewrittenFunction::new(function_source, function_source.named_blocks());
     let origins = NormalizationOrigins::for_unchanged(function_source, source.source());
     let mut journal = LegacyObservationJournal::new(
         &source,
@@ -799,7 +801,7 @@ fn placement_effect_elision_is_considered_only_at_zero_occurrences() {
     );
     assert!(matches!(
         ledger.outcome(&obligation),
-        crate::ledger::Outcome::Rendered { .. }
+        crate::ledger::Outcome::Rendered
     ));
 }
 
@@ -893,7 +895,7 @@ fn duplicate_surviving_effect_occurrence_is_a_conflict() {
     );
     assert!(matches!(
         ledger.outcome(&obligation),
-        crate::ledger::Outcome::Rendered { .. }
+        crate::ledger::Outcome::Rendered
     ));
     assert_eq!(
         ledger.conflicts().collect::<Vec<_>>(),
@@ -945,36 +947,34 @@ fn first_bound(plan: &BindingPlan, source: &SourceOwnedFunctionFacts) -> (ValueI
 
 #[test]
 fn source_certified_dead_phi_accounts_for_value_edges_and_write() {
+    // A register the loop only feeds back into itself: its merge is live by
+    // the reads alone (the increment reads it), so it is placed, and nothing
+    // the program observes reads it, so it is unobserved. A merge nothing
+    // reads at all is never placed.
     let mut entry = R2ILBlock::new(0x1000, 4);
-    entry.push(R2ILOp::CBranch {
-        cond: Varnode::constant(1, 1),
-        target: Varnode::constant(0x1008, 8),
-    });
-    let mut left = R2ILBlock::new(0x1004, 4);
-    left.push(R2ILOp::Copy {
-        dst: Varnode::unique(0x90, 8),
+    entry.push(R2ILOp::Copy {
+        dst: Varnode::register(0x38, 8),
         src: Varnode::constant(11, 8),
     });
-    left.push(R2ILOp::Branch {
-        target: Varnode::constant(0x100c, 8),
+    let mut header = R2ILBlock::new(0x1004, 4);
+    header.push(R2ILOp::IntAdd {
+        dst: Varnode::register(0x38, 8),
+        a: Varnode::register(0x38, 8),
+        b: Varnode::constant(1, 8),
     });
-    let mut right = R2ILBlock::new(0x1008, 4);
-    right.push(R2ILOp::Copy {
-        dst: Varnode::unique(0x90, 8),
-        src: Varnode::constant(12, 8),
+    header.push(R2ILOp::CBranch {
+        cond: Varnode::constant(1, 1),
+        target: Varnode::constant(0x1004, 8),
     });
-    right.push(R2ILOp::Branch {
-        target: Varnode::constant(0x100c, 8),
-    });
-    let mut join = R2ILBlock::new(0x100c, 4);
-    join.push(R2ILOp::Copy {
+    let mut exit = R2ILBlock::new(0x1008, 4);
+    exit.push(R2ILOp::Copy {
         dst: Varnode::register(0, 8),
         src: Varnode::constant(0, 8),
     });
-    join.push(R2ILOp::Return {
+    exit.push(R2ILOp::Return {
         target: Varnode::register(0x30, 8),
     });
-    let source = source_owned_from_blocks(&[entry, left, right, join]);
+    let source = source_owned_from_blocks(&[entry, header, exit]);
     let dead = source
         .source()
         .unobserved_merges()
@@ -982,13 +982,13 @@ fn source_certified_dead_phi_accounts_for_value_edges_and_write() {
         .find(|value| {
             source.source().graph().value(*value).is_some_and(|value| {
                 value.canonical_storage.is_some_and(|storage| {
-                    storage.space == CanonicalStorageSpace::Unique
-                        && storage.offset == 0x90
+                    storage.space == CanonicalStorageSpace::Register
+                        && storage.offset == 0x38
                         && storage.size == 8
                 })
             })
         })
-        .expect("unused unique-space merge");
+        .expect("the loop register's unobserved merge");
     let definition = source
         .source()
         .graph()
@@ -1011,8 +1011,7 @@ fn source_certified_dead_phi_accounts_for_value_edges_and_write() {
     let plan = Rc::new(BindingPlan::build_shadow(&source).expect("dead-merge-aware plan"));
     let function = CFunction::new("dead_phi", CType::Void);
     let function_source = source.source().function();
-    let normalized =
-        r2ssa::RewrittenFunction::new(function_source, function_source.blocks().to_vec());
+    let normalized = r2ssa::RewrittenFunction::new(function_source, function_source.named_blocks());
     let origins = NormalizationOrigins::for_unchanged(function_source, source.source());
     let names = test_binding_names(&source, plan, Rc::clone(&function.symbols));
     let journal = LegacyObservationJournal::new(
@@ -1135,8 +1134,7 @@ fn immutable_phi_coalesced_by_one_binding_accounts_for_edges_and_definition() {
         },
     );
     let function_source = source.source().function();
-    let normalized =
-        r2ssa::RewrittenFunction::new(function_source, function_source.blocks().to_vec());
+    let normalized = r2ssa::RewrittenFunction::new(function_source, function_source.named_blocks());
     let origins = NormalizationOrigins::for_unchanged(function_source, source.source());
     let names = test_binding_names(&source, plan, Rc::clone(&function.symbols));
     let journal = LegacyObservationJournal::new(
@@ -1288,8 +1286,8 @@ fn first_bound_rendered_input(
         .insts
         .iter()
         .find_map(|inst| {
-            let (block_addr, op_idx) = source.source().inst_op_site(inst.id)?;
-            let block = graph.block_id_for_addr(block_addr)?;
+            let op_idx = graph.op_ordinal(inst.id)?;
+            let block = inst.block;
             inst.inputs
                 .iter()
                 .copied()
@@ -1338,8 +1336,8 @@ fn first_bound_rendered_output(
             ) {
                 return None;
             }
-            let (block_addr, op_idx) = source.source().inst_op_site(inst.id)?;
-            let block = graph.block_id_for_addr(block_addr)?;
+            let op_idx = graph.op_ordinal(inst.id)?;
+            let block = inst.block;
             Some((value, *binding, inst.id, NormalizedOpSite { block, op_idx }))
         })
         .expect("fixture has an exactly projected bound output")
@@ -1932,10 +1930,9 @@ fn discharging_two_instructions_marks_owned_cells_and_each_effect_once() {
         .collect::<BTreeSet<_>>();
     for inst_id in order {
         let inst = graph.inst(inst_id).expect("discharged instruction");
-        let block = source
-            .source()
-            .inst_op_site(inst_id)
-            .map(|(block, _)| block)
+        let block = graph
+            .op_ordinal(inst_id)
+            .and_then(|_| graph.block_addr_of(inst_id))
             .expect("discharged instruction has a site");
         let write = match plan.write_disposition(inst_id) {
             Some(MachineWriteDisposition::Exact(write)) => LegacyWriteObservation::Exact(*write),

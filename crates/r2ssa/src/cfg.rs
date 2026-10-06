@@ -191,7 +191,7 @@ impl BasicBlock {
     /// control may run off its end into the next address. That is a fact the
     /// operations do not carry: a call's return depends on the callee, and a
     /// trap has no successor at all.
-    pub(crate) fn from_r2il_continuing(block: &R2ILBlock, continues: bool) -> Self {
+    pub fn from_r2il_continuing(block: &R2ILBlock, continues: bool) -> Self {
         // Check if this block has switch info
         let terminator = if let Some(ref switch_info) = block.switch_info {
             // Use switch terminator with cases from switch_info
@@ -230,12 +230,6 @@ impl BasicBlock {
                 })
                 .collect(),
         }
-    }
-
-    /// Source address of the final operation, with the block address used when
-    /// the lifter did not attach per-operation instruction metadata.
-    pub const fn terminal_instruction_addr(&self) -> Option<u64> {
-        self.terminal_instruction_addr
     }
 
     /// Source instruction the operation at this index was lifted from.
@@ -371,17 +365,6 @@ impl BasicBlock {
                 vec![]
             }
         }
-    }
-
-    /// Check if this block is a branch (conditional or unconditional).
-    pub fn is_branch(&self) -> bool {
-        matches!(
-            self.terminator,
-            BlockTerminator::Branch { .. }
-                | BlockTerminator::ConditionalBranch { .. }
-                | BlockTerminator::IndirectBranch
-                | BlockTerminator::Switch { .. }
-        )
     }
 
     /// Check if this block ends with a return.
@@ -813,11 +796,6 @@ impl CFG {
         self.addr_to_node.get(&addr).copied()
     }
 
-    /// Get the entry block.
-    pub fn entry_block(&self) -> Option<&BasicBlock> {
-        self.get_block(self.entry)
-    }
-
     /// Get all block addresses in the CFG.
     pub fn block_addrs(&self) -> impl Iterator<Item = u64> + '_ {
         let mut addrs: Vec<u64> = self.addr_to_node.keys().copied().collect();
@@ -833,11 +811,6 @@ impl CFG {
     /// Get the number of blocks.
     pub fn num_blocks(&self) -> usize {
         self.graph.node_count()
-    }
-
-    /// Get the number of edges.
-    pub fn num_edges(&self) -> usize {
-        self.graph.edge_count()
     }
 
     /// Get the predecessors of a block.

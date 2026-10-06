@@ -30,14 +30,15 @@ impl crate::SsaArtifact {
         let function = self.function();
         let graph = self.graph();
         let sites = function
-            .blocks()
+            .named_blocks()
             .iter()
             .flat_map(|block| {
-                let calls = block.ops.iter().enumerate();
-                calls.filter_map(|(index, op)| match function.enters_supervisor(op) {
-                    true => graph.inst_id_for_op_site(block.addr, index),
-                    false => None,
-                })
+                block
+                    .sited()
+                    .filter_map(|(id, op)| match function.enters_supervisor(op) {
+                        true => graph.inst_for_op(id),
+                        false => None,
+                    })
             })
             .collect::<Vec<_>>();
         if sites.is_empty() {
@@ -48,7 +49,7 @@ impl crate::SsaArtifact {
             .into_iter()
             .filter_map(|site| {
                 let address = graph.instruction_for_inst(site)?;
-                let number = match reaching.get(&site) {
+                let number = match reaching.get(site) {
                     Some(ReachingStorageState::Value(value)) => self.proven_constant(*value),
                     _ => None,
                 };

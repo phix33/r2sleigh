@@ -60,7 +60,7 @@ impl<'a> FoldingContext<'a> {
     /// ones, so the caller renders them under the negated condition.
     pub fn guarded_tail_condition(&self, block: &FunctionSSABlock) -> Option<(CExpr, usize)> {
         let (branch_idx, _) = r2ssa::branch_condition(block)?;
-        if branch_idx + 1 >= block.ops.len() {
+        if branch_idx + 1 >= block.ops().len() {
             return None;
         }
         // The branch's own operand, read the way every operand is read. No
@@ -99,8 +99,12 @@ impl<'a> FoldingContext<'a> {
                             .find(|predicate| predicate.id == assumption.predicate)
                     })
             })?;
-        let block = self.inputs.prepared_ssa?.function().get_block(block_addr)?;
-        self.certified_branch_condition_from_block(block)
+        let block = self
+            .inputs
+            .prepared_ssa?
+            .function()
+            .named_block(block_addr)?;
+        self.certified_branch_condition_from_block(&block)
             .filter(|(_, predicate_id, _)| *predicate_id == predicate.id)
             .map(|(expr, _, _)| expr)
     }

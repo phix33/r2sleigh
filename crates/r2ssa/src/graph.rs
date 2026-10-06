@@ -1,9 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::arena::OpId;
 use crate::function::SSAFunction;
 use crate::op::SSAOp;
+use crate::value_table::VarId;
 use crate::var::SSAVar;
 use crate::{CanonicalStorageId, CanonicalStorageSpace};
 
@@ -78,21 +80,26 @@ mod tests {
     #[test]
     fn phi_storage_identity_survives_removing_preceding_phi() {
         let mut func = two_phi_merge();
-        let merge = func.get_block(0x100c).expect("merge block");
-        assert_eq!(merge.phis.len(), 2, "the fixture must merge two registers");
-        let retained_storage = merge.phis[1]
+        let merge = func.named_block(0x100c).expect("merge block");
+        assert_eq!(
+            merge.phis().len(),
+            2,
+            "the fixture must merge two registers"
+        );
+        let retained_storage = merge.phis()[1]
             .canonical_storage
             .expect("second merge storage");
-        let retained_dst = merge.phis[1].dst.clone();
-        assert_ne!(retained_storage, merge.phis[0].canonical_storage.unwrap());
+        let retained_dst = merge.phis()[1].dst.clone();
+        let removed_dst = merge.phis()[0].dst.clone();
+        assert_ne!(retained_storage, merge.phis()[0].canonical_storage.unwrap());
 
-        let merge = func.get_block_mut(0x100c).expect("merge block");
-        merge.phis.remove(0);
+        let mut merge = func.edit_block(0x100c).expect("merge block");
+        merge.retain_phis(crate::Pass::Fixture, |phi| phi.dst != removed_dst);
 
-        let merge = func.get_block(0x100c).expect("merge block");
-        assert_eq!(merge.phis.len(), 1);
-        assert_eq!(merge.phis[0].dst, retained_dst);
-        assert_eq!(merge.phis[0].canonical_storage, Some(retained_storage));
+        let merge = func.named_block(0x100c).expect("merge block");
+        assert_eq!(merge.phis().len(), 1);
+        assert_eq!(merge.phis()[0].dst, retained_dst);
+        assert_eq!(merge.phis()[0].canonical_storage, Some(retained_storage));
 
         let graph = SsaGraph::from_function(&func);
         let graph_phi = graph
@@ -159,8 +166,12 @@ pub struct GraphValue {
 /// not a pointer chase and building one is not an allocation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum InstPayload {
-    Phi { predecessors: Vec<BlockId> },
-    Op(SSAOp),
+    Phi {
+        predecessors: Vec<BlockId>,
+    },
+    /// The operation over value ids: an operand is the value it reads or
+    /// defines, and its name is `SsaGraph::value(id).var`, kept once.
+    Op(SSAOp<ValueId>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -203,6 +214,10 @@ pub struct SsaGraph {
     /// interned afterwards is read nowhere -- so the offsets never move.
     pub(crate) use_offsets: Vec<u32>,
     pub(crate) use_sites: Vec<UseSite>,
+    /// Each function variable's value, by its [`crate::VarId`]; `None` for a
+    /// variable no operation names. How an operand of the function crosses
+    /// into the graph.
+    pub(crate) value_of_var: Vec<Option<ValueId>>,
     pub block_by_addr: BTreeMap<u64, BlockId>,
     /// Each value addressed by its variable's hash, open-addressed over
     /// `values`: a slot holds a value's identifier plus one, and zero is
@@ -216,26 +231,32 @@ pub struct SsaGraph {
     /// variable back out of `values`, which is where it already is, and asks
     /// once.
     pub(crate) value_index: Vec<u32>,
-    pub op_inst_by_site: BTreeMap<(u64, usize), InstId>,
-    pub op_site_by_inst: BTreeMap<InstId, (u64, usize)>,
+    /// The instruction each operation and phi became, indexed by its
+    /// [`OpId`]: dense over the function's arena, `None` for an id whose
+    /// operation is dead.
+    pub(crate) inst_by_op: Vec<Option<InstId>>,
+    /// The operation or phi each instruction is, indexed by [`InstId`].
+    pub(crate) op_by_inst: Vec<OpId>,
     /// Which machine instruction each operation came from.
     ///
     /// Carried here from the function so a consumer holding only the graph can
     /// ask. Absent for a phi and for anything the lifter stamped no address on.
-    pub(crate) instruction_by_inst: BTreeMap<InstId, u64>,
+    pub(crate) instruction_by_inst: crate::dense::IdMap<InstId, u64>,
     /// The inverse: every operation one machine instruction became, in order.
     pub(crate) insts_by_instruction: BTreeMap<u64, Vec<InstId>>,
     /// Entry-lane projections by value, valued by the lane's storage
     /// (`SSAFunction::mint_entry_lane_projections`).
-    pub(crate) formal_projections: BTreeMap<ValueId, CanonicalStorageId>,
+    pub(crate) formal_projections: crate::dense::IdMap<ValueId, CanonicalStorageId>,
     /// Entry roots rebuilt from their declared lanes, valued by the root's
     /// storage (`SSAFunction::mint_entry_lane_projections`).
-    pub(crate) formal_roots: BTreeMap<ValueId, CanonicalStorageId>,
+    pub(crate) formal_roots: crate::dense::IdMap<ValueId, CanonicalStorageId>,
+    /// Each entry-lane formal at the low end of its root, with the root.
+    pub(crate) entry_lanes: Vec<(SSAVar, SSAVar)>,
 }
 
 /// Record which machine instruction one operation came from, both ways round.
 fn record_instruction(
-    by_inst: &mut BTreeMap<InstId, u64>,
+    by_inst: &mut crate::dense::IdMap<InstId, u64>,
     by_instruction: &mut BTreeMap<u64, Vec<InstId>>,
     inst: InstId,
     from: Option<u64>,
@@ -269,6 +290,70 @@ fn insert_value_slot(index: &mut [u32], hash: u64, id: u32) {
 }
 
 /// The start of each value's run of uses, with a final entry for the total.
+/// The graph's values as the function's variables are first named: phis
+/// before operations, sources before the destination, block by block in
+/// order. Each variable is numbered once, in O(1), through the dense index
+/// its id gives.
+struct ValueNumbering<'f> {
+    function: &'f SSAFunction,
+    values: Vec<GraphValue>,
+    by_var: Vec<Option<ValueId>>,
+    def_of: Vec<Option<InstId>>,
+    uses_of: Vec<Vec<UseSite>>,
+}
+
+impl<'f> ValueNumbering<'f> {
+    fn new(function: &'f SSAFunction) -> Self {
+        Self {
+            function,
+            values: Vec::new(),
+            by_var: vec![None; function.values().len()],
+            def_of: Vec::new(),
+            uses_of: Vec::new(),
+        }
+    }
+
+    /// The value `operand` names, numbered now if this is its first name.
+    fn intern(&mut self, operand: VarId) -> ValueId {
+        if let Some(id) = self.by_var[operand.0 as usize] {
+            return id;
+        }
+        let var = self.function.var(operand);
+        let id = ValueId(self.values.len() as u32);
+        let canonical_storage = self.function.storage_of(operand).or_else(|| {
+            var.constant_bits().map(|bits| CanonicalStorageId {
+                space: CanonicalStorageSpace::Constant,
+                offset: bits,
+                size: var.size,
+            })
+        });
+        self.values.push(GraphValue {
+            id,
+            var: var.clone(),
+            canonical_storage,
+        });
+        self.by_var[operand.0 as usize] = Some(id);
+        self.def_of.push(None);
+        self.uses_of.push(Vec::new());
+        id
+    }
+
+    /// The value an operand already numbered names.
+    fn value_of(&self, operand: VarId) -> ValueId {
+        self.by_var[operand.0 as usize].expect("every operand is numbered before its payload")
+    }
+
+    /// `inst` reads `inputs`, in order, and defines `output`.
+    fn record(&mut self, inst: InstId, inputs: &[ValueId], output: Option<ValueId>) {
+        for (input_idx, input) in inputs.iter().enumerate() {
+            self.uses_of[input.0 as usize].push(UseSite { inst, input_idx });
+        }
+        if let Some(output) = output {
+            self.def_of[output.0 as usize] = Some(inst);
+        }
+    }
+}
+
 pub(crate) fn use_offsets_of(uses: &[Vec<UseSite>]) -> Vec<u32> {
     let mut offsets = Vec::with_capacity(uses.len() + 1);
     let mut total = 0u32;
@@ -341,75 +426,25 @@ impl SsaGraph {
                 .collect();
         }
 
-        let mut values = Vec::new();
-        let mut value_by_var = HashMap::new();
-        let mut def_of = Vec::new();
-        let mut uses_of: Vec<Vec<UseSite>> = Vec::new();
+        let mut numbering = ValueNumbering::new(function);
         let mut insts = Vec::new();
-        let mut op_inst_by_site = BTreeMap::new();
-        let mut op_site_by_inst = BTreeMap::new();
-        let mut instruction_by_inst = BTreeMap::new();
+        let mut inst_by_op = vec![None; function.id_limit()];
+        let mut op_by_inst = Vec::new();
+        let mut instruction_by_inst = crate::dense::IdMap::default();
         let mut insts_by_instruction: BTreeMap<u64, Vec<InstId>> = BTreeMap::new();
-
-        let intern_value = |var: &SSAVar,
-                            values: &mut Vec<GraphValue>,
-                            value_by_var: &mut HashMap<SSAVar, ValueId>,
-                            def_of: &mut Vec<Option<InstId>>,
-                            uses_of: &mut Vec<Vec<UseSite>>| {
-            if let Some(id) = value_by_var.get(var).copied() {
-                return id;
-            }
-            let id = ValueId(values.len() as u32);
-            let canonical_storage = function.canonical_storage_for_var(var).or_else(|| {
-                var.constant_bits().map(|bits| CanonicalStorageId {
-                    space: CanonicalStorageSpace::Constant,
-                    offset: bits,
-                    size: var.size,
-                })
-            });
-            values.push(GraphValue {
-                id,
-                var: var.clone(),
-                canonical_storage,
-            });
-            value_by_var.insert(var.clone(), id);
-            def_of.push(None);
-            uses_of.push(Vec::new());
-            id
-        };
 
         for block in function.blocks() {
             let block_id = block_by_addr[&block.addr];
 
-            for (phi_idx, phi) in block.phis.iter().enumerate() {
+            for (phi_idx, (op_id, phi)) in block.sited_phis().enumerate() {
                 let inputs = phi
                     .sources
                     .iter()
-                    .map(|(_, value)| {
-                        intern_value(
-                            value,
-                            &mut values,
-                            &mut value_by_var,
-                            &mut def_of,
-                            &mut uses_of,
-                        )
-                    })
+                    .map(|(_, value)| numbering.intern(*value))
                     .collect::<Vec<_>>();
-                let output = intern_value(
-                    &phi.dst,
-                    &mut values,
-                    &mut value_by_var,
-                    &mut def_of,
-                    &mut uses_of,
-                );
+                let output = numbering.intern(phi.dst);
                 let inst_id = InstId(insts.len() as u32);
-                for (input_idx, input) in inputs.iter().copied().enumerate() {
-                    uses_of[input.0 as usize].push(UseSite {
-                        inst: inst_id,
-                        input_idx,
-                    });
-                }
-                def_of[output.0 as usize] = Some(inst_id);
+                numbering.record(inst_id, &inputs, Some(output));
                 let predecessors = phi
                     .sources
                     .iter()
@@ -430,63 +465,49 @@ impl SsaGraph {
                     payload: InstPayload::Phi { predecessors },
                 });
                 blocks[block_id.0 as usize].insts.push(inst_id);
+                inst_by_op[op_id.index()] = Some(inst_id);
+                op_by_inst.push(op_id);
             }
 
-            for (op_idx, op) in block.ops.iter().enumerate() {
+            for (op_idx, (op_id, op)) in block.sited().enumerate() {
                 let inputs = op
                     .sources()
                     .into_iter()
-                    .map(|value| {
-                        intern_value(
-                            value,
-                            &mut values,
-                            &mut value_by_var,
-                            &mut def_of,
-                            &mut uses_of,
-                        )
-                    })
+                    .map(|value| numbering.intern(*value))
                     .collect::<Vec<_>>();
-                let output = op.dst().map(|dst| {
-                    intern_value(
-                        dst,
-                        &mut values,
-                        &mut value_by_var,
-                        &mut def_of,
-                        &mut uses_of,
-                    )
-                });
+                let output = op.dst().map(|dst| numbering.intern(*dst));
+                let payload = InstPayload::Op(op.map(&mut |operand| numbering.value_of(*operand)));
                 let inst_id = InstId(insts.len() as u32);
-                for (input_idx, input) in inputs.iter().copied().enumerate() {
-                    uses_of[input.0 as usize].push(UseSite {
-                        inst: inst_id,
-                        input_idx,
-                    });
-                }
-                if let Some(output) = output {
-                    def_of[output.0 as usize] = Some(inst_id);
-                }
+                numbering.record(inst_id, &inputs, output);
                 insts.push(GraphInst {
                     id: inst_id,
                     block: block_id,
-                    ordinal: block.phis.len() + op_idx,
+                    ordinal: block.phis().len() + op_idx,
                     inputs,
                     output,
                     canonical_storage: output
-                        .and_then(|value| values.get(value.0 as usize))
+                        .and_then(|value| numbering.values.get(value.0 as usize))
                         .and_then(|value| value.canonical_storage),
-                    payload: InstPayload::Op(op.clone()),
+                    payload,
                 });
                 blocks[block_id.0 as usize].insts.push(inst_id);
-                op_inst_by_site.insert((block.addr, op_idx), inst_id);
-                op_site_by_inst.insert(inst_id, (block.addr, op_idx));
+                inst_by_op[op_id.index()] = Some(inst_id);
+                op_by_inst.push(op_id);
                 record_instruction(
                     &mut instruction_by_inst,
                     &mut insts_by_instruction,
                     inst_id,
-                    function.instruction_at(block.addr, op_idx),
+                    function.instruction_of(op_id),
                 );
             }
         }
+        let ValueNumbering {
+            values,
+            by_var: value_by_var,
+            def_of,
+            uses_of,
+            ..
+        } = numbering;
 
         let entry = block_by_addr
             .get(&function.root())
@@ -494,12 +515,20 @@ impl SsaGraph {
             .unwrap_or(BlockId(0));
 
         let formal_projections = function
-            .formal_projection_vars()
-            .filter_map(|(var, storage)| value_by_var.get(var).map(|value| (*value, *storage)))
+            .formal_projection_ids()
+            .filter_map(|(operand, storage)| {
+                value_by_var[operand.0 as usize].map(|value| (value, *storage))
+            })
             .collect();
         let formal_roots = function
-            .formal_root_vars()
-            .filter_map(|(var, storage)| value_by_var.get(var).map(|value| (*value, *storage)))
+            .formal_root_ids()
+            .filter_map(|(operand, storage)| {
+                value_by_var[operand.0 as usize].map(|value| (value, *storage))
+            })
+            .collect();
+        let entry_lanes = function
+            .entry_lanes()
+            .map(|(lane, root)| (function.var(lane).clone(), function.var(root).clone()))
             .collect();
         let value_index = value_index_of(&values);
         Self {
@@ -511,21 +540,23 @@ impl SsaGraph {
             def_of,
             use_offsets: use_offsets_of(&uses_of),
             use_sites: uses_of.into_iter().flatten().collect(),
+            value_of_var: value_by_var,
             block_by_addr,
             value_index,
-            op_inst_by_site,
-            op_site_by_inst,
+            inst_by_op,
+            op_by_inst,
             instruction_by_inst,
             insts_by_instruction,
             formal_projections,
             formal_roots,
+            entry_lanes,
         }
     }
 
     /// Whether the caller supplied this value: an entry value with no
     /// defining instruction, or a lane the declaration mints from one.
     pub fn caller_supplied(&self, value: ValueId) -> bool {
-        self.def_inst(value).is_none() || self.formal_projections.contains_key(&value)
+        self.def_inst(value).is_none() || self.formal_projections.contains(value)
     }
 
     /// Whether this function's body wrote the value. It wrote no
@@ -534,16 +565,16 @@ impl SsaGraph {
     /// restates what the caller passed rather than storing anything the body
     /// computed.
     pub fn written_by_body(&self, value: ValueId) -> bool {
-        !self.caller_supplied(value) && !self.formal_roots.contains_key(&value)
+        !self.caller_supplied(value) && !self.formal_roots.contains(value)
     }
 
     /// The lane storage an entry-lane projection stands for.
     pub fn formal_projection_storage(&self, value: ValueId) -> Option<CanonicalStorageId> {
-        self.formal_projections.get(&value).copied()
+        self.formal_projections.get(value).copied()
     }
 
     /// Every entry-lane projection with the lane it stands for.
-    pub fn formal_projections(&self) -> impl Iterator<Item = (&ValueId, &CanonicalStorageId)> {
+    pub fn formal_projections(&self) -> impl Iterator<Item = (ValueId, &CanonicalStorageId)> {
         self.formal_projections.iter()
     }
 
@@ -578,12 +609,71 @@ impl SsaGraph {
         }
     }
 
-    pub fn inst_id_for_op_site(&self, block_addr: u64, op_idx: usize) -> Option<InstId> {
-        self.op_inst_by_site.get(&(block_addr, op_idx)).copied()
+    /// The instruction an operation or phi became.
+    pub fn inst_for_op(&self, id: OpId) -> Option<InstId> {
+        self.inst_by_op.get(id.index()).copied().flatten()
     }
 
-    pub fn op_site_for_inst(&self, id: InstId) -> Option<(u64, usize)> {
-        self.op_site_by_inst.get(&id).copied()
+    /// The operation or phi an instruction is.
+    pub fn op_for_inst(&self, id: InstId) -> Option<OpId> {
+        self.op_by_inst.get(id.0 as usize).copied()
+    }
+
+    /// How many of a block's instructions are its phis: they stand first.
+    fn phi_count(&self, block: &GraphBlock) -> usize {
+        block.insts.partition_point(|inst| {
+            self.insts
+                .get(inst.0 as usize)
+                .is_some_and(|inst| matches!(inst.payload, InstPayload::Phi { .. }))
+        })
+    }
+
+    /// Where an operation's instruction stands among its block's operations,
+    /// phis not counted. `None` for a phi.
+    ///
+    /// A presentation view of a sealed function, for spelling a site as
+    /// `0x{block}:op:{n}` and for ordering what is spelled. A fact is keyed
+    /// by the [`InstId`] or the [`OpId`], never by this.
+    pub fn op_ordinal(&self, id: InstId) -> Option<usize> {
+        let inst = self.inst(id)?;
+        let block = self.blocks.get(inst.block.0 as usize)?;
+        inst.ordinal.checked_sub(self.phi_count(block))
+    }
+
+    /// Where a walk over a sealed block from this instruction starts: the
+    /// block's address and the instruction's place among the block's
+    /// operations.
+    ///
+    /// A cursor for the walks that read the operations before or after an
+    /// instruction, private to the crate. The way back from a place is the
+    /// block's own [`SSABlock::op_id`](crate::FunctionSSABlock::op_id) and
+    /// [`Self::inst_for_op`]; no fact is keyed by a place.
+    pub(crate) fn walk_start(&self, id: InstId) -> Option<(u64, usize)> {
+        Some((self.block_addr_of(id)?, self.op_ordinal(id)?))
+    }
+
+    /// The instruction a spelled site `0x{block}:{n}` names: the inverse of
+    /// [`Self::op_ordinal`], for reading back a site a person wrote.
+    /// The instructions of `block` strictly between two ordinals, in order.
+    ///
+    /// A block's instructions are held in ordinal order -- its phis, then its
+    /// operations -- and an instruction's ordinal is its position there, so
+    /// the range is a slice: `O(1)` to find rather than a walk of the block.
+    pub fn insts_between(&self, block: BlockId, after: usize, before: usize) -> &[InstId] {
+        self.block(block)
+            .map(|block| &block.insts)
+            .and_then(|insts| insts.get(after.saturating_add(1)..before.min(insts.len())))
+            .unwrap_or(&[])
+    }
+
+    pub(crate) fn inst_spelled_at(&self, block_addr: u64, ordinal: usize) -> Option<InstId> {
+        let block = self.block(self.block_id_for_addr(block_addr)?)?;
+        block.insts.get(self.phi_count(block) + ordinal).copied()
+    }
+
+    /// The address of the block an instruction stands in.
+    pub fn block_addr_of(&self, id: InstId) -> Option<u64> {
+        Some(self.block(self.inst(id)?.block)?.addr)
     }
 
     /// Which machine instruction this operation came from.
@@ -592,7 +682,7 @@ impl SsaGraph {
     /// index space instead was wrong from the first operation renaming added
     /// to a block, and wrong in silence.
     pub fn instruction_for_inst(&self, id: InstId) -> Option<u64> {
-        self.instruction_by_inst.get(&id).copied()
+        self.instruction_by_inst.get(id).copied()
     }
 
     /// Every operation one machine instruction became, in order.
@@ -638,6 +728,25 @@ impl SsaGraph {
 
     pub fn value(&self, id: ValueId) -> Option<&GraphValue> {
         self.values.get(id.0 as usize)
+    }
+
+    /// An operation with each operand spelled as its variable, borrowed from
+    /// this graph's one table of values. For a reader that still works in
+    /// names (the renderer, until it reads values: doc/adr-renderer-printer.md);
+    /// nothing is cloned.
+    pub fn named_op(&self, op: &SSAOp<ValueId>) -> SSAOp<&SSAVar> {
+        op.map(&mut |id| self.var(*id))
+    }
+
+    /// The value a function operand names, where an operation names it.
+    pub fn value_of(&self, operand: crate::VarId) -> Option<ValueId> {
+        self.value_of_var.get(operand.0 as usize).copied().flatten()
+    }
+
+    /// The variable a value is spelled as: its name, version and width.
+    /// Every id an operation names is a value of this graph.
+    pub fn var(&self, id: ValueId) -> &SSAVar {
+        &self.values[id.0 as usize].var
     }
 
     /// Materialize an exact source-declared value at function entry.
@@ -691,6 +800,16 @@ impl SsaGraph {
 
     pub fn def_inst(&self, id: ValueId) -> Option<InstId> {
         self.def_of.get(id.0 as usize).copied().flatten()
+    }
+
+    /// The operation that defines `var`, when an operation rather than a
+    /// phi does.
+    pub fn defining_op(&self, var: &SSAVar) -> Option<&SSAOp<ValueId>> {
+        let def = self.def_inst(self.value_id_for_var(var)?)?;
+        match &self.inst(def)?.payload {
+            InstPayload::Op(op) => Some(op),
+            InstPayload::Phi { .. } => None,
+        }
     }
 
     pub fn use_sites(&self, id: ValueId) -> &[UseSite] {

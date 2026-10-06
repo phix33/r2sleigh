@@ -427,13 +427,13 @@ pub(super) fn component_eligible_with(
         .map(|value| {
             value.var.constant_bits().is_none()
                 && !unobserved_merges.contains(value.id)
-                && !unobserved_values.contains(&value.id)
+                && !unobserved_values.contains(value.id)
                 && !return_controls.contains(&value.id)
                 && !direct_control_targets.contains(&value.id)
                 && !direct_call_targets.contains(&value.id)
                 && !stack_frame_values.contains(&value.id)
-                && !stack_geometry_values.contains(&value.id)
-                && !structural_unused.contains(&value.id)
+                && !stack_geometry_values.contains(value.id)
+                && !structural_unused.contains(value.id)
                 && !unread.contains(&value.id)
         })
         .collect())
@@ -610,9 +610,7 @@ pub(super) fn effectful_definition_values(source: &r2ssa::SsaArtifact) -> BTreeS
             )
         })
         .filter_map(|obligation| match obligation.id.instruction.site {
-            r2ssa::CanonicalInstructionSite::Op(op_idx) => {
-                graph.inst_id_for_op_site(obligation.id.instruction.block_addr, op_idx as usize)
-            }
+            r2ssa::CanonicalInstructionSite::Op(op) => graph.inst_for_op(op),
             _ => None,
         })
         .filter_map(|inst| graph.inst(inst).and_then(|inst| inst.output))
@@ -752,7 +750,7 @@ pub(super) fn frame_objects_with_escaped_address(
         };
         let escapes = boundary_readers.any(value.id)
             || graph.use_sites(value.id).iter().any(|site| {
-                !geometry.contains(&site.inst)
+                !geometry.contains(site.inst)
                     && !matches!(
                         projection.use_disposition(*site),
                         Some(r2ssa::MachineUseDisposition::MemoryAddress(_))
@@ -815,19 +813,16 @@ pub(super) fn frame_objects_with_escaped_address(
 fn is_call_argument(source_owned: &SourceOwnedFunctionFacts, value: ValueId) -> bool {
     let source = source_owned.source();
     let graph = source.graph();
-    let identity = source.function().decompile_prep_facts();
+    let identity = source.decompile_prep_facts();
     let Some(callsites) = source_owned.report().callsites() else {
         return false;
     };
     callsites.by_callsite.values().any(|facts| {
         facts.argument_values.iter().any(|argument| {
             argument.value == value
-                || identity
-                    .zip(graph.value(argument.value))
-                    .zip(graph.value(value))
-                    .is_some_and(|((identity, argument), address)| {
-                        identity.same_bits(&argument.var, &address.var)
-                    })
+                || (graph.value(argument.value).is_some()
+                    && graph.value(value).is_some()
+                    && identity.same_bits(argument.value, value))
         })
     })
 }
@@ -1205,7 +1200,7 @@ pub(super) fn rewrite_inlining_partition(
         let relocations = inlined
             .iter()
             .filter_map(|value| Some((graph.def_inst(*value)?, *readers.get(value)?)))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<r2ssa::dense::IdMap<_, _>>();
         let liveness = source.liveness().with_relocations(graph, &relocations);
         let round_eligible = eligible
             .iter()
@@ -1236,8 +1231,14 @@ pub(super) fn rewrite_inlining_partition(
         // rather than of the version -- at -O0 the value an address is built
         // from is a reload, and the solution typed whichever version it could
         // see.
+        // Asked once per leaf the rewriter imports, and the answer is the
+        // object's, so it is worked out once per object this round.
+        let pointer_of_group = std::cell::RefCell::new(vec![None; components.len()]);
         let declared_pointers = |value: ValueId| {
-            declared_pointer_of_object(source_owned, &groups, &group_members, value)
+            let group = *groups.get(value.0 as usize)?;
+            let members = group_members.get(&group)?;
+            *pointer_of_group.borrow_mut()[group as usize]
+                .get_or_insert_with(|| declared_pointer_of_object(source_owned, members))
         };
         // Absorbed exactly as the rendering absorbs, so a value is proven constant only through producers this round folds.
         let round_canonical = r2rewrite::canonicalize_with(
@@ -1346,13 +1347,8 @@ pub(super) fn rewrite_inlining_partition(
 /// `len[buf]`. The signature is the one statement of what a formal is.
 fn declared_pointer_of_object(
     source_owned: &SourceOwnedFunctionFacts,
-    pre_partition: &[u32],
-    group_members: &BTreeMap<u32, Vec<ValueId>>,
-    value: ValueId,
+    members: &[ValueId],
 ) -> Option<bool> {
-    let source = source_owned.source();
-    let group = pre_partition.get(value.0 as usize).copied()?;
-    let members = group_members.get(&group)?;
     let mut agreed: Option<bool> = None;
     let mut agree = |answer: bool| -> Option<bool> {
         match agreed {
@@ -1388,7 +1384,6 @@ fn declared_pointer_of_object(
         };
         agree(answer)?;
     }
-    let _ = source;
     agreed
 }
 
@@ -1412,11 +1407,8 @@ fn declared_formal_type(
         return None;
     }
     let source = source_owned.source();
-    let var = &source.graph().value(value)?.var;
-    let index = source
-        .function()
-        .decompile_prep_facts()?
-        .formal_parameter_of(var)?;
+    source.graph().value(value)?;
+    let index = source.formal_parameter_of(value)?;
     let ty = facts
         .merged_signature
         .as_ref()?
@@ -1644,7 +1636,7 @@ fn inlinable_core(facts: PlanFacts<'_>, round: Round<'_>) -> Folds {
             .is_some_and(|output| {
                 dead_readers.contains(&output)
                     || unrendered.contains(&output)
-                    || unobserved.contains(&output)
+                    || unobserved.contains(output)
             })
     };
     // Of those graphless reads, call arguments are the one kind the renderer
@@ -1654,9 +1646,7 @@ fn inlinable_core(facts: PlanFacts<'_>, round: Round<'_>) -> Folds {
     let mut call_arg_readers = BTreeMap::<ValueId, BTreeSet<InstId>>::new();
     if let Some(callsites) = source_owned.report().callsites() {
         for (site, facts) in &callsites.by_callsite {
-            let Some(inst) = graph.inst_id_for_op_site(site.block_addr, site.op_index) else {
-                continue;
-            };
+            let inst = site.at;
             for argument in &facts.argument_values {
                 call_arg_readers
                     .entry(argument.value)
@@ -1696,13 +1686,13 @@ fn inlinable_core(facts: PlanFacts<'_>, round: Round<'_>) -> Folds {
         let Some(certificate) = source.certificates().returns.get(*index) else {
             continue;
         };
-        if certificate.at != *at {
+        if certificate.at != at {
             continue;
         }
         return_readers
             .entry(certificate.value)
             .or_default()
-            .insert(*at);
+            .insert(at);
     }
     // Which gate turned a value away, by name. Reading this function said a
     // flag copy passes every test in it, and the corpus said it stays bound;
@@ -1738,7 +1728,7 @@ fn inlinable_core(facts: PlanFacts<'_>, round: Round<'_>) -> Folds {
         };
         // A lane of an entry register is the formal it was minted for: the
         // declaration is its only spelling, so it is never folded into a
-        // reader (doc/adr-register-identity.md §8, 6).
+        // reader (doc/adr-register-identity.md §6).
         if graph.formal_projection_storage(value.id).is_some() {
             rejected("formal projection");
             continue;
@@ -2086,13 +2076,11 @@ fn inlinable_core(facts: PlanFacts<'_>, round: Round<'_>) -> Folds {
             continue;
         };
         // Only this block's operations can sit between the definition and the
-        // reader, so only this block's are read. Asking every operation in the
-        // function was the same answer at the cost of the whole graph, once per
-        // candidate value.
+        // reader, so only those are read: the slice between the two ordinals,
+        // not the block from its start, once per candidate value.
         let rewritten_by = graph
-            .block(def_inst.block)
-            .into_iter()
-            .flat_map(|block| block.insts.iter())
+            .insts_between(def_inst.block, def_inst.ordinal, use_inst.ordinal)
+            .iter()
             .filter_map(|inst| graph.inst(*inst))
             .find(|inst| {
                 inst.ordinal > def_inst.ordinal
@@ -2442,7 +2430,7 @@ pub(crate) fn certificate_elided_cells(
         };
         // By position: another operand may be the very same constant.
         let input_idx = r2ssa::BlockTransferOp::DIRECTION_INPUT;
-        if inst.inputs.get(input_idx) == graph.value_id_for_var(&transfer.direction).as_ref() {
+        if inst.inputs.get(input_idx) == Some(&transfer.direction) {
             insert_elided_use(
                 &mut uses,
                 r2ssa::UseSite {
@@ -2506,7 +2494,7 @@ pub(crate) fn certificate_elided_cells(
         let Some(output) = inst.output else {
             continue;
         };
-        if certificates.call_results.contains_key(&output) {
+        if certificates.call_results.contains(output) {
             continue;
         }
         insert_elided_write(&mut writes, inst.id, ElisionReason::CallBoundaryCarrier)?;
@@ -2515,7 +2503,7 @@ pub(crate) fn certificate_elided_cells(
     // `Subpiece` minting it from the root's entry value has no statement, and
     // its read of the root is not an occurrence (doc/adr-register-identity.md).
     for (value, _) in graph.formal_projections() {
-        let Some(inst) = graph.def_inst(*value) else {
+        let Some(inst) = graph.def_inst(value) else {
             continue;
         };
         let definition = graph
@@ -2547,10 +2535,10 @@ pub(crate) fn certificate_elided_cells(
     }
     for inst in &certificates.stack_geometry.insts {
         let definition = graph
-            .inst(*inst)
-            .ok_or(CertificateElidedCellsError::InvalidWrite(*inst))?;
+            .inst(inst)
+            .ok_or(CertificateElidedCellsError::InvalidWrite(inst))?;
         if definition.output.is_some() {
-            insert_elided_write(&mut writes, *inst, ElisionReason::DeadStackBase)?;
+            insert_elided_write(&mut writes, inst, ElisionReason::DeadStackBase)?;
         }
     }
     // The SSA liveness owner publishes the complete pure domain outside the
@@ -2569,15 +2557,13 @@ pub(crate) fn certificate_elided_cells(
     }
     for inst in unobserved.unobserved_insts() {
         let definition = graph
-            .inst(*inst)
-            .ok_or(CertificateElidedCellsError::InvalidWrite(*inst))?;
+            .inst(inst)
+            .ok_or(CertificateElidedCellsError::InvalidWrite(inst))?;
         if matches!(definition.payload, r2ssa::InstPayload::Phi { .. }) {
             continue;
         }
         if definition.output.is_some() {
-            writes
-                .entry(*inst)
-                .or_insert(ElisionReason::UnobservedValue);
+            writes.entry(inst).or_insert(ElisionReason::UnobservedValue);
         }
     }
     for value in unobserved.iter() {

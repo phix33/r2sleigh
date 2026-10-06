@@ -8,7 +8,7 @@ use crate::facts::FunctionSignatureSpec;
 use crate::analysis::{InferredSignature, InferredSignatureParam};
 use crate::model::Signedness;
 use crate::prepare::{prepared_arch_display_name, recover_signature_params_from_prepared_ssa};
-use crate::signedness::{ScalarSignednessEvidence, infer_scalar_signedness};
+use crate::signedness::{ScalarSignednessEvidence, scalar_signedness_of};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SignatureTypeEvidence {
@@ -117,28 +117,21 @@ pub(crate) fn infer_signature_from_prepared_ssa(prepared: &SsaArtifact) -> Infer
             &param.evidence,
         );
     }
-    refine_parameter_signedness(
-        arch_name,
-        prepared,
-        &recovered_params,
-        &mut canonical_params,
-    );
+    refine_parameter_signedness(prepared, &recovered_params, &mut canonical_params);
 
     let returns = crate::ReturnTypeFact::decide(prepared, &BTreeMap::new(), &evidence_types);
-    let mut inferred = build_inferred_signature(
+    let callconv = prepared.machine_context().function_interface().map_or_else(
+        || "unknown".to_string(),
+        |interface| interface.calling_convention().to_string(),
+    );
+    build_inferred_signature(
         &function_name,
         arch_name,
         ptr_bits,
         &canonical_params,
         returns.decided(),
-        &HashMap::new(),
-    );
-    if let Some(interface) = prepared.machine_context().function_interface() {
-        inferred.callconv = interface.calling_convention().to_string();
-    } else {
-        inferred.callconv = "unknown".to_string();
-    }
-    inferred
+        callconv,
+    )
 }
 
 fn certified_parameter_memory_widths(prepared: &SsaArtifact) -> HashMap<usize, BTreeSet<u32>> {
@@ -156,12 +149,7 @@ fn certified_memory_parameter(
     prepared: &SsaArtifact,
     access: &r2ssa::MemoryAccessCertificate,
 ) -> Option<usize> {
-    if access.space != r2il::SpaceId::Ram
-        || prepared
-            .machine_context()
-            .memory_space_at(access.block_addr, access.op_index)
-            != Some(access.space)
-    {
+    if access.space != r2il::SpaceId::Ram {
         return None;
     }
     prepared
@@ -231,61 +219,28 @@ fn certified_parameter_pointer_type(
 }
 
 fn refine_parameter_signedness(
-    arch_name: &str,
     prepared: &SsaArtifact,
     recovered_params: &[RecoveredSignatureParam],
     params: &mut [SignatureParamCandidate],
 ) {
-    let parameter_home_aliases = certified_parameter_home_aliases(prepared, recovered_params);
-    let inferred = infer_scalar_signedness(
-        prepared
-            .function()
-            .blocks()
-            .iter()
-            .flat_map(|block| block.ops.iter()),
-        prepared
-            .function()
-            .blocks()
-            .iter()
-            .flat_map(|block| {
-                block
-                    .phis
-                    .iter()
-                    .flat_map(|phi| phi.sources.iter().map(|(_, source)| (source, &phi.dst)))
-            })
-            .chain(
-                prepared
-                    .certificates()
-                    .stack_reloads
-                    .values()
-                    .filter_map(|reload| {
-                        if reload.relation != r2ssa::ViewRelation::Identity
-                            || reload.value_width != reload.memory_width
-                        {
-                            return None;
-                        }
-                        Some((
-                            prepared.value_var(reload.canonical_source)?,
-                            prepared.value_var(reload.value)?,
-                        ))
-                    }),
-            )
-            .chain(
-                parameter_home_aliases
-                    .iter()
-                    .map(|(source, reload)| (source, reload)),
-            ),
-        (!arch_name.is_empty()).then_some(arch_name),
+    let graph = prepared.graph();
+    let inferred = scalar_signedness_of(
+        prepared,
+        true,
+        signedness_aliases(prepared, recovered_params),
     );
     let mut pointee_evidence = HashMap::<(usize, u32), BTreeSet<ScalarSignednessEvidence>>::new();
     for access in prepared.certificates().memory_accesses.values() {
         let Some(index) = certified_memory_parameter(prepared, access) else {
             continue;
         };
-        let Some(value) = access.value.and_then(|value| prepared.value_var(value)) else {
+        let Some(value) = access.value else {
             continue;
         };
-        if value.size != access.width {
+        if graph
+            .value(value)
+            .is_none_or(|value| value.var.size != access.width)
+        {
             continue;
         }
         let Some(observed) = inferred.get(value) else {
@@ -301,7 +256,8 @@ fn refine_parameter_signedness(
         let scalar_observed = recovered_params
             .iter()
             .find(|recovered| recovered.arg_index == param.arg_index)
-            .and_then(|recovered| inferred.get(&recovered.ssa_var));
+            .and_then(|recovered| graph.value_id_for_var(&recovered.ssa_var))
+            .and_then(|value| inferred.get(value));
         let observed = match &mut param.ty {
             CTypeLike::Int { signedness, .. } if *signedness == Signedness::Unknown => {
                 scalar_observed
@@ -332,6 +288,36 @@ fn refine_parameter_signedness(
             _ => {}
         }
     }
+}
+
+/// The same-width aliases parameter signedness flows through beside the
+/// merges: a certified reload and the value it reloads, and a parameter's
+/// home and its reload.
+fn signedness_aliases(
+    prepared: &SsaArtifact,
+    recovered_params: &[RecoveredSignatureParam],
+) -> Vec<(r2ssa::ValueId, r2ssa::ValueId)> {
+    let graph = prepared.graph();
+    prepared
+        .certificates()
+        .stack_reloads
+        .values()
+        .filter(|reload| {
+            reload.relation == r2ssa::ViewRelation::Identity
+                && reload.value_width == reload.memory_width
+        })
+        .map(|reload| (reload.canonical_source, reload.value))
+        .chain(
+            certified_parameter_home_aliases(prepared, recovered_params)
+                .iter()
+                .filter_map(|(source, reload)| {
+                    Some((
+                        graph.value_id_for_var(source)?,
+                        graph.value_id_for_var(reload)?,
+                    ))
+                }),
+        )
+        .collect()
 }
 
 fn certified_parameter_home_aliases(
@@ -405,6 +391,13 @@ fn certified_parameter_home_aliases(
     aliases
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 fn transparent_same_width_source(prepared: &SsaArtifact, start: r2ssa::ValueId) -> Option<SSAVar> {
     let mut current = start;
     let mut visited = HashSet::new();
@@ -420,20 +413,20 @@ fn transparent_same_width_source(prepared: &SsaArtifact, start: r2ssa::ValueId) 
         let r2ssa::InstPayload::Op(op) = &inst.payload else {
             return Some(current_var);
         };
+        let graph = prepared.graph();
         let source = match op {
-            SSAOp::Copy { src, .. } | SSAOp::New { src, .. } | SSAOp::Cast { src, .. } => src,
-            SSAOp::Subpiece { src, offset, .. } if *offset == 0 && src.size == current_var.size => {
-                src
+            SSAOp::Copy { src, .. } | SSAOp::New { src, .. } | SSAOp::Cast { src, .. } => *src,
+            SSAOp::Subpiece { src, offset, .. }
+                if *offset == 0 && graph.var(*src).size == current_var.size =>
+            {
+                *src
             }
             _ => return Some(current_var),
         };
-        if source.size != current_var.size {
+        if graph.var(source).size != current_var.size {
             return Some(current_var);
         }
-        let Some(source_value) = prepared.graph().value_id_for_var(source) else {
-            return Some(current_var);
-        };
-        current = source_value;
+        current = source;
     }
     None
 }
@@ -882,72 +875,6 @@ fn exact_signature_type_evidence(ty: &CTypeLike) -> SignatureTypeEvidence {
     evidence
 }
 
-fn canonical_x86_64_arg_reg(name: &str) -> Option<&'static str> {
-    match name.to_ascii_lowercase().as_str() {
-        "rdi" | "edi" | "di" | "dil" => Some("rdi"),
-        "rsi" | "esi" | "si" | "sil" => Some("rsi"),
-        "rdx" | "edx" | "dx" | "dl" | "dh" => Some("rdx"),
-        "rcx" | "ecx" | "cx" | "cl" | "ch" => Some("rcx"),
-        "r8" | "r8d" | "r8w" | "r8b" => Some("r8"),
-        "r9" | "r9d" | "r9w" | "r9b" => Some("r9"),
-        _ => None,
-    }
-}
-
-fn infer_callconv_x86_64_from_counts(counts: &HashMap<String, u32>) -> (&'static str, u8) {
-    let mut canonical = std::collections::BTreeMap::new();
-    for (reg, count) in counts {
-        if let Some(name) = canonical_x86_64_arg_reg(reg) {
-            *canonical.entry(name).or_insert(0u32) += *count;
-        }
-    }
-
-    let rdi = *canonical.get("rdi").unwrap_or(&0);
-    let rsi = *canonical.get("rsi").unwrap_or(&0);
-    let rcx = *canonical.get("rcx").unwrap_or(&0);
-    let rdx = *canonical.get("rdx").unwrap_or(&0);
-    let r8 = *canonical.get("r8").unwrap_or(&0);
-    let r9 = *canonical.get("r9").unwrap_or(&0);
-
-    let sysv_primary = rdi + rsi;
-    let sysv_total = rdi + rsi + rdx + rcx + r8 + r9;
-    let ms_total = rcx + rdx + r8 + r9;
-    let ms_regs_used = [rcx, rdx, r8, r9].iter().filter(|&&v| v > 0).count();
-    let ms_dominant = sysv_primary == 0
-        && rcx > 0
-        && ms_regs_used >= 2
-        && ms_total >= 3
-        && ms_total >= (rdi + rsi + rdx + 1);
-
-    if ms_dominant {
-        let confidence = if ms_total >= 3 { 90 } else { 76 };
-        ("ms", confidence)
-    } else {
-        let confidence = if sysv_primary > 0 {
-            92
-        } else if sysv_total > 0 {
-            76
-        } else {
-            60
-        };
-        ("amd64", confidence)
-    }
-}
-
-pub fn compute_callconv_inference(
-    arch_name: &str,
-    input_counts: &HashMap<String, u32>,
-) -> (String, u8) {
-    match arch_name {
-        "x86-64" => {
-            let (callconv, confidence) = infer_callconv_x86_64_from_counts(input_counts);
-            (callconv.to_string(), confidence)
-        }
-        "x86" => ("cdecl".to_string(), 64),
-        _ => (String::new(), 0),
-    }
-}
-
 use crate::context::sanitize_c_identifier;
 
 fn uniquify_name(base: String, used: &mut HashSet<String>) -> String {
@@ -1038,7 +965,7 @@ pub(crate) fn build_inferred_signature(
     ptr_bits: u32,
     params: &[SignatureParamCandidate],
     ret_type: Option<&CTypeLike>,
-    input_counts: &HashMap<String, u32>,
+    callconv: String,
 ) -> InferredSignature {
     let mut ordered = params.to_vec();
     ordered.sort_by(|a, b| {
@@ -1078,7 +1005,6 @@ pub(crate) fn build_inferred_signature(
     }
     // An undecided return is spelled as nothing, so no type is read back from it.
     let rendered_ret = ret_type.map_or_else(String::new, |ty| render_signature_type(ty, ptr_bits));
-    let (callconv, _) = compute_callconv_inference(arch_name, input_counts);
     InferredSignature {
         function_name: function_name.to_string(),
         signature: format_signature_prototype(function_name, &rendered_ret, &json_params),
@@ -1592,7 +1518,7 @@ mod tests {
             64,
             &params,
             Some(&CTypeLike::Void),
-            &HashMap::new(),
+            "amd64".to_string(),
         );
 
         assert_eq!(inferred.params.len(), 7);

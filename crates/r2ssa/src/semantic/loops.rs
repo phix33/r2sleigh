@@ -43,27 +43,10 @@ fn loop_induction_facts(
         .collect()
 }
 
-/// Each loop header with the blocks that branch back to it: one natural loop per header.
-pub(crate) fn latches_by_header(function: &SSAFunction) -> BTreeMap<u64, BTreeSet<u64>> {
-    let mut latches_by_header = BTreeMap::<u64, BTreeSet<u64>>::new();
-    for &block_addr in function.block_addrs() {
-        for succ in function.successors(block_addr) {
-            if function.dominates(succ, block_addr) {
-                latches_by_header
-                    .entry(succ)
-                    .or_default()
-                    .insert(block_addr);
-            }
-        }
-    }
-    latches_by_header
-}
-
-/// What loop recovery reads beside the body: the branch tests, the value ranges and the back edges.
+/// What loop recovery reads beside the body: the branch tests and the value ranges.
 pub(crate) struct LoopEvidence<'a> {
     pub(crate) predicates: &'a PredicateFacts,
     pub(crate) values: &'a crate::values::ValueRanges,
-    pub(crate) latches_by_header: &'a BTreeMap<u64, BTreeSet<u64>>,
 }
 
 /// Every natural loop with its carriers and trip count, and every induction its carriers prove.
@@ -74,31 +57,29 @@ pub(crate) fn collect_structured_loop_facts(
     storage_spans: &StorageSpans,
 ) -> (
     BTreeMap<LoopId, StructuredLoopFact>,
-    BTreeMap<ValueId, InductionFact>,
+    crate::dense::IdMap<ValueId, InductionFact>,
 ) {
     let Body {
         function, graph, ..
     } = code;
-    let LoopEvidence {
-        predicates,
-        values,
-        latches_by_header,
-    } = evidence;
+    let LoopEvidence { predicates, values } = evidence;
     let mut counter = TripCounter::new(function, graph, predicates, values);
     let mut loops = BTreeMap::new();
-    let mut inductions = BTreeMap::new();
-    for (idx, (&header, latches)) in latches_by_header.iter().enumerate() {
+    let mut inductions = crate::dense::IdMap::default();
+    for (idx, natural) in function.natural_loops().iter().enumerate() {
         let id = LoopId(idx as u32);
-        let body_set = natural_loop_body(function, header, latches);
+        let header = natural.header;
+        let latches = &natural.latches;
+        let body_set = &natural.body;
         let body = body_set.iter().copied().collect::<Vec<_>>();
-        let leaving = LoopExits::of(function, &body_set);
+        let leaving = LoopExits::of(function, body_set);
         let exits = leaving.targets();
-        let condition = loop_condition(predicates, header, &body_set, &exits);
+        let condition = loop_condition(predicates, header, body_set, &exits);
         let loop_ = NaturalLoop {
             id,
             header,
             latches,
-            body: &body_set,
+            body: body_set,
             exits: &leaving,
         };
         let carriers = loop_carrier_facts(code, loop_, live_out, storage_spans);
@@ -201,6 +182,7 @@ pub(crate) fn loop_carrier_facts(
         function,
         graph,
         machine_context,
+        ..
     } = body;
     let NaturalLoop {
         id: loop_id,
@@ -209,11 +191,11 @@ pub(crate) fn loop_carrier_facts(
         body: loop_body,
         ..
     } = loop_;
-    let Some(header_block) = function.get_block(header) else {
+    let Some(header_block) = function.named_block(header) else {
         return Vec::new();
     };
     let mut carriers = header_block
-        .phis
+        .phis()
         .iter()
         .filter_map(|phi| {
             let phi_value = graph.value_id_for_var(&phi.dst)?;
@@ -278,8 +260,8 @@ pub(crate) fn loop_carrier_facts(
     // mutable carrier after structured control flow. Resolve the transitive
     // relation through a sorted worklist: every phi edge is reconsidered only
     // when a newly certified output can change its answer.
-    let mut owners_by_value = BTreeMap::<ValueId, BTreeSet<usize>>::new();
-    let mut continuing_owners_by_value = BTreeMap::<ValueId, BTreeSet<usize>>::new();
+    let mut owners_by_value = crate::dense::IdMap::<ValueId, BTreeSet<usize>>::default();
+    let mut continuing_owners_by_value = crate::dense::IdMap::<ValueId, BTreeSet<usize>>::default();
     for (carrier_index, carrier) in carriers.iter().enumerate() {
         for value in carrier
             .identity_values
@@ -291,8 +273,7 @@ pub(crate) fn loop_carrier_facts(
             }))
         {
             owners_by_value
-                .entry(value)
-                .or_default()
+                .get_or_insert_with(value, Default::default)
                 .insert(carrier_index);
         }
         for value in carrier
@@ -304,11 +285,14 @@ pub(crate) fn loop_carrier_facts(
             }))
         {
             continuing_owners_by_value
-                .entry(value)
-                .or_default()
+                .get_or_insert_with(value, Default::default)
                 .insert(carrier_index);
         }
     }
+    // A worklist over the loop's inner phis. A phi is given its one owner at
+    // most once -- one already owned is skipped -- and owners only grow, so
+    // a phi is re-queued only when an input it reads gains one: each phi is
+    // decided once, and the work is the phis plus their uses.
     let mut pending = graph
         .insts
         .iter()
@@ -319,7 +303,7 @@ pub(crate) fn loop_carrier_facts(
                     .is_some_and(|block| block.addr != header)
         })
         .map(|inst| inst.id)
-        .collect::<BTreeSet<_>>();
+        .collect::<crate::dense::IdWorklist<_>>();
     while let Some(phi_inst) = pending.pop_first() {
         let Some(inst) = graph.inst(phi_inst) else {
             continue;
@@ -330,7 +314,7 @@ pub(crate) fn loop_carrier_facts(
         let Some(output) = inst.output else {
             continue;
         };
-        if owners_by_value.contains_key(&output)
+        if owners_by_value.contains(output)
             || predecessors.len() != inst.inputs.len()
             || inst.inputs.is_empty()
             || inst.inputs.iter().copied().collect::<BTreeSet<_>>().len() != inst.inputs.len()
@@ -340,13 +324,13 @@ pub(crate) fn loop_carrier_facts(
         let Some(mut candidate_owners) = inst
             .inputs
             .first()
-            .and_then(|input| owners_by_value.get(input))
+            .and_then(|input| owners_by_value.get(*input))
             .cloned()
         else {
             continue;
         };
         for input in inst.inputs.iter().skip(1) {
-            let Some(input_owners) = owners_by_value.get(input) else {
+            let Some(input_owners) = owners_by_value.get(*input) else {
                 candidate_owners.clear();
                 break;
             };
@@ -355,7 +339,7 @@ pub(crate) fn loop_carrier_facts(
         candidate_owners.retain(|owner| {
             inst.inputs.iter().any(|input| {
                 continuing_owners_by_value
-                    .get(input)
+                    .get(*input)
                     .is_some_and(|owners| owners.contains(owner))
             })
         });
@@ -398,12 +382,10 @@ pub(crate) fn loop_carrier_facts(
             }
         }
         owners_by_value
-            .entry(output)
-            .or_default()
+            .get_or_insert_with(output, Default::default)
             .insert(carrier_index);
         continuing_owners_by_value
-            .entry(output)
-            .or_default()
+            .get_or_insert_with(output, Default::default)
             .insert(carrier_index);
         for site in graph.use_sites(output) {
             if graph
@@ -436,28 +418,4 @@ pub(crate) fn loop_carrier_facts(
         carrier.members = members;
     }
     carriers
-}
-
-pub(crate) fn natural_loop_body(
-    function: &SSAFunction,
-    header: u64,
-    latches: &BTreeSet<u64>,
-) -> BTreeSet<u64> {
-    let mut body = BTreeSet::new();
-    body.insert(header);
-    let mut stack = latches.iter().copied().collect::<Vec<_>>();
-    while let Some(addr) = stack.pop() {
-        if !function.dominates(header, addr) {
-            continue;
-        }
-        if !body.insert(addr) {
-            continue;
-        }
-        for pred in function.predecessors(addr) {
-            if !body.contains(&pred) {
-                stack.push(pred);
-            }
-        }
-    }
-    body
 }

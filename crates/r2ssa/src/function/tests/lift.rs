@@ -62,7 +62,11 @@ fn decompile_ssa_models_post_call_arm64_return_register_clobber() {
     }];
 
     let prepared = prepared_preserving(&blocks, &arch, &[]).expect("prepared SSA should build");
-    let ops = &prepared.get_block(0x1400).expect("entry block").ops;
+    let ops = prepared
+        .named_block(0x1400)
+        .expect("entry block")
+        .ops()
+        .to_vec();
     let post_call_x0 = ops
         .iter()
         .find_map(|op| match op {
@@ -118,7 +122,7 @@ fn decompile_ssa_models_post_call_arm64_return_register_clobber() {
             .is_none()
     );
 
-    for op in ops {
+    for op in &ops {
         if let SSAOp::CallDefine { dst } = op
             && dst.name() == "x8"
         {
@@ -265,16 +269,16 @@ fn call_result_certificates_require_a_complete_machine_boundary() {
     // `Subpiece` of it, certified as that result sliced.
     let eax = prepared
         .function()
-        .get_block(0x16c0)
+        .named_block(0x16c0)
         .into_iter()
-        .flat_map(|block| &block.ops)
+        .flat_map(|block| block.ops().to_vec())
         .find_map(|op| match op {
             SSAOp::Subpiece {
                 dst,
                 src,
                 offset: 0,
             } if dst.size == 4 && src.name().eq_ignore_ascii_case("rax") => {
-                prepared.graph().value_id_for_var(dst)
+                prepared.graph().value_id_for_var(&dst)
             }
             _ => None,
         })
@@ -336,7 +340,7 @@ fn prepared_return_register_subpiece_zext_chain_is_renderable() {
     let prepared = SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA");
     let return_value = prepared
         .graph()
-        .inst_id_for_op_site(0x1740, 2)
+        .inst_spelled_at(0x1740, 2)
         .and_then(|inst| prepared.graph().inst(inst))
         .and_then(|inst| inst.output)
         .expect("zero-extended return-register value");
@@ -344,7 +348,7 @@ fn prepared_return_register_subpiece_zext_chain_is_renderable() {
     let expr_cert = prepared
         .certificates()
         .expressions
-        .get(&return_value)
+        .get(return_value)
         .expect("return value expression certificate");
     let input_debug = expr_cert
         .inputs
@@ -357,14 +361,14 @@ fn prepared_return_register_subpiece_zext_chain_is_renderable() {
             let renderable = prepared
                 .certificates()
                 .expressions
-                .get(value)
+                .get(*value)
                 .is_some_and(|cert| cert.renderable);
             format!("{name}:{renderable}")
         })
         .collect::<Vec<_>>();
     let mut tmp_debug = Vec::new();
     for value in &expr_cert.inputs {
-        if let Some(cert) = prepared.certificates().expressions.get(value) {
+        if let Some(cert) = prepared.certificates().expressions.get(*value) {
             let value_name = prepared
                 .value_var(*value)
                 .map(|var| var.display_name())
@@ -377,7 +381,7 @@ fn prepared_return_register_subpiece_zext_chain_is_renderable() {
                 let renderable = prepared
                     .certificates()
                     .expressions
-                    .get(input)
+                    .get(*input)
                     .is_some_and(|cert| cert.renderable);
                 tmp_debug.push(format!("{value_name}->{input_name}:{renderable}"));
             }
@@ -427,9 +431,9 @@ fn a_callee_proven_to_preserve_a_register_leaves_it_undefined_by_the_call() {
     let call_defines = |artifact: &SsaArtifact, name: &str| {
         artifact
             .function()
-            .get_block(0x1000)
+            .named_block(0x1000)
             .expect("entry block")
-            .ops
+            .ops()
             .iter()
             .filter(|op| {
                 matches!(op, SSAOp::CallDefine { dst } if dst.name().eq_ignore_ascii_case(name))
@@ -444,9 +448,9 @@ fn a_callee_proven_to_preserve_a_register_leaves_it_undefined_by_the_call() {
     // The store reads the value rdi held on entry, not a clobber.
     let stored = with
         .function()
-        .get_block(0x1000)
+        .named_block(0x1000)
         .expect("entry block")
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             SSAOp::Store { val, .. } => Some(val.clone()),
@@ -503,9 +507,9 @@ fn a_callee_that_returns_an_unaffected_register_defines_it_at_the_call() {
     let call_defines = |artifact: &SsaArtifact| {
         artifact
             .function()
-            .get_block(0x1000)
+            .named_block(0x1000)
             .expect("entry block")
-            .ops
+            .ops()
             .iter()
             .filter(|op| {
                 matches!(op, SSAOp::CallDefine { dst } if dst.name().eq_ignore_ascii_case("rbx"))
@@ -517,9 +521,9 @@ fn a_callee_that_returns_an_unaffected_register_defines_it_at_the_call() {
     let stored = |artifact: &SsaArtifact| {
         artifact
             .function()
-            .get_block(0x1000)
+            .named_block(0x1000)
             .expect("entry block")
-            .ops
+            .ops()
             .iter()
             .find_map(|op| match op {
                 SSAOp::Store { val, .. } => Some(val.clone()),
@@ -580,62 +584,5 @@ fn a_body_that_leaves_by_a_jump_claims_no_preserved_register() {
             .is_empty(),
         "{:?}",
         artifact.facts().boundaries.preserved_call_carriers
-    );
-}
-
-/// A call clobbers the direction flag, and what reads it after reads the zero the convention returns.
-#[test]
-fn a_call_returns_the_direction_flag_clear() {
-    let mut arch = ArchSpec::new("x86-64");
-    arch.addr_size = 8;
-    arch.add_register(RegisterDef::new("rax", 0, 8));
-    arch.add_register(RegisterDef::new("DF", 0x20a, 1));
-    let direction = call_preservation_storage(0x20a, 1);
-    // call 0x2000; rax = zext(DF); return
-    let block = call_preservation_block(vec![
-        R2ILOp::Call {
-            target: make_ram(0x2000, 8),
-        },
-        R2ILOp::IntZExt {
-            dst: make_reg(0, 8),
-            src: make_reg(0x20a, 1),
-        },
-        R2ILOp::Return {
-            target: make_const(0, 8),
-        },
-    ]);
-    let artifact = SsaArtifact::for_decompile_with(
-        &[block],
-        DecompileInputs {
-            arch: Some(&arch),
-            machine_roles: SourceMachineRoles::default()
-                .with_direction_flag_storage(Some(direction)),
-            convention_slots: Some(
-                SourceConventionSlots::new("amd64", [], None).expect("convention slots"),
-            ),
-            call_effect: clobbering([call_preservation_storage(0, 8)], []),
-            ..Default::default()
-        },
-    )
-    .expect("artifact");
-    let graph = artifact.graph();
-    let clobbers = graph
-        .insts
-        .iter()
-        .filter(|inst| {
-            matches!(
-                inst.payload,
-                crate::graph::InstPayload::Op(SSAOp::CallDefine { .. })
-            )
-        })
-        .filter(|inst| inst.canonical_storage == Some(direction))
-        .filter_map(|inst| inst.output)
-        .collect::<Vec<_>>();
-    assert_eq!(clobbers.len(), 1, "the call clobbers the direction flag");
-    assert!(
-        clobbers
-            .iter()
-            .all(|value| graph.use_sites(*value).is_empty()),
-        "what follows the call reads the convention's zero, not the clobber"
     );
 }

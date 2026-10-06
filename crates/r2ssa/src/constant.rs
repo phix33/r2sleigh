@@ -25,9 +25,10 @@
 //! fold expands no phi, so recording each value once terminates the walk and
 //! also keeps a shared subexpression from being evaluated twice.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::CanonicalStorageSpace;
+use crate::dense::{IdMap, IdVec};
 use crate::function::DecompilePrepFacts;
 use crate::graph::{GraphInst, InstPayload, SsaGraph, ValueId};
 use crate::indirect::exact_input;
@@ -37,8 +38,13 @@ use crate::op::SSAOp;
 /// unchanged: a copy or a zero extension, as the one identity fact states
 /// them (`crate::view`). A truncation, a lane at an offset and a sign
 /// extension each change the number.
-fn is_value_preserving(op: &SSAOp) -> bool {
-    crate::view::preserves_integer(op)
+fn is_value_preserving(graph: &SsaGraph, op: &SSAOp<ValueId>) -> bool {
+    crate::view::preserves_integer(op, operand_facts(graph))
+}
+
+/// What a graph operation's operand is: its value's width and constant bits.
+fn operand_facts(graph: &SsaGraph) -> impl Fn(&ValueId) -> (u32, Option<u64>) + Copy + '_ {
+    |value| crate::op::var_facts(graph.var(*value))
 }
 
 /// The literal a value states about itself, at its own width.
@@ -48,10 +54,11 @@ fn is_value_preserving(op: &SSAOp) -> bool {
 /// preparation has a root for the value, what the root states counts too:
 /// the root relation closes over phis, which no walk over definitions does.
 fn literal_of(graph: &SsaGraph, facts: Option<&DecompilePrepFacts>, value: ValueId) -> Option<u64> {
+    let id = value;
     let value = graph.value(value)?;
     facts
-        .map(|facts| facts.canonical_root(&value.var))
-        .and_then(|root| root.constant_bits())
+        .and_then(|facts| facts.views.representative_constant(id))
+        .map(|(bits, _)| bits)
         .or_else(|| value.var.constant_bits())
         .or_else(|| {
             value
@@ -67,6 +74,13 @@ fn literal_of(graph: &SsaGraph, facts: Option<&DecompilePrepFacts>, value: Value
 /// is read several copies later; they are the same value, and the proof only
 /// connects them when both are named by their origin rather than by whichever
 /// temporary happened to be holding them.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn root_of(graph: &SsaGraph, value: ValueId) -> ValueId {
     let mut current = value;
     let mut seen = BTreeSet::new();
@@ -77,7 +91,7 @@ pub(crate) fn root_of(graph: &SsaGraph, value: ValueId) -> ValueId {
         let InstPayload::Op(op) = &inst.payload else {
             break;
         };
-        if !is_value_preserving(op) {
+        if !is_value_preserving(graph, op) {
             break;
         }
         let Some(source) = exact_input(graph, inst, 0) else {
@@ -114,8 +128,8 @@ pub(crate) fn sign_extend(value: u64, size: u32) -> i64 {
 }
 
 /// How many operands an operation folds over, when it folds at all.
-fn folded_arity(op: &SSAOp) -> Option<usize> {
-    if is_value_preserving(op) {
+fn folded_arity(graph: &SsaGraph, op: &SSAOp<ValueId>) -> Option<usize> {
+    if is_value_preserving(graph, op) {
         return Some(1);
     }
     op.operation().map(|_| op.sources().len())
@@ -124,7 +138,14 @@ fn folded_arity(op: &SSAOp) -> Option<usize> {
 /// What an operation computes from its operands' values, in `sources` order, as `r2il::eval` states it.
 ///
 /// `None` where p-code leaves the value undefined or it does not fit a constant.
-pub(crate) fn computed(op: &SSAOp, operands: &[u64]) -> Option<u64> {
+///
+/// `facts` gives each operand's width (`op::var_facts` for a function's
+/// operations).
+pub(crate) fn computed<V>(
+    op: &SSAOp<V>,
+    facts: impl Fn(&V) -> (u32, Option<u64>),
+    operands: &[u64],
+) -> Option<u64> {
     let operation = op.operation()?;
     let sources = op.sources();
     if sources.len() != operands.len() {
@@ -133,15 +154,15 @@ pub(crate) fn computed(op: &SSAOp, operands: &[u64]) -> Option<u64> {
     let words = sources
         .iter()
         .zip(operands)
-        .map(|(source, value)| r2il::eval::Word::new(u128::from(*value), source.size).ok())
+        .map(|(source, value)| r2il::eval::Word::new(u128::from(*value), facts(source).0).ok())
         .collect::<Option<Vec<_>>>()?;
-    let value = r2il::eval::apply(operation, &words, op.dst()?.size).ok()?;
+    let value = r2il::eval::apply(operation, &words, facts(op.dst()?).0).ok()?;
     u64::try_from(value).ok()
 }
 
 /// The operands an operation folds over, where it folds at all.
-fn folded_inputs(graph: &SsaGraph, inst: &GraphInst, op: &SSAOp) -> Option<Vec<ValueId>> {
-    (0..folded_arity(op)?)
+fn folded_inputs(graph: &SsaGraph, inst: &GraphInst, op: &SSAOp<ValueId>) -> Option<Vec<ValueId>> {
+    (0..folded_arity(graph, op)?)
         .map(|index| exact_input(graph, inst, index))
         .collect()
 }
@@ -157,15 +178,19 @@ pub(crate) fn fold_inst(
     };
     let inputs = folded_inputs(graph, inst, op)?;
     let operands = inputs.iter().map(|input| known(*input)).collect::<Vec<_>>();
-    fold_op(op, &operands)
+    fold_op(graph, op, &operands)
 }
 
 /// Evaluate one operation over operands already folded to constants.
-fn fold_op(op: &SSAOp, operands: &[Option<u64>]) -> Option<u64> {
-    if is_value_preserving(op) {
+fn fold_op(graph: &SsaGraph, op: &SSAOp<ValueId>, operands: &[Option<u64>]) -> Option<u64> {
+    if is_value_preserving(graph, op) {
         return *operands.first()?;
     }
-    computed(op, &operands.iter().copied().collect::<Option<Vec<_>>>()?)
+    computed(
+        op,
+        operand_facts(graph),
+        &operands.iter().copied().collect::<Option<Vec<_>>>()?,
+    )
 }
 
 /// The constant a value computes to.
@@ -183,10 +208,41 @@ pub(crate) fn prepared_folded_value(
 }
 
 fn fold(graph: &SsaGraph, facts: Option<&DecompilePrepFacts>, value: ValueId) -> Option<u64> {
-    let mut known: BTreeMap<ValueId, Option<u64>> = BTreeMap::new();
+    let mut known = IdMap::new(graph.values.len());
+    fold_into(graph, facts, value, &mut known);
+    known.get(value).copied().flatten()
+}
+
+/// What every value of `graph` folds to, each evaluated once.
+///
+/// A value's fold depends only on the value -- its literal, or its
+/// definition over its inputs' folds -- never on which question reached it,
+/// so one table shared across all of them is the per-value answer, and the
+/// whole graph costs `O(V + E)` rather than a walk per question.
+pub(crate) fn fold_all(
+    graph: &SsaGraph,
+    facts: Option<&DecompilePrepFacts>,
+) -> IdVec<ValueId, Option<u64>> {
+    let mut known = IdMap::new(graph.values.len());
+    for value in &graph.values {
+        fold_into(graph, facts, value.id, &mut known);
+    }
+    IdVec::from_fn(graph.values.len(), |value| {
+        known.get(value).copied().flatten()
+    })
+}
+
+/// Fold `value` and everything it is folded from into `known`, which may
+/// already hold answers for other values.
+fn fold_into(
+    graph: &SsaGraph,
+    facts: Option<&DecompilePrepFacts>,
+    value: ValueId,
+    known: &mut IdMap<ValueId, Option<u64>>,
+) {
     let mut pending = vec![(value, false)];
     while let Some((current, operands_ready)) = pending.pop() {
-        if known.contains_key(&current) {
+        if known.contains(current) {
             continue;
         }
         if let Some(bits) = literal_of(graph, facts, current) {
@@ -215,12 +271,11 @@ fn fold(graph: &SsaGraph, facts: Option<&DecompilePrepFacts>, value: ValueId) ->
         }
         let operands: Vec<Option<u64>> = inputs
             .iter()
-            .map(|input| known.get(input).copied().flatten())
+            .map(|input| known.get(*input).copied().flatten())
             .collect();
-        let folded = fold_op(op, &operands);
+        let folded = fold_op(graph, op, &operands);
         known.insert(current, folded);
     }
-    known.get(&value).copied().flatten()
 }
 
 #[cfg(test)]
@@ -273,6 +328,33 @@ mod tests {
             target: reg(0x80, 8),
         });
         SSAFunction::from_blocks_raw(&[block], Some(&arch)).expect("widened counter SSA")
+    }
+
+    /// The table folded once is each value's own fold: the graph alone, and
+    /// with the prep facts, for every value of a function whose constants run
+    /// through extensions, copies and arithmetic.
+    #[test]
+    fn folding_every_value_at_once_is_folding_each_alone() {
+        let function = widened_counter();
+        let prep = function.prep_facts_for_test();
+        let graph = &prep.graph;
+        let bare = super::fold_all(graph, None);
+        let prepared = super::fold_all(graph, Some(&prep.facts));
+        for value in &graph.values {
+            assert_eq!(
+                bare[value.id],
+                super::fold(graph, None, value.id),
+                "{}",
+                value.var
+            );
+            assert_eq!(
+                prepared[value.id],
+                super::fold(graph, Some(&prep.facts), value.id),
+                "{}",
+                value.var
+            );
+        }
+        assert!(bare.iter().any(|(_, folded)| *folded == Some(16)));
     }
 
     /// The value defined by the instruction at `index` in the entry block.

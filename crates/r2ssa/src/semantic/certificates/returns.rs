@@ -5,8 +5,6 @@ use super::super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnValueCertificate {
     pub at: InstId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub value: ValueId,
     pub width: u32,
     pub carrier: Option<ReturnCarrier>,
@@ -16,6 +14,13 @@ pub struct ReturnValueCertificate {
     pub source_logical_value: Option<SourceLogicalValue>,
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub(crate) fn collect_machine_return_control_certificates(
     boundaries: &SourceBoundaryFacts,
     graph: &SsaGraph,
@@ -23,16 +28,16 @@ pub(crate) fn collect_machine_return_control_certificates(
     structured: &StructuredDataflowFacts,
     unobserved: &crate::deadphi::DeadPhis,
 ) -> (
-    BTreeMap<InstId, MachineReturnControlCertificate>,
-    BTreeMap<InstId, InstId>,
+    crate::dense::IdMap<InstId, MachineReturnControlCertificate>,
+    crate::dense::IdMap<InstId, InstId>,
 ) {
-    let mut certificates = BTreeMap::new();
-    let mut by_inst = BTreeMap::new();
+    let mut certificates = crate::dense::IdMap::default();
+    let mut by_inst = crate::dense::IdMap::default();
     for (at, boundary) in &boundaries.returns {
         let Some(return_address) = boundary.return_address else {
             continue;
         };
-        let Some(return_inst) = graph.inst(*at) else {
+        let Some(return_inst) = graph.inst(at) else {
             continue;
         };
         if return_inst.inputs.first() != Some(&return_address.value)
@@ -63,14 +68,11 @@ pub(crate) fn collect_machine_return_control_certificates(
             };
             match &definition.payload {
                 InstPayload::Op(SSAOp::Copy { dst, src }) => {
-                    let Some(source) = graph.value_id_for_var(src) else {
-                        complete = false;
-                        break;
-                    };
+                    let source = *src;
                     if definition.output != Some(current)
                         || definition.inputs.as_slice() != [source]
-                        || dst.size != return_address.storage.size
-                        || src.size != return_address.storage.size
+                        || graph.var(*dst).size != return_address.storage.size
+                        || graph.var(source).size != return_address.storage.size
                         || !insts.insert(inst)
                         || !values.insert(source)
                     {
@@ -109,7 +111,7 @@ pub(crate) fn collect_machine_return_control_certificates(
                         )
                     );
                     if !stack_object
-                        || dst.size != return_address.storage.size
+                        || graph.var(*dst).size != return_address.storage.size
                         || definition.output != Some(current)
                         || definition.inputs.as_slice() != [access.address]
                         || !insts.insert(inst)
@@ -169,7 +171,7 @@ pub(crate) fn collect_machine_return_control_certificates(
             }
         }
         let return_use = UseSite {
-            inst: *at,
+            inst: at,
             input_idx: 0,
         };
         if !complete
@@ -189,7 +191,7 @@ pub(crate) fn collect_machine_return_control_certificates(
             })
             || insts
                 .iter()
-                .any(|inst| !absorbed.contains(inst) && by_inst.contains_key(inst))
+                .any(|inst| !absorbed.contains(inst) && by_inst.contains(*inst))
         {
             continue;
         }
@@ -205,7 +207,7 @@ pub(crate) fn collect_machine_return_control_certificates(
             })
             .collect::<BTreeSet<_>>();
         let certificate = MachineReturnControlCertificate {
-            at: *at,
+            at,
             storage: return_address.storage,
             control_value: return_address.value,
             insts,
@@ -219,9 +221,9 @@ pub(crate) fn collect_machine_return_control_certificates(
             .iter()
             .filter(|inst| !certificate.absorbed_insts.contains(inst))
         {
-            by_inst.insert(*inst, *at);
+            by_inst.insert(*inst, at);
         }
-        certificates.insert(*at, certificate);
+        certificates.insert(at, certificate);
     }
     (certificates, by_inst)
 }
@@ -230,25 +232,25 @@ pub(crate) fn collect_return_value_certificates(
     boundaries: &SourceBoundaryFacts,
     graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
-    stack_reloads: &BTreeMap<ValueId, StackReloadSourceCertificate>,
-) -> (Vec<ReturnValueCertificate>, BTreeMap<InstId, usize>) {
+    stack_reloads: &crate::dense::IdMap<ValueId, StackReloadSourceCertificate>,
+) -> (
+    Vec<ReturnValueCertificate>,
+    crate::dense::IdMap<InstId, usize>,
+) {
     let mut returns = Vec::new();
-    let mut returns_by_inst = BTreeMap::new();
+    let mut returns_by_inst = crate::dense::IdMap::default();
 
     for (boundary_at, boundary) in &boundaries.returns {
-        if boundary.at != *boundary_at || !boundary.complete {
+        if boundary.at != boundary_at || !boundary.complete {
             r2il::refusal_evidence!(
                 "return-certificate",
                 "{:?}: at_mismatch={} incomplete={}",
                 boundary_at,
-                boundary.at != *boundary_at,
+                boundary.at != boundary_at,
                 !boundary.complete
             );
             continue;
         }
-        let Some((block_addr, op_index)) = graph.op_site_for_inst(boundary.at) else {
-            continue;
-        };
         let Some(inst) = graph.inst(boundary.at) else {
             continue;
         };
@@ -282,8 +284,6 @@ pub(crate) fn collect_return_value_certificates(
             };
             ReturnValueCertificate {
                 at: boundary.at,
-                block_addr,
-                op_index,
                 value,
                 width,
                 carrier: return_carrier_for_boundary_value(boundary_value, stack_reloads),
@@ -396,15 +396,34 @@ pub(crate) fn exact_logical_return_projection(
     }
     match projection.kind() {
         // The value the walk reached is the carrier's own, or the operand a
-        // lane insert wrote into it, which has no storage of its own.
+        // lane insert wrote into it, which has no register of its own: a
+        // temporary or a literal names no machine location, so it cannot
+        // contradict the slot. `movq xmm0, [rsp-16]` returns a `double` in
+        // `XMM0_Qa` as the loaded temporary.
         SourceCarrierKind::Full
             if projection.size_bits() == physical_bits
                 && physical_value.var.size == storage.size
-                && physical_value
-                    .canonical_storage
-                    .is_none_or(|reached| reached == storage) =>
+                && physical_value.canonical_storage.is_none_or(|reached| {
+                    reached == storage
+                        || matches!(
+                            reached.space,
+                            CanonicalStorageSpace::Unique | CanonicalStorageSpace::Constant
+                        )
+                }) =>
         {
             Some((boundary.value, storage.size, Some(logical)))
+        }
+        // The slot is the low lane of the root the value defines (a double in
+        // XMM0_Qa reached as XMM0): the lane at the slot's width, as below.
+        SourceCarrierKind::Full
+            if physical_value.var.size > storage.size
+                && physical_value
+                    .canonical_storage
+                    .zip(machine_context)
+                    .is_some_and(|(root, context)| context.is_low_lane_of(storage, root)) =>
+        {
+            let input = exact_logical_lane_input(graph, boundary.value, storage.size);
+            Some((input.unwrap_or(boundary.value), storage.size, Some(logical)))
         }
         // A float is a scalar in the carrier's low lane exactly as an integer
         // is: a `double` returned in a 128-bit vector register is its low half.
@@ -450,9 +469,7 @@ pub(crate) fn exact_logical_return_projection(
             // width, or the insert of that lane at its low end: certify the
             // lane value itself, usually the named local, so the return names
             // it rather than casting the carrier.
-            if let Some(input) =
-                exact_logical_lane_input(graph, boundary.value, physical_value, logical_width)
-            {
+            if let Some(input) = exact_logical_lane_input(graph, boundary.value, logical_width) {
                 return Some((input, logical_width, Some(logical)));
             }
             // Otherwise the carrier holds the logical value in its low lane
@@ -499,47 +516,63 @@ pub(crate) fn exact_logical_return_projection(
     }
 }
 
-/// The lane value the carrier's own definition widens or inserts at its low
-/// end, when that lane is the logical width.
+/// The value whose bytes are the carrier's low `logical_width` bytes,
+/// exactly: the lane an extension widens, or one an insert writes at the
+/// carrier's low end, followed down while that lane is still wider.
+///
+/// The low bytes of `zext(x)`, of `sext(x)` and of an insert of `x` at
+/// position zero are the low bytes of `x` for any width up to `x`'s, so the
+/// walk ends at a value exactly as wide as the logical return, or at the
+/// first definition that is none of these. `movzx eax, al` then a 32-bit
+/// write's zero extension is two steps from `RAX` to `AL`.
 ///
 /// Returns `None` for every other shape, including a merge, so the caller can
 /// go on to ask the wider question rather than refusing here.
 pub(crate) fn exact_logical_lane_input(
     graph: &SsaGraph,
     carrier: ValueId,
-    carrier_value: &crate::graph::GraphValue,
     logical_width: u32,
 ) -> Option<ValueId> {
-    let producer = graph.def_inst(carrier).and_then(|id| graph.inst(id))?;
-    if producer.output != Some(carrier) {
-        return None;
+    let mut at = carrier;
+    loop {
+        let value = graph.value(at)?;
+        if value.var.size == logical_width && at != carrier {
+            return Some(at);
+        }
+        let producer = graph.def_inst(at).and_then(|id| graph.inst(id))?;
+        if producer.output != Some(at) {
+            return None;
+        }
+        let (lane, lane_var) = match (&producer.payload, producer.inputs.as_slice()) {
+            (
+                InstPayload::Op(SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src }),
+                [input],
+            ) if *dst == value.id => (*input, *src),
+            (InstPayload::Op(SSAOp::Insert(insert)), [_, input, _])
+                if insert.dst == value.id
+                    && graph.var(insert.position).constant_bits() == Some(0) =>
+            {
+                (*input, insert.value)
+            }
+            _ => return None,
+        };
+        let lane_value = graph.value(lane)?;
+        if lane != lane_var || lane_value.var.size < logical_width {
+            return None;
+        }
+        at = lane;
     }
-    let (lane, lane_var) = match (&producer.payload, producer.inputs.as_slice()) {
-        (InstPayload::Op(SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src }), [input])
-            if *dst == carrier_value.var =>
-        {
-            (*input, src)
-        }
-        (InstPayload::Op(SSAOp::Insert(insert)), [_, input, _])
-            if insert.dst == carrier_value.var && insert.position.constant_bits() == Some(0) =>
-        {
-            (*input, &insert.value)
-        }
-        _ => return None,
-    };
-    let lane_value = graph.value(lane)?;
-    (lane_value.var == *lane_var && lane_value.var.size == logical_width).then_some(lane)
 }
 
 pub(crate) fn return_carrier_for_boundary_value(
     boundary: &CallBoundaryValueFact,
-    stack_reloads: &BTreeMap<ValueId, StackReloadSourceCertificate>,
+    stack_reloads: &crate::dense::IdMap<ValueId, StackReloadSourceCertificate>,
 ) -> Option<ReturnCarrier> {
     match boundary.slot {
         CallBoundarySlot::Register { .. } => return_carrier_for_boundary_slot(boundary.slot),
         CallBoundarySlot::Stack(offset) => {
             let reload = stack_reloads
-                .get(&boundary.value)
+                .get(boundary.value)
                 .filter(|reload| reload.relation == crate::view::ViewRelation::Identity)?;
             (reload.offset == offset).then_some(ReturnCarrier::StackSlot {
                 object: reload.object,

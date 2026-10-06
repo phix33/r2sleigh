@@ -33,19 +33,16 @@ fn stack_helpers_require_exact_ram_source_fact_object_and_memory_location() {
     let structured = artifact.facts().structured.clone();
 
     assert!(super::super::ram_memory_access_matches_source(
-        artifact.function(),
         artifact.graph(),
         &objects,
         &access,
     ));
     assert_eq!(
         super::super::stack_memory_access_at(super::super::StackMemoryAccessInput {
-            function: artifact.function(),
             graph: artifact.graph(),
             structured: &structured,
             objects: &objects,
-            block_addr: access.block_addr,
-            op_index: access.op_index,
+            inst: access.id.inst,
             is_write: false,
             value: access.value,
         }),
@@ -55,6 +52,7 @@ fn stack_helpers_require_exact_ram_source_fact_object_and_memory_location() {
     let certificates = super::super::collect_prepared_function_certificates(
         super::super::Body {
             function: artifact.function(),
+            prep: Some(artifact.decompile_prep_facts()),
             graph: artifact.graph(),
             machine_context: Some(artifact.machine_context()),
         },
@@ -84,7 +82,6 @@ fn stack_helpers_require_exact_ram_source_fact_object_and_memory_location() {
     let mut mismatched_fact = access.clone();
     mismatched_fact.space = SpaceId::Custom(7);
     assert!(!super::super::ram_memory_access_matches_source(
-        artifact.function(),
         artifact.graph(),
         &objects,
         &mismatched_fact,
@@ -101,7 +98,6 @@ fn stack_helpers_require_exact_ram_source_fact_object_and_memory_location() {
         offset: -8,
     };
     assert!(!super::super::ram_memory_access_matches_source(
-        artifact.function(),
         artifact.graph(),
         &mismatched_objects,
         &access,
@@ -109,6 +105,7 @@ fn stack_helpers_require_exact_ram_source_fact_object_and_memory_location() {
     let certificates = super::super::collect_prepared_function_certificates(
         super::super::Body {
             function: artifact.function(),
+            prep: Some(artifact.decompile_prep_facts()),
             graph: artifact.graph(),
             machine_context: Some(artifact.machine_context()),
         },
@@ -132,7 +129,7 @@ fn stack_helpers_require_exact_ram_source_fact_object_and_memory_location() {
     let mut mismatched_memory = artifact.facts().memory.clone();
     for use_fact in mismatched_memory
         .uses_by_inst
-        .get_mut(&access.id.inst)
+        .get_mut(access.id.inst)
         .expect("RAM memory use")
     {
         use_fact.location.space = SpaceId::Custom(7);

@@ -1,0 +1,400 @@
+//! Recursive-descent body lift, from bytes at an address.
+
+use r2sleigh_lift::Disassembler;
+use std::collections::BTreeMap;
+
+use r2engine::body::{Body, UnresolvedReason, lift_body};
+use r2ssa::cfg::CFG;
+use r2ssa::{EntryAffineForm, TripCount, TripRefusal, ValueId};
+
+const BASE: u64 = 0x1000;
+
+fn addrs(body: &Body) -> Vec<u64> {
+    body.blocks.iter().map(|block| block.lifted.addr).collect()
+}
+
+fn lifted(body: &Body) -> Vec<r2il::R2ILBlock> {
+    body.blocks
+        .iter()
+        .map(|block| block.lifted.clone())
+        .collect()
+}
+
+fn x86_64() -> Disassembler {
+    r2sleigh_lift::embedded_machine("x86-64")
+        .expect("x86-64 is embedded")
+        .disasm
+}
+
+/// One run of bytes mapped at `BASE`, in a program that declares no other
+/// function.
+struct Fixture {
+    bytes: &'static [u8],
+    entries: &'static [u64],
+}
+
+impl r2engine::body::Program for Fixture {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+        let slice = self.bytes.get(offset..)?;
+        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    /// The bytes are one run of code.
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        let end = BASE + self.bytes.len() as u64;
+        (BASE..end)
+            .contains(&vaddr)
+            .then_some(r2engine::body::Region {
+                start: BASE,
+                end,
+                file_end: end,
+                execute: true,
+                write: false,
+            })
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        self.entries.contains(&vaddr)
+    }
+}
+
+fn reader(bytes: &'static [u8]) -> Fixture {
+    Fixture {
+        bytes,
+        entries: &[],
+    }
+}
+
+/// cmp rdi, 0; je +5; mov eax, 1; ret
+const DIAMOND: &[u8] = &[
+    0x48, 0x83, 0xff, 0x00, // 0x1000 cmp rdi, 0
+    0x74, 0x05, // 0x1004 je 0x100b
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 0x1006 mov eax, 1
+    0xc3, // 0x100b ret
+];
+
+#[test]
+fn conditional_branch_splits_three_blocks() {
+    let body = lift_body(BASE, &x86_64(), &reader(DIAMOND), &BTreeMap::new()).expect("body");
+    assert_eq!(addrs(&body), vec![0x1000, 0x1006, 0x100b]);
+    let sizes: Vec<u32> = body.blocks.iter().map(|block| block.lifted.size).collect();
+    assert_eq!(sizes, vec![6, 5, 1]);
+    // Every block keeps the bytes it is, for the capture to hand on.
+    assert_eq!(body.blocks[2].bytes, vec![0xc3]);
+    assert!(body.unresolved.is_empty(), "{:?}", body.unresolved);
+}
+
+#[test]
+fn a_block_states_where_control_leaves_it() {
+    use r2source::AdvisorySuccessorKind::{Direct, Fallthrough};
+
+    let body = lift_body(BASE, &x86_64(), &reader(DIAMOND), &BTreeMap::new()).expect("body");
+    assert_eq!(
+        body.blocks[0].successors,
+        vec![(Direct, 0x100b), (Fallthrough, 0x1006)]
+    );
+    assert_eq!(body.blocks[1].successors, vec![(Fallthrough, 0x100b)]);
+    // A return leaves the function, so it names no successor at all.
+    assert!(body.blocks[2].successors.is_empty());
+}
+
+#[test]
+fn the_walk_feeds_the_graph() {
+    let body = lift_body(BASE, &x86_64(), &reader(DIAMOND), &BTreeMap::new()).expect("body");
+    let lifted = lifted(&body);
+    let cfg = CFG::from_blocks(&lifted).expect("cfg");
+    assert_eq!(cfg.entry, 0x1000);
+    assert_eq!(cfg.num_blocks(), 3);
+    let mut successors = cfg.successors(0x1000);
+    successors.sort_unstable();
+    assert_eq!(successors, vec![0x1006, 0x100b]);
+}
+
+/// call 0x1010; ret. The callee is outside what this reader maps, which is the
+/// point: a call is a fact about the body, not an invitation to walk into one.
+const CALLING: &[u8] = &[
+    0xe8, 0x0b, 0x00, 0x00, 0x00, // 0x1000 call 0x1010
+    0xc3, // 0x1005 ret
+];
+
+#[test]
+fn a_call_is_recorded_and_the_block_runs_on() {
+    let body = lift_body(BASE, &x86_64(), &reader(CALLING), &BTreeMap::new()).expect("body");
+    assert_eq!(body.calls, vec![0x1010]);
+    assert_eq!(body.blocks.len(), 1);
+    assert_eq!(body.blocks[0].lifted.addr, 0x1000);
+    assert_eq!(body.blocks[0].lifted.size, 6);
+}
+
+/// jmp rax
+const INDIRECT: &[u8] = &[0xff, 0xe0];
+
+#[test]
+fn an_indirect_branch_is_refused_not_guessed() {
+    let body = lift_body(BASE, &x86_64(), &reader(INDIRECT), &BTreeMap::new()).expect("body");
+    assert_eq!(body.blocks.len(), 1);
+    assert_eq!(
+        body.unresolved
+            .iter()
+            .map(|stop| (stop.addr, stop.reason))
+            .collect::<Vec<_>>(),
+        vec![(0x1000, UnresolvedReason::IndirectBranch)]
+    );
+}
+
+#[test]
+fn a_dispatch_told_it_goes_nowhere_is_still_unresolved() {
+    // A table of no entries resolves nothing. Read as resolved, the branch
+    // had no successor and no stop, which claims control ends there.
+    let dispatched = BTreeMap::from([(BASE, Vec::new())]);
+    let body = lift_body(BASE, &x86_64(), &reader(INDIRECT), &dispatched).expect("body");
+    assert_eq!(
+        body.unresolved
+            .iter()
+            .map(|stop| (stop.addr, stop.reason))
+            .collect::<Vec<_>>(),
+        vec![(0x1000, UnresolvedReason::IndirectBranch)]
+    );
+    assert!(body.blocks[0].successors.is_empty());
+}
+
+/// A backward branch to the function's own entry: the walk terminates.
+/// dec rdi; jne -5
+const LOOP: &[u8] = &[
+    0x48, 0xff, 0xcf, // 0x1000 dec rdi
+    0x75, 0xfb, // 0x1003 jne 0x1000
+    0xc3, // 0x1005 ret
+];
+
+#[test]
+fn a_loop_terminates_and_keeps_one_block_per_leader() {
+    let body = lift_body(BASE, &x86_64(), &reader(LOOP), &BTreeMap::new()).expect("body");
+    assert_eq!(addrs(&body), vec![0x1000, 0x1005]);
+}
+
+#[test]
+fn an_unmapped_entry_refuses() {
+    let error =
+        lift_body(0x9000, &x86_64(), &reader(DIAMOND), &BTreeMap::new()).expect_err("unmapped");
+    assert_eq!(error.to_string(), "nothing mapped at 0x9000");
+}
+
+/// `jmp 0x1002` into bytes the program maps as data, which decode as `ret`.
+const INTO_DATA: &[u8] = &[
+    0xeb, 0x00, // 0x1000 jmp 0x1002
+    0xc3, // 0x1002 data
+];
+
+/// `INTO_DATA` with its code ending at 0x1002 and the rest mapped where nothing runs.
+struct DataAfterCode;
+
+impl r2engine::body::Program for DataAfterCode {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        r2engine::body::Program::read(&reader(INTO_DATA), vaddr, max)
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        let region = |start, end, execute| r2engine::body::Region {
+            start,
+            end,
+            file_end: end,
+            execute,
+            write: false,
+        };
+        [region(BASE, 0x1002, true), region(0x1002, 0x1003, false)]
+            .into_iter()
+            .find(|region| region.holds(vaddr, vaddr + 1))
+    }
+
+    fn is_entry(&self, _vaddr: u64) -> bool {
+        false
+    }
+}
+
+#[test]
+fn no_instruction_is_lifted_where_the_program_maps_data() {
+    // Data decodes as readily as code: 0xc3 is a `ret`. Only the mapping says
+    // control cannot run there, so the walk stops and an entry there begins
+    // no function.
+    let body = lift_body(BASE, &x86_64(), &DataAfterCode, &BTreeMap::new()).expect("body");
+    assert_eq!(addrs(&body), vec![0x1000]);
+    assert_eq!(
+        body.unresolved
+            .iter()
+            .map(|stop| (stop.addr, stop.reason))
+            .collect::<Vec<_>>(),
+        vec![(0x1002, UnresolvedReason::NotExecutable)]
+    );
+    let error = lift_body(0x1002, &x86_64(), &DataAfterCode, &BTreeMap::new())
+        .expect_err("data is no entry");
+    assert_eq!(
+        error.to_string(),
+        "no instruction can run at 0x1002: the program maps it without execute permission"
+    );
+}
+
+/// jmp 0x1010, where another function begins.
+const TAIL: &[u8] = &[
+    0xe9, 0x0b, 0x00, 0x00, 0x00, // 0x1000 jmp 0x1010
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // padding
+    0x89, 0xf8, 0xc3, // 0x1010 mov eax, edi; ret
+];
+
+#[test]
+fn a_branch_to_another_function_ends_the_body() {
+    let program = Fixture {
+        bytes: TAIL,
+        entries: &[0x1010],
+    };
+    let body = lift_body(BASE, &x86_64(), &program, &BTreeMap::new()).expect("body");
+    // One block, and the other function's code is not in it.
+    assert_eq!(addrs(&body), vec![0x1000]);
+    assert_eq!(body.tail_calls, vec![0x1010]);
+    assert!(body.calls.is_empty());
+}
+
+#[test]
+fn a_branch_to_a_function_the_program_does_not_declare_is_followed() {
+    let program = Fixture {
+        bytes: TAIL,
+        entries: &[],
+    };
+    let body = lift_body(BASE, &x86_64(), &program, &BTreeMap::new()).expect("body");
+    assert_eq!(addrs(&body), vec![0x1000, 0x1010]);
+    assert!(body.tail_calls.is_empty());
+}
+
+/// `cmp r0, 0; it eq; moveq r0, 1; bx lr` in Thumb: the move runs only where
+/// the comparison held.
+const PREDICATED: &[u8] = &[
+    0x00, 0x28, // cmp r0, 0
+    0x08, 0xbf, // it eq
+    0x01, 0x20, // moveq r0, 1
+    0x70, 0x47, // bx lr
+];
+
+#[test]
+fn a_run_keeps_the_decoder_context_that_predicates_it() {
+    // Thumb's `it` says what the next instruction runs under, so a decoder
+    // that starts afresh at each address reads it as unconditional. The walk
+    // used to do exactly that and then disagreed with the block lift of the
+    // same bytes about where control goes.
+    let machine = r2sleigh_lift::embedded_machine("thumb").expect("thumb machine");
+    let body =
+        lift_body(BASE, &machine.disasm, &reader(PREDICATED), &BTreeMap::new()).expect("body");
+    let ops = body
+        .blocks
+        .iter()
+        .flat_map(|block| block.lifted.ops.iter())
+        .collect::<Vec<_>>();
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, r2il::R2ILOp::Select { .. })),
+        "{ops:?}"
+    );
+}
+
+/// Code mapped at `base`, in a program that declares no other function.
+struct Mapped {
+    base: u64,
+    bytes: &'static [u8],
+}
+
+impl r2engine::body::Program for Mapped {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let offset = usize::try_from(vaddr.checked_sub(self.base)?).ok()?;
+        let slice = self.bytes.get(offset..).filter(|slice| !slice.is_empty())?;
+        Some(slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        let end = self.base + self.bytes.len() as u64;
+        (self.base..end)
+            .contains(&vaddr)
+            .then_some(r2engine::body::Region {
+                start: self.base,
+                end,
+                file_end: end,
+                execute: true,
+                write: false,
+            })
+    }
+
+    fn is_entry(&self, _vaddr: u64) -> bool {
+        false
+    }
+}
+
+/// The function the bytes at `entry` begin, walked and prepared.
+fn walked(code: Mapped, entry: u64) -> r2ssa::SsaArtifact {
+    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("x86-64 is embedded");
+    let body = lift_body(entry, &machine.disasm, &code, &BTreeMap::new()).expect("the body lifts");
+    r2ssa::SsaArtifact::for_decompile(&lifted(&body), Some(&machine.arch)).expect("an artifact")
+}
+
+/// Each loop's trip count, once its stated trips recount the same from the graph.
+fn trips_of(artifact: &r2ssa::SsaArtifact) -> Vec<Result<r2ssa::TripCount, r2ssa::TripRefusal>> {
+    let loops = artifact.structured().loops.values();
+    let checked = loops.inspect(|fact| assert!(fact.validate_trips(artifact)));
+    checked.map(|fact| Ok(fact.trips.clone()?.count)).collect()
+}
+
+/// `fnv1a32` from `hashes_gcc_x64_O2`, `0x401330` to `0x401366`.
+const FNV1A32: &[u8] = &[
+    0xf3, 0x0f, 0x1e, 0xfa, 0x48, 0x85, 0xf6, 0x74, 0x27, 0x48, 0x01, 0xfe, 0xb8, 0xc5, 0x9d, 0x1c,
+    0x81, 0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x0f, 0xb6, 0x17, 0x48, 0x83, 0xc7, 0x01, 0x31,
+    0xd0, 0x69, 0xc0, 0x93, 0x01, 0x00, 0x01, 0x48, 0x39, 0xfe, 0x75, 0xec, 0xc3, 0x0f, 0x1f, 0x00,
+    0xb8, 0xc5, 0x9d, 0x1c, 0x81, 0xc3,
+];
+
+#[test]
+fn a_pointer_walked_to_its_end_runs_its_length_once_the_guard_excludes_zero() {
+    let code = || Mapped {
+        base: 0x401330,
+        bytes: FNV1A32,
+    };
+    let artifact = walked(code(), 0x401330);
+    let length = artifact
+        .graph()
+        .values
+        .iter()
+        .find(|value| value.var.to_string() == "RSI_0")
+        .expect("rsi at entry")
+        .id;
+    let form = EntryAffineForm {
+        width_bits: 64,
+        terms: BTreeMap::from([(length, 1)]),
+        constant: 0,
+    };
+    let [
+        Ok(TripCount::Symbolic {
+            form: counted,
+            guard,
+        }),
+    ] = &trips_of(&artifact)[..]
+    else {
+        panic!("one symbolic count");
+    };
+    assert_eq!(*counted, form);
+    // The guard is `test rsi, rsi; je` taken not equal, on the edge into the preheader.
+    let (block, assumption) = (guard.block, &guard.assumption);
+    assert_eq!(
+        (block, assumption.predecessor, assumption.truth),
+        (0x401339, 0x401330, false)
+    );
+    // The test is `cmp rsi, rdi` after `add rdi, 1`: the pointer's update against the end.
+    let loop_fact = artifact
+        .structured()
+        .loops
+        .values()
+        .next()
+        .expect("the loop");
+    let test = loop_fact.trips.as_ref().expect("a count").test;
+    let name = |value: ValueId| artifact.graph().value(value).map(|v| v.var.to_string());
+    let tested = (name(test.induction), name(test.bound), test.reads_update);
+    assert_eq!(tested, (Some("RDI_1".into()), Some("RSI_1".into()), true));
+    // Entered past `test rsi, rsi; je`, nothing says the length is not zero, which is 2^64 trips.
+    let unguarded = walked(code(), 0x401339);
+    assert_eq!(trips_of(&unguarded), [Err(TripRefusal::ZeroNotExcluded)]);
+}

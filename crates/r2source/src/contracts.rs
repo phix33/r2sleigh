@@ -124,34 +124,6 @@ pub enum SourceAbiClass {
 }
 
 impl SourceAbiClass {
-    /// Whether this convention requires the direction flag clear on entry and
-    /// on return from every call.
-    ///
-    /// Both x86 ABIs state it -- System V's psABI in its register usage, and
-    /// Microsoft's x64 convention alongside it -- and the 32-bit conventions
-    /// inherit it from the same platforms. It is what makes a repeated string
-    /// instruction's direction knowable at all: no compiled function in the
-    /// corpus executes `cld` or `std`, so the flag's value where the
-    /// instruction reads it is whatever the caller or the last callee left,
-    /// and this is what each was required to leave.
-    ///
-    /// A convention outside the vocabulary states nothing, and a machine
-    /// without a direction flag never asks.
-    pub const fn clears_direction_flag(self) -> bool {
-        matches!(
-            self,
-            Self::SystemVAMD64
-                | Self::MicrosoftX64
-                | Self::SystemV
-                | Self::Microsoft
-                | Self::Cdecl
-                | Self::Stdcall
-                | Self::Fastcall
-                | Self::Thiscall
-                | Self::Vectorcall
-        )
-    }
-
     /// Classify an exact source spelling without architecture or symbol hints.
     pub fn from_source_spelling(spelling: &str) -> Self {
         let mut normalized = String::with_capacity(spelling.len());
@@ -666,10 +638,6 @@ pub struct SourceRoleRegisterNames {
     return_address: Option<SourceRegisterName>,
     stack_pointer: Option<SourceRegisterName>,
     frame_pointer: Option<SourceRegisterName>,
-    /// The flag that decides which way a repeated string instruction walks.
-    /// A role register like the three above: the machine names it, and what
-    /// its value is on entry is the convention's to say.
-    direction_flag: Option<SourceRegisterName>,
 }
 
 /// One register spelling, stored inline.
@@ -725,7 +693,6 @@ impl SourceRoleRegisterNames {
             return_address: None,
             stack_pointer: None,
             frame_pointer: None,
-            direction_flag: None,
         }
     }
 
@@ -742,15 +709,7 @@ impl SourceRoleRegisterNames {
             return_address: spelled(return_address),
             stack_pointer: spelled(stack_pointer),
             frame_pointer: spelled(frame_pointer),
-            direction_flag: None,
         }
-    }
-
-    /// Record what the source called the direction flag.
-    #[must_use]
-    pub fn with_direction_flag(mut self, name: Option<&str>) -> Self {
-        self.direction_flag = name.and_then(SourceRegisterName::new);
-        self
     }
 
     pub fn return_address(&self) -> Option<&str> {
@@ -763,10 +722,6 @@ impl SourceRoleRegisterNames {
 
     pub fn frame_pointer(&self) -> Option<&str> {
         self.frame_pointer.as_ref().map(SourceRegisterName::as_str)
-    }
-
-    pub fn direction_flag(&self) -> Option<&str> {
-        self.direction_flag.as_ref().map(SourceRegisterName::as_str)
     }
 }
 
@@ -806,30 +761,29 @@ pub struct SourceFunctionInterface {
     return_logical_value: Option<SourceLogicalValue>,
     type_graph: Option<SourceTypeGraph>,
     stack_slot_roles_complete: bool,
-    /// Which of this function's own parameters its body proves is a format
-    /// string, for callers whose prototype for it names none. A property of
-    /// the function, unlike the per-callsite count rule a literal decides.
-    body_proven_format_parameter: Option<u32>,
+    /// Which of this function's own parameters is the format string that
+    /// counts a variadic call's tail, and what says so: the declaration
+    /// (its basis is the types'), or the body forwarding it to a callee's
+    /// format (`Certified`), which only fills a gap a declaration left. A
+    /// property of the function, unlike the per-callsite count rule a
+    /// literal decides.
+    format_parameter: Option<crate::confidence::Fact<u32>>,
     /// Whether the declaration says arguments continue past the fixed ones.
     ///
     /// A fact of the callee's contract: a caller of a variadic function hands
     /// it a tail the fixed parameters do not describe, and only a proven count
     /// (a literal format string's conversions) says how long that tail is.
     variadic: bool,
-    /// Which fixed parameter the declaration names as the format string, for
-    /// a variadic function whose tail that format counts.
-    declared_format_parameter: Option<u32>,
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
     body_proven_return_address: bool,
-    /// The prototype is radare2's, found by an import's name rather than
-    /// linked to the address or stated by debug information.
-    prototype_from_source_types: bool,
-    /// Every logical type is its carrier's width as an unsigned integer,
-    /// minted from what the body was read to use rather than stated by any
-    /// declaration. The graph places each carrier; it says nothing about
-    /// whether the value is a pointer, signed, or named.
-    types_are_carrier_widths: bool,
+    /// What the logical types are read from (doc/adr-provenance.md):
+    /// `DebugInfo` where the binary declares the body, `Declared` where a
+    /// library's prototype was found by an import's name, `CarrierWidth`
+    /// where a body recovery minted each carrier's width and declares
+    /// nothing of pointer, sign or name. An interface nothing marked claims
+    /// no more than `Convention`.
+    types: crate::confidence::Confidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1274,12 +1228,61 @@ impl SourceFunctionInterface {
             return_logical_value,
             type_graph,
             stack_slot_roles_complete: require_exact_stack_slot_roles,
-            body_proven_format_parameter: None,
+            format_parameter: None,
             variadic: false,
-            declared_format_parameter: None,
             body_proven_return_address: false,
-            prototype_from_source_types: false,
-            types_are_carrier_widths: false,
+            types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
+        })
+    }
+
+    /// The same interface over other stack slots, stated against `revision`.
+    ///
+    /// Every other fact it states is kept: carriers, return mechanism, role
+    /// names, the types and what they are read from, the variadic tail and
+    /// its format parameter, a body-proven return address. The slots are
+    /// checked as an exact interface checks them, and the carriers and the
+    /// mechanism are placed on them again in the order their own checks
+    /// need: carriers first, since one refuses to move once a mechanism is
+    /// bound.
+    pub fn restated(
+        &self,
+        stack_slots: impl IntoIterator<Item = SourceStackSlotSpec>,
+        revision_identity: impl Into<Vec<u8>>,
+    ) -> Result<Self, SourceFunctionInterfaceError> {
+        let mut rebuilt = Self::new_exact_with_logical_types(
+            revision_identity,
+            self.calling_convention.clone(),
+            self.parameters.iter().cloned(),
+            self.return_kind,
+            stack_slots,
+            self.parameter_logical_values.iter().cloned(),
+            self.return_logical_value,
+            self.type_graph.clone(),
+        )?
+        .with_role_register_names(self.role_register_names);
+        if let Some(storage) = self.return_address_storage {
+            rebuilt = rebuilt.with_return_address_storage(storage)?;
+        }
+        if let Some(storage) = self.stack_pointer_storage {
+            rebuilt = rebuilt.with_stack_pointer_storage(storage)?;
+        }
+        if let Some(storage) = self.frame_pointer_storage {
+            rebuilt = rebuilt.with_frame_pointer_storage(storage)?;
+        }
+        if let Some(mechanism) = self.return_mechanism {
+            rebuilt = rebuilt.with_exact_stacked_return(
+                mechanism.stack_offset(),
+                mechanism.slot_size_bytes(),
+                mechanism.stack_pointer_delta_bytes(),
+                mechanism.address_size_bytes(),
+            )?;
+        }
+        Ok(Self {
+            format_parameter: self.format_parameter.clone(),
+            variadic: self.variadic,
+            body_proven_return_address: self.body_proven_return_address,
+            types: self.types.clone(),
+            ..rebuilt
         })
     }
 
@@ -1383,12 +1386,27 @@ impl SourceFunctionInterface {
         {
             return Err(SourceFunctionInterfaceError::InvalidFormatParameterIndex);
         }
-        self.body_proven_format_parameter = Some(parameter_index);
+        // A declaration's format is the contract; a body proof fills a gap.
+        if self.declared_format_parameter().is_none() {
+            self.format_parameter = Some(crate::confidence::Fact::new(
+                parameter_index,
+                crate::confidence::Basis::Certified,
+            ));
+        }
         Ok(self)
     }
 
-    pub const fn body_proven_format_parameter(&self) -> Option<u32> {
-        self.body_proven_format_parameter
+    /// Which parameter is the format string, and what says so.
+    pub const fn format_parameter(&self) -> Option<&crate::confidence::Fact<u32>> {
+        self.format_parameter.as_ref()
+    }
+
+    /// The format parameter where this function's body proved it.
+    pub fn body_proven_format_parameter(&self) -> Option<u32> {
+        self.format_parameter
+            .as_ref()
+            .filter(|fact| fact.confidence.basis == crate::confidence::Basis::Certified)
+            .map(|fact| fact.value)
     }
 
     /// Record that the declaration is variadic, and which fixed parameter it
@@ -1405,7 +1423,8 @@ impl SourceFunctionInterface {
             return Err(SourceFunctionInterfaceError::InvalidFormatParameterIndex);
         }
         self.variadic = true;
-        self.declared_format_parameter = format_parameter;
+        self.format_parameter =
+            format_parameter.map(|index| crate::confidence::Fact::new(index, self.types.clone()));
         Ok(self)
     }
 
@@ -1415,8 +1434,11 @@ impl SourceFunctionInterface {
     }
 
     /// The fixed parameter the declaration names as the format string.
-    pub const fn declared_format_parameter(&self) -> Option<u32> {
-        self.declared_format_parameter
+    pub fn declared_format_parameter(&self) -> Option<u32> {
+        self.format_parameter
+            .as_ref()
+            .filter(|fact| fact.confidence.basis != crate::confidence::Basis::Certified)
+            .map(|fact| fact.value)
     }
 
     /// Record that the body hands its caller back the return address it was
@@ -1435,27 +1457,23 @@ impl SourceFunctionInterface {
         self.body_proven_return_address
     }
 
-    /// The same interface, with its prototype marked as radare2's by-name lookup.
-    pub const fn with_prototype_from_source_types(mut self) -> Self {
-        self.prototype_from_source_types = true;
+    /// The same interface, its logical types read from `types`.
+    #[must_use]
+    pub fn with_types(mut self, types: crate::confidence::Confidence) -> Self {
+        self.types = types;
         self
     }
 
-    pub const fn prototype_from_source_types(&self) -> bool {
-        self.prototype_from_source_types
+    /// What the logical types are read from.
+    pub const fn types(&self) -> &crate::confidence::Confidence {
+        &self.types
     }
 
-    /// The same interface, with its logical types marked as the carriers'
-    /// widths a body recovery minted rather than types anything declared.
-    pub const fn with_types_as_carrier_widths(mut self) -> Self {
-        self.types_are_carrier_widths = true;
-        self
-    }
-
-    /// Whether the logical types are only the carriers' widths, so no
-    /// declaration of the function's types is to be read from them.
-    pub const fn types_are_carrier_widths(&self) -> bool {
-        self.types_are_carrier_widths
+    /// Whether a declaration states the logical types -- the binary's debug
+    /// information or a library prototype -- rather than a recovery or a
+    /// convention.
+    pub fn types_are_declared(&self) -> bool {
+        self.types.grade() <= crate::confidence::Grade::Declared
     }
 
     pub fn return_address_storage_is_valid(&self, storage: CanonicalStorageId) -> bool {
@@ -2294,6 +2312,11 @@ fn valid_call_target_storage(storage: CanonicalStorageId) -> bool {
 mod tests {
     use super::*;
 
+    /// An effect whose call and return read nothing, for tests of the effect alone.
+    fn no_reads() -> SourceBoundaryReads {
+        SourceBoundaryReads::new([], []).expect("no reads")
+    }
+
     fn register_storage(offset: u64, size: u32) -> CanonicalStorageId {
         CanonicalStorageId {
             space: CanonicalStorageSpace::Register,
@@ -2506,6 +2529,45 @@ mod tests {
             both.format_parameter_rule(),
             Some(SourceFormatParameterRule::Radare2FormatString { parameter_index: 1 })
         );
+    }
+
+    /// Restating an interface over other slots changes the slots and the
+    /// revision it is stated against, and nothing else it says.
+    #[test]
+    fn a_restated_interface_keeps_every_fact_but_its_slots() {
+        let interface = SourceFunctionInterface::new_exact(
+            b"variadic-function".to_vec(),
+            "sysv-amd64",
+            [
+                SourceAbiParameterSpec::new(0, register_storage(0x38, 8)),
+                SourceAbiParameterSpec::new(1, register_storage(0x30, 8)),
+            ],
+            SourceFunctionReturn::Register {
+                storage: register_storage(0, 8),
+            },
+            [],
+        )
+        .expect("interface")
+        .with_declared_variadic(Some(1))
+        .expect("the second parameter is the format")
+        .with_body_proven_format_parameter(1)
+        .expect("the body forwards it")
+        .with_body_proven_return_address()
+        .expect("a register result")
+        .with_types(crate::Confidence::of(crate::Basis::DebugInfo));
+        let restated = interface
+            .restated([], b"other-revision".to_vec())
+            .expect("restates");
+        assert_eq!(restated.revision_identity(), b"other-revision");
+        assert!(restated.is_variadic());
+        // The declaration's format is the contract; the body's proof of the
+        // same parameter fills no gap and is not recorded over it.
+        assert_eq!(restated.declared_format_parameter(), Some(1));
+        assert_eq!(restated.body_proven_format_parameter(), None);
+        assert_eq!(restated.format_parameter(), interface.format_parameter());
+        assert!(restated.body_proven_return_address());
+        assert_eq!(restated.types(), interface.types());
+        assert_eq!(restated.parameters(), interface.parameters());
     }
 
     #[test]
@@ -3138,6 +3200,7 @@ mod tests {
                 register_storage(0xa0, 16),
                 register_storage(0xa4, 4),
             ],
+            no_reads(),
         )
         .expect("a call effect");
         assert!(effect.preserves(register_storage(0x10, 16)));
@@ -3165,10 +3228,13 @@ mod tests {
     /// contradiction like one named clobbered and preserved.
     #[test]
     fn a_reserved_register_is_neither_clobbered_nor_preserved() {
-        let effect =
-            SourceCallEffect::new([register_storage(0x00, 8)], [register_storage(0x18, 8)])
-                .and_then(|effect| effect.with_system_reserved([register_storage(0x110, 8)]))
-                .expect("a call effect");
+        let effect = SourceCallEffect::new(
+            [register_storage(0x00, 8)],
+            [register_storage(0x18, 8)],
+            no_reads(),
+        )
+        .and_then(|effect| effect.with_system_reserved([register_storage(0x110, 8)]))
+        .expect("a call effect");
         assert_eq!(
             effect.effect_on(register_storage(0x110, 8)),
             SourceCallRegisterEffect::SystemReserved
@@ -3194,7 +3260,7 @@ mod tests {
             SourceCallRegisterEffect::Clobbered
         );
         assert_eq!(
-            SourceCallEffect::new([register_storage(0x110, 8)], [])
+            SourceCallEffect::new([register_storage(0x110, 8)], [], no_reads())
                 .and_then(|effect| effect.with_system_reserved([register_storage(0x114, 4)])),
             Err(SourceMachineRolesError::ContradictoryCallEffect)
         );
@@ -3204,12 +3270,20 @@ mod tests {
     #[test]
     fn a_call_effect_naming_one_register_both_ways_refuses() {
         assert_eq!(
-            SourceCallEffect::new([register_storage(0x10, 8)], [register_storage(0x14, 4)]),
+            SourceCallEffect::new(
+                [register_storage(0x10, 8)],
+                [register_storage(0x14, 4)],
+                no_reads()
+            ),
             Err(SourceMachineRolesError::ContradictoryCallEffect)
         );
         assert_eq!(
-            SourceCallEffect::new([register_storage(0x10, 8)], [register_storage(0x18, 8)])
-                .map(|effect| (effect.clobbered().len(), effect.preserved().len())),
+            SourceCallEffect::new(
+                [register_storage(0x10, 8)],
+                [register_storage(0x18, 8)],
+                no_reads()
+            )
+            .map(|effect| (effect.clobbered().len(), effect.preserved().len())),
             Ok((1, 1))
         );
     }
@@ -3237,9 +3311,9 @@ pub struct SourceMachineRoles {
     /// register numbering and mean nothing to the lifted architecture.
     role_register_names: SourceRoleRegisterNames,
     stack_allocation_contract: Option<SourceStackAllocationContract>,
-    /// The flag that decides which way a repeated string instruction walks,
-    /// placed against the lifted architecture.
-    direction_flag_storage: Option<CanonicalStorageId>,
+    /// Whether a call pushes its return address, as `<returnaddress>` says.
+    #[serde(default)]
+    call_pushes_return_address: Option<bool>,
 }
 
 /// Whether a call leaves the frame carriers where they were, as the convention's call effect says.
@@ -3263,11 +3337,6 @@ impl SourceCallPreservedCarriers {
 
     pub const fn frame_pointer(self) -> bool {
         self.frame_pointer
-    }
-
-    /// Whether both carriers that can address a frame survive a call.
-    pub const fn frame_survives_a_call(self) -> bool {
-        self.stack_pointer && self.frame_pointer
     }
 }
 
@@ -3293,6 +3362,43 @@ pub struct SourceCallEffect {
     clobbered: Box<[CanonicalStorageId]>,
     preserved: Box<[CanonicalStorageId]>,
     system_reserved: Box<[CanonicalStorageId]>,
+    reads: SourceBoundaryReads,
+}
+
+/// The registers a call and a return read without an operand naming them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceBoundaryReads {
+    call: Box<[CanonicalStorageId]>,
+    ret: Box<[CanonicalStorageId]>,
+}
+
+impl SourceBoundaryReads {
+    /// Refuses a storage that is not a register.
+    pub fn new(
+        call: impl IntoIterator<Item = CanonicalStorageId>,
+        ret: impl IntoIterator<Item = CanonicalStorageId>,
+    ) -> Result<Self, SourceMachineRolesError> {
+        let call = sorted_storages(call);
+        let ret = sorted_storages(ret);
+        if call
+            .iter()
+            .chain(ret.iter())
+            .any(|storage| !valid_register_storage(*storage))
+        {
+            return Err(SourceMachineRolesError::InvalidRegisterStorage);
+        }
+        Ok(Self { call, ret })
+    }
+
+    /// What a call may read: the convention's argument registers.
+    pub const fn call(&self) -> &[CanonicalStorageId] {
+        &self.call
+    }
+
+    /// What a return hands back: the convention's result registers.
+    pub const fn ret(&self) -> &[CanonicalStorageId] {
+        &self.ret
+    }
 }
 
 impl SourceCallEffect {
@@ -3300,6 +3406,7 @@ impl SourceCallEffect {
     pub fn new(
         clobbered: impl IntoIterator<Item = CanonicalStorageId>,
         preserved: impl IntoIterator<Item = CanonicalStorageId>,
+        reads: SourceBoundaryReads,
     ) -> Result<Self, SourceMachineRolesError> {
         let clobbered = sorted_storages(clobbered);
         let preserved = sorted_storages(preserved);
@@ -3317,6 +3424,7 @@ impl SourceCallEffect {
             clobbered,
             preserved,
             system_reserved: Box::default(),
+            reads,
         })
     }
 
@@ -3360,6 +3468,10 @@ impl SourceCallEffect {
     /// The registers the platform reserves to the system, sorted.
     pub const fn system_reserved(&self) -> &[CanonicalStorageId] {
         &self.system_reserved
+    }
+
+    pub const fn reads(&self) -> &SourceBoundaryReads {
+        &self.reads
     }
 
     /// What a call does to a storage.
@@ -3447,6 +3559,11 @@ pub struct SourceConventionSlots {
     abi_class: SourceAbiClass,
     argument_slots: Box<[CanonicalStorageId]>,
     result_slot: Option<CanonicalStorageId>,
+    /// The floating-point argument registers, in order, counted apart from
+    /// the integer ones.
+    float_argument_slots: Box<[CanonicalStorageId]>,
+    /// Where a floating-point result is left.
+    float_result_slot: Option<CanonicalStorageId>,
     stack_arguments: Option<SourceStackArgumentPlacement>,
     /// Every variadic argument travels on the stack from the first slot,
     /// whatever registers the fixed prefix leaves free: Apple's arm64 ABI.
@@ -3511,6 +3628,33 @@ impl SourceConventionSlots {
         self
     }
 
+    /// Record the floating-point slots, refusing what is no register.
+    pub fn with_float_slots(
+        mut self,
+        arguments: impl IntoIterator<Item = CanonicalStorageId>,
+        result: Option<CanonicalStorageId>,
+    ) -> Result<Self, SourceMachineRolesError> {
+        let arguments = arguments.into_iter().collect::<Box<[_]>>();
+        if arguments
+            .iter()
+            .chain(&result)
+            .any(|storage| !valid_register_storage(*storage))
+        {
+            return Err(SourceMachineRolesError::InvalidRegisterStorage);
+        }
+        self.float_argument_slots = arguments;
+        self.float_result_slot = result;
+        Ok(self)
+    }
+
+    pub const fn float_argument_slots(&self) -> &[CanonicalStorageId] {
+        &self.float_argument_slots
+    }
+
+    pub const fn float_result_slot(&self) -> Option<CanonicalStorageId> {
+        self.float_result_slot
+    }
+
     /// Whether the variadic tail starts on the stack whatever registers are
     /// free, as Apple's arm64 ABI has it.
     pub const fn variadic_tail_on_stack(&self) -> bool {
@@ -3552,6 +3696,8 @@ impl SourceConventionSlots {
             abi_class,
             argument_slots: argument_slots.into_boxed_slice(),
             result_slot,
+            float_argument_slots: Box::default(),
+            float_result_slot: None,
             stack_arguments: None,
             variadic_tail_on_stack: false,
         })
@@ -3605,7 +3751,7 @@ impl SourceMachineRoles {
             stack_pointer_storage,
             role_register_names: SourceRoleRegisterNames::none(),
             stack_allocation_contract: None,
-            direction_flag_storage: None,
+            call_pushes_return_address: None,
         })
     }
 
@@ -3644,16 +3790,13 @@ impl SourceMachineRoles {
         Ok(self)
     }
 
-    /// The direction flag, placed against the lifted architecture.
-    pub const fn direction_flag_storage(&self) -> Option<CanonicalStorageId> {
-        self.direction_flag_storage
+    pub const fn call_pushes_return_address(&self) -> Option<bool> {
+        self.call_pushes_return_address
     }
 
-    /// Bind the direction flag's storage, dropping one that is not a
-    /// well-formed register location.
     #[must_use]
-    pub fn with_direction_flag_storage(mut self, storage: Option<CanonicalStorageId>) -> Self {
-        self.direction_flag_storage = storage.filter(|storage| valid_register_storage(*storage));
+    pub const fn with_call_pushes_return_address(mut self, pushes: bool) -> Self {
+        self.call_pushes_return_address = Some(pushes);
         self
     }
 

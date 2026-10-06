@@ -67,7 +67,7 @@ fn a_declared_array_and_a_declared_struct_are_one_object_each() {
         "uint32_t v[4];",
         "struct node c;",
         "double d[3];",
-        "int8_t buf[16];",
+        "char buf[16];",
         "sum_array(v, 4)",
         "avg(d, 3)",
         "list_len(&a)",
@@ -118,6 +118,10 @@ fn two_functions_of_one_name_are_each_declared_by_their_own_unit() {
         "{second}"
     );
     assert!(second.contains("total"), "{second}");
+    // The double leaves in XMM0's low lane, which is the convention's slot:
+    // returned as the value, not rebuilt from the vector register.
+    assert!(second.contains("return total;"), "{second}");
+    assert!(!second.contains("__uint128_t"), "{second}");
     assert!(!second.contains("doubled"), "{second}");
 }
 
@@ -145,4 +149,47 @@ fn without_debug_information_nothing_declared_appears() {
         }
         assert!(!out.contains("panicked"), "{address}:\n{out}");
     }
+}
+
+/// A declared `double` argument is passed, whether the caller writes the lane or hands on its own formal (B3).
+#[test]
+fn a_declared_double_argument_reaches_its_call() {
+    for name in ["float_calls_zig_x86_64_O2g", "float_calls_zig_aarch64_O2g"] {
+        let call_store = run(name, "pdd @ sym.call_store");
+        assert!(
+            !call_store.contains("r2sleigh refused"),
+            "{name}:\n{call_store}"
+        );
+        assert!(call_store.contains("store("), "{name}:\n{call_store}");
+        assert!(call_store.contains(", p);"), "{name}:\n{call_store}");
+        let forward = run(name, "pdd @ sym.forward");
+        assert!(forward.contains("store(x, p);"), "{name}:\n{forward}");
+        assert!(!forward.contains("r2sleigh refused"), "{name}:\n{forward}");
+    }
+}
+
+/// A declared `double` result is certified when its slot is the low lane of the root the body merges or writes (B3).
+#[test]
+fn a_declared_double_result_is_returned() {
+    for name in [
+        "float_returns_zig_x86_64_O2g",
+        "float_returns_zig_aarch64_O2g",
+    ] {
+        let out = run(name, "pdd @ sym.loop_sum");
+        assert!(!out.contains("r2sleigh refused"), "{name}:\n{out}");
+        assert!(
+            out.contains("double loop_sum(const double* v, int32_t n)"),
+            "{name}:\n{out}"
+        );
+    }
+}
+
+/// An argument moved as a whole register holds the slot that is that register's low lane (B3).
+#[test]
+fn a_double_moved_as_its_whole_register_is_the_argument() {
+    let aarch64 = run("float_moves_zig_aarch64_O2g", "pdd @ sym.swap_call");
+    assert!(aarch64.contains("return scale(b, a);"), "{aarch64}");
+    let x86_64 = run("float_moves_zig_x86_64_O2g", "pdd @ sym.swap_call");
+    assert!(!x86_64.contains("r2sleigh refused"), "{x86_64}");
+    assert!(x86_64.contains("return scale("), "{x86_64}");
 }

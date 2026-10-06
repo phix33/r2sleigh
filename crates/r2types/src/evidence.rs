@@ -20,7 +20,7 @@ use crate::convert::{CTypeLike, to_c_type_like};
 use crate::facts::FunctionType;
 use crate::model::{Signedness, Type, TypeArena, TypeId};
 
-use crate::signedness::{ScalarSignednessEvidence, infer_scalar_signedness};
+use crate::signedness::{ScalarSignednessEvidence, scalar_signedness_of};
 use crate::solver::{SolvedTypes, solve_constraints};
 
 /// A node of the recovered type graph.
@@ -44,7 +44,7 @@ impl SolverNode for EvidenceNode {
 /// What the solver concluded, spelled the way the evidence spelled it.
 #[derive(Debug, Clone, Default)]
 pub struct EvidenceTypes {
-    value_types: HashMap<r2ssa::ValueId, CTypeLike>,
+    value_types: r2ssa::dense::IdMap<r2ssa::ValueId, CTypeLike>,
     slot_types: BTreeMap<StackSlotKey, CTypeLike>,
 }
 
@@ -54,7 +54,7 @@ impl EvidenceTypes {
     }
 
     pub fn value_type(&self, value: r2ssa::ValueId) -> Option<&CTypeLike> {
-        self.value_types.get(&value)
+        self.value_types.get(value)
     }
 
     pub fn stack_slot_types(&self) -> impl Iterator<Item = (&StackSlotKey, &CTypeLike)> {
@@ -205,14 +205,22 @@ impl<'a> EvidenceBuilder<'a> {
     }
 
     /// Values the SSA form proves are the same value.
+    ///
+    /// A merge no observation reads (`SsaArtifact::unobserved_merges`) is
+    /// left out: it carries no value the program uses, so it is no evidence
+    /// that its sources share a type. A register reused for an index on one
+    /// path and a pointer on the other merges both at the join, and equating
+    /// through that merge typed the index a pointer.
     fn gather_ssa_identities(&mut self) {
         let graph = self.source.graph();
+        let unobserved = self.source.unobserved_merges();
         let mut pairs = Vec::new();
         for inst in &graph.insts {
             let Some(output) = inst.output else {
                 continue;
             };
             match &inst.payload {
+                r2ssa::InstPayload::Phi { .. } if unobserved.contains(output) => {}
                 r2ssa::InstPayload::Phi { .. } => {
                     for input in &inst.inputs {
                         pairs.push((output, *input));
@@ -239,20 +247,9 @@ impl<'a> EvidenceBuilder<'a> {
     /// Conflicting signed and unsigned uses are both asserted: their meet is
     /// `Bottom`, and readback refuses only that value.
     fn gather_scalar_signedness(&mut self) {
-        let inferred = infer_scalar_signedness(
-            self.source
-                .function()
-                .blocks()
-                .iter()
-                .flat_map(|block| block.ops.iter()),
-            std::iter::empty(),
-            crate::prepare::prepared_arch_display_name(self.source),
-        );
-        let mut inferred = inferred.into_iter().collect::<Vec<_>>();
-        inferred.sort_by(|(left, _), (right, _)| left.cmp(right));
-
-        for (var, evidence) in inferred {
-            let Some(value) = self.source.graph().value_id_for_var(&var) else {
+        let inferred = scalar_signedness_of(self.source, false, std::iter::empty());
+        for (value, evidence) in inferred {
+            let Some(var) = self.source.graph().value(value).map(|value| &value.var) else {
                 continue;
             };
             let Some(bits) = var.size.checked_mul(8) else {
@@ -311,7 +308,7 @@ impl<'a> EvidenceBuilder<'a> {
             if !certificate.relation.is_identity() {
                 continue;
             }
-            bounds.push((EvidenceNode::Value(*value), signature.return_type.clone()));
+            bounds.push((EvidenceNode::Value(value), signature.return_type.clone()));
         }
 
         for (node, declared) in bounds {
@@ -377,13 +374,7 @@ impl<'a> EvidenceBuilder<'a> {
         &self,
         access: &r2ssa::MemoryAccessCertificate,
     ) -> Option<r2ssa::ValueId> {
-        if access.space != r2il::SpaceId::Ram
-            || self
-                .source
-                .machine_context()
-                .memory_space_at(access.block_addr, access.op_index)
-                != Some(access.space)
-        {
+        if access.space != r2il::SpaceId::Ram {
             return None;
         }
         let address = self
@@ -440,7 +431,7 @@ impl<'a> EvidenceBuilder<'a> {
             let Some(elem) = pointee_type_for_width(width) else {
                 continue;
             };
-            bounds.push((EvidenceNode::Value(*value), elem));
+            bounds.push((EvidenceNode::Value(value), elem));
         }
 
         for (node, elem) in bounds {
@@ -498,6 +489,13 @@ impl<'a> EvidenceBuilder<'a> {
     }
 
     /// The two operands of an address that is one value plus another.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+        )
+    )]
     fn address_sum_operands(
         &self,
         address: r2ssa::ValueId,
@@ -764,7 +762,7 @@ impl<'a> EvidenceBuilder<'a> {
 enum AddressIdentity {
     Value(r2ssa::ValueId),
     Computed {
-        op: std::mem::Discriminant<r2ssa::SSAOp>,
+        op: std::mem::Discriminant<r2ssa::SSAOp<r2ssa::ValueId>>,
         inputs: Vec<r2ssa::ValueId>,
     },
 }
@@ -1159,6 +1157,107 @@ mod tests {
             solved.value_type(index),
             None,
             "the affine index is not a second pointer base"
+        );
+    }
+
+    /// A function of a pointer in `rdi` and an index in `rsi`, with `rdx` free.
+    fn pointer_and_index_source(blocks: &[r2il::R2ILBlock]) -> r2ssa::SsaArtifact {
+        let mut arch = r2il::ArchSpec::new("x86-64");
+        arch.add_register(r2il::RegisterDef::new("rdi", 0, 8));
+        arch.add_register(r2il::RegisterDef::new("rsi", 8, 8));
+        arch.add_register(r2il::RegisterDef::new("rsp", 16, 8));
+        arch.add_register(r2il::RegisterDef::new("rip", 24, 8));
+        arch.add_register(r2il::RegisterDef::new("rdx", 32, 8));
+        let register = |offset| r2ssa::CanonicalStorageId {
+            space: r2ssa::CanonicalStorageSpace::Register,
+            offset,
+            size: 8,
+        };
+        let interface = r2ssa::SourceFunctionInterface::new_exact(
+            b"unobserved-merge-evidence".to_vec(),
+            "sysv64",
+            [
+                r2ssa::SourceAbiParameterSpec::new(0, register(0)),
+                r2ssa::SourceAbiParameterSpec::new(1, register(8)),
+            ],
+            r2ssa::SourceFunctionReturn::Void,
+            [],
+        )
+        .and_then(|interface| interface.with_stack_pointer_storage(register(16)))
+        .and_then(|interface| interface.with_return_address_storage(register(24)))
+        .expect("exact source interface");
+        r2ssa::SsaArtifact::for_decompile_with_interface(blocks, Some(&arch), interface)
+            .expect("prepared source")
+    }
+
+    /// `rdx` holds the index on one path and the pointer on the other, and
+    /// the join merges them; nothing the program observes reads that merge.
+    /// It is no evidence that the index and the pointer share a type, and
+    /// equating through it typed the index a pointer
+    /// (manual_limits.c `out_param_parse`, gcc -O0).
+    #[test]
+    fn an_unobserved_merge_of_an_index_and_a_pointer_types_neither_as_the_other() {
+        let rdx = r2ssa::CanonicalStorageId {
+            space: r2ssa::CanonicalStorageSpace::Register,
+            offset: 32,
+            size: 8,
+        };
+        let mut entry = r2il::R2ILBlock::new(0x1000, 4);
+        entry.push(r2il::R2ILOp::Load {
+            dst: r2il::Varnode::unique(0x200, 4),
+            space: r2il::SpaceId::Ram,
+            addr: r2il::Varnode::register(0, 8),
+        });
+        entry.push(r2il::R2ILOp::CBranch {
+            target: r2il::Varnode::constant(0x1008, 8),
+            cond: r2il::Varnode::unique(0x200, 1),
+        });
+        let mut index = r2il::R2ILBlock::new(0x1004, 4);
+        index.push(r2il::R2ILOp::Copy {
+            dst: r2il::Varnode::register(32, 8),
+            src: r2il::Varnode::register(8, 8),
+        });
+        index.push(r2il::R2ILOp::Branch {
+            target: r2il::Varnode::constant(0x100c, 8),
+        });
+        let mut pointer = r2il::R2ILBlock::new(0x1008, 4);
+        pointer.push(r2il::R2ILOp::Copy {
+            dst: r2il::Varnode::register(32, 8),
+            src: r2il::Varnode::register(0, 8),
+        });
+        let mut join = r2il::R2ILBlock::new(0x100c, 4);
+        join.push(r2il::R2ILOp::IntAdd {
+            dst: r2il::Varnode::register(32, 8),
+            a: r2il::Varnode::register(32, 8),
+            b: r2il::Varnode::constant(1, 8),
+        });
+        join.push(r2il::R2ILOp::Return {
+            target: r2il::Varnode::register(24, 8),
+        });
+        let source = pointer_and_index_source(&[entry, index, pointer, join]);
+        let merged = source
+            .graph()
+            .insts
+            .iter()
+            .filter(|inst| matches!(inst.payload, r2ssa::InstPayload::Phi { .. }))
+            .filter_map(|inst| inst.output)
+            .find(|value| {
+                source
+                    .graph()
+                    .value(*value)
+                    .is_some_and(|value| value.canonical_storage == Some(rdx))
+            })
+            .expect("rdx merges at the join");
+        assert!(
+            source.unobserved_merges().contains(merged),
+            "the merge is read only by an increment nothing observes"
+        );
+        let index = source.facts().boundaries.parameters[&1].value;
+        let solved = solve_evidence_types(&source, &BTreeMap::new(), 64);
+        assert!(
+            !matches!(solved.value_type(index), Some(CTypeLike::Pointer(_))),
+            "{:?}",
+            solved.value_type(index)
         );
     }
 

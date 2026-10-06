@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use r2ssa::body::{Unresolved, UnresolvedReason};
+use crate::body::{Unresolved, UnresolvedReason};
 
 use super::{Line, Support};
 use crate::native::NativeRefusal;
@@ -152,6 +152,7 @@ impl Indexing {
                 address: write.place,
                 bytes: Vec::new(),
                 syntax: None,
+                flow: None,
                 annotations: vec![super::Annotation {
                     kind: super::AnnotationKind::Points { value },
                     support: Support::Stated,

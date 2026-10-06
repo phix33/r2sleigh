@@ -105,6 +105,8 @@ pub struct Answered<'a> {
 
 /// One walked body's blocks, in address order as the walk leaves them, and its def-use and every value's fate, built the first time a line needs them.
 pub struct WalkedBody<'a> {
+    /// Built inside the one answer that holds the body, never across answers.
+    #[cfg_attr(dylint_lib = "r2sleigh_lints", allow(cache_outside_query_database))]
     built: std::cell::OnceCell<Option<(r2ssa::SsaGraph, Fates)>>,
     blocks: &'a [r2il::R2ILBlock],
     arch: &'a r2il::ArchSpec,
@@ -191,6 +193,9 @@ pub struct Line {
     pub bytes: Vec<u8>,
     /// How the decoder spells it. Absent where the bytes are not an instruction.
     pub syntax: Option<Syntax>,
+    /// Where control goes after it, read from its lift. Absent where it did
+    /// not lift, or was only spelled.
+    pub flow: Option<r2sleigh_lift::flow::Flow>,
     pub annotations: Vec<Annotation>,
 }
 

@@ -6,10 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::TABLE_SWITCH;
 
-use r2abi::{CompilerSpec, Conventions, Platform, Prototypes};
+use r2abi::{CallingConvention, Platform, Prototypes, calling_convention};
 use r2engine::native::{NativeTarget, Program, call_effect, decompile};
 use r2sleigh_lift::EmbeddedMachine;
-use r2source::SourceCallEffect;
+use r2sleigh_lift::profile::{LanguageProfile, SpecStorage};
+use r2source::{CanonicalStorageId, CanonicalStorageSpace, SourceCallEffect};
 use r2ssa::{InstPayload, SSAOp};
 
 const BASE: u64 = 0x1000;
@@ -59,12 +60,21 @@ const SPILLED_SWITCH: &[u8] = &[
 /// One embedded machine with what the engine reads beside it.
 struct Machine {
     embedded: EmbeddedMachine,
-    conventions: Conventions,
-    /// What each convention says a call does to this machine's registers.
-    effects: BTreeMap<String, Option<SourceCallEffect>>,
-    compiler: CompilerSpec,
+    /// The name of the convention the platform defaults to.
+    default: &'static str,
+    /// Each convention the machine is tried under, by radare2's name for it:
+    /// the default, and Microsoft x64 under the Windows toolchain's
+    /// specification where the language has one and it differs.
+    conventions: BTreeMap<&'static str, Under>,
     prototypes: Prototypes,
     declarations: r2abi::Declarations,
+}
+
+/// One convention and what the engine reads beside it.
+struct Under {
+    convention: &'static CallingConvention,
+    compiler: LanguageProfile,
+    effect: Option<SourceCallEffect>,
 }
 
 impl Machine {
@@ -75,23 +85,34 @@ impl Machine {
     /// The machine as a platform's ABI describes it, beyond its conventions.
     fn on(sleigh: &str, family: &str, bits: u32, platform: Platform) -> Self {
         let embedded = r2sleigh_lift::embedded_machine(sleigh).expect("embedded machine");
-        let conventions = Conventions::for_arch(family, bits).expect("conventions");
-        let effects = conventions
-            .names()
-            .map(|name| {
-                let convention = conventions.get(name).expect("named convention");
-                (
-                    name.to_owned(),
-                    call_effect(&embedded.arch, bits, platform, convention),
-                )
-            })
-            .collect();
-        let compiler = CompilerSpec::parse(embedded.compiler_spec);
+        let under = |platform: Platform, specification: &str| {
+            let compiler = LanguageProfile::parse(specification).expect("parses");
+            let convention = calling_convention(family, bits, platform).expect("a convention");
+            Under {
+                convention,
+                effect: call_effect(
+                    &embedded.arch,
+                    bits,
+                    platform,
+                    &compiler,
+                    convention.variadic_count_register,
+                ),
+                compiler,
+            }
+        };
+        let default = under(platform, embedded.compiler_spec);
+        let name = default.convention.name;
+        let mut conventions = BTreeMap::from([(name, default)]);
+        if let Some(windows) = embedded.windows_compiler_spec {
+            let ms = under(Platform::Windows, windows);
+            if ms.convention.name != name {
+                conventions.insert(ms.convention.name, ms);
+            }
+        }
         Self {
             embedded,
+            default: name,
             conventions,
-            effects,
-            compiler,
             prototypes: Prototypes::embedded(),
             declarations: r2abi::Declarations::default(),
         }
@@ -99,38 +120,43 @@ impl Machine {
 
     /// The machine under its default convention.
     fn target(&self) -> NativeTarget<'_> {
-        self.under(
-            self.conventions
-                .default_name()
-                .expect("a default convention"),
-        )
+        self.under(self.default)
     }
 
     /// The machine under one named convention.
     fn under(&self, name: &str) -> NativeTarget<'_> {
+        let under = &self.conventions[name];
         NativeTarget {
             arch: &self.embedded.arch,
             disasm: &self.embedded.disasm,
             cpu: self.embedded.cpu,
-            convention: self.conventions.get(name).expect("the named convention"),
-            call_effect: self.effects[name].as_ref(),
-            compiler: &self.compiler,
+            convention: under.convention,
+            call_effect: under.effect.as_ref(),
+            compiler: &under.compiler,
+            dwarf: &self.embedded.dwarf,
             prototypes: &self.prototypes,
             declarations: &self.declarations,
         }
     }
+
+    /// The compiler specification of the default convention.
+    fn compiler(&self) -> &LanguageProfile {
+        &self.conventions[self.default].compiler
+    }
 }
 
 /// `len` bytes of code mapped at `BASE`, as one region an instruction can run in.
-fn code_region(len: usize, vaddr: u64) -> Option<r2ssa::body::Region> {
+fn code_region(len: usize, vaddr: u64) -> Option<r2engine::body::Region> {
     let end = BASE + len as u64;
-    (BASE..end).contains(&vaddr).then_some(r2ssa::body::Region {
-        start: BASE,
-        end,
-        file_end: end,
-        execute: true,
-        write: false,
-    })
+    (BASE..end)
+        .contains(&vaddr)
+        .then_some(r2engine::body::Region {
+            start: BASE,
+            end,
+            file_end: end,
+            execute: true,
+            write: false,
+        })
 }
 
 /// One run of bytes mapped at `BASE`, under one name.
@@ -142,14 +168,14 @@ struct Fixture {
     name: &'static str,
 }
 
-impl r2ssa::body::Program for Fixture {
+impl r2engine::body::Program for Fixture {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
         let slice = self.bytes.get(offset..)?;
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
     }
 
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
         code_region(self.bytes.len(), vaddr)
     }
 
@@ -182,7 +208,7 @@ impl Program for Fixture {
 #[test]
 fn a_function_is_decompiled_from_bytes_alone() {
     let machine = Machine::new("x86-64", "x86-64", 64);
-    assert_eq!(machine.compiler.stack_pointer.as_deref(), Some("RSP"));
+    assert_eq!(machine.compiler().stack_pointer.as_deref(), Some("RSP"));
 
     let target = machine.target();
     let program = Fixture {
@@ -264,7 +290,7 @@ fn a_call_is_rendered_from_the_callee_body() {
 /// a defect reached only by reading the callee.
 struct PanickingCallee;
 
-impl r2ssa::body::Program for PanickingCallee {
+impl r2engine::body::Program for PanickingCallee {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         assert!(vaddr < 0x100a, "a defect reading the callee at {vaddr:#x}");
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
@@ -272,7 +298,7 @@ impl r2ssa::body::Program for PanickingCallee {
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
     }
 
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
         code_region(CALLER.len(), vaddr)
     }
 
@@ -464,14 +490,14 @@ fn the_slot_the_caller_pushed_the_return_address_into_is_spelled() {
 /// import stub is: no body worth reading, and a declared prototype instead.
 struct Importing;
 
-impl r2ssa::body::Program for Importing {
+impl r2engine::body::Program for Importing {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
         let slice = CALLER.get(offset..)?;
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
     }
 
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
         code_region(CALLER.len(), vaddr)
     }
 
@@ -511,7 +537,7 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
     // strlen takes one argument, the convention says it arrives in rdi, and
     // the declaration says what it is.
     assert!(
-        response.output.text().contains("strlen(const int8_t*)"),
+        response.output.text().contains("strlen(const char*)"),
         "{}",
         response.output
     );
@@ -519,7 +545,7 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
         response
             .output
             .text()
-            .contains("strlen((const int8_t*)RDI_0)"),
+            .contains("strlen((const char*)RDI_0)"),
         "{}",
         response.output
     );
@@ -545,7 +571,7 @@ const AARCH64_ADD_ONE: &[u8] = &[
 fn a_function_is_decompiled_on_aarch64_too() {
     let machine = Machine::new("aarch64", "aarch64", 64);
     // The stack pointer is the specification's to name on every machine.
-    assert_eq!(machine.compiler.stack_pointer.as_deref(), Some("sp"));
+    assert_eq!(machine.compiler().stack_pointer.as_deref(), Some("sp"));
 
     let target = machine.target();
     let program = Fixture {
@@ -871,7 +897,7 @@ impl Unbounded {
     }
 }
 
-impl r2ssa::body::Program for Unbounded {
+impl r2engine::body::Program for Unbounded {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let region = self.region(vaddr)?;
         let bytes: &[u8] = match region.execute {
@@ -888,12 +914,12 @@ impl r2ssa::body::Program for Unbounded {
         Some(rest[..rest.len().min(max)].to_vec())
     }
 
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
         let code = code_region(UNBOUNDED_TABLE.len(), vaddr);
         let end = TABLE + 16 + self.zero_filled;
         let table = (TABLE..end)
             .contains(&vaddr)
-            .then_some(r2ssa::body::Region {
+            .then_some(r2engine::body::Region {
                 start: TABLE,
                 end,
                 file_end: TABLE + 16,
@@ -961,7 +987,7 @@ fn unresolved_at_the_dispatch(prepared: &r2engine::native::Prepared) {
             .iter()
             .map(|stop| (stop.addr, stop.reason))
             .collect::<Vec<_>>(),
-        vec![(0x1020, r2ssa::body::UnresolvedReason::IndirectBranch)]
+        vec![(0x1020, r2engine::body::UnresolvedReason::IndirectBranch)]
     );
 }
 
@@ -2638,14 +2664,14 @@ struct ImportCaller {
     stub: u64,
 }
 
-impl r2ssa::body::Program for ImportCaller {
+impl r2engine::body::Program for ImportCaller {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
         let slice = self.bytes.get(offset..)?;
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
     }
 
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
         code_region(self.bytes.len(), vaddr)
     }
 
@@ -2676,13 +2702,13 @@ impl Program for ImportCaller {
 }
 
 /// The operation defining what one instruction stores, through the copies and lane reads between.
-fn stored_value_origin(artifact: &r2ssa::SsaArtifact, instruction: u64) -> SSAOp {
+fn stored_value_origin(artifact: &r2ssa::SsaArtifact, instruction: u64) -> SSAOp<r2ssa::ValueId> {
     let graph = artifact.graph();
     let mut value = graph
         .insts_for_instruction(instruction)
         .iter()
         .find_map(|inst| match &graph.inst(*inst)?.payload {
-            InstPayload::Op(SSAOp::Store { val, .. }) => graph.value_id_for_var(val),
+            InstPayload::Op(SSAOp::Store { val, .. }) => Some(*val),
             _ => None,
         })
         .expect("the instruction stores");
@@ -2693,7 +2719,7 @@ fn stored_value_origin(artifact: &r2ssa::SsaArtifact, instruction: u64) -> SSAOp
             .expect("the stored value has a definition");
         match &inst.payload {
             InstPayload::Op(SSAOp::Copy { src, .. } | SSAOp::Subpiece { src, .. }) => {
-                value = graph.value_id_for_var(src).expect("the copied value");
+                value = *src;
             }
             InstPayload::Op(op) => return op.clone(),
             InstPayload::Phi { .. } => panic!("a straight line has no merge"),
@@ -2857,9 +2883,10 @@ fn a_register_rebuilt_from_a_narrowed_formal_is_not_a_call_argument() {
     );
 }
 
-/// Every register a shipped default convention names is one register of its machine, so none is dropped.
+/// Every register a default prototype names is one register of its
+/// machine, and the call effect states it: none is dropped on the way.
 #[test]
-fn every_register_a_default_convention_names_is_one_of_its_machine() {
+fn every_register_a_default_prototype_names_is_one_of_its_machine() {
     for (sleigh, family, bits) in [
         ("x86-64", "x86-64", 64),
         ("x86", "x86", 32),
@@ -2867,40 +2894,46 @@ fn every_register_a_default_convention_names_is_one_of_its_machine() {
         ("arm", "arm", 32),
     ] {
         let machine = Machine::new(sleigh, family, bits);
-        let convention = machine
-            .conventions
-            .default_convention()
-            .expect("a default convention");
-        let unplaced = convention
-            .clobbered
+        let prototype = machine
+            .compiler()
+            .default_prototype()
+            .expect("a default prototype");
+        let named = prototype
+            .inputs
             .iter()
-            .chain(&convention.preserved)
-            .filter(|name| {
-                let named = machine.embedded.arch.registers.iter();
-                named
-                    .filter(|register| register.name.eq_ignore_ascii_case(name))
-                    .count()
-                    != 1
+            .chain(&prototype.outputs)
+            .map(|entry| &entry.storage)
+            .chain(&prototype.killed_by_call)
+            .chain(&prototype.unaffected)
+            .filter_map(|storage| match storage {
+                SpecStorage::Register(name) => Some(name.as_str()),
+                SpecStorage::Address { .. } => None,
             })
             .collect::<Vec<_>>();
-        assert!(
-            unplaced.is_empty(),
-            "{sleigh}/{}: {unplaced:?}",
-            convention.name
-        );
-        let effect = machine.effects[&convention.name]
+        assert!(!named.is_empty(), "{sleigh}");
+        let effect = machine.conventions[machine.default]
+            .effect
             .as_ref()
-            .expect("the default convention states a call effect");
-        assert_eq!(
-            effect.clobbered().len(),
-            convention.clobbered.len(),
-            "{sleigh}"
-        );
-        assert_eq!(
-            effect.preserved().len(),
-            convention.preserved.len(),
-            "{sleigh}"
-        );
+            .expect("the default prototype states a call effect");
+        for register in named {
+            let placed = machine
+                .embedded
+                .arch
+                .registers
+                .iter()
+                .filter(|candidate| candidate.name.eq_ignore_ascii_case(register))
+                .map(|candidate| CanonicalStorageId {
+                    space: CanonicalStorageSpace::Register,
+                    offset: candidate.offset,
+                    size: candidate.size,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(placed.len(), 1, "{sleigh}: {register}");
+            assert!(
+                effect.clobbered().contains(&placed[0]) || effect.preserved().contains(&placed[0]),
+                "{sleigh}: {register} is in neither list"
+            );
+        }
     }
 }
 
@@ -3160,7 +3193,7 @@ fn the_sign_word_a_division_extends_into_is_not_the_parameter_it_extends() {
     for slot in homes.values() {
         for lane in &high_lanes {
             assert!(
-                !slot.reload_values.contains(lane),
+                !slot.reload_values.contains(*lane),
                 "{lane:?} is a sign word, not the contents of the slot at {}",
                 slot.offset
             );
@@ -3622,7 +3655,7 @@ fn a_buffer_an_unknown_call_is_handed_runs_to_the_nearest_save_slot() {
             .iter()
             .find_map(|inst| match &graph.inst(*inst)?.payload {
                 InstPayload::Op(SSAOp::Store { addr, space, .. }) => {
-                    objects.object_for_var(graph, addr, *space)
+                    objects.object_for_value(*addr, *space)
                 }
                 _ => None,
             })
@@ -3710,7 +3743,8 @@ fn a_parameter_every_read_of_which_is_rewritten_away_is_still_declared() {
 }
 
 /// A stack-protector check around a call: the canary is read through the
-/// thread pointer before the call and again after it.
+/// thread pointer before the call and again after it. The callee calls
+/// through a register, so its own body proves nothing about `fs` either.
 const CANARY_AROUND_A_CALL: &[u8] = &[
     0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
     0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // 1004 mov rax, fs:[0x28]
@@ -3721,7 +3755,7 @@ const CANARY_AROUND_A_CALL: &[u8] = &[
     0x48, 0x83, 0xc4, 0x18, // 1025 add rsp, 0x18
     0xc3, // 1029 ret
     0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 102a padding
-    0x31, 0xc0, // 1030 xor eax, eax
+    0xff, 0xd7, // 1030 call rdi
     0xc3, // 1032 ret
 ];
 
@@ -3894,5 +3928,247 @@ fn a_lane_write_whose_other_bytes_nobody_reads_does_not_read_them() {
     }
     return 0;
 }"#,
+    );
+}
+
+/// `mov rdi, rsi; call 0x1010; ret`, and at 0x1010 `mov rax, rdi; ret`.
+const COPY_INTO_AN_ARGUMENT: &[u8] = &[
+    0x48, 0x89, 0xf7, // 0x1000 mov rdi, rsi
+    0xe8, 0x08, 0x00, 0x00, 0x00, // 0x1003 call 0x1010
+    0xc3, // 0x1008 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // padding to 0x1010
+    0x48, 0x89, 0xf8, // 0x1010 mov rax, rdi
+    0xc3, // 0x1013 ret
+];
+
+/// The boundary passes the value that reached `rdi`, the copy; copy
+/// forwarding leaves the call reading `rsi`, the value the copy carried. The
+/// two have one class of bits, so the call's read of `rsi` is a read the text
+/// performs, and liveness must not ignore it.
+#[test]
+fn a_call_reading_the_value_its_copied_argument_carried_reads_it() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = ImportCaller {
+        bytes: COPY_INTO_AN_ARGUMENT,
+        stub: 0x1010,
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    let artifact: &r2ssa::SsaArtifact = prepared.artifact();
+    let graph = artifact.graph();
+    let calls = &artifact.facts().boundaries.calls;
+    let call = calls.values().next().expect("the call");
+    let r2ssa::SourceCallArgumentValue::Value(passed) = call
+        .arguments
+        .first()
+        .unwrap_or_else(|| panic!("{call:#?}\n{}", artifact.function().dump()))
+        .value
+    else {
+        panic!("the first argument is a value: {call:#?}");
+    };
+    let passed = &graph.value(passed).expect("a value").var;
+    let Some(SSAOp::Copy { src, .. }) = graph.defining_op(passed) else {
+        panic!("the argument is the copy: {passed:?}");
+    };
+    let carried = *src;
+    let call_reads = graph
+        .use_sites(carried)
+        .iter()
+        .filter(|site| {
+            matches!(
+                graph.inst(site.inst).map(|inst| &inst.payload),
+                Some(InstPayload::Op(SSAOp::CallUse { .. }))
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(!call_reads.is_empty(), "{}", artifact.function().dump());
+    for site in call_reads {
+        assert!(
+            !artifact.ignored_reads().contains(site),
+            "{site:?} is the argument's read\n{}",
+            artifact.function().dump()
+        );
+    }
+}
+
+/// `fnv1a32` from `tests/coverage/pinned/hashes_gcc_x64_O2`, gcc -O2:
+/// `for (i = 0; i < len; i++) { h ^= data[i]; h *= 16777619; }`.
+const FNV1A32_O2: &[u8] = &[
+    0xf3, 0x0f, 0x1e, 0xfa, // endbr64
+    0x48, 0x85, 0xf6, // test rsi, rsi
+    0x74, 0x27, // je 0x30
+    0x48, 0x01, 0xfe, // add rsi, rdi
+    0xb8, 0xc5, 0x9d, 0x1c, 0x81, // mov eax, 0x811c9dc5
+    0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00, // nop
+    0x0f, 0xb6, 0x17, // 0x18 movzx edx, byte [rdi]
+    0x48, 0x83, 0xc7, 0x01, // add rdi, 1
+    0x31, 0xd0, // xor eax, edx
+    0x69, 0xc0, 0x93, 0x01, 0x00, 0x01, // imul eax, eax, 0x1000193
+    0x48, 0x39, 0xfe, // cmp rsi, rdi
+    0x75, 0xec, // jne 0x18
+    0xc3, // ret
+    0x0f, 0x1f, 0x00, // nop
+    0xb8, 0xc5, 0x9d, 0x1c, 0x81, // 0x30 mov eax, 0x811c9dc5
+    0xc3, // ret
+];
+
+/// A merge is placed only where some byte of its storage is live on entry
+/// (issue #56). The loop carries the hash and the pointer; every flag the
+/// compare sets is written again before it is read, no Sleigh temporary
+/// outlives its instruction, and the `movzx` writes the four bytes of `rdx`
+/// the `xor` reads before anything reads them, so none of those merges.
+#[test]
+fn a_loop_header_merges_only_what_the_loop_carries() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = Fixture {
+        bytes: FNV1A32_O2.to_vec(),
+        name: "fnv1a32",
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    let function = prepared.artifact().function();
+    let header = function
+        .get_block(BASE + 0x18)
+        .unwrap_or_else(|| panic!("the loop header\n{}", function.dump()));
+    let merged = header
+        .phis()
+        .iter()
+        .map(|phi| function.var(phi.dst).display_name())
+        .collect::<Vec<_>>();
+    assert_eq!(merged, ["RAX_2", "RDI_1"], "{}", function.dump());
+}
+
+/// clang -O1's `classify`: a switch over 0..=7 lowered to a lookup in an
+/// `int[8]` at `LOOKUP`, or -1 above it.
+///
+/// ```text
+/// mov eax, 0xffffffff
+/// cmp edi, 7
+/// ja  done
+/// mov eax, edi
+/// mov eax, dword [LOOKUP + rax*4]
+/// done: ret
+/// ```
+const LOOKUP: u64 = 0x2068;
+const CLASSIFY: &[u8] = &[
+    0xb8, 0xff, 0xff, 0xff, 0xff, // mov eax, -1
+    0x83, 0xff, 0x07, // cmp edi, 7
+    0x77, 0x09, // ja +9
+    0x89, 0xf8, // mov eax, edi
+    0x8b, 0x04, 0x85, 0x68, 0x20, 0x00, 0x00, // mov eax, [rax*4 + 0x2068]
+    0xc3, // ret
+];
+/// The table's eight words. The first is 10 -- `0a 00 00 00` -- so its
+/// first two bytes read as the text "\n", which is what the string scan
+/// finds there.
+const LOOKUP_BYTES: [u8; 32] = [
+    10, 0, 0, 0, 21, 0, 0, 0, 32, 0, 0, 0, 43, 0, 0, 0, 54, 0, 0, 0, 65, 0, 0, 0, 0xff, 0xff, 0xff,
+    0xff, 87, 0, 0, 0,
+];
+
+/// `CLASSIFY` as code and `LOOKUP_BYTES` as static data at `LOOKUP`.
+struct LookupTable;
+
+impl r2engine::body::Program for LookupTable {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let region = self.region(vaddr)?;
+        let bytes: &[u8] = match region.execute {
+            true => CLASSIFY,
+            false => &LOOKUP_BYTES,
+        };
+        let rest = bytes.get(usize::try_from(vaddr - region.start).ok()?..)?;
+        Some(rest[..rest.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        let end = LOOKUP + LOOKUP_BYTES.len() as u64;
+        code_region(CLASSIFY.len(), vaddr).or_else(|| {
+            (LOOKUP..end)
+                .contains(&vaddr)
+                .then_some(r2engine::body::Region {
+                    start: LOOKUP,
+                    end,
+                    file_end: end,
+                    execute: false,
+                    write: false,
+                })
+        })
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        vaddr == BASE
+    }
+}
+
+impl Program for LookupTable {
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        (LOOKUP..LOOKUP + LOOKUP_BYTES.len() as u64).contains(&vaddr)
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == BASE).then(|| "classify".to_owned())
+    }
+
+    fn import_at(&self, _vaddr: u64) -> Option<String> {
+        None
+    }
+}
+
+/// An address the function computes with is a number, whatever text its
+/// first bytes happen to spell: the table is read a word at a time at
+/// `LOOKUP + 4 * x`, and a string literal there would be two bytes the
+/// compiler places somewhere else, so the read would leave it.
+#[test]
+fn the_base_of_an_indexed_word_read_is_no_string_literal() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let response = decompile(&target, &LookupTable, BASE).expect("decompile");
+    let text = response.output.text().to_string();
+    assert!(response.render_refusal.is_none(), "{text}");
+    assert!(
+        !text.contains("\"\\n\""),
+        "the table's address is spelled as text: {text}"
+    );
+    assert!(
+        text.contains("0x2068"),
+        "the table is read at its own address: {text}"
+    );
+}
+
+/// `dl` written on both arms of a branch and read back after they merge:
+/// only the byte `sete` wrote is read, so the caller's `rdx` is no input of
+/// the function. The merge is what keeps the read from folding into the
+/// write.
+const SETE_LOW_BYTE: &[u8] = &[
+    0x48, 0x85, 0xff, // 0x1000 test rdi, rdi
+    0x0f, 0x94, 0xc2, // 0x1003 sete dl
+    0x74, 0x08, // 0x1006 je 0x1010
+    0x48, 0x85, 0xf6, // 0x1008 test rsi, rsi
+    0x0f, 0x94, 0xc2, // 0x100b sete dl
+    0x90, 0x90, // 0x100e nop; nop
+    0x0f, 0xb6, 0xc2, // 0x1010 movzx eax, dl
+    0xc3, // 0x1013 ret
+];
+
+/// The convention's argument registers are construction's carriers, so
+/// `sete dl` writes the low byte of the whole `rdx`, and the bytes above it
+/// are the caller's. Reading back the byte it wrote reads none of those: a
+/// parameter is an entry register some byte of which an observation reaches,
+/// and here only `rdi` is.
+#[test]
+fn a_lane_written_and_read_back_is_no_parameter() {
+    let text = rendered(SETE_LOW_BYTE, "is_null");
+    let signature = text.lines().next().expect("a signature");
+    let parameters = signature
+        .split_once('(')
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(list, _)| list)
+        .expect("a parameter list");
+    assert_eq!(
+        parameters, "uint64_t RDI_0, uint64_t RSI_0",
+        "the signature names a register the function never reads: {text}"
     );
 }

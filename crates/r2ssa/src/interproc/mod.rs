@@ -12,7 +12,7 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use r2il::{ArchSpec, MemoryOrdering, SpaceId};
+use r2il::{MemoryOrdering, SpaceId};
 use serde::{Deserialize, Serialize};
 
 use crate::abi::AbiProfile;
@@ -386,11 +386,6 @@ pub struct FunctionSemanticSummary {
 }
 
 impl FunctionSemanticSummary {
-    /// Whether this report uses the current non-authoritative wire schema.
-    pub const fn has_current_schema(&self) -> bool {
-        self.schema_version == INTERPROC_SUMMARY_SCHEMA_VERSION
-    }
-
     pub fn unknown(id: InterprocFunctionId, name: Option<String>) -> Self {
         Self {
             schema_version: INTERPROC_SUMMARY_SCHEMA_VERSION,
@@ -413,276 +408,6 @@ impl FunctionSemanticSummary {
             writes_global_memory: false,
             touches_unknown_memory: false,
         }
-    }
-
-    /// The seed for a bodiless callee named bare or marked. The names table
-    /// spells an import bare; having no body is the externality the seed
-    /// table asks the name to carry.
-    pub(crate) fn seed_for_callee_name(id: InterprocFunctionId, name: &str) -> Option<Self> {
-        if name.contains("imp.") || name.contains("reloc.") {
-            Self::seed_for_name(id, name)
-        } else {
-            Self::seed_for_name(id, &format!("sym.imp.{name}"))
-        }
-    }
-
-    fn seed_for_name(id: InterprocFunctionId, name: &str) -> Option<Self> {
-        let normalized = normalize_seed_name(name)?;
-        // The normalized spelling selects the model; it does not rename the
-        // callee. `_Exit` is not `exit`, and a rendering that says so names a
-        // function the program does not call.
-        let called = import_basename(name).to_owned();
-        let mut arg_effects = BTreeMap::new();
-        let mut effect = |idx: usize, read: bool, write: bool, escape: bool, free: bool| {
-            arg_effects.insert(
-                idx,
-                SummaryArgEffect {
-                    read,
-                    write,
-                    escape,
-                    free,
-                },
-            );
-        };
-        let mut memory_effects = Vec::new();
-        let mut transfer_effects = Vec::new();
-        let mut allocation_effects = Vec::new();
-        let mut lifetime_effects = Vec::new();
-        let mut sync_effects = Vec::new();
-        let atomic_effects = Vec::new();
-
-        let return_relation = match normalized {
-            "malloc" => {
-                effect(0, true, false, false, false);
-                allocation_effects.push(SummaryAllocationEffect {
-                    size_arg: Some(0),
-                    zeroed: false,
-                });
-                SummaryReturnRelation::HeapAlloc
-            }
-            "calloc" => {
-                effect(0, true, false, false, false);
-                effect(1, true, false, false, false);
-                allocation_effects.push(SummaryAllocationEffect {
-                    size_arg: Some(1),
-                    zeroed: true,
-                });
-                SummaryReturnRelation::HeapAlloc
-            }
-            "free" => {
-                effect(0, false, false, true, true);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Free,
-                    location: arg_location(0, None, None),
-                });
-                lifetime_effects.push(SummaryLifetimeEffect {
-                    arg: 0,
-                    op: SummaryLifetimeOp::Free,
-                });
-                SummaryReturnRelation::Void
-            }
-            "memcpy" | "memmove" => {
-                effect(0, false, true, true, false);
-                effect(1, true, false, false, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Write,
-                    location: arg_location(0, None, None),
-                });
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Read,
-                    location: arg_location(1, None, None),
-                });
-                transfer_effects.push(SummaryTransferEffect {
-                    dst: arg_location(0, None, None),
-                    src: arg_location(1, None, None),
-                    len: SummaryTransferLength::Arg(2),
-                });
-                SummaryReturnRelation::Arg(0)
-            }
-            "copyin" | "copyout" => {
-                effect(0, true, false, false, false);
-                effect(1, false, true, true, false);
-                effect(2, true, false, false, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Read,
-                    location: arg_location(0, None, None),
-                });
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Write,
-                    location: arg_location(1, None, None),
-                });
-                transfer_effects.push(SummaryTransferEffect {
-                    dst: arg_location(1, None, None),
-                    src: arg_location(0, None, None),
-                    len: SummaryTransferLength::Arg(2),
-                });
-                SummaryReturnRelation::Unknown
-            }
-            "memset" => {
-                effect(0, false, true, true, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Write,
-                    location: arg_location(0, None, None),
-                });
-                transfer_effects.push(SummaryTransferEffect {
-                    dst: arg_location(0, None, None),
-                    src: SummaryMemoryLocation {
-                        region: SummaryMemoryRegion::Unknown,
-                        range: None,
-                    },
-                    len: SummaryTransferLength::Arg(2),
-                });
-                SummaryReturnRelation::Arg(0)
-            }
-            // The `n`-bounded writers: at most `n` bytes land in the destination.
-            "snprintf" | "vsnprintf" => {
-                effect(0, false, true, true, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Write,
-                    location: arg_location(0, None, None),
-                });
-                transfer_effects.push(SummaryTransferEffect {
-                    dst: arg_location(0, None, None),
-                    src: SummaryMemoryLocation {
-                        region: SummaryMemoryRegion::Unknown,
-                        range: None,
-                    },
-                    len: SummaryTransferLength::Arg(1),
-                });
-                SummaryReturnRelation::Unknown
-            }
-            // `__snprintf_chk(s, maxlen, flag, slen, format, ...)` on glibc and
-            // Apple alike: the write is bounded by `maxlen`; `slen` is the
-            // object size the check compares it against.
-            "snprintf_chk" => {
-                effect(0, false, true, true, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Write,
-                    location: arg_location(0, None, None),
-                });
-                transfer_effects.push(SummaryTransferEffect {
-                    dst: arg_location(0, None, None),
-                    src: SummaryMemoryLocation {
-                        region: SummaryMemoryRegion::Unknown,
-                        range: None,
-                    },
-                    len: SummaryTransferLength::Arg(1),
-                });
-                SummaryReturnRelation::Unknown
-            }
-            "strncpy" => {
-                effect(0, false, true, true, false);
-                effect(1, true, false, false, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Write,
-                    location: arg_location(0, None, None),
-                });
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Read,
-                    location: arg_location(1, None, None),
-                });
-                transfer_effects.push(SummaryTransferEffect {
-                    dst: arg_location(0, None, None),
-                    src: arg_location(1, None, None),
-                    len: SummaryTransferLength::Arg(2),
-                });
-                SummaryReturnRelation::Arg(0)
-            }
-            "strlen" => {
-                effect(0, true, false, false, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Read,
-                    location: arg_location(0, None, None),
-                });
-                SummaryReturnRelation::Unknown
-            }
-            "strcmp" | "memcmp" => {
-                effect(0, true, false, false, false);
-                effect(1, true, false, false, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Read,
-                    location: arg_location(0, None, None),
-                });
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Read,
-                    location: arg_location(1, None, None),
-                });
-                SummaryReturnRelation::Unknown
-            }
-            "puts" | "printf" => {
-                effect(0, true, false, false, false);
-                memory_effects.push(SummaryMemoryEffect {
-                    kind: SummaryMemoryEffectKind::Read,
-                    location: arg_location(0, None, None),
-                });
-                SummaryReturnRelation::Unknown
-            }
-            "retain" => {
-                effect(0, true, false, true, false);
-                lifetime_effects.push(SummaryLifetimeEffect {
-                    arg: 0,
-                    op: SummaryLifetimeOp::Retain,
-                });
-                SummaryReturnRelation::Arg(0)
-            }
-            "release" => {
-                effect(0, false, false, true, false);
-                lifetime_effects.push(SummaryLifetimeEffect {
-                    arg: 0,
-                    op: SummaryLifetimeOp::Release,
-                });
-                SummaryReturnRelation::Void
-            }
-            "lock" => {
-                effect(0, false, false, true, false);
-                sync_effects.push(SummarySyncEffect {
-                    arg: 0,
-                    op: SummarySyncOp::Lock,
-                });
-                SummaryReturnRelation::Void
-            }
-            "unlock" => {
-                effect(0, false, false, true, false);
-                sync_effects.push(SummarySyncEffect {
-                    arg: 0,
-                    op: SummarySyncOp::Unlock,
-                });
-                SummaryReturnRelation::Void
-            }
-            "exit" => SummaryReturnRelation::Void,
-            _ => return None,
-        };
-
-        Some(Self {
-            schema_version: INTERPROC_SUMMARY_SCHEMA_VERSION,
-            id,
-            name: Some(called),
-            linkage: FunctionSemanticLinkage::Unknown,
-            arg_count_hint: Some(match normalized {
-                "malloc" | "free" | "strlen" | "puts" | "printf" | "exit" | "retain"
-                | "release" | "lock" | "unlock" => 1,
-                "calloc" => 2,
-                "strcmp" | "memcmp" => 2,
-                "memcpy" | "memmove" | "copyin" | "copyout" | "memset" | "strncpy" | "snprintf"
-                | "vsnprintf" => 3,
-                "snprintf_chk" => 5,
-                _ => 0,
-            }),
-            direct_callees: BTreeSet::new(),
-            callsite_count: 0,
-            has_unknown_calls: false,
-            arg_effects,
-            memory_effects,
-            transfer_effects,
-            allocation_effects,
-            lifetime_effects,
-            sync_effects,
-            atomic_effects,
-            return_relation,
-            reads_global_memory: false,
-            writes_global_memory: false,
-            touches_unknown_memory: false,
-        })
     }
 }
 
@@ -767,12 +492,6 @@ fn validate_function_summary_map(
 pub struct PreparedInterprocSummarySet {
     root: InterprocFunctionId,
     owners: BTreeMap<InterprocFunctionId, Arc<SsaArtifact>>,
-    /// Every function this evidence was derived from a body for, whether or
-    /// not that body's allocation is still retained. Retention is a memory
-    /// decision; which functions contributed evidence is a fact about the
-    /// evidence, and a consumer asking "was there a body for this callee"
-    /// is asking the second question.
-    bodies: BTreeSet<InterprocFunctionId>,
     report: InterprocSummarySet,
 }
 
@@ -792,16 +511,6 @@ impl PreparedInterprocSummarySet {
     /// Borrow one exact immutable SSA owner by its function identity.
     pub fn owner(&self, id: InterprocFunctionId) -> Option<&Arc<SsaArtifact>> {
         self.owners.get(&id)
-    }
-
-    /// Whether this evidence was derived from a body for `id`.
-    pub fn has_body(&self, id: InterprocFunctionId) -> bool {
-        self.bodies.contains(&id)
-    }
-
-    /// Every function a body contributed evidence for.
-    pub fn bodies(&self) -> &BTreeSet<InterprocFunctionId> {
-        &self.bodies
     }
 
     /// Borrow the report projection produced from the retained root.
@@ -1007,17 +716,24 @@ fn only_variadic_tail_unproven(
     prepared: &SsaArtifact,
     instruction: crate::CanonicalInstructionId,
 ) -> bool {
-    let crate::CanonicalInstructionSite::Op(ordinal) = instruction.site else {
+    let crate::CanonicalInstructionSite::Op(op) = instruction.site else {
         return false;
     };
-    prepared.certificates().callsites.values().any(|site| {
-        site.block_addr == instruction.block_addr
-            && site.op_index as u64 == ordinal
-            && site.direct_target.is_some()
-            && site.variadic
-            && site.variadic_argument_count_refusal.is_some()
-            && site.results_complete
-    })
+    let certificates = prepared.certificates();
+    let Some(inst) = prepared.graph().inst_for_op(op) else {
+        return false;
+    };
+    prepared
+        .call_sites()
+        .by_inst
+        .get(inst)
+        .and_then(|call_site| certificates.callsites.get(call_site))
+        .is_some_and(|site| {
+            site.direct_target.is_some()
+                && site.variadic
+                && site.variadic_argument_count_refusal.is_some()
+                && site.results_complete
+        })
 }
 
 fn unknown_call_argument_state(
@@ -1170,16 +886,15 @@ fn summary_arg_count_hint(inputs: SummaryArgCountInputs<'_>) -> Option<usize> {
 /// must not authorize type facts or certification.
 pub fn solve_interproc_summary_set(
     functions: &[InterprocFunctionInput<'_>],
-    arch: Option<&ArchSpec>,
     root: Option<InterprocFunctionId>,
     seed_summaries: &BTreeMap<InterprocFunctionId, FunctionSemanticSummary>,
 ) -> Result<InterprocSummarySet, InterprocSummarySchemaError> {
     validate_function_summary_map(seed_summaries)?;
-    let abi = AbiProfile::from_arch(arch);
     let mut locals = BTreeMap::new();
     let mut current = seed_summaries.clone();
 
     for function in functions {
+        let abi = function.prepared.abi().unwrap_or_default();
         let local = collect_local_summary_facts(function.prepared, &abi);
         current
             .entry(function.id)
@@ -1335,11 +1050,12 @@ fn require_trusted_root_for_helper_scope(
 #[derive(Debug, Clone)]
 pub struct PreparedCalleeSummary {
     id: InterprocFunctionId,
-    architecture_family: crate::MachineArchitectureFamily,
+    architecture: Box<str>,
     blocks: Vec<(u64, u32)>,
     local: LocalSummaryFacts,
     /// Names of the bodiless callees this body reaches: a PLT stub's slot.
-    callee_names: BTreeMap<u64, String>,
+    /// The library model of each import this body calls directly.
+    library: BTreeMap<u64, FunctionSemanticSummary>,
 }
 
 impl PreparedCalleeSummary {
@@ -1363,24 +1079,24 @@ impl PreparedCalleeSummary {
             .ok_or(PreparedInterprocSummaryError::UnknownOrIncoherentMachineContext)?;
         let local = collect_source_owned_summary_facts(prepared, &abi);
         require_converged_call_carriers(&local)?;
-        let callee_names = prepared
-            .display_names()
-            .functions()
+        let library = prepared
+            .machine_context()
+            .callee_libraries()
             .iter()
             .filter(|(addr, _)| local.direct_callees.contains(*addr))
-            .map(|(addr, name)| (*addr, name.clone()))
+            .map(|(addr, summary)| (*addr, summary.clone()))
             .collect();
         Ok(Self {
             id,
-            architecture_family: prepared.machine_context().architecture_family(),
+            architecture: prepared.machine_context().architecture().into(),
             blocks: prepared
                 .function()
-                .blocks()
+                .named_blocks()
                 .iter()
                 .map(|block| (block.addr, block.size))
                 .collect(),
             local,
-            callee_names,
+            library,
         })
     }
 
@@ -1551,7 +1267,7 @@ fn attributable_callees(
 ) -> Vec<PreparedCalleeSummary> {
     let mut claimed: Vec<(u64, u64)> = root
         .function()
-        .blocks()
+        .named_blocks()
         .iter()
         .filter_map(|block| {
             block
@@ -1607,7 +1323,7 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
         }
     }
 
-    let root_family = root.machine_context().architecture_family();
+    let root_architecture = root.machine_context().architecture();
     if root.machine_context().function_interface().is_none() {
         return Err(PreparedInterprocSummaryError::UnknownOrIncoherentMachineContext);
     }
@@ -1618,7 +1334,7 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
     // set is consistent by construction, each body current by the analysis
     // epochs when the root was read, so no revision is compared here.
     for callee in callees {
-        if callee.architecture_family != root_family {
+        if *callee.architecture != *root_architecture {
             return Err(PreparedInterprocSummaryError::ArchitectureMismatch);
         }
     }
@@ -1630,7 +1346,7 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
     let callees = &attributable_callees(&root, root_id, callees);
     validate_interproc_block_ranges(
         root.function()
-            .blocks()
+            .named_blocks()
             .iter()
             .map(|block| (root_id, block.addr, block.size))
             .chain(callees.iter().flat_map(|callee| {
@@ -1646,42 +1362,38 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
     require_trusted_root_for_helper_scope(root.provenance_kind(), callees.len() + 1)?;
 
     let mut owners = BTreeMap::new();
-    let mut bodies = BTreeSet::new();
     let mut locals = BTreeMap::new();
     let mut current = BTreeMap::new();
     owners.insert(root_id, Arc::clone(&root));
-    bodies.insert(root_id);
     current.insert(root_id, initial_summary(root_id, None, &root_local));
     locals.insert(root_id, (None, root_local));
     for callee in callees {
-        bodies.insert(callee.id);
         current.insert(callee.id, initial_summary(callee.id, None, &callee.local));
         locals.insert(callee.id, (None, callee.local.clone()));
     }
 
-    let mut names = root.display_names().functions().clone();
+    // The engine models only stated imports; a local symbol's name is a hint.
+    let mut library = root.machine_context().callee_libraries().clone();
     for callee in callees {
-        for (addr, name) in &callee.callee_names {
-            names.entry(*addr).or_insert_with(|| name.clone());
+        for (addr, summary) in &callee.library {
+            library.entry(*addr).or_insert_with(|| summary.clone());
         }
     }
-    seed_named_callees(&names, &locals, &mut current);
+    seed_library_callees(&library, &locals, &mut current);
     let report =
         solve_interproc_summary_set_from_locals(locals, current, Some(root_id), callees.len() + 1);
     require_converged_summary_report(&report)?;
     Ok(PreparedInterprocSummarySet {
         root: root_id,
         owners,
-        bodies,
         report,
     })
 }
 
-/// A callee with no body but a known name is what its model says: an import
-/// the seed table describes enters the set as a fixed summary, so a call to
-/// `snprintf` is a bounded write rather than an unknown call.
-fn seed_named_callees(
-    names: &BTreeMap<u64, String>,
+/// A callee with no body that is a modelled import is what its model says, so
+/// a call to `snprintf` is a bounded write rather than an unknown call.
+fn seed_library_callees(
+    library: &BTreeMap<u64, FunctionSemanticSummary>,
     locals: &BTreeMap<InterprocFunctionId, (Option<String>, LocalSummaryFacts)>,
     current: &mut BTreeMap<InterprocFunctionId, FunctionSemanticSummary>,
 ) {
@@ -1694,19 +1406,9 @@ fn seed_named_callees(
         if current.contains_key(&id) {
             continue;
         }
-        let seed = names
-            .get(&callee)
-            .and_then(|name| FunctionSemanticSummary::seed_for_callee_name(id, name));
-        r2il::refusal_evidence!(
-            "summary-seed",
-            "callee {callee:#x} name={:?} seeded={}",
-            names.get(&callee),
-            seed.is_some()
-        );
-        let Some(seed) = seed else {
-            continue;
-        };
-        current.insert(id, seed);
+        if let Some(summary) = library.get(&callee) {
+            current.insert(id, summary.clone());
+        }
     }
 }
 
@@ -1759,9 +1461,9 @@ pub fn solve_prepared_interproc_summary_set(
     // source-owned cannot contribute at all, but a scope that is the wrong
     // architecture or whose functions overlap is wrong about every body in
     // it, so those answers come first.
-    let root_family = root.machine_context().architecture_family();
+    let root_architecture = root.machine_context().architecture();
     for function in functions {
-        if function.prepared.machine_context().architecture_family() != root_family {
+        if function.prepared.machine_context().architecture() != root_architecture {
             return Err(PreparedInterprocSummaryError::ArchitectureMismatch);
         }
     }
@@ -2359,7 +2061,7 @@ fn collect_local_summary_facts_with_obligation_authority(
             .filter(|obligation| {
                 obligation.id.kind == crate::SemanticObligationKind::VolatileOrUnknownEffect
             })
-            .map(|obligation| obligation.id.to_string())
+            .map(|obligation| obligation.id.spelled(prepared.graph()).to_string())
             .collect::<Vec<_>>(),
         prepared.call_sites().by_id.len(),
         prepared
@@ -2367,8 +2069,7 @@ fn collect_local_summary_facts_with_obligation_authority(
             .callsites
             .values()
             .map(|site| (
-                site.block_addr,
-                site.op_index,
+                site.at,
                 site.variadic,
                 site.variadic_argument_count_refusal,
                 site.results_complete,
@@ -2474,8 +2175,8 @@ fn collect_local_summary_facts_with_obligation_authority(
         }
     }
 
-    for block in function.blocks() {
-        for (op_idx, op) in block.ops.iter().enumerate() {
+    for block in function.named_blocks() {
+        for (op_id, op) in block.sited() {
             match op {
                 SSAOp::Load { addr, dst, space }
                 | SSAOp::LoadLinked {
@@ -2588,8 +2289,7 @@ fn collect_local_summary_facts_with_obligation_authority(
                 SSAOp::Return { target } => {
                     out.return_observations.push(classify_return_target(
                         prepared,
-                        block.addr,
-                        op_idx,
+                        op_id,
                         target,
                         &out.call_observations,
                     ));
@@ -2637,10 +2337,9 @@ fn collect_local_summary_facts_with_obligation_authority(
     out
 }
 
-/// Keep this classification aligned with the operations for which obligation
-/// collection emits `VolatileOrUnknownEffect`. None of these operations carry
-/// exact preservation authority for call carriers or observable memory.
-fn has_volatile_or_unknown_effect(op: &SSAOp) -> bool {
+/// The operations obligation collection marks `VolatileOrUnknownEffect`; only a
+/// user operation keeps the call carriers, writing nothing but its named output.
+fn has_volatile_or_unknown_effect<V>(op: &SSAOp<V>) -> bool {
     matches!(
         op,
         SSAOp::CallOther { .. } | SSAOp::Unimplemented | SSAOp::CpuId { .. } | SSAOp::New { .. }
@@ -2651,7 +2350,7 @@ fn apply_call_carrier_transfer(
     prepared: &SsaArtifact,
     abi: &AbiProfile,
     state: &mut CallCarrierMap,
-    op: &SSAOp,
+    op: &SSAOp<crate::VarId>,
 ) {
     // A user operation writes only its named output.
     let clobbers_every_carrier = !matches!(op, SSAOp::CallOther { .. })
@@ -2661,7 +2360,7 @@ fn apply_call_carrier_transfer(
         state
             .values_mut()
             .for_each(|value| *value = CallCarrierState::Unknown);
-    } else if let Some(dst) = op.dst() {
+    } else if let Some(dst) = op.dst().and_then(|dst| prepared.graph().value_of(*dst)) {
         update_call_carrier_state(prepared, abi, state, dst);
     }
 }
@@ -2725,13 +2424,11 @@ fn classify_memory_access_location(
 /// before it scales, which the address facts keep as a term of its own; the
 /// value view says whose bits it extends, and how.
 fn scaled_argument_index(prepared: &SsaArtifact, value: ValueId) -> Option<(usize, Option<u32>)> {
-    let var = prepared.value_var(value)?;
-    let facts = prepared.function().decompile_prep_facts()?;
-    if let Some(index) = facts.formal_parameter_of(var) {
+    if let Some(index) = prepared.formal_parameter_of(value) {
         return Some((index, None));
     }
-    let view = facts.view(var);
-    let index = facts.formal_parameter_of_view(&view)?;
+    let view = prepared.decompile_prep_facts().view(value);
+    let index = prepared.formal_parameter_of_view(&view)?;
     match view.extension {
         crate::view::ViewExtension::Exact | crate::view::ViewExtension::Zero => Some((index, None)),
         crate::view::ViewExtension::Sign => Some((index, Some(view.prefix_bits))),
@@ -2872,16 +2569,13 @@ fn classify_address_root(
 fn address_candidates(prepared: &SsaArtifact, value_id: ValueId) -> Vec<ValueId> {
     let mut candidates = vec![value_id];
     let graph = prepared.graph();
-    if let (Some(facts), Some(var)) = (
-        prepared.function().decompile_prep_facts(),
-        prepared.value_var(value_id),
-    ) {
-        for root in [facts.canonical_root(var), facts.same_integer_root(var)] {
-            if let Some(root) = graph.value_id_for_var(root)
-                && !candidates.contains(&root)
-            {
-                candidates.push(root);
-            }
+    let facts = prepared.decompile_prep_facts();
+    for root in [
+        crate::view::class_value(graph, Some(&facts.views), value_id),
+        facts.same_integer_root(value_id),
+    ] {
+        if !candidates.contains(&root) {
+            candidates.push(root);
         }
     }
     candidates
@@ -2954,7 +2648,9 @@ fn is_an_index(prepared: &SsaArtifact, value_id: ValueId) -> bool {
             .flatten()
             .any(|factor| factor > 1),
         SSAOp::IntLeft { .. } => constant(1).is_some_and(|places| places > 0),
-        SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } => src.size < dst.size,
+        SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } => {
+            graph.var(*src).size < graph.var(*dst).size
+        }
         _ => false,
     }
 }
@@ -2966,32 +2662,85 @@ fn summary_const_value(prepared: &SsaArtifact, value_id: ValueId) -> Option<u64>
     }
 }
 
-/// The iterations this dataflow can take, from the data rather than a guess.
-///
-/// The carrier lattice is flat: a cell is absent, then a specific entry
-/// argument or value, then `Unknown`, and a join with anything leaves
-/// `Unknown` where it is. So each of a block's carrier cells advances at most
-/// twice, and the block's own in-state and out-state each appear once, which
-/// is what the first pass reports as a change. Every round that reports a
-/// change made at least one of those moves, so bound the rounds by how many
-/// exist and add the round that reports none.
-fn call_arg_state_iteration_bound(prepared: &SsaArtifact, abi: &AbiProfile) -> usize {
-    let blocks = prepared.function().block_addrs().len();
-    let carriers = tracked_call_carriers(prepared, abi).len();
-    blocks
-        .saturating_mul(carriers.saturating_mul(2).saturating_add(2))
-        .saturating_add(1)
-}
-
 fn collect_call_arg_state(prepared: &SsaArtifact, abi: &AbiProfile) -> CallArgumentState {
-    let bound = call_arg_state_iteration_bound(prepared, abi);
-    collect_call_arg_state_with_iteration_limit(prepared, abi, bound)
+    // The carrier lattice is flat: a cell is unreached, then one entry
+    // argument or value, then unknown, so each moves at most twice.
+    let height = tracked_call_carriers(prepared, abi)
+        .len()
+        .saturating_mul(2)
+        .saturating_add(1);
+    collect_call_arg_state_of_height(prepared, abi, height)
 }
 
-fn collect_call_arg_state_with_iteration_limit(
+/// What a call is handed in each argument carrier, as `state` holds them
+/// where the call stands.
+fn call_arguments_in(
     prepared: &SsaArtifact,
     abi: &AbiProfile,
-    max_iterations: usize,
+    call_id: CallSiteId,
+    state: &CallCarrierMap,
+) -> Vec<SummaryOperand> {
+    call_argument_carriers(prepared, abi, call_id)
+        .map(|carriers| {
+            carriers
+                .into_iter()
+                .map(|carrier| match state.get(&carrier) {
+                    Some(CallCarrierState::EntryArg(index)) => SummaryOperand::Arg(*index),
+                    Some(CallCarrierState::Value(value_id)) => {
+                        classify_value_operand(prepared, *value_id)
+                    }
+                    Some(CallCarrierState::Unknown) | None => SummaryOperand::Unknown,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| unknown_call_arguments(prepared, abi, call_id))
+}
+
+/// What one block leaves in each carrier it sets, whatever it was entered
+/// with.
+///
+/// Two runs from two starts no event can write: a carrier both end on the
+/// same content is one the block set, and that content is its effect; one
+/// still on its start is one the block leaves alone. `O(ops x carriers)`,
+/// once per block.
+fn block_carrier_effect(
+    prepared: &SsaArtifact,
+    abi: &AbiProfile,
+    tracked: &BTreeSet<CallCarrierKey>,
+    block: &crate::SSABlock<crate::VarId>,
+) -> CallCarrierMap {
+    let start = |sentinel: u32| {
+        tracked
+            .iter()
+            .map(|carrier| (*carrier, CallCarrierState::Value(ValueId(sentinel))))
+            .collect::<CallCarrierMap>()
+    };
+    let mut runs = [start(u32::MAX), start(u32::MAX - 1)];
+    for run in &mut runs {
+        for dst in block
+            .phis()
+            .iter()
+            .filter_map(|phi| prepared.graph().value_of(phi.dst))
+        {
+            update_call_carrier_state(prepared, abi, run, dst);
+        }
+        for op in block.ops() {
+            apply_call_carrier_transfer(prepared, abi, run, op);
+        }
+    }
+    let [first, second] = runs;
+    first
+        .into_iter()
+        .filter(|(carrier, value)| second.get(carrier) == Some(value))
+        .collect()
+}
+
+/// The call-argument state, solved under a stated lattice height; a solve
+/// that runs past it degrades every observation to unknown.
+fn collect_call_arg_state_of_height(
+    prepared: &SsaArtifact,
+    abi: &AbiProfile,
+    height: usize,
 ) -> CallArgumentState {
     let function = prepared.function();
     let tracked = tracked_call_carriers(prepared, abi);
@@ -3014,82 +2763,90 @@ fn collect_call_arg_state_with_iteration_limit(
         .iter()
         .map(|storage| (*storage, CallCarrierState::Unknown))
         .collect::<BTreeMap<_, _>>();
-    let mut in_states = BTreeMap::<u64, CallCarrierMap>::new();
-    let mut out_states = BTreeMap::<u64, CallCarrierMap>::new();
-    let mut changed = true;
-    let mut iterations = 0usize;
-    while changed && iterations < max_iterations.max(1) {
-        iterations += 1;
-        changed = false;
-        for &block_addr in function.block_addrs() {
-            let preds = function.predecessors(block_addr);
-            // The root is the one way in: a loop through the function's first
-            // instruction merges at the block after it, like any other.
-            let mut state = if block_addr == function.root() {
-                entry_state.clone()
-            } else if preds.is_empty() {
-                unknown_state.clone()
-            } else {
-                merge_pred_states(&out_states, &preds, &tracked)
-            };
-            let Some(block) = function.get_block(block_addr) else {
-                continue;
-            };
-            for phi in &block.phis {
-                update_call_carrier_state(prepared, abi, &mut state, &phi.dst);
+    // What each block leaves in each carrier it touches, whatever it was
+    // entered with: every event sets a carrier to a content of its own, so a
+    // block's effect is the last event per carrier. Computed once per block,
+    // so a visit of the fixpoint below costs the carriers, not the block.
+    let effects = function
+        .blocks()
+        .iter()
+        .map(|block| {
+            (
+                block.addr,
+                block_carrier_effect(prepared, abi, &tracked, block),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    // The carriers' contents at each block's entry, on the fixpoint
+    // driver: a flat lattice per carrier, where two different contents join
+    // to unknown and an edge from a block not yet walked says nothing. Each
+    // carrier moves at most twice, from unreached to a content to unknown.
+    let root = function.root();
+    let solved = crate::fixpoint::forward_on_edges(
+        function,
+        "call-arguments",
+        height,
+        entry_state.clone(),
+        |merged: &mut CallCarrierMap, other: &CallCarrierMap| {
+            *merged = merge_call_carrier_states(merged, other, &tracked);
+        },
+        // The root is the one way in: a loop through the function's first
+        // instruction merges at the block after it, like any other.
+        |_, block, state: &CallCarrierMap| match block == root {
+            true => entry_state.clone(),
+            false => state.clone(),
+        },
+        |block_addr, entry| {
+            let mut state = entry.clone();
+            for (carrier, value) in effects.get(&block_addr).into_iter().flatten() {
+                state.insert(*carrier, *value);
             }
-            let old = in_states.insert(block_addr, state.clone());
-            if old.as_ref() != Some(&state) {
-                changed = true;
-            }
-
-            for op in &block.ops {
-                apply_call_carrier_transfer(prepared, abi, &mut state, op);
-            }
-            let new_state = state;
-            let old = out_states.insert(block_addr, new_state.clone());
-            if old.as_ref() != Some(&new_state) {
-                changed = true;
-            }
+            state
+        },
+    );
+    let in_states = match solved {
+        Ok(solved) => solved.entry,
+        Err(exhausted) => {
+            r2il::refusal_evidence!("call-arguments", "{exhausted}");
+            return unknown_call_argument_state(prepared, abi, false);
         }
-    }
+    };
 
-    if changed {
-        return unknown_call_argument_state(prepared, abi, false);
-    }
-
-    let mut by_call = BTreeMap::new();
+    // Each block's calls, by the operation each sits at: one walk of a block
+    // states every call in it, rather than one walk from the block's top per
+    // call.
+    let graph = prepared.graph();
+    let mut calls_by_block = BTreeMap::<u64, BTreeMap<crate::arena::OpId, CallSiteId>>::new();
     for (&call_id, call) in &prepared.call_sites().by_id {
-        let Some((block_addr, call_op_idx)) = prepared.inst_op_site(call.at) else {
-            continue;
-        };
-        let Some(block) = function.get_block(block_addr) else {
-            continue;
-        };
-        let mut state = in_states.get(&block_addr).cloned().unwrap_or_default();
-        for phi in &block.phis {
-            update_call_carrier_state(prepared, abi, &mut state, &phi.dst);
+        if let (Some(block_addr), Some(call_op)) =
+            (graph.block_addr_of(call.at), graph.op_for_inst(call.at))
+        {
+            calls_by_block
+                .entry(block_addr)
+                .or_default()
+                .insert(call_op, call_id);
         }
-        for (op_idx, op) in block.ops.iter().enumerate() {
-            if op_idx == call_op_idx {
-                let args = call_argument_carriers(prepared, abi, call_id)
-                    .map(|carriers| {
-                        carriers
-                            .into_iter()
-                            .map(|carrier| match state.get(&carrier) {
-                                Some(CallCarrierState::EntryArg(index)) => {
-                                    SummaryOperand::Arg(*index)
-                                }
-                                Some(CallCarrierState::Value(value_id)) => {
-                                    classify_value_operand(prepared, *value_id)
-                                }
-                                Some(CallCarrierState::Unknown) | None => SummaryOperand::Unknown,
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_else(|| unknown_call_arguments(prepared, abi, call_id));
-                by_call.insert(call_id, args);
-                break;
+    }
+    let mut by_call = BTreeMap::new();
+    for (block_addr, calls) in &calls_by_block {
+        let Some(block) = function.get_block(*block_addr) else {
+            continue;
+        };
+        // A block nothing reaches holds nothing known.
+        let mut state = in_states
+            .get(block_addr)
+            .cloned()
+            .unwrap_or_else(|| unknown_state.clone());
+        for dst in block
+            .phis()
+            .iter()
+            .filter_map(|phi| graph.value_of(phi.dst))
+        {
+            update_call_carrier_state(prepared, abi, &mut state, dst);
+        }
+        for (op_id, op) in block.sited() {
+            if let Some(call_id) = calls.get(&op_id) {
+                by_call.insert(*call_id, call_arguments_in(prepared, abi, *call_id, &state));
             }
             apply_call_carrier_transfer(prepared, abi, &mut state, op);
         }
@@ -3156,11 +2913,8 @@ fn update_call_carrier_state(
     prepared: &SsaArtifact,
     _abi: &AbiProfile,
     state: &mut CallCarrierMap,
-    var: &SSAVar,
+    value_id: ValueId,
 ) {
-    let Some(value_id) = prepared.graph().value_id_for_var(var) else {
-        return;
-    };
     let storage = prepared
         .graph()
         .value(value_id)
@@ -3229,26 +2983,6 @@ pub fn observe_call_arguments(
         .collect()
 }
 
-fn merge_pred_states(
-    in_states: &BTreeMap<u64, CallCarrierMap>,
-    preds: &[u64],
-    tracked: &BTreeSet<CallCarrierKey>,
-) -> CallCarrierMap {
-    let unknown = tracked
-        .iter()
-        .map(|storage| (*storage, CallCarrierState::Unknown))
-        .collect::<CallCarrierMap>();
-    let mut states = preds
-        .iter()
-        .map(|pred| in_states.get(pred).unwrap_or(&unknown));
-    let Some(first) = states.next() else {
-        return unknown;
-    };
-    states.fold(first.clone(), |merged, state| {
-        merge_call_carrier_states(&merged, state, tracked)
-    })
-}
-
 fn merge_call_carrier_states(
     left: &CallCarrierMap,
     right: &CallCarrierMap,
@@ -3279,12 +3013,11 @@ fn merge_call_carrier_states(
 
 fn classify_return_target(
     prepared: &SsaArtifact,
-    block_addr: u64,
-    return_op_idx: usize,
+    return_op: crate::OpId,
     target: &SSAVar,
     calls: &BTreeMap<CallSiteId, CallObservation>,
 ) -> SummaryValueObservation {
-    if let Some(return_inst) = exact_return_address_use(prepared, block_addr, return_op_idx, target)
+    if let Some(return_inst) = exact_return_address_use(prepared, return_op, target)
         && let Some(observation) = exact_return_boundary_observation(prepared, return_inst, calls)
     {
         return observation;
@@ -3298,13 +3031,12 @@ fn classify_return_target(
 
 fn exact_return_address_use(
     prepared: &SsaArtifact,
-    block_addr: u64,
-    return_op_idx: usize,
+    return_op: crate::OpId,
     target: &SSAVar,
 ) -> Option<crate::graph::InstId> {
     let graph = prepared.graph();
-    let inst = graph.inst_id_for_op_site(block_addr, return_op_idx)?;
-    let boundary = prepared.facts().boundaries.returns.get(&inst)?;
+    let inst = graph.inst_for_op(return_op)?;
+    let boundary = prepared.facts().boundaries.returns.get(inst)?;
     let return_address = boundary.return_address?;
     let target_value = graph.value_id_for_var(target)?;
     let use_site = UseSite { inst, input_idx: 0 };
@@ -3323,7 +3055,7 @@ fn exact_return_boundary_observation(
     calls: &BTreeMap<CallSiteId, CallObservation>,
 ) -> Option<SummaryValueObservation> {
     let expected_storage = exact_function_return_storage(prepared)?;
-    let boundary = prepared.facts().boundaries.returns.get(&return_inst)?;
+    let boundary = prepared.facts().boundaries.returns.get(return_inst)?;
     if !boundary.complete {
         return None;
     }
@@ -3416,7 +3148,7 @@ fn return_call_site_for_value(
                 return prepared
                     .call_sites()
                     .by_inst
-                    .get(&scan_inst_id)
+                    .get(scan_inst_id)
                     .copied()
                     .and_then(exact_result_matches);
             }
@@ -3446,7 +3178,7 @@ fn classify_var_operand(prepared: &SsaArtifact, var: &SSAVar) -> SummaryOperand 
 fn classify_value_operand(prepared: &SsaArtifact, value_id: ValueId) -> SummaryOperand {
     let rooted = canonical_root_value(prepared, value_id);
     for candidate in [value_id, rooted] {
-        if let Some(bits) = crate::constant::folded_value(prepared.graph(), candidate) {
+        if let Some(bits) = prepared.bare_folded_value(candidate) {
             return SummaryOperand::Const(bits);
         }
         if let Some(expression) = prepared.addresses().parameter_expression(candidate) {
@@ -3467,82 +3199,6 @@ fn global_address_for_value_id(prepared: &SsaArtifact, value_id: ValueId) -> Opt
     let object = prepared.objects().object(object)?;
     match object.kind {
         ObjectKind::Global { address, .. } => Some(address),
-        _ => None,
-    }
-}
-
-/// The name the program links against, with radare2's namespace removed.
-fn import_basename(name: &str) -> &str {
-    let mut bare = name.trim();
-    for prefix in ["sym.imp.", "sym.", "imp.", "reloc.", "dbg."] {
-        while let Some(rest) = bare.strip_prefix(prefix) {
-            bare = rest;
-        }
-    }
-    bare.split_once('@').map_or(bare, |(base, _)| base)
-}
-
-fn normalize_seed_name(name: &str) -> Option<&'static str> {
-    let normalized_owned = name.trim().to_ascii_lowercase();
-    let mut normalized = normalized_owned.as_str();
-    let has_external_marker = ["sym.imp.", "imp.", "reloc."]
-        .iter()
-        .any(|prefix| normalized.strip_prefix(prefix).is_some())
-        || normalized.ends_with("@plt")
-        || normalized.ends_with(".plt");
-    if !has_external_marker {
-        return None;
-    }
-    for prefix in ["sym.imp.", "sym.", "imp.", "reloc.", "dbg."] {
-        while let Some(rest) = normalized.strip_prefix(prefix) {
-            normalized = rest;
-        }
-    }
-    while let Some(rest) = normalized.strip_suffix("@plt") {
-        normalized = rest;
-    }
-    while let Some(rest) = normalized.strip_suffix(".plt") {
-        normalized = rest;
-    }
-    if let Some((base, _)) = normalized.split_once('@') {
-        normalized = base;
-    }
-    if let Some(rest) = normalized.strip_prefix("__isoc99_") {
-        normalized = rest;
-    }
-    if let Some(rest) = normalized.strip_prefix("__gi_") {
-        normalized = rest;
-    }
-    while let Some(rest) = normalized.strip_prefix('_') {
-        normalized = rest;
-    }
-    match normalized {
-        // Names arrive with their leading underscores already stripped, so
-        // the fortified variants match by their bare spelling. Those that keep
-        // the plain layout share a model; the ones that insert the object size
-        // before the length get their own.
-        "strlen" | "strlen_chk" => Some("strlen"),
-        "strcmp" => Some("strcmp"),
-        "memcmp" => Some("memcmp"),
-        "memcpy" => Some("memcpy"),
-        "memmove" => Some("memmove"),
-        "copyin" => Some("copyin"),
-        "copyout" => Some("copyout"),
-        "memset" => Some("memset"),
-        "snprintf" => Some("snprintf"),
-        "vsnprintf" => Some("vsnprintf"),
-        "snprintf_chk" | "vsnprintf_chk" => Some("snprintf_chk"),
-        "strncpy" => Some("strncpy"),
-        "malloc" | "__libc_malloc" | "__gi___libc_malloc" => Some("malloc"),
-        "calloc" | "__libc_calloc" => Some("calloc"),
-        "free" => Some("free"),
-        "os_ref_retain" | "osobject_retain" => Some("retain"),
-        "os_ref_release" | "osobject_release" => Some("release"),
-        "lck_mtx_lock" | "lck_rw_lock_shared" | "lck_rw_lock_exclusive" => Some("lock"),
-        "lck_mtx_unlock" | "lck_rw_unlock_shared" | "lck_rw_unlock_exclusive" => Some("unlock"),
-        "puts" => Some("puts"),
-        "printf" | "__printf_chk" => Some("printf"),
-        "exit" | "_exit" => Some("exit"),
         _ => None,
     }
 }

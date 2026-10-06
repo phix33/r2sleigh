@@ -18,7 +18,7 @@ pub(crate) fn private_stack_objects(
     let mut addresses_by_object = BTreeMap::<ObjectId, BTreeSet<ValueId>>::new();
     // Every value that names some stack address. Arithmetic from one slot's
     // base to another slot's address stays inside the frame and is not escape.
-    let mut stack_addresses = BTreeSet::<ValueId>::new();
+    let mut stack_addresses = crate::dense::IdSet::<ValueId>::default();
     for (key, object) in &objects.value_objects {
         if key.space != SpaceId::Ram {
             continue;
@@ -89,10 +89,17 @@ pub(crate) fn private_stack_objects(
 /// another stack slot is that slot's address and stops the walk; a flag or a
 /// merge computed from the address is followed like any other value, and is
 /// no escape unless what it feeds is.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query; the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub(crate) fn stack_address_escape(
     graph: &SsaGraph,
     access_addresses: &BTreeSet<(InstId, ValueId)>,
-    stack_addresses: &BTreeSet<ValueId>,
+    stack_addresses: &crate::dense::IdSet<ValueId>,
     live_out: &crate::liveout::FunctionLiveOut,
     addresses: &BTreeSet<ValueId>,
 ) -> Option<UseSite> {
@@ -147,7 +154,7 @@ pub(crate) fn stack_address_escape(
             let Some(output) = inst.output else {
                 return Some(*site);
             };
-            if stack_addresses.contains(&output) {
+            if stack_addresses.contains(output) {
                 continue;
             }
             pending.push(output);
@@ -170,10 +177,25 @@ pub(crate) fn collect_memory_round_trips(
     structured: &StructuredDataflowFacts,
 ) -> BTreeMap<StructuredAccessId, MemoryRoundTripCertificate> {
     let mut certificates = BTreeMap::new();
+    // Where an access stands: its instruction's block and place in the
+    // graph's order of that block.
+    let place = |access: &crate::semantic::StructuredMemoryAccessFact| {
+        graph
+            .inst(access.id.inst)
+            .map(|inst| (inst.block, inst.ordinal))
+    };
     for write in structured.memory_accesses.values() {
         if !write.is_write || !write.provenance_complete {
             continue;
         }
+        let Some((write_block, write_at)) = place(write) else {
+            continue;
+        };
+        let in_write_block = |access: &crate::semantic::StructuredMemoryAccessFact| {
+            place(access)
+                .filter(|(block, _)| *block == write_block)
+                .map(|(_, at)| at)
+        };
         let Some(stored) = write.value else {
             continue;
         };
@@ -205,17 +227,17 @@ pub(crate) fn collect_memory_round_trips(
                 && access.object == write.object
                 && access.object_offset == write.object_offset
                 && access.width == write.width
-                && access.block_addr == write.block_addr
-                && access.op_index < write.op_index
+                && in_write_block(access).is_some_and(|at| at < write_at)
         }) else {
+            continue;
+        };
+        let Some(read_at) = in_write_block(read) else {
             continue;
         };
         let overwritten = structured.memory_accesses.values().any(|access| {
             access.is_write
                 && access.object == write.object
-                && access.block_addr == write.block_addr
-                && access.op_index > read.op_index
-                && access.op_index < write.op_index
+                && in_write_block(access).is_some_and(|at| at > read_at && at < write_at)
         });
         if overwritten {
             continue;
@@ -226,13 +248,9 @@ pub(crate) fn collect_memory_round_trips(
         let next_write = structured
             .memory_accesses
             .values()
-            .filter(|access| {
-                access.is_write
-                    && access.object == write.object
-                    && access.block_addr == write.block_addr
-                    && access.op_index > write.op_index
-            })
-            .map(|access| access.op_index)
+            .filter(|access| access.is_write && access.object == write.object)
+            .filter_map(in_write_block)
+            .filter(|at| *at > write_at)
             .min()
             .unwrap_or(usize::MAX);
         let redundant = structured
@@ -245,17 +263,13 @@ pub(crate) fn collect_memory_round_trips(
                     && access.object == write.object
                     && access.object_offset == write.object_offset
                     && access.width == write.width
-                    && access.block_addr == write.block_addr
-                    && access.op_index > write.op_index
-                    && access.op_index < next_write
+                    && in_write_block(access).is_some_and(|at| at > write_at && at < next_write)
             })
             .collect::<Vec<_>>();
         r2il::refusal_evidence!(
             "memory-round-trip",
-            "{:?} at {:#x}:{} stores back what {:?} read, so {:?} is unchanged; {} later reads say the same",
+            "{:?} stores back what {:?} read, so {:?} is unchanged; {} later reads say the same",
             write.id,
-            write.block_addr,
-            write.op_index,
             read.id,
             write.object,
             redundant.len()
@@ -266,11 +280,7 @@ pub(crate) fn collect_memory_round_trips(
                 write: write.id,
                 read: read.id,
                 object: write.object,
-                block_addr: write.block_addr,
-                write_op_index: write.op_index,
-                read_op_index: read.op_index,
                 redundant_reads: redundant.iter().map(|access| access.id).collect(),
-                redundant_read_op_indexes: redundant.iter().map(|access| access.op_index).collect(),
             },
         );
     }

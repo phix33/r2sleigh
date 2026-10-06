@@ -20,10 +20,11 @@ fn return_certificate_requires_one_complete_source_boundary_value() {
     };
     let (block_addr, op_index) = artifact
         .graph()
-        .op_site_for_inst(boundary.at)
+        .walk_start(boundary.at)
         .expect("return op site");
     let certificate = artifact
-        .return_certificate_for_op(block_addr, op_index)
+        .inst_at(block_addr, op_index)
+        .and_then(|inst| artifact.return_certificate_for_inst(inst))
         .expect("complete boundary value certificate");
     assert_eq!(certificate.at, boundary.at);
     assert_eq!(certificate.value, boundary_value.value);
@@ -37,7 +38,7 @@ fn return_certificate_requires_one_complete_source_boundary_value() {
     let mut ambiguous = artifact.facts().boundaries.clone();
     ambiguous
         .returns
-        .get_mut(&boundary.at)
+        .get_mut(boundary.at)
         .expect("return boundary")
         .values
         .push(*boundary_value);
@@ -67,10 +68,11 @@ fn low_bit_return_certificate_owns_the_exact_logical_extension_input() {
     let physical = boundary_value.value;
     let (block_addr, op_index) = artifact
         .graph()
-        .op_site_for_inst(boundary.at)
+        .walk_start(boundary.at)
         .expect("return op site");
     let certificate = artifact
-        .return_certificate_for_op(block_addr, op_index)
+        .inst_at(block_addr, op_index)
+        .and_then(|inst| artifact.return_certificate_for_inst(inst))
         .expect("exact logical return certificate");
     assert_ne!(certificate.value, physical);
     assert_eq!(certificate.width, 4);
@@ -117,10 +119,11 @@ fn low_bit_return_certificate_owns_a_constant_that_is_its_own_zero_extension() {
         assert!(boundary.complete, "constant {constant:#x}");
         let (block_addr, op_index) = artifact
             .graph()
-            .op_site_for_inst(boundary.at)
+            .walk_start(boundary.at)
             .expect("return op site");
         let certificate = artifact
-            .return_certificate_for_op(block_addr, op_index)
+            .inst_at(block_addr, op_index)
+            .and_then(|inst| artifact.return_certificate_for_inst(inst))
             .unwrap_or_else(|| panic!("certificate for constant {constant:#x}"));
         assert_eq!(certificate.width, 4, "constant {constant:#x}");
         assert_eq!(
@@ -253,7 +256,7 @@ fn stack_return_carrier_requires_stack_reload_certificate() {
     let mut value = boundary.values[0];
     value.slot = CallBoundarySlot::Stack(-8);
     assert_eq!(
-        super::super::return_carrier_for_boundary_value(&value, &BTreeMap::new()),
+        super::super::return_carrier_for_boundary_value(&value, &crate::dense::IdMap::default()),
         None
     );
 
@@ -281,7 +284,7 @@ fn stack_return_carrier_requires_stack_reload_certificate() {
     assert_eq!(
         super::super::return_carrier_for_boundary_value(
             &value,
-            &BTreeMap::from([(value.value, reload)]),
+            &[(value.value, reload)].into_iter().collect(),
         ),
         Some(ReturnCarrier::StackSlot {
             object,
@@ -533,7 +536,7 @@ fn counted_for_certificate_joins_condition_phi_initializer_and_latch_by_identity
         .facts()
         .structured
         .inductions
-        .get(&certificate.induction_phi)
+        .get(certificate.induction_phi)
         .expect("certificate induction fact");
 
     assert_eq!(certificate.induction_init, induction.init);
@@ -1116,6 +1119,7 @@ fn return_boundary_without_typed_machine_roles_carries_values_but_no_exit_state(
     );
     let walked = super::super::reaching_abi_value_in_block(
         artifact.function(),
+        Some(artifact.decompile_prep_facts()),
         artifact.graph(),
         artifact.machine_context(),
         0x5000,

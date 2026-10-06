@@ -20,7 +20,8 @@ pub enum SliceError {
     NotFound(String),
     AmbiguousName {
         name: String,
-        values: BTreeSet<ValueId>,
+        /// In id order.
+        values: Vec<ValueId>,
     },
 }
 
@@ -65,7 +66,7 @@ pub fn resolve_slice_seed(artifact: &SsaArtifact, text: &str) -> Result<SliceSee
             .map(|_| SliceSeed::Value(id))
             .ok_or(SliceError::InvalidValue(id));
     }
-    let values: BTreeSet<_> = graph
+    let values: Vec<_> = graph
         .values
         .iter()
         .filter(|value| value.var.display_name() == text)
@@ -90,7 +91,7 @@ pub fn resolve_slice_seed(artifact: &SsaArtifact, text: &str) -> Result<SliceSee
             .parse::<usize>()
             .map_err(|_| SliceError::InvalidSyntax(text.into()))?;
         return graph
-            .inst_id_for_op_site(addr, op)
+            .inst_spelled_at(addr, op)
             .map(SliceSeed::Instruction)
             .ok_or_else(|| SliceError::NotFound(text.into()));
     }
@@ -166,7 +167,7 @@ pub fn backward_slice(artifact: &SsaArtifact, seed: SliceSeed) -> Slice {
         for def in definitions {
             defs.entry(def.next_version)
                 .or_default()
-                .insert((*inst, &def.location));
+                .insert((inst, &def.location));
         }
     }
     let mut phis = BTreeMap::<_, Vec<_>>::new();
@@ -197,7 +198,7 @@ pub fn backward_slice(artifact: &SsaArtifact, seed: SliceSeed) -> Slice {
                         break;
                     };
                     dependencies.extend(inst.inputs.iter().map(|value| value_node(graph, *value)));
-                    if let Some(uses) = facts.memory.uses_by_inst.get(&id) {
+                    if let Some(uses) = facts.memory.uses_by_inst.get(id) {
                         dependencies.extend(uses.iter().map(|use_fact| {
                             Node::Memory(use_fact.version, use_fact.location.clone())
                         }));
@@ -253,7 +254,7 @@ pub fn backward_slice(artifact: &SsaArtifact, seed: SliceSeed) -> Slice {
     slice
 }
 
-fn operation_kind(op: &crate::SSAOp) -> &'static str {
+fn operation_kind<V>(op: &crate::SSAOp<V>) -> &'static str {
     macro_rules! kinds {
         ($($kind:ident),* $(,)?) => {
             match op {
@@ -357,7 +358,7 @@ fn render_instruction(artifact: &SsaArtifact, id: InstId) -> String {
     let Some(inst) = graph.inst(id) else {
         return format!("i{} missing-instruction", id.0);
     };
-    let site = match graph.op_site_for_inst(id) {
+    let site = match graph.walk_start(id) {
         Some((block, op)) => format!("0x{block:x}:{op}"),
         None => match graph.block(inst.block) {
             Some(block) => format!("0x{:x}:phi:{}", block.addr, inst.ordinal),
@@ -366,7 +367,11 @@ fn render_instruction(artifact: &SsaArtifact, id: InstId) -> String {
     };
     let operation = match &inst.payload {
         InstPayload::Phi { .. } => "PHI".into(),
-        InstPayload::Op(op) => format!("{}: {op}", operation_kind(op)),
+        InstPayload::Op(op) => format!(
+            "{}: {}",
+            operation_kind(op),
+            op.map(&mut |id| graph.var(*id).clone())
+        ),
     };
     let output = inst
         .output
@@ -381,7 +386,7 @@ fn render_instruction(artifact: &SsaArtifact, id: InstId) -> String {
     let obligations = artifact
         .obligations()
         .obligations_for_inst(id)
-        .map(|obligation| obligation.id.to_string())
+        .map(|obligation| obligation.id.spelled(artifact.graph()).to_string())
         .collect::<Vec<_>>()
         .join(", ");
     let mut memory = BTreeSet::new();

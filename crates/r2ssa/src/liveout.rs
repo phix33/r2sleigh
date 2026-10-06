@@ -23,8 +23,15 @@ use crate::graph::{SsaGraph, ValueId};
 
 /// The values a function hands back to its caller.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub struct FunctionLiveOut {
-    values: BTreeSet<ValueId>,
+    values: crate::dense::IdSet<ValueId>,
     /// The values each returning block hands back, by the block's address.
     by_return: BTreeMap<u64, BTreeSet<ValueId>>,
     /// Return blocks where no definition of a return register could be found.
@@ -52,19 +59,26 @@ fn covers_fully(write: CanonicalStorageId, return_storage: CanonicalStorageId) -
 
 impl FunctionLiveOut {
     /// Work out what leaves through the return registers of every returning block.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     pub fn compute(
         func: &SSAFunction,
         graph: &SsaGraph,
         return_storages: &[CanonicalStorageId],
     ) -> Self {
         let mut live = Self::default();
-        for block in func.blocks() {
+        for block in func.named_blocks() {
             // A predicated return (`bxeq lr`) ends its block in a return the terminator does not name.
             let returns = func
                 .cfg()
                 .get_block(block.addr)
                 .is_some_and(|cfg| cfg.is_return())
-                || matches!(block.ops.last(), Some(crate::op::SSAOp::Return { .. }));
+                || matches!(block.ops().last(), Some(crate::op::SSAOp::Return { .. }));
             if !returns {
                 continue;
             }
@@ -103,7 +117,14 @@ impl FunctionLiveOut {
     /// join is answered by its merge rather than by whatever lies beyond it, and
     /// a block already visited is not walked twice.
     ///
-    /// Answers whether any definition was found, and whether a path was clobbered.
+    /// Answers whether a definition was found on every path, none reaching the entry unwritten, and whether a path was clobbered.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     fn collect_reaching(
         &mut self,
         func: &SSAFunction,
@@ -114,14 +135,21 @@ impl FunctionLiveOut {
     ) -> (bool, bool) {
         let mut found = false;
         let mut clobbered_any = false;
+        let mut reaches_entry = false;
+        // Each block is walked at most twice: once on a path nothing has written yet, once on one written.
         let mut seen = BTreeSet::new();
-        let mut pending = std::collections::VecDeque::from([from]);
-        while let Some(addr) = pending.pop_front() {
-            if !seen.insert(addr) {
+        let mut pending = std::collections::VecDeque::from([(from, false)]);
+        while let Some((addr, mut written)) = pending.pop_front() {
+            if !seen.insert((addr, written)) {
                 continue;
             }
             let Some(block) = func.get_block(addr) else {
                 continue;
+            };
+            let storage_of = |id: &crate::VarId| {
+                graph
+                    .value_of(*id)
+                    .and_then(|value| graph.value(value)?.canonical_storage)
             };
             let mut defined_here = false;
             // Whether a call on this path leaves the return register holding a
@@ -134,7 +162,7 @@ impl FunctionLiveOut {
             // the zero and left everything the comparison computed observed by
             // nothing. Walking back until the location is covered names every
             // definition the caller actually reads.
-            for op in block.ops.iter().rev() {
+            for op in block.ops().iter().rev() {
                 // The shared rule, so this walk and the return boundary's
                 // cannot drift. Walking past a call named the last thing put in
                 // the register before it -- for a function whose final act is
@@ -147,13 +175,14 @@ impl FunctionLiveOut {
                 let Some(dst) = op.dst() else {
                     continue;
                 };
-                let Some(storage) = graph.canonical_storage_for_var(dst) else {
+                let Some(storage) = storage_of(dst) else {
                     continue;
                 };
                 if !contributes_to(storage, return_storage) {
                     continue;
                 }
-                if let Some(value) = graph.value_id_for_var(dst) {
+                written = true;
+                if let Some(value) = graph.value_of(*dst) {
                     self.values.insert(value);
                     found |= here.insert(value);
                 }
@@ -162,8 +191,8 @@ impl FunctionLiveOut {
                     break;
                 }
             }
-            for phi in &block.phis {
-                let Some(storage) = graph.canonical_storage_for_var(&phi.dst) else {
+            for phi in block.phis() {
+                let Some(storage) = storage_of(&phi.dst) else {
                     continue;
                 };
                 if !contributes_to(storage, return_storage) {
@@ -171,17 +200,16 @@ impl FunctionLiveOut {
                 }
                 // Only a write that covers the whole return storage replaces the
                 // merge. A narrower one leaves the remaining bytes to the phi.
-                let overwritten = block.ops.iter().any(|op| {
+                let overwritten = block.ops().iter().any(|op| {
                     op.dst().is_some_and(|dst| {
-                        graph
-                            .canonical_storage_for_var(dst)
-                            .is_some_and(|written| covers_fully(written, return_storage))
+                        storage_of(dst).is_some_and(|written| covers_fully(written, return_storage))
                     })
                 });
                 if overwritten {
                     continue;
                 }
-                if let Some(value) = graph.value_id_for_var(&phi.dst) {
+                written = true;
+                if let Some(value) = graph.value_of(phi.dst) {
                     defined_here |= covers_fully(storage, return_storage);
                     self.values.insert(value);
                     found |= here.insert(value);
@@ -197,20 +225,22 @@ impl FunctionLiveOut {
             if defined_here {
                 continue;
             }
+            // A path back to the entry that wrote none of it hands back what the caller left there.
+            reaches_entry |= addr == func.entry && !written;
             for predecessor in func.predecessors(addr) {
-                pending.push_back(predecessor);
+                pending.push_back((predecessor, written));
             }
         }
-        (found, clobbered_any)
+        (found && !reaches_entry, clobbered_any)
     }
 
     /// Whether the caller reads this value once the function returns.
     pub fn contains(&self, value: ValueId) -> bool {
-        self.values.contains(&value)
+        self.values.contains(value)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = ValueId> + '_ {
-        self.values.iter().copied()
+        self.values.iter()
     }
 
     pub fn len(&self) -> usize {
@@ -458,7 +488,7 @@ mod tests {
         };
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&x86_64_arch())).expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let returned = func.blocks().iter().next().expect("one block").ops[1]
+        let returned = func.named_blocks().iter().next().expect("one block").ops()[1]
             .dst()
             .and_then(|value| graph.value_id_for_var(value))
             .expect("last return-register definition");
@@ -766,9 +796,9 @@ mod tests {
         let graph = SsaGraph::from_function(&func);
         let live = FunctionLiveOut::compute(&func, &graph, &[storage(0, 8)]);
         let merge = func
-            .get_block(0x100c)
+            .named_block(0x100c)
             .expect("merge block")
-            .phis
+            .phis()
             .iter()
             .filter_map(|phi| graph.value_id_for_var(&phi.dst))
             .collect::<Vec<_>>();
@@ -780,9 +810,9 @@ mod tests {
         );
         for arm in [0x1004, 0x1008] {
             let defined = func
-                .get_block(arm)
+                .named_block(arm)
                 .expect("arm block")
-                .ops
+                .ops()
                 .iter()
                 .filter_map(|op| op.dst())
                 .filter(|dst| func.canonical_storage_for_var(dst) == Some(storage(0, 8)))
@@ -803,9 +833,9 @@ mod tests {
             let graph = SsaGraph::from_function(&func);
             let live = FunctionLiveOut::compute(&func, &graph, &[storage(0, 8)]);
             let roots = func
-                .get_block(0x1000)
+                .named_block(0x1000)
                 .expect("return block")
-                .ops
+                .ops()
                 .iter()
                 .filter_map(|op| op.dst())
                 .filter(|dst| func.canonical_storage_for_var(dst) == Some(storage(0, 8)))

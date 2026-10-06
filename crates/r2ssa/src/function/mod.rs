@@ -6,28 +6,35 @@
 
 mod blocks;
 mod build;
+mod edit;
+mod named_edit;
 mod rewrite;
+mod stack_roots;
+mod stage;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use r2il::{ArchSpec, R2ILBlock, R2ILOp};
-use r2sleigh_lift::{GenuineLiftedFunction, GenuineLiftedFunctionAuthority, TrustedLiftedFunction};
+use r2sleigh_lift::{GenuineLiftedFunction, TrustedLiftedFunction};
 use r2source::{OwnedFunctionSnapshot, SourceCallPreservedCarriers};
 use serde::{Deserialize, Serialize};
 
 use crate::aggregate_access::{
     AggregateAccessProjectionFacts, collect_aggregate_access_projections,
 };
+use crate::arena::{OpArena, OpId, Pass};
+use crate::block::BlockMut;
 pub use crate::block::SSABlock;
-use crate::block::SSABlock as LocalSSABlock;
 use crate::cfg::{CFG, CFGEdge};
 use crate::control::{
     SsaExecutionStopReason, SsaPrepareError, SsaWorkControl, UncheckedSsaWorkControl,
 };
+use crate::dense::IdMap;
 use crate::domtree::DomTree;
 use crate::graph::SsaGraph;
+use crate::graph::ValueId;
 use crate::integrity::{SsaIntegrityError, validate_ssa_function};
 #[cfg(test)]
 use crate::machine_context::{SourceCallArgumentSpec, SourceCallResult};
@@ -46,10 +53,13 @@ use crate::semantic::{
     StructuredDataflowFacts,
 };
 use crate::span::StorageSpans;
+use crate::value_table::VarId;
 use crate::var::SSAVar;
 use crate::{AssumptionSet, CanonicalStorageId, CanonicalStorageSpace};
 use blocks::Blocks;
-pub use blocks::IrRevision;
+pub(crate) use edit::{Anchor, BlockEdits, EditPlan, Insertion, ShapeEdit};
+pub use named_edit::NamedBlockMut;
+pub use stage::{Lifted, Prepared, Sealed};
 
 /// Query-only CFG risk summary for decompilation preflight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +84,14 @@ pub use r2source::StackAddressBase;
 ///
 /// `#[track_caller]` puts the caller's line in the message, so each site costs
 /// nothing to say and cannot drift from where it actually is.
+/// The validator's typed refusal, as the one error preparation reports, with
+/// the integrity error named in the evidence.
+#[track_caller]
+fn integrity_refusal(error: SsaIntegrityError) -> SsaPrepareError {
+    r2il::refusal_evidence!("ssa-integrity", "{error:?}");
+    malformed_ssa_input()
+}
+
 #[track_caller]
 fn malformed_ssa_input() -> SsaPrepareError {
     let location = std::panic::Location::caller();
@@ -94,23 +112,26 @@ pub struct StackAddressRoot {
 }
 
 /// Decompiler-prep analysis facts derived from SSA.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// Collected once, when a function is sealed, over the graph of the blocks
+/// the sealed function keeps; nothing changes those blocks after, so the
+/// facts never describe blocks that no longer exist. Every fact is an index
+/// over the graph's values (doc/adr-one-ir.md): a lookup is `O(1)` and reads
+/// no name.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecompilePrepFacts {
-    /// The revision of the blocks these facts were computed from: they are
-    /// handed out only while the blocks are still at it.
-    pub revision: IrRevision,
     /// Which values carry the same bits, and each value's representative.
     ///
     /// The one identity fact every stage builds on (`crate::view`): a value
     /// shares identity with another only where their bits are equal at full
     /// width, so an extension or a lane at a non-zero offset is never the
     /// value it was read from.
-    pub views: crate::view::ValueViews,
-    pub stack_address_roots: BTreeMap<SSAVar, StackAddressRoot>,
+    pub views: crate::view::ValueViews<crate::graph::ValueId>,
+    pub stack_address_roots: IdMap<crate::graph::ValueId, StackAddressRoot>,
     /// Exact address roots normalized to the entry stack pointer by machine
     /// dataflow. Unlike `stack_address_roots`, these roots are never rebased
     /// to a source-declared frame-pointer coordinate system.
-    pub entry_stack_address_roots: BTreeMap<SSAVar, StackAddressRoot>,
+    pub entry_stack_address_roots: IdMap<crate::graph::ValueId, StackAddressRoot>,
     /// Addresses that lie inside a stack object at an offset the machine
     /// computes rather than states.
     ///
@@ -121,11 +142,24 @@ pub struct DecompilePrepFacts {
     /// root recorded here names the object the index is into -- the base and
     /// the constant part -- and says nothing about which element, which is
     /// exactly what is known.
-    pub indexed_stack_address_roots: BTreeMap<SSAVar, StackAddressRoot>,
+    pub indexed_stack_address_roots: IdMap<crate::graph::ValueId, StackAddressRoot>,
     /// Entry SSA values bound to canonical ABI parameter slots.
-    pub formal_parameters: BTreeMap<SSAVar, usize>,
+    pub formal_parameters: IdMap<crate::graph::ValueId, usize>,
     /// Full-width entry ABI values that may serve as parameter address bases.
-    pub formal_parameter_bases: BTreeMap<SSAVar, usize>,
+    pub formal_parameter_bases: IdMap<crate::graph::ValueId, usize>,
+}
+
+impl Default for DecompilePrepFacts {
+    fn default() -> Self {
+        Self {
+            views: crate::view::ValueViews::default(),
+            stack_address_roots: IdMap::new(0),
+            entry_stack_address_roots: IdMap::new(0),
+            indexed_stack_address_roots: IdMap::new(0),
+            formal_parameters: IdMap::new(0),
+            formal_parameter_bases: IdMap::new(0),
+        }
+    }
 }
 
 /// Unforgeable run-local identity for one immutable SSA artifact.
@@ -169,12 +203,20 @@ impl std::hash::Hash for SsaArtifactAuthority {
 /// Whole-model coherence hid the interface from SSA construction entirely, so
 /// one unattributed frame slot cost the argument carriers and the return
 /// projection too. Each use below asks only the question it depends on.
+///
+/// Construction reads only what is known before it runs. Where the source
+/// states no interface, that is the calling convention: its argument
+/// registers and its result register are the carriers at the boundary
+/// whatever this function's own signature turns out to be. An interface
+/// recovered from the body comes after construction and is read at the
+/// seal, so one build serves both recovery and the artifact.
 #[derive(Clone, Copy)]
 pub(crate) struct InterfaceQuestions<'a> {
     interface: Option<&'a SourceFunctionInterface>,
     return_boundary: bool,
     argument_placement: bool,
     frame_geometry: bool,
+    convention: Option<&'a SourceConventionSlots>,
 }
 
 impl<'a> InterfaceQuestions<'a> {
@@ -185,6 +227,7 @@ impl<'a> InterfaceQuestions<'a> {
             return_boundary: abi.return_boundary_is_coherent(),
             argument_placement: abi.argument_placement_is_coherent(),
             frame_geometry: abi.frame_geometry_is_coherent(),
+            convention: None,
         }
     }
 
@@ -195,6 +238,63 @@ impl<'a> InterfaceQuestions<'a> {
             return_boundary: false,
             argument_placement: false,
             frame_geometry: false,
+            convention: None,
+        }
+    }
+
+    /// No interface the source states: construction asks the convention.
+    fn before_recovery(convention: &'a SourceConventionSlots) -> Self {
+        Self {
+            convention: Some(convention),
+            ..Self::none()
+        }
+    }
+
+    /// The registers at this function's boundary that every caller reads
+    /// or writes whole: the interface's argument and result registers, or,
+    /// with none stated, the convention's.
+    pub(crate) fn construction_carriers(self) -> Vec<CanonicalStorageId> {
+        let register = |storage: &CanonicalStorageId| {
+            (storage.space == CanonicalStorageSpace::Register).then_some(*storage)
+        };
+        if let Some(convention) = self.convention {
+            return convention
+                .argument_slots()
+                .iter()
+                .chain(convention.result_slot().as_ref())
+                .filter_map(register)
+                .collect();
+        }
+        self.for_argument_placement()
+            .into_iter()
+            .flat_map(|interface| {
+                interface
+                    .parameters()
+                    .iter()
+                    .filter_map(crate::SourceAbiParameterSpec::register_storage)
+            })
+            .chain(
+                self.for_return_boundary()
+                    .and_then(|interface| match interface.return_kind() {
+                        crate::SourceFunctionReturn::Register { storage } => Some(storage),
+                        crate::SourceFunctionReturn::Void
+                        | crate::SourceFunctionReturn::Unproven => None,
+                    }),
+            )
+            .collect()
+    }
+
+    /// The register a caller reads the result from, whose merges in a
+    /// returning block keep their sources: the interface's, where it
+    /// describes it coherently, or the convention's.
+    pub(crate) fn return_carrier(self) -> Option<CanonicalStorageId> {
+        match self.convention {
+            Some(convention) => convention
+                .result_slot()
+                .filter(|slot| slot.space == CanonicalStorageSpace::Register),
+            None => self
+                .for_return_boundary()
+                .and_then(crate::optimize::coherent_return_carrier),
         }
     }
 
@@ -252,7 +352,7 @@ impl ArtifactLiveness {
     pub fn with_relocations(
         &self,
         graph: &SsaGraph,
-        relocations: &std::collections::BTreeMap<crate::graph::InstId, crate::graph::InstId>,
+        relocations: &crate::dense::IdMap<crate::graph::InstId, crate::graph::InstId>,
     ) -> crate::liveness::ValueLiveness {
         if relocations.is_empty() {
             return self.values.clone();
@@ -272,7 +372,7 @@ impl ArtifactLiveness {
 /// Neither field is a dataflow, ABI or typing fact. They are retained because
 /// the lift and the snapshot are the only things that ever saw them, and both
 /// are gone by the time anything renders.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ArtifactSpellings {
     /// Spellings the source carried for the addresses this function calls, so
     /// the renderer prints `sym.imp.strcmp` where it would print an address.
@@ -284,13 +384,37 @@ pub struct ArtifactSpellings {
     user_operations: Arc<[String]>,
 }
 
+/// What an artifact is built with besides its function: where it came from,
+/// how its names read to a person, and the native instructions its
+/// obligations are about. Given at construction, so nothing is written into
+/// an artifact once it is built.
+struct Finish {
+    provenance: SsaArtifactProvenance,
+    spellings: ArtifactSpellings,
+    /// Each native instruction of a genuine lift, which the obligations are
+    /// bound to; absent where the function was not lifted from one.
+    native_spans: Option<Vec<crate::GenuineNativeInstructionSpan>>,
+}
+
+impl Finish {
+    /// A function a test or an internal path built, from no lift.
+    fn manual() -> Self {
+        Self {
+            provenance: SsaArtifactProvenance::Manual,
+            spellings: ArtifactSpellings::default(),
+            native_spans: None,
+        }
+    }
+}
+
 /// Canonical SSA artifact consumed by downstream analysis layers.
 #[derive(Debug)]
 pub struct SsaArtifact {
     authority: SsaArtifactAuthority,
     provenance: SsaArtifactProvenance,
-    function: SSAFunction,
-    graph: SsaGraph,
+    /// The sealed function, its prep facts and its graph: everything below
+    /// was derived from it, and nothing can change it.
+    sealed: Sealed,
     liveness: ArtifactLiveness,
     unobserved_merges: crate::deadphi::DeadPhis,
     facts: PreparedFunctionFacts,
@@ -367,9 +491,6 @@ fn genuine_native_instruction_spans(
 #[derive(Debug, Clone)]
 enum SsaArtifactProvenance {
     Manual,
-    /// The kind is the whole fact: a genuine lift alone certifies nothing,
-    /// so the authority it was built from has no reader here.
-    GenuineLiftOnly,
     TrustedSource(OwnedFunctionSnapshot),
 }
 
@@ -378,7 +499,6 @@ enum SsaArtifactProvenance {
 #[derive(Debug, Clone)]
 pub struct TrustedSsaArtifact {
     artifact: Arc<SsaArtifact>,
-    lift_authority: GenuineLiftedFunctionAuthority,
     source_block_count: usize,
     arch: ArchSpec,
 }
@@ -419,48 +539,6 @@ pub struct DecompileInputs<'a> {
     pub callee_interfaces: BTreeMap<u64, SourceFunctionInterface>,
 }
 
-/// The graph every preparation reads, built from a validated function with the source's formals minted.
-pub(crate) fn prepare_graph(
-    function: &mut SSAFunction,
-    machine_context: &mut SourceMachineContext,
-) -> Result<SsaGraph, SsaPrepareError> {
-    // The validator answers with a typed integrity error naming the block
-    // and the edge it disagreed about; discarding it left the reader with
-    // "malformed SSA source input" and nothing to look at.
-    validate_ssa_function(function).map_err(|error| {
-        r2il::refusal_evidence!("ssa-integrity", "{error:?}");
-        malformed_ssa_input()
-    })?;
-    function.apply_boundary_constants(machine_context);
-    function.mint_entry_lane_projections(machine_context);
-    // Before the graph, so every fact built from it counts readers of a
-    // copied value where they are, not where the copy was. It rewrites
-    // reads to variables the validated function already defines, so the
-    // validation above still holds; the minted lanes could not pass it.
-    function.forward_copies();
-    // Each rewrite above changed the blocks the prep facts were collected
-    // from; they are collected once more, over the blocks every later stage
-    // reads.
-    function.recollect_decompile_prep_facts();
-    machine_context.remap_memory_sites_to_prepared(function);
-    let mut graph = SsaGraph::from_function_with_storage(function);
-    // A lane write whose untouched bytes nothing reads does not read the
-    // value it was written into (`demand`); releasing those bases changes an
-    // operand, so the facts and the graph are taken once more where it did.
-    // No operation moves and none touches memory, so the memory sites the
-    // context already maps onto these blocks stand (remapping is not
-    // idempotent: it reads its own map as the lifted one).
-    if release_undemanded_bytes(function, machine_context, &graph) {
-        function.recollect_decompile_prep_facts();
-        graph = SsaGraph::from_function_with_storage(function);
-    }
-    crate::semantic::ensure_source_formal_parameter_values(&mut graph, machine_context);
-    let formal_parameters =
-        crate::semantic::collect_source_formal_parameter_facts(&graph, machine_context);
-    function.install_exact_formal_parameters(&graph, &formal_parameters);
-    Ok(graph)
-}
-
 /// Release the base of every INSERT whose demanded bytes lie in its lane.
 ///
 /// The demand is rooted at what leaves through the return registers, so it
@@ -468,17 +546,20 @@ pub(crate) fn prepare_graph(
 /// with an INSERT into a value that is not a constant can release anything,
 /// and only one pays for the pass.
 fn release_undemanded_bytes(
-    function: &mut SSAFunction,
+    function: &SSAFunction,
     machine_context: &SourceMachineContext,
     graph: &SsaGraph,
-) -> bool {
+) -> EditPlan {
     let inserts = function
         .blocks()
         .iter()
-        .flat_map(|block| &block.ops)
-        .any(|op| matches!(op, SSAOp::Insert(insert) if insert.src.constant_bits().is_none()));
+        .flat_map(|block| block.ops())
+        .any(|op| {
+            matches!(op, SSAOp::Insert(insert)
+                if function.var(insert.src).constant_bits().is_none())
+        });
     if !inserts {
-        return false;
+        return EditPlan::new();
     }
     let return_storages = machine_context
         .abi_model()
@@ -492,7 +573,7 @@ fn release_undemanded_bytes(
             "demanded-bytes",
             "an exit hands registers to code outside the graph; no base is released"
         );
-        return false;
+        return EditPlan::new();
     }
     let demand = crate::demand::Demand::of(graph, &live_out);
     function.release_undemanded_insert_bases(graph, &demand)
@@ -503,9 +584,16 @@ fn release_undemanded_bytes(
 /// Which listed number is a step towards another is read off this, so the listing and the
 /// reference index answer it from the same graph.
 pub fn def_use_graph(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<SsaGraph> {
-    let mut function = SSAFunction::from_blocks_raw(blocks, arch)?;
-    let mut machine_context = SourceMachineContext::from_blocks(blocks, arch);
-    let graph = prepare_graph(&mut function, &mut machine_context).ok()?;
+    let function = SSAFunction::from_blocks_raw(blocks, arch)?;
+    let machine_context = SourceMachineContext::from_blocks(blocks, arch);
+    let sealed = Lifted::new(function)
+        .validate()
+        .map_err(integrity_refusal)
+        .ok()?
+        .seal(&machine_context)
+        .map_err(integrity_refusal)
+        .ok()?;
+    let graph = sealed.graph().clone();
     (!graph.blocks.is_empty()).then_some(graph)
 }
 
@@ -513,6 +601,18 @@ impl SsaArtifact {
     #[cfg(test)]
     fn new(function: SSAFunction) -> Self {
         Self::new_with_context(function, SourceMachineContext::from_blocks(&[], None))
+    }
+
+    /// The artifact of a function a test prepared itself.
+    #[cfg(test)]
+    fn from_prepared(prepared: Prepared, machine_context: SourceMachineContext) -> Self {
+        Self::seal_finished(
+            prepared,
+            machine_context,
+            Finish::manual(),
+            &UncheckedSsaWorkControl,
+        )
+        .expect("an unchecked control never stops")
     }
 
     fn new_with_context(function: SSAFunction, machine_context: SourceMachineContext) -> Self {
@@ -534,94 +634,38 @@ impl SsaArtifact {
     }
 
     fn new_with_context_control_and_provenance<C: SsaWorkControl + ?Sized>(
-        mut function: SSAFunction,
-        mut machine_context: SourceMachineContext,
+        function: SSAFunction,
+        machine_context: SourceMachineContext,
         provenance: SsaArtifactProvenance,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
-        let prepare_entry_bytes = r2il::allocation::live_bytes();
-        let graph = prepare_graph(&mut function, &mut machine_context)?;
-        let return_storages = machine_context
-            .abi_model()
-            .return_registers()
-            .iter()
-            .map(|slot| slot.storage())
-            .collect::<Vec<_>>();
-        let live_out =
-            crate::liveout::FunctionLiveOut::compute(&function, &graph, &return_storages);
-        let mut content = crate::liveness::ValueContent::of(&graph, Some(&machine_context));
-        let mut liveness =
-            crate::liveness::ValueLiveness::compute(&graph, &live_out, content.clone());
-        let storage_spans = StorageSpans::compute(&graph, &liveness);
-        let graph_built_bytes = r2il::allocation::live_bytes();
-        let facts = PreparedFunctionFacts::collect_with_context_and_control(
-            crate::semantic::CollectionOver {
-                function: &function,
-                graph: &graph,
-                storage_spans: &storage_spans,
-                assumptions: &AssumptionSet::default(),
-                machine_context: Some(&machine_context),
-                site: "prepare",
+        let prepared = Lifted::new(function)
+            .validate()
+            .map_err(integrity_refusal)?;
+        Self::seal_finished(
+            prepared,
+            machine_context,
+            Finish {
+                provenance,
+                ..Finish::manual()
             },
             control,
-        )?;
-        // What one prepared function holds is the space every later stage has
-        // to work above, so it is reported beside the phases that built it.
-        r2il::refusal_evidence!(
-            "prepare-held",
-            "{:#x}/{} holds {} bytes after preparation: function+graph {} facts {}",
-            function.entry,
-            function.num_blocks(),
-            r2il::allocation::live_bytes().saturating_sub(prepare_entry_bytes),
-            graph_built_bytes.saturating_sub(prepare_entry_bytes),
-            r2il::allocation::live_bytes().saturating_sub(graph_built_bytes)
-        );
-        // Two reads of the same bytes that the same memory reaches are one
-        // content, which the graph cannot see and the memory facts can. The
-        // spans above were judged without this and are at worst finer.
-        content.declare_same_content(&same_content_reads(&facts.structured, &facts.memory));
-        // A call's conventional read of a register the certified call does
-        // not pass is not a read the text performs, and held values live
-        // across every call that the machine merely might have read. The
-        // spans above were judged with those reads and are at worst finer.
-        let ignored_reads = uncertified_call_reads(&graph, &facts.boundaries);
-        liveness = crate::liveness::ValueLiveness::compute_with_relocations(
-            &graph,
-            &live_out,
-            &std::collections::BTreeMap::new(),
-            content,
-            &ignored_reads,
-        );
-        function.install_formal_parameter_identity(&graph, &facts.addresses);
-        let unobserved_merges = crate::deadphi::DeadPhis::find(&graph, &live_out, &facts);
-        let aggregate_accesses = collect_aggregate_access_projections(
-            &graph,
-            &facts.addresses,
-            &facts.structured.memory_accesses,
-            &machine_context,
-        );
+        )
+    }
+
+    /// Seal a prepared function and derive the artifact's facts from it.
+    fn seal_finished<C: SsaWorkControl + ?Sized>(
+        prepared: Prepared,
+        machine_context: SourceMachineContext,
+        finish: Finish,
+        control: &C,
+    ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
-        let mut artifact = Self {
-            authority: SsaArtifactAuthority::new(),
-            provenance,
-            function,
-            graph,
-            liveness: ArtifactLiveness {
-                storage_spans,
-                live_out,
-                values: liveness,
-                ignored_reads,
-            },
-            unobserved_merges,
-            facts,
-            machine_context,
-            aggregate_accesses,
-            spellings: ArtifactSpellings {
-                display_names: r2source::DisplayNames::default(),
-                user_operations: Arc::from([] as [String; 0]),
-            },
-        };
+        let prepare_entry_bytes = r2il::allocation::live_bytes();
+        let sealed = prepared.seal(&machine_context).map_err(integrity_refusal)?;
+        let mut artifact =
+            sealed.into_artifact(machine_context, finish, control, prepare_entry_bytes)?;
         artifact.seal_body_proven_interface();
         Ok(artifact)
     }
@@ -650,7 +694,6 @@ impl SsaArtifact {
     pub fn provenance_kind(&self) -> SsaArtifactProvenanceKind {
         match &self.provenance {
             SsaArtifactProvenance::Manual => SsaArtifactProvenanceKind::Manual,
-            SsaArtifactProvenance::GenuineLiftOnly => SsaArtifactProvenanceKind::GenuineLiftOnly,
             SsaArtifactProvenance::TrustedSource(_) => SsaArtifactProvenanceKind::TrustedSource,
         }
     }
@@ -702,10 +745,7 @@ impl SsaArtifact {
     }
 
     pub fn for_decompile(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
-        Some(Self::new_with_context(
-            SSAFunction::from_blocks_for_decompile(blocks, arch)?,
-            SourceMachineContext::from_blocks(blocks, arch),
-        ))
+        Self::for_decompile_with_control(blocks, arch, &UncheckedSsaWorkControl).ok()
     }
 
     /// Build a complete decompiler SSA artifact under cooperative control.
@@ -717,10 +757,18 @@ impl SsaArtifact {
         arch: Option<&ArchSpec>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        let function = SSAFunction::from_blocks_for_decompile_with_control(blocks, arch, control)?;
-        control.poll()?;
         let machine_context = SourceMachineContext::from_blocks(blocks, arch);
-        Self::new_with_context_and_control(function, machine_context, control)
+        let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
+            blocks,
+            arch,
+            InterfaceQuestions::none(),
+            &machine_context,
+            &CalleeBoundaries::default(),
+            None,
+            control,
+        )?;
+        control.poll()?;
+        Self::seal_finished(function, machine_context, Finish::manual(), control)
     }
 
     /// Build decompiler-prepared SSA with an explicit function interface.
@@ -784,7 +832,9 @@ impl SsaArtifact {
             callee_preserved_carriers,
             callee_interfaces,
         } = inputs;
-        let machine_context = SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
+        let callees =
+            CalleeBoundaries::from_interfaces(arch, &callee_preserved_carriers, &callee_interfaces);
+        let mut machine_context = SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
             blocks,
             arch,
             function_interface,
@@ -794,23 +844,26 @@ impl SsaArtifact {
             call_site_interfaces,
             tail_call_identities,
         );
-        Some(Self::new_with_context(
-            SSAFunction::from_blocks_for_decompile_with_interface_and_control(
-                blocks,
-                arch,
-                InterfaceQuestions::new(&machine_context),
-                &machine_context,
-                &CalleeBoundaries::from_interfaces(
-                    arch,
-                    &callee_preserved_carriers,
-                    &callee_interfaces,
-                ),
-                None,
+        machine_context.set_callee_preserved(callees.preserved().clone());
+        let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
+            blocks,
+            arch,
+            InterfaceQuestions::new(&machine_context),
+            &machine_context,
+            &callees,
+            None,
+            &UncheckedSsaWorkControl,
+        )
+        .ok()?;
+        Some(
+            Self::seal_finished(
+                function,
+                machine_context,
+                Finish::manual(),
                 &UncheckedSsaWorkControl,
             )
-            .ok()?,
-            machine_context,
-        ))
+            .expect("internal SSA artifact construction requires a validated function"),
+        )
     }
 
     /// Build controlled decompiler SSA from explicit source interfaces, machine roles and call effect.
@@ -842,86 +895,7 @@ impl SsaArtifact {
             control,
         )?;
         control.poll()?;
-        Self::new_with_context_and_control(function, machine_context, control)
-    }
-
-    /// Build analysis-only decompiler SSA directly from an immutable genuine lift.
-    ///
-    /// A genuine lift proves instruction origin, but detached source interfaces
-    /// do not prove that ABI facts came from the same immutable source snapshot.
-    /// This path therefore cannot grant certification authority.
-    pub fn for_decompile_from_genuine_lift_with_interfaces_and_control<
-        C: SsaWorkControl + ?Sized,
-    >(
-        lifted: &GenuineLiftedFunction,
-        function_interface: Option<SourceFunctionInterface>,
-        call_site_interfaces: Vec<SourceCallSiteInterface>,
-        control: &C,
-    ) -> Result<Self, SsaPrepareError> {
-        let Some(function_interface) = function_interface else {
-            return Err(malformed_ssa_input());
-        };
-        if function_interface.revision_identity() != lifted.authority().layout().revision_identity()
-        {
-            return Err(malformed_ssa_input());
-        }
-        let blocks = lifted
-            .blocks()
-            .iter()
-            .map(|block| block.block().clone())
-            .collect::<Vec<_>>();
-        let native_spans = genuine_native_instruction_spans(lifted);
-        let arch = lifted.arch_spec();
-        let machine_context = SourceMachineContext::from_blocks_with_interfaces(
-            blocks.as_slice(),
-            Some(arch),
-            Some(function_interface),
-            SourceMachineRoles::default(),
-            None,
-            None,
-            call_site_interfaces,
-        );
-        let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
-            blocks.as_slice(),
-            Some(arch),
-            InterfaceQuestions::new(&machine_context),
-            &machine_context,
-            &CalleeBoundaries::default(),
-            None,
-            control,
-        )?;
-        if function.entry != lifted.authority().layout().entry_addr() {
-            return Err(malformed_ssa_input());
-        }
-        control.poll()?;
-        let mut artifact = Self::new_with_context_control_and_provenance(
-            function,
-            machine_context,
-            SsaArtifactProvenance::GenuineLiftOnly,
-            control,
-        )?;
-        if !artifact
-            .facts
-            .obligations
-            .bind_genuine_native_spans(native_spans)
-        {
-            return Err(malformed_ssa_input());
-        }
-        Ok(artifact)
-    }
-
-    /// Build analysis-only decompiler SSA from one complete genuine lift.
-    pub fn for_decompile_from_genuine_lift_with_interfaces(
-        lifted: &GenuineLiftedFunction,
-        function_interface: Option<SourceFunctionInterface>,
-        call_site_interfaces: Vec<SourceCallSiteInterface>,
-    ) -> Result<Self, SsaPrepareError> {
-        Self::for_decompile_from_genuine_lift_with_interfaces_and_control(
-            lifted,
-            function_interface,
-            call_site_interfaces,
-            &UncheckedSsaWorkControl,
-        )
+        Self::seal_finished(function, machine_context, Finish::manual(), control)
     }
 
     pub fn for_patterns(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
@@ -929,21 +903,6 @@ impl SsaArtifact {
             SSAFunction::from_blocks_for_patterns(blocks, arch)?,
             SourceMachineContext::from_blocks(blocks, arch),
         ))
-    }
-
-    /// Build a complete pattern/type-inference SSA artifact under cooperative control.
-    pub fn for_patterns_with_control<C: SsaWorkControl + ?Sized>(
-        blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
-        control: &C,
-    ) -> Result<Self, SsaPrepareError> {
-        let function = SSAFunction::from_blocks_for_patterns_with_control(blocks, arch, control)?;
-        control.poll()?;
-        Self::new_with_context_and_control(
-            function,
-            SourceMachineContext::from_blocks(blocks, arch),
-            control,
-        )
     }
 
     pub fn for_symbolic(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
@@ -966,8 +925,7 @@ impl SsaArtifact {
         function_interface: Option<SourceFunctionInterface>,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
     ) -> Option<Self> {
-        let mut function = SSAFunction::from_blocks_raw(blocks, arch)?;
-        function.refresh_decompile_prep_facts();
+        let function = SSAFunction::from_blocks_raw(blocks, arch)?;
         Some(Self::new_with_context(
             function,
             SourceMachineContext::from_blocks_with_interfaces(
@@ -983,7 +941,72 @@ impl SsaArtifact {
     }
 
     pub fn function(&self) -> &SSAFunction {
-        &self.function
+        self.sealed.function()
+    }
+
+    /// The decompiler-prep facts, collected once when the function was
+    /// sealed.
+    pub fn decompile_prep_facts(&self) -> &DecompilePrepFacts {
+        self.sealed.decompile_prep_facts()
+    }
+
+    /// The formal a value is: one the entry proves, which the prep facts
+    /// hold, or one the address facts prove holds exactly that parameter
+    /// with nothing added -- a copy or a reload of it. The entry's answer is
+    /// authoritative where both answer.
+    ///
+    /// Two owners, each for its own evidence. The address facts are
+    /// collected over the prep facts, so writing their answer back into the
+    /// prep facts left the two describing different functions. O(1).
+    pub fn formal_parameter_of(&self, value: ValueId) -> Option<usize> {
+        self.decompile_prep_facts()
+            .formal_parameter_of(value)
+            .or_else(|| self.addressed_formal(value))
+    }
+
+    /// The formal whose bits a view names: the root itself, or a formal that
+    /// is exactly those bits of the root -- `esi` of `rsi`, which a widening
+    /// of `esi` views as `rsi`'s low 32 bits. O(formals).
+    pub fn formal_parameter_of_view(
+        &self,
+        view: &crate::view::ValueView<ValueId>,
+    ) -> Option<usize> {
+        let prep = self.decompile_prep_facts();
+        let names = |formal: ValueId| {
+            let lane = prep.view(formal);
+            lane.root == view.root
+                && lane.prefix_bits == view.prefix_bits
+                && lane.extension == crate::view::ViewExtension::Exact
+        };
+        self.formal_parameter_of(view.root).or_else(|| {
+            self.formal_parameters()
+                .find_map(|(formal, index)| names(formal).then_some(index))
+        })
+    }
+
+    /// Every value that is a formal, with its parameter: the entry's first,
+    /// then the address facts', each in its own order.
+    pub fn formal_parameters(&self) -> impl Iterator<Item = (ValueId, usize)> + '_ {
+        let prep = self.decompile_prep_facts();
+        let entry = prep
+            .formal_parameters
+            .iter()
+            .map(|(value, index)| (value, *index));
+        let addressed = self
+            .addresses()
+            .parameter_expressions
+            .iter()
+            .filter(|(_, expression)| expression.terms.is_empty() && expression.offset == 0)
+            .filter_map(move |(value, expression)| {
+                (!prep.formal_parameters.contains(value)).then_some((value, expression.parameter))
+            });
+        entry.chain(addressed)
+    }
+
+    /// The parameter a value holds exactly, by the address facts.
+    fn addressed_formal(&self, value: ValueId) -> Option<usize> {
+        let expression = self.addresses().parameter_expression(value)?;
+        (expression.terms.is_empty() && expression.offset == 0).then_some(expression.parameter)
     }
 
     /// What the calling convention says this function's caller may read.
@@ -1004,6 +1027,13 @@ impl SsaArtifact {
     /// A carrier is state a register preserves, and a register is reused, so a
     /// carrier can reach across the point where its storage changed meaning.
     /// Anything that wants to call a carrier one variable has to ask this first.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     pub fn carriers_spanning_a_reuse(&self) -> std::collections::BTreeSet<crate::SemanticId> {
         let spans = self.storage_spans();
         let mut spanning = std::collections::BTreeSet::new();
@@ -1033,13 +1063,20 @@ impl SsaArtifact {
     ///
     /// Reuse is a question about one storage holding two meanings, so only the
     /// members in that storage can answer it.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     fn carrier_storage_occupants(
         &self,
         carrier: &crate::semantic::LoopCarrierFact,
         members: &std::collections::BTreeSet<crate::ValueId>,
     ) -> std::collections::BTreeSet<crate::ValueId> {
         let storage_of = |value: crate::ValueId| {
-            self.graph
+            self.graph()
                 .value(value)
                 .and_then(|value| value.canonical_storage)
                 .filter(|storage| !storage.is_unknown())
@@ -1062,6 +1099,13 @@ impl SsaArtifact {
     /// A register the loop spills to a frame slot and reloads is not what
     /// carried the value; the slot is. Published so a renderer can name one
     /// variable where the machine used two.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     pub fn memory_mirrored_carriers(&self) -> std::collections::BTreeSet<crate::SemanticId> {
         let structured = &self.facts.structured;
         let objects = &self.facts.objects;
@@ -1072,7 +1116,7 @@ impl SsaArtifact {
                 if crate::mirror::carrier_mirrors_memory(
                     structured,
                     objects,
-                    &self.graph,
+                    self.graph(),
                     loop_fact,
                     &members,
                 ) {
@@ -1094,7 +1138,7 @@ impl SsaArtifact {
 
     /// Complete upstream-certified domain of pure values no program
     /// observation depends on.
-    pub const fn unobserved_values(&self) -> &std::collections::BTreeSet<crate::graph::ValueId> {
+    pub const fn unobserved_values(&self) -> &crate::dense::IdSet<crate::graph::ValueId> {
         self.unobserved_merges.unobserved_values()
     }
 
@@ -1119,11 +1163,7 @@ impl SsaArtifact {
     }
 
     pub fn graph(&self) -> &SsaGraph {
-        &self.graph
-    }
-
-    pub fn into_function(self) -> SSAFunction {
-        self.function
+        self.sealed.graph()
     }
 
     pub fn facts(&self) -> &PreparedFunctionFacts {
@@ -1153,15 +1193,15 @@ impl SsaArtifact {
 
     pub fn with_assumptions(&self, assumptions: &AssumptionSet) -> Self {
         let facts = PreparedFunctionFacts::collect_with_context(
-            &self.function,
-            &self.graph,
-            self.liveness.storage_spans(),
+            self.function(),
+            Some(self.decompile_prep_facts()),
+            self.graph(),
             assumptions,
             &self.machine_context,
             "assume",
         );
         let aggregate_accesses = collect_aggregate_access_projections(
-            &self.graph,
+            self.graph(),
             &facts.addresses,
             &facts.structured.memory_accesses,
             &self.machine_context,
@@ -1169,8 +1209,7 @@ impl SsaArtifact {
         Self {
             authority: SsaArtifactAuthority::new(),
             provenance: SsaArtifactProvenance::Manual,
-            function: self.function.clone(),
-            graph: self.graph.clone(),
+            sealed: self.sealed.clone(),
             liveness: self.liveness.clone(),
             unobserved_merges: self.unobserved_merges.clone(),
             facts,
@@ -1209,7 +1248,7 @@ impl SsaArtifact {
     pub fn source_signature(&self) -> Option<&r2source::SourceSignaturePresentation> {
         match &self.provenance {
             SsaArtifactProvenance::TrustedSource(source) => source.presentation().signature(),
-            SsaArtifactProvenance::Manual | SsaArtifactProvenance::GenuineLiftOnly => None,
+            SsaArtifactProvenance::Manual => None,
         }
     }
 
@@ -1340,13 +1379,11 @@ impl SsaArtifact {
         &self.facts.obligations
     }
 
-    pub fn callsite_certificate_for_op(
+    pub fn callsite_certificate_for_inst(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        inst: crate::graph::InstId,
     ) -> Option<&CallsiteCertificate> {
-        let inst = self.graph.inst_id_for_op_site(block_addr, op_idx)?;
-        let callsite = self.facts.certificates.callsites_by_inst.get(&inst)?;
+        let callsite = self.facts.call_sites.by_inst.get(inst)?;
         self.facts.certificates.callsites.get(callsite)
     }
 
@@ -1365,43 +1402,21 @@ impl SsaArtifact {
             .certificates
             .callsites
             .values()
-            .filter(|certificate| certificate.block_addr == block_addr);
+            .filter(|certificate| self.graph().block_addr_of(certificate.at) == Some(block_addr));
         let certificate = found.next()?;
         found.next().is_none().then_some(certificate)
     }
 
-    pub fn memory_certificates_for_op_site(
+    pub fn memory_certificate_for_inst(
         &self,
-        block_addr: u64,
-        op_idx: usize,
-    ) -> Vec<&MemoryAccessCertificate> {
-        let certs = &self.facts.certificates;
-        let read = certs
-            .memory_accesses_by_op
-            .get(&(block_addr, op_idx, false))
-            .into_iter()
-            .flatten();
-        let write = certs
-            .memory_accesses_by_op
-            .get(&(block_addr, op_idx, true))
-            .into_iter()
-            .flatten();
-        read.chain(write)
-            .filter_map(|id| certs.memory_accesses.get(id))
-            .collect()
-    }
-
-    pub fn memory_certificate_for_op_site(
-        &self,
-        block_addr: u64,
-        op_idx: usize,
+        inst: crate::graph::InstId,
         is_write: bool,
     ) -> Option<&MemoryAccessCertificate> {
         let certs = &self.facts.certificates;
         self.facts
             .certificates
-            .memory_accesses_by_op
-            .get(&(block_addr, op_idx, is_write))?
+            .memory_accesses_by_inst
+            .get(&(inst, is_write))?
             .iter()
             .filter_map(|id| certs.memory_accesses.get(id))
             .find(|cert| cert.is_write == is_write)
@@ -1411,34 +1426,30 @@ impl SsaArtifact {
         &self,
         value_id: crate::graph::ValueId,
     ) -> Option<&StackReloadSourceCertificate> {
-        self.facts.certificates.stack_reloads.get(&value_id)
+        self.facts.certificates.stack_reloads.get(value_id)
     }
 
-    pub fn stack_reload_certificate_for_op(
+    pub fn stack_reload_certificate_for_inst(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        inst: crate::graph::InstId,
     ) -> Option<&StackReloadSourceCertificate> {
-        let inst = self.graph.inst_id_for_op_site(block_addr, op_idx)?;
-        let value = self.graph.inst(inst)?.output?;
-        self.facts.certificates.stack_reloads.get(&value)
+        let value = self.graph().inst(inst)?.output?;
+        self.facts.certificates.stack_reloads.get(value)
     }
 
     pub fn call_result_certificate_for_value(
         &self,
         value_id: crate::graph::ValueId,
     ) -> Option<&CallResultCertificate> {
-        self.facts.certificates.call_results.get(&value_id)
+        self.facts.certificates.call_results.get(value_id)
     }
 
-    pub fn call_result_certificate_for_op(
+    pub fn call_result_certificate_for_inst(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        inst: crate::graph::InstId,
     ) -> Option<&CallResultCertificate> {
-        let inst = self.graph.inst_id_for_op_site(block_addr, op_idx)?;
-        let value = self.facts.certificates.call_results_by_inst.get(&inst)?;
-        self.facts.certificates.call_results.get(value)
+        let value = self.facts.certificates.call_results_by_inst.get(inst)?;
+        self.facts.certificates.call_results.get(*value)
     }
 
     pub fn call_result_certificates_for_callsite(
@@ -1451,24 +1462,22 @@ impl SsaArtifact {
             .get(&call_site)
             .into_iter()
             .flatten()
-            .filter_map(|value| self.facts.certificates.call_results.get(value))
+            .filter_map(|value| self.facts.certificates.call_results.get(*value))
             .collect()
     }
 
-    pub fn return_certificate_for_op(
+    pub fn return_certificate_for_inst(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        inst: crate::graph::InstId,
     ) -> Option<&ReturnValueCertificate> {
-        let inst = self.graph.inst_id_for_op_site(block_addr, op_idx)?;
-        let index = self.facts.certificates.returns_by_inst.get(&inst)?;
+        let index = self.facts.certificates.returns_by_inst.get(inst)?;
         self.facts.certificates.returns.get(*index)
     }
 
     pub fn resolved_call_target(&self, call: &crate::semantic::CallSiteFact) -> Option<u64> {
         call.direct_target.or_else(|| {
             let value_id = canonical_root_value_id(self, call.target);
-            let value = self.graph.value(value_id)?;
+            let value = self.graph().value(value_id)?;
             value.var.constant_bits().or_else(|| {
                 value.canonical_storage.and_then(|storage| {
                     matches!(
@@ -1489,11 +1498,18 @@ impl SsaArtifact {
     /// that question: four places used to fold it privately, and a consumer
     /// outside the crate had none.
     pub fn folded_value(&self, value_id: crate::graph::ValueId) -> Option<u64> {
-        crate::constant::prepared_folded_value(
-            self.graph(),
-            self.function().decompile_prep_facts(),
-            value_id,
-        )
+        self.sealed
+            .folded()
+            .prepared
+            .get(value_id)
+            .copied()
+            .flatten()
+    }
+
+    /// The constant a value computes to from the graph alone, without what
+    /// preparation admitted; one lookup into the table folded at the seal.
+    pub(crate) fn bare_folded_value(&self, value_id: crate::graph::ValueId) -> Option<u64> {
+        self.sealed.folded().bare.get(value_id).copied().flatten()
     }
 
     /// Every value the body computes, in graph order.
@@ -1504,7 +1520,7 @@ impl SsaArtifact {
     }
 
     pub fn value_var(&self, value_id: crate::graph::ValueId) -> Option<&SSAVar> {
-        self.graph.value(value_id).map(|value| &value.var)
+        self.graph().value(value_id).map(|value| &value.var)
     }
 
     /// Exact stack-relative coordinate proved for one artifact-local SSA value.
@@ -1517,13 +1533,10 @@ impl SsaArtifact {
         &self,
         value_id: crate::graph::ValueId,
     ) -> Option<StackAddressRoot> {
-        let facts = self.function.decompile_prep_facts()?;
-        let value = self.value_var(value_id)?;
-        facts.stack_address_root_of(value).copied().or_else(|| {
+        let facts = self.decompile_prep_facts();
+        facts.stack_address_root_of(value_id).copied().or_else(|| {
             let root = canonical_root_value_id(self, value_id);
-            self.value_var(root)
-                .and_then(|root| facts.stack_address_root_of(root))
-                .copied()
+            facts.stack_address_root_of(root).copied()
         })
     }
 
@@ -1546,8 +1559,8 @@ impl SsaArtifact {
                 .map(|(name, storage)| (name.as_str(), storage.offset, storage.size)),
         );
         let mut entries_by_family = HashMap::<usize, usize>::new();
-        for value in &self.graph.values {
-            if value.var.version != 0 || self.graph.def_inst(value.id).is_some() {
+        for value in &self.graph().values {
+            if value.var.version != 0 || self.graph().def_inst(value.id).is_some() {
                 continue;
             }
             let Some(storage) = value
@@ -1569,58 +1582,47 @@ impl SsaArtifact {
         &self,
         value_id: crate::graph::ValueId,
     ) -> Option<StackAddressRoot> {
-        let facts = self.function.decompile_prep_facts()?;
-        let value = self.value_var(value_id)?;
+        let facts = self.decompile_prep_facts();
         facts
-            .entry_stack_address_root_of(value)
+            .entry_stack_address_root_of(value_id)
             .copied()
             .or_else(|| {
                 let root = canonical_root_value_id(self, value_id);
-                self.value_var(root)
-                    .and_then(|root| facts.entry_stack_address_root_of(root))
-                    .copied()
+                facts.entry_stack_address_root_of(root).copied()
             })
     }
 
-    pub fn inst_op_site(&self, inst_id: crate::graph::InstId) -> Option<(u64, usize)> {
-        self.graph.op_site_for_inst(inst_id)
+    /// The instruction a test names by its block and its place among the
+    /// block's operations.
+    #[cfg(test)]
+    pub(crate) fn inst_at(&self, block_addr: u64, index: usize) -> Option<crate::graph::InstId> {
+        let op = self.function().get_block(block_addr)?.op_id(index)?;
+        self.graph().inst_for_op(op)
     }
 
     pub fn object_for_var(&self, var: &SSAVar, space: r2il::SpaceId) -> Option<ObjectId> {
-        self.graph
+        self.graph()
             .value_id_for_var(var)
             .and_then(|value_id| self.objects().object_for_value(value_id, space))
     }
 
-    pub fn memory_uses_for_op_site(
-        &self,
-        block_addr: u64,
-        op_idx: usize,
-    ) -> Option<&[MemoryUseFact]> {
-        self.graph
-            .inst_id_for_op_site(block_addr, op_idx)
-            .and_then(|inst_id| self.memory().uses_by_inst.get(&inst_id))
+    pub fn memory_uses_for_inst(&self, inst: crate::graph::InstId) -> Option<&[MemoryUseFact]> {
+        self.memory()
+            .uses_by_inst
+            .get(inst)
             .map(|facts| facts.as_slice())
     }
 
-    pub fn memory_defs_for_op_site(
-        &self,
-        block_addr: u64,
-        op_idx: usize,
-    ) -> Option<&[MemoryDefFact]> {
-        self.graph
-            .inst_id_for_op_site(block_addr, op_idx)
-            .and_then(|inst_id| self.memory().defs_by_inst.get(&inst_id))
+    pub fn memory_defs_for_inst(&self, inst: crate::graph::InstId) -> Option<&[MemoryDefFact]> {
+        self.memory()
+            .defs_by_inst
+            .get(inst)
             .map(|facts| facts.as_slice())
     }
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.function = self.function.with_name(name);
+        self.sealed = self.sealed.named(name.into());
         self
-    }
-
-    pub fn local_ssa_blocks(&self) -> &[LocalSSABlock] {
-        self.function.blocks()
     }
 }
 
@@ -1942,6 +1944,13 @@ fn body_proven_format_parameter(shared: &SsaArtifact) -> Option<u32> {
 /// traffic is an elidable save and restore, and a parameter home is a variable
 /// the program uses -- so the identity is established here instead, and claims
 /// only that: the value holds the parameter, not that the traffic may go.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 fn forwarded_parameter_index(
     shared: &SsaArtifact,
     value: crate::ValueId,
@@ -2051,13 +2060,7 @@ impl TrustedSsaArtifact {
         lifted: TrustedLiftedFunction,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        Self::prepare_with_callee_interfaces(
-            lifted,
-            control,
-            &BTreeMap::new(),
-            &CalleePreservedCarriers::new(),
-            &BTreeMap::new(),
-        )
+        Self::prepare_with_callee_interfaces(lifted, control, &CalleeEvidence::default())
     }
 
     /// Prepare, describing each call whose callee body came in this capture.
@@ -2067,13 +2070,17 @@ impl TrustedSsaArtifact {
     pub fn prepare_with_callee_interfaces<C: SsaWorkControl + ?Sized>(
         lifted: TrustedLiftedFunction,
         control: &C,
-        callee_interfaces: &BTreeMap<u64, SourceFunctionInterface>,
-        callee_preserved_carriers: &CalleePreservedCarriers,
-        callee_argument_reach: &BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
+        evidence: &CalleeEvidence,
     ) -> Result<Self, SsaPrepareError> {
+        let CalleeEvidence {
+            interfaces: callee_interfaces,
+            preserved: callee_preserved_carriers,
+            reach: callee_argument_reach,
+            library,
+        } = evidence;
+        let callee_statements = crate::machine_context::CalleeStatement::of(callee_interfaces);
         let source = lifted.source().clone();
         let genuine = lifted.lifted();
-        let lift_authority = genuine.authority().clone();
         let arch = genuine.arch_spec().clone();
         let blocks = genuine
             .blocks()
@@ -2141,6 +2148,15 @@ impl TrustedSsaArtifact {
         // `unavailable`, the return boundary is incomplete, and the renderer
         // refuses with no way to tell which link gave up. That was the largest
         // single refusal cause in the corpus, so each link says so.
+        // Construction reads the source's interface where it states one and
+        // the convention where it does not; a recovered interface is read
+        // from the seal on.
+        // Without one, the function is built once, against the convention,
+        // and that build is both what recovery reads and what is sealed:
+        // nothing construction reads differs between the two contexts.
+        let stated_interface = source.function_interface().is_some();
+        let mut built = None;
+        let mut result_owners = BTreeSet::new();
         let function_interface = match source.function_interface().cloned() {
             Some(interface) => Some(interface),
             None => 'recovered: {
@@ -2157,12 +2173,8 @@ impl TrustedSsaArtifact {
                     "the capture carried no function interface; recovering one from {} blocks",
                     blocks.len()
                 );
-                // Recover against the same decompile-normalized SSA shape the
-                // final artifact will use. The generic SSA constructor can
-                // number a call differently from decompile preparation after
-                // call-result and register-alias operations are inserted; an
-                // exact source callsite then fails to correlate in the
-                // provisional pass even though it correlates in the final one.
+                // Recovery reads the decompile-normalized build the artifact
+                // seals, so a call it numbers is the call the artifact numbers.
                 let mut provisional_machine_context =
                     SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
                         blocks.as_slice(),
@@ -2178,11 +2190,12 @@ impl TrustedSsaArtifact {
                 // the final pass reads; without them every format was unproven.
                 provisional_machine_context
                     .bind_source_string_literals(source.image().string_literals());
+                provisional_machine_context.set_callee_statements(&callee_statements);
                 let Ok(preliminary) =
                     SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                         &blocks,
                         Some(&arch),
-                        InterfaceQuestions::none(),
+                        InterfaceQuestions::before_recovery(source.convention_slots()),
                         &provisional_machine_context,
                         &callees,
                         Some(&declared_successors),
@@ -2203,8 +2216,17 @@ impl TrustedSsaArtifact {
                 // carrier handed straight to its callee. The latter is still
                 // a parameter even though implicit call reads leave no source
                 // operation behind.
+                // This build is the one the artifact seals. The prep facts
+                // read here are recovery's own: the seal rewrites the blocks
+                // (boundary constants, lane projections, demand) and derives
+                // its facts afresh from the rewritten function.
+                let preliminary = built.insert(preliminary);
+                let Ok(preliminary_prep) = preliminary.provisional_prep_facts(control) else {
+                    break 'recovered None;
+                };
                 let recovered = crate::recover_interface::recover_interface_with_context(
-                    &preliminary,
+                    preliminary,
+                    &preliminary_prep,
                     source.convention_slots(),
                     &provisional_machine_context,
                     source.function().loader_role(),
@@ -2212,6 +2234,7 @@ impl TrustedSsaArtifact {
                 let Some(recovered) = recovered else {
                     break 'recovered None;
                 };
+                result_owners.clone_from(recovered.result_owners());
                 let minted = crate::recover_interface::mint_recovered_interface(
                     &recovered,
                     source.machine_roles(),
@@ -2246,6 +2269,10 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
+        machine_context.set_callee_library(library.clone());
+        machine_context.set_callee_preserved(callees.preserved().clone());
+        machine_context.set_result_owners(result_owners);
+        machine_context.set_callee_statements(&callee_statements);
         machine_context.set_frame_saves(source.image().frame_saves());
         // What each entry of a captured code pointer table names, recorded
         // before the facts are collected: a load of such a slot is proven
@@ -2274,47 +2301,51 @@ impl TrustedSsaArtifact {
             source.image().string_literals().len()
         );
         machine_context.bind_source_string_literals(source.image().string_literals());
-        let mut function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
-            blocks.as_slice(),
-            Some(&arch),
-            InterfaceQuestions::new(&machine_context),
-            &machine_context,
-            &callees,
-            Some(&declared_successors),
-            control,
-        )?;
+        let mut function = match built {
+            Some(built) => built,
+            None => {
+                let questions = match stated_interface {
+                    true => InterfaceQuestions::new(&machine_context),
+                    false => InterfaceQuestions::before_recovery(source.convention_slots()),
+                };
+                SSAFunction::from_blocks_for_decompile_with_interface_and_control(
+                    blocks.as_slice(),
+                    Some(&arch),
+                    questions,
+                    &machine_context,
+                    &callees,
+                    Some(&declared_successors),
+                    control,
+                )?
+            }
+        };
         // What the source calls this function. A name radare2 derived from the
         // entry address restates the address and is left absent, so consumers
         // that would only spell it back out are not misled into thinking the
         // function was named.
         let presented = source.presentation().display_name();
         if !r2source::display_names::is_generated_function_name(presented) {
-            function = function.with_name(presented);
+            function = function.named(presented.to_string());
         }
         if function.entry != source.image().entry_address() {
             return Err(malformed_ssa_input());
         }
         control.poll()?;
-        let mut artifact = SsaArtifact::new_with_context_control_and_provenance(
+        let artifact = SsaArtifact::seal_finished(
             function,
             machine_context,
-            SsaArtifactProvenance::TrustedSource(source),
+            Finish {
+                provenance: SsaArtifactProvenance::TrustedSource(source),
+                spellings: ArtifactSpellings {
+                    display_names,
+                    user_operations: Arc::from(arch.user_ops.clone()),
+                },
+                native_spans: Some(native_spans),
+            },
             control,
         )?;
-        artifact.spellings = ArtifactSpellings {
-            display_names,
-            user_operations: Arc::from(arch.user_ops.clone()),
-        };
-        if !artifact
-            .facts
-            .obligations
-            .bind_genuine_native_spans(native_spans)
-        {
-            return Err(malformed_ssa_input());
-        }
         Ok(Self {
             artifact: Arc::new(artifact),
-            lift_authority,
             source_block_count: blocks.len(),
             arch,
         })
@@ -2342,10 +2373,6 @@ impl TrustedSsaArtifact {
         Arc::ptr_eq(&self.artifact, artifact)
     }
 
-    pub const fn lift_authority(&self) -> &GenuineLiftedFunctionAuthority {
-        &self.lift_authority
-    }
-
     /// How many blocks the trusted lift produced.
     ///
     /// The p-code itself used to be retained here as evidence of the lift
@@ -2367,7 +2394,7 @@ impl TrustedSsaArtifact {
     pub fn source(&self) -> &OwnedFunctionSnapshot {
         match &self.artifact.provenance {
             SsaArtifactProvenance::TrustedSource(source) => source,
-            SsaArtifactProvenance::Manual | SsaArtifactProvenance::GenuineLiftOnly => {
+            SsaArtifactProvenance::Manual => {
                 unreachable!("TrustedSsaArtifact always retains source provenance")
             }
         }
@@ -2380,83 +2407,66 @@ pub(crate) fn canonical_root_value_id(
     prepared: &SsaArtifact,
     value_id: crate::graph::ValueId,
 ) -> crate::graph::ValueId {
-    let Some(facts) = prepared.function().decompile_prep_facts() else {
-        return value_id;
-    };
-    let Some(start) = prepared.value_var(value_id) else {
-        return value_id;
-    };
-    prepared
-        .graph()
-        .value_id_for_var(facts.canonical_root(start))
-        .unwrap_or(value_id)
+    crate::view::class_value(
+        prepared.graph(),
+        Some(&prepared.decompile_prep_facts().views),
+        value_id,
+    )
 }
 
 impl Deref for SsaArtifact {
     type Target = SSAFunction;
 
     fn deref(&self) -> &Self::Target {
-        &self.function
+        self.function()
     }
 }
 
 impl DecompilePrepFacts {
-    /// The representative of `var`'s bit-identity class, where it is not `var`.
-    pub fn canonical_root_of(&self, var: &SSAVar) -> Option<&SSAVar> {
-        self.views.representative_of(var)
+    /// The value naming `value`'s bit-identity class, where it is not
+    /// `value` and the class is named by a value rather than a literal.
+    pub fn canonical_root_of(&self, value: ValueId) -> Option<ValueId> {
+        self.views
+            .representative_of(value)
+            .and_then(crate::view::Representative::value)
     }
 
-    /// The variable every value with `var`'s bits at `var`'s width is named
-    /// by: an `O(1)` lookup into the view (`crate::view`).
-    pub fn canonical_root<'a>(&'a self, var: &'a SSAVar) -> &'a SSAVar {
-        self.views.representative(var)
+    /// The representative every value with `value`'s bits at its width is
+    /// named by: an `O(1)` lookup into the view (`crate::view`).
+    pub fn canonical_root(&self, value: ValueId) -> crate::view::Representative<ValueId> {
+        self.views.representative(value)
     }
 
-    /// The bits `var` is read from, stated relative to their root.
-    pub fn view(&self, var: &SSAVar) -> crate::view::ValueView {
-        self.views.view(var)
+    /// The bits `value` is read from, stated relative to their root.
+    pub fn view(&self, value: ValueId) -> crate::view::ValueView<ValueId> {
+        self.views.view(value)
     }
 
     /// Whether `a` and `b` are the same bits at the same width.
-    pub fn same_bits(&self, a: &SSAVar, b: &SSAVar) -> bool {
+    pub fn same_bits(&self, a: ValueId, b: ValueId) -> bool {
         self.views.same_bits(a, b)
     }
 
-    /// The value `var` equals as an unsigned integer: the root of its chain of
-    /// copies and zero extensions, or `var` itself.
-    pub fn same_integer_root<'a>(&'a self, var: &'a SSAVar) -> &'a SSAVar {
-        self.views.same_integer_root(var)
+    /// The value `value` equals as an unsigned integer: the root of its
+    /// chain of copies and zero extensions, or `value` itself.
+    pub fn same_integer_root(&self, value: ValueId) -> ValueId {
+        self.views.same_integer_root(value)
     }
 
-    pub fn indexed_stack_address_root_of(&self, var: &SSAVar) -> Option<&StackAddressRoot> {
-        self.indexed_stack_address_roots.get(var)
+    pub fn indexed_stack_address_root_of(&self, value: ValueId) -> Option<&StackAddressRoot> {
+        self.indexed_stack_address_roots.get(value)
     }
 
-    pub fn stack_address_root_of(&self, var: &SSAVar) -> Option<&StackAddressRoot> {
-        self.stack_address_roots.get(var)
+    pub fn stack_address_root_of(&self, value: ValueId) -> Option<&StackAddressRoot> {
+        self.stack_address_roots.get(value)
     }
 
-    pub fn entry_stack_address_root_of(&self, var: &SSAVar) -> Option<&StackAddressRoot> {
-        self.entry_stack_address_roots.get(var)
+    pub fn entry_stack_address_root_of(&self, value: ValueId) -> Option<&StackAddressRoot> {
+        self.entry_stack_address_roots.get(value)
     }
 
-    pub fn formal_parameter_of(&self, var: &SSAVar) -> Option<usize> {
-        self.formal_parameters.get(var).copied()
-    }
-
-    /// The formal whose bits a view names: the root itself, or a formal that
-    /// is exactly those bits of the root -- `esi` of `rsi`, which a widening
-    /// of `esi` views as `rsi`'s low 32 bits. O(formals).
-    pub fn formal_parameter_of_view(&self, view: &crate::view::ValueView) -> Option<usize> {
-        self.formal_parameter_of(&view.root).or_else(|| {
-            self.formal_parameters.iter().find_map(|(formal, index)| {
-                let lane = self.views.view(formal);
-                (lane.root == view.root
-                    && lane.prefix_bits == view.prefix_bits
-                    && lane.extension == crate::view::ViewExtension::Exact)
-                    .then_some(*index)
-            })
-        })
+    pub fn formal_parameter_of(&self, value: ValueId) -> Option<usize> {
+        self.formal_parameters.get(value).copied()
     }
 }
 
@@ -2493,6 +2503,9 @@ pub struct SSAFunction {
     cfg: CFG,
     /// Dominator tree.
     domtree: DomTree,
+    /// The natural loops of `cfg`, computed on first use from it and the
+    /// dominator tree, and forgotten whenever those are recomputed.
+    natural_loops: std::sync::OnceLock<crate::natural_loops::NaturalLoops>,
     /// SSA operations, one entry per block, in reverse postorder.
     ///
     /// Dense and ordered rather than a hash map beside a separate order, so
@@ -2500,56 +2513,33 @@ pub struct SSAFunction {
     /// looking each address up in another. Every mutable path advances its
     /// revision, which the prep facts are stamped with.
     blocks: Blocks,
+    /// What each operand id of `blocks` is spelled as: one table, filled as
+    /// operations enter the function (`crate::value_table`).
+    values: crate::value_table::ValueTable,
     /// Where each block address sits in `blocks`.
     block_index: BTreeMap<u64, u32>,
     /// The same addresses as `blocks`, in the same order, for readers that want
     /// the addresses without the operations.
     block_order: Vec<u64>,
-    /// Which machine instruction each operation came from, by its site.
-    ///
-    /// Renaming inserts operations the lift never had, so an index into these
-    /// operations stops agreeing with an index into the lifted ones at the
-    /// first insertion in a block. This is the answer in *this* index space,
-    /// recorded where both were known. Absent for a phi and for anything the
-    /// lifter stamped no address on.
-    op_instruction_addrs: BTreeMap<(u64, usize), u64>,
-    /// Canonical lifted storage retained during SSA renaming.
-    ///
-    /// Values are attached from raw varnodes at the lift/SSA seam. Consumers
-    /// must not reconstruct this information from `SSAVar::name`.
-    canonical_storage_by_var: BTreeMap<SSAVar, CanonicalStorageId>,
     /// Entry-lane projections: the value standing for a lane of a register as
     /// the function was entered with it, defined at entry as a `Subpiece` of
-    /// the family root's entry value (doc/adr-register-identity.md §8, 6).
+    /// the family root's entry value (doc/adr-register-identity.md §6).
     /// Keyed by the projection's variable, valued by the lane's storage.
-    formal_projections: BTreeMap<SSAVar, CanonicalStorageId>,
+    formal_projections: crate::dense::IdMap<VarId, CanonicalStorageId>,
     /// Entry roots rebuilt from their declared lanes: the value a read of the
     /// whole register takes once the formals describe it, defined at entry
     /// from the projections with zero above them. Keyed by the rebuilt
     /// variable, valued by the root's storage. The rebuild restates what the
     /// caller passed; it is no write the body made.
-    formal_roots: BTreeMap<SSAVar, CanonicalStorageId>,
-    /// Optional decompiler-prep fact snapshot for the current SSA state.
-    decompile_prep_facts: Option<DecompilePrepFacts>,
-    /// The interface the prep facts were last collected with, to collect them
-    /// again after a rewrite.
-    prep_interface: Option<SourceFunctionInterface>,
-    /// Structural def/use index for repeated SSA queries.
-    query_index: RwLock<Option<SsaQueryIndex>>,
-}
-
-/// Where every variable is defined and read, without saying so twice.
-///
-/// The function already holds each variable once, at the site that names it,
-/// so an index keyed by an owned copy of the variable pays for a second name
-/// per definition and a third per use. These are the sites alone, ordered by
-/// the variable they mention, and a query binary-searches them and reads the
-/// variable back out of the block. One name, one owner, and the answers and
-/// their order are the ones the owned index gave.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct SsaQueryIndex {
-    defs: Vec<(u32, DefLocation)>,
-    uses: Vec<(u32, UseLocation)>,
+    formal_roots: crate::dense::IdMap<VarId, CanonicalStorageId>,
+    /// Each entry-lane formal at the low end of its root, and that root: the
+    /// formal is the caller's own value of the lane, live at entry with no
+    /// definition, and its bits are the root's low bits.
+    entry_lanes: crate::dense::IdMap<VarId, VarId>,
+    /// Which bytes each operation and phi wrote as data, recorded when the
+    /// function was lifted and kept through every rewrite by id
+    /// (doc/adr-written-lanes.md).
+    written: crate::lanes::Written,
 }
 
 /// Reads that see one content: loads of the same bytes of one object -- the
@@ -2562,8 +2552,11 @@ struct SsaQueryIndex {
 /// reaches therefore read the same bytes as last written by the same writes.
 /// A read with no exact offset, or annotated by more than one location, says
 /// nothing. `O(A log A)` in the reads.
-fn same_content_reads(
-    structured: &crate::semantic::StructuredDataflowFacts,
+pub(crate) fn same_content_reads(
+    memory_accesses: &BTreeMap<
+        crate::semantic::StructuredAccessId,
+        crate::semantic::StructuredMemoryAccessFact,
+    >,
     memory: &crate::semantic::MemorySSAFacts,
 ) -> Vec<(crate::graph::ValueId, crate::graph::ValueId)> {
     type ReadKey = (
@@ -2574,7 +2567,7 @@ fn same_content_reads(
     );
     let mut first_read = BTreeMap::<ReadKey, crate::graph::ValueId>::new();
     let mut pairs = Vec::new();
-    for access in structured.memory_accesses.values() {
+    for access in memory_accesses.values() {
         if access.is_write || !access.provenance_complete {
             continue;
         }
@@ -2583,7 +2576,7 @@ fn same_content_reads(
         };
         let versions = memory
             .uses_by_inst
-            .get(&access.id.inst)
+            .get(access.id.inst)
             .into_iter()
             .flatten()
             .filter(|reached| {
@@ -2618,15 +2611,30 @@ fn same_content_reads(
 /// pass. The graph states a read of every register the convention lets a
 /// callee read, so that liveness before the facts exist errs safe; once the
 /// call boundary says which values are arguments, the rest are not reads.
-fn uncertified_call_reads(
+///
+/// A read is passed when it has the bits of a passed argument, not only its
+/// id: the boundary names the value that reached the argument register, and
+/// copy forwarding may have left the call reading the value that copy
+/// carried. Both are one class (`view::class_values`), and the text reads it.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a use site is an (instruction, operand) pair, not a dense id"
+    )
+)]
+pub(crate) fn uncertified_call_reads(
     graph: &SsaGraph,
+    views: Option<&crate::view::ValueViews<ValueId>>,
     boundaries: &crate::semantic::SourceBoundaryFacts,
 ) -> std::collections::BTreeSet<crate::graph::UseSite> {
+    let class = crate::view::class_values(graph, views);
+    let class_of = |value: crate::graph::ValueId| class.get(value.0 as usize).copied();
     let mut passed = std::collections::BTreeSet::new();
     for boundary in boundaries.calls.values() {
         for argument in &boundary.arguments {
             if let crate::semantic::SourceCallArgumentValue::Value(value) = argument.value {
-                passed.insert(value);
+                passed.insert(class_of(value).unwrap_or(value));
             }
         }
     }
@@ -2643,7 +2651,7 @@ fn uncertified_call_reads(
             inst.inputs
                 .iter()
                 .enumerate()
-                .filter(|(_, input)| !passed.contains(input))
+                .filter(|(_, input)| !passed.contains(&class_of(**input).unwrap_or(**input)))
                 .map(move |(input_idx, _)| crate::graph::UseSite {
                     inst: inst.id,
                     input_idx,
@@ -2652,65 +2660,166 @@ fn uncertified_call_reads(
         .collect()
 }
 
-fn block_at_mut<'a>(
+fn block_at_mut<'a, V>(
     index: &BTreeMap<u64, u32>,
-    blocks: &'a mut [SSABlock],
+    blocks: &'a mut [SSABlock<V>],
     addr: u64,
-) -> Option<&'a mut SSABlock> {
+) -> Option<&'a mut SSABlock<V>> {
     blocks.get_mut(*index.get(&addr)? as usize)
 }
 
 impl SSAFunction {
-    /// Which machine instruction this operation came from.
-    ///
-    /// The site is in the operations' own index space: a block address and an
-    /// index into that block's `ops`. `None` for an operation renaming added
-    /// and for anything the lifter stamped no address on.
-    pub fn instruction_at(&self, block_addr: u64, op_idx: usize) -> Option<u64> {
-        self.op_instruction_addrs
-            .get(&(block_addr, op_idx))
-            .copied()
+    /// Which machine instruction this operation executes for; see
+    /// [`OpArena::instruction`].
+    pub fn instruction_of(&self, id: OpId) -> Option<u64> {
+        self.blocks.arena().instruction(id)
     }
 
-    /// Insert operations at one index of a block; every later operation keeps its own instruction.
-    pub(crate) fn insert_ops(
-        &mut self,
-        block_addr: u64,
-        at: usize,
-        ops: Vec<(SSAOp, Option<u64>)>,
-    ) {
-        let Some(block) = block_at_mut(&self.block_index, self.blocks.edit(), block_addr) else {
+    /// Every operation and phi this function ever held, by id.
+    /// Which bytes each operation and phi wrote as data, as lifted.
+    pub fn written(&self) -> &crate::lanes::Written {
+        &self.written
+    }
+
+    /// The record, or for a function no preparation recorded -- one built
+    /// raw, which nothing has optimised -- the record taken from it as it
+    /// stands, which is as lifted.
+    pub fn written_or_captured(&self) -> std::borrow::Cow<'_, crate::lanes::Written> {
+        match self.written.is_empty() {
+            false => std::borrow::Cow::Borrowed(&self.written),
+            true => std::borrow::Cow::Owned(crate::lanes::Written::capture(self)),
+        }
+    }
+
+    /// Record what each operation writes, before anything rewrites one.
+    pub(crate) fn capture_written(&mut self) {
+        self.written = crate::lanes::Written::capture(self);
+    }
+
+    pub fn arena(&self) -> &OpArena {
+        self.blocks.arena()
+    }
+
+    /// One more than the largest id minted so far: the length of a dense
+    /// map indexed by [`OpId`].
+    pub fn id_limit(&self) -> usize {
+        self.blocks.arena().id_limit()
+    }
+
+    /// Apply a pass's plan: its operation edits in IR order, minting what
+    /// they insert, then its merge and control-flow edits in the order the
+    /// pass stated them, then the reorder it asked for.
+    ///
+    /// The one path by which a pass changes a function. `O(n)` in the
+    /// operations for the operation edits, one block lookup per merge edit,
+    /// and one reverse postorder and dominator computation for a reorder.
+    pub(crate) fn apply_edits(&mut self, mut plan: EditPlan) {
+        if plan.is_empty() {
             return;
-        };
-        let at = at.min(block.ops.len());
-        let count = ops.len();
-        let (ops, from): (Vec<_>, Vec<_>) = ops.into_iter().unzip();
-        block.ops.splice(at..at, ops);
-        let moved = self
-            .op_instruction_addrs
-            .range((block_addr, at)..=(block_addr, usize::MAX))
-            .map(|(site, addr)| (site.1, *addr))
-            .collect::<Vec<_>>();
-        for (index, _) in &moved {
-            self.op_instruction_addrs.remove(&(block_addr, *index));
         }
-        let placed = moved
-            .into_iter()
-            .map(|(index, addr)| (index + count, addr))
-            .chain(
-                from.into_iter()
-                    .enumerate()
-                    .filter_map(|(offset, addr)| Some((at + offset, addr?))),
-            );
-        for (index, addr) in placed {
-            self.op_instruction_addrs.insert((block_addr, index), addr);
+        let (shape, reorder) = plan.take_shape();
+        if !shape.is_empty() {
+            // The loops are the control graph's; any edit to it forgets them.
+            self.natural_loops = std::sync::OnceLock::new();
         }
-        self.invalidate_query_index();
+        self.values.adopt(plan.take_minted());
+        self.blocks.apply(plan);
+        for edit in shape {
+            match edit {
+                ShapeEdit::ReplacePhi { block, id, phi } => {
+                    if let Some(mut block) = self.block_for_change(block) {
+                        let index = block.sited_phis().position(|(held, _)| held == id);
+                        if let Some(index) = index {
+                            block.phis_mut()[index] = phi;
+                        }
+                    }
+                }
+                ShapeEdit::DropPhiSources { block, pred } => {
+                    if let Some(mut block) = self.block_for_change(block) {
+                        for phi in block.phis_mut() {
+                            phi.sources.retain(|(source, _)| *source != pred);
+                        }
+                    }
+                }
+                ShapeEdit::RemoveEdge { from, to } => self.cfg.remove_edge(from, to),
+                ShapeEdit::SetTerminator { block, terminator } => {
+                    self.cfg.set_terminator(block, terminator);
+                }
+                ShapeEdit::RemoveBlock(addr) => self.cfg.remove_block(addr),
+            }
+        }
+        if reorder {
+            self.reorder_from_cfg();
+        }
+    }
+
+    /// One block, open for change with the arena; for applying a plan.
+    fn block_for_change(&mut self, addr: u64) -> Option<BlockMut<'_, VarId>> {
+        let index = *self.block_index.get(&addr)? as usize;
+        self.blocks.block_mut(index)
+    }
+
+    /// One block, open for change in variables by name: what is written is
+    /// interned into the function's table as it is written.
+    fn named_block_for_change(&mut self, addr: u64) -> Option<NamedBlockMut<'_>> {
+        let index = *self.block_index.get(&addr)? as usize;
+        let block = self.blocks.block_mut(index)?;
+        Some(NamedBlockMut::new(block, &mut self.values))
+    }
+
+    /// Keep the blocks the control-flow graph still has, in its reverse
+    /// postorder, and recompute the dominators.
+    fn reorder_from_cfg(&mut self) {
+        let cfg = &self.cfg;
+        self.blocks.retain(Pass::RemoveBlock, |block| {
+            cfg.get_block(block.addr).is_some()
+        });
+        self.block_order = self.cfg.reverse_postorder();
+        self.reorder_blocks();
+        self.domtree = DomTree::compute(&self.cfg);
+        self.natural_loops = std::sync::OnceLock::new();
+    }
+}
+
+#[cfg(test)]
+impl SSAFunction {
+    /// The prep facts of this function as it stands, with no interface, and
+    /// the graph they are keyed by, for a test that reads them off a
+    /// function it does not seal.
+    pub(crate) fn prep_facts_for_test(&self) -> Provisional {
+        let graph = SsaGraph::from_function_with_storage(self);
+        let facts = self
+            .collect_decompile_prep_facts_with_control(&graph, None, &UncheckedSsaWorkControl)
+            .expect("an unchecked control never stops");
+        Provisional { graph, facts }
+    }
+
+    /// One block, open for change, for a test that writes a fixture a block
+    /// at a time; outside tests a block opens only on a [`Lifted`] function.
+    pub(crate) fn edit_block(&mut self, addr: u64) -> Option<NamedBlockMut<'_>> {
+        self.named_block_for_change(addr)
+    }
+
+    /// The control-flow graph, open for a test that corrupts it to show the
+    /// validator refuses what follows.
+    pub(crate) fn corrupt_cfg(&mut self) -> &mut CFG {
+        self.natural_loops = std::sync::OnceLock::new();
+        &mut self.cfg
+    }
+
+    /// Drop a block from the blocks and the graph and repair nothing that
+    /// named it, for a test that shows the validator refuses what follows.
+    pub(crate) fn corrupt_remove_block(&mut self, addr: u64) {
+        self.blocks
+            .retain(Pass::RemoveBlock, |block| block.addr != addr);
+        self.block_order.retain(|&a| a != addr);
+        self.block_index = block_index_of(&self.blocks);
+        self.cfg.remove_block(addr);
     }
 }
 
 /// Where each block sits in a reverse-postorder block vector.
-fn block_index_of(blocks: &[SSABlock]) -> BTreeMap<u64, u32> {
+fn block_index_of<V>(blocks: &[SSABlock<V>]) -> BTreeMap<u64, u32> {
     blocks
         .iter()
         .enumerate()
@@ -2729,16 +2838,15 @@ impl Clone for SSAFunction {
             entry: self.entry,
             cfg: self.cfg.clone(),
             domtree: self.domtree.clone(),
+            natural_loops: self.natural_loops.clone(),
             blocks: self.blocks.clone(),
+            values: self.values.clone(),
             block_index: self.block_index.clone(),
             block_order: self.block_order.clone(),
-            op_instruction_addrs: self.op_instruction_addrs.clone(),
-            canonical_storage_by_var: self.canonical_storage_by_var.clone(),
             formal_projections: self.formal_projections.clone(),
             formal_roots: self.formal_roots.clone(),
-            decompile_prep_facts: self.decompile_prep_facts.clone(),
-            prep_interface: self.prep_interface.clone(),
-            query_index: RwLock::new(None),
+            entry_lanes: self.entry_lanes.clone(),
+            written: self.written.clone(),
         }
     }
 }
@@ -2754,6 +2862,10 @@ pub struct RewrittenFunction<'a> {
     source: &'a SSAFunction,
     blocks: Vec<SSABlock>,
     block_index: BTreeMap<u64, u32>,
+    /// The source's arena, copied, so that what this rewrite inserts is
+    /// minted above every id the source holds and never names one of its
+    /// operations.
+    arena: OpArena,
 }
 
 impl<'a> RewrittenFunction<'a> {
@@ -2764,6 +2876,7 @@ impl<'a> RewrittenFunction<'a> {
             source,
             blocks,
             block_index,
+            arena: source.arena().clone(),
         }
     }
 
@@ -2793,6 +2906,10 @@ impl<'a> RewrittenFunction<'a> {
         self.source.domtree()
     }
 
+    pub fn natural_loops(&self) -> &crate::natural_loops::NaturalLoops {
+        self.source.natural_loops()
+    }
+
     /// All blocks in reverse postorder.
     pub fn blocks(&self) -> &[SSABlock] {
         &self.blocks
@@ -2810,11 +2927,6 @@ impl<'a> RewrittenFunction<'a> {
         self.blocks.get(*self.block_index.get(&addr)? as usize)
     }
 
-    /// The block control enters by; see [`SSAFunction::root`].
-    pub fn entry_block(&self) -> Option<&SSABlock> {
-        self.get_block(self.root())
-    }
-
     pub fn predecessors(&self, addr: u64) -> Vec<u64> {
         self.source.predecessors(addr)
     }
@@ -2827,28 +2939,90 @@ impl<'a> RewrittenFunction<'a> {
         self.source.dominates(a, b)
     }
 
-    /// One block's operations, mutable, for the pass that is still building.
-    pub fn get_block_mut(&mut self, addr: u64) -> Option<&mut SSABlock> {
+    /// One block of this copy, with the arena what it gains is minted from.
+    fn block_mut(&mut self, addr: u64) -> Option<BlockMut<'_>> {
         let index = *self.block_index.get(&addr)? as usize;
-        self.blocks.get_mut(index)
+        Some(BlockMut::new(self.blocks.get_mut(index)?, &mut self.arena))
+    }
+
+    /// Insert operations at `at` in the block at `addr`, each derived by
+    /// `pass` from the operation named beside it and minted an id above every
+    /// id the source holds. Answers whether the block exists.
+    pub fn insert_ops(
+        &mut self,
+        addr: u64,
+        at: usize,
+        pass: Pass,
+        ops: impl IntoIterator<Item = (SSAOp, Option<OpId>)>,
+    ) -> bool {
+        let Some(mut block) = self.block_mut(addr) else {
+            return false;
+        };
+        block.insert_ops(at, pass, ops);
+        true
+    }
+
+    /// Remove the operation at `at` of the block at `addr`; its id is
+    /// tombstoned in this copy's arena, never in the source's.
+    pub fn remove_op(&mut self, addr: u64, at: usize, pass: Pass) -> Option<SSAOp> {
+        let mut block = self.block_mut(addr)?;
+        (at < block.len()).then(|| block.remove_op(at, pass))
+    }
+
+    /// Keep the phis of the block at `addr` that `keep` accepts. Answers
+    /// whether the block exists.
+    pub fn retain_phis(
+        &mut self,
+        addr: u64,
+        pass: Pass,
+        keep: impl FnMut(&PhiNode) -> bool,
+    ) -> bool {
+        let Some(mut block) = self.block_mut(addr) else {
+            return false;
+        };
+        block.retain_phis(pass, keep);
+        true
+    }
+
+    /// Every operation the source and this rewrite ever held, by id.
+    pub fn arena(&self) -> &OpArena {
+        &self.arena
     }
 
     /// A second copy of these operations over the same function, for a test
     /// that wants to rewrite them again.
     #[must_use]
     pub fn duplicate(&self) -> Self {
-        Self::new(self.source, self.blocks.clone())
+        Self {
+            source: self.source,
+            blocks: self.blocks.clone(),
+            block_index: self.block_index.clone(),
+            arena: self.arena.clone(),
+        }
     }
 
     /// The rewritten operations, in the text the source function dumps.
     pub fn dump(&self) -> String {
-        dump_blocks(self.name(), self.entry(), self.blocks(), self.source)
+        dump_blocks(
+            self.name(),
+            self.entry(),
+            self.blocks(),
+            self.source,
+            SSAVar::clone,
+        )
     }
 }
 
 /// One function's blocks as text, shared by a function and by operations
 /// rewritten over it.
-fn dump_blocks(name: Option<&str>, entry: u64, blocks: &[SSABlock], shape: &SSAFunction) -> String {
+/// `spell` says what variable an operand of `blocks` is.
+fn dump_blocks<V>(
+    name: Option<&str>,
+    entry: u64,
+    blocks: &[SSABlock<V>],
+    shape: &SSAFunction,
+    spell: impl Fn(&V) -> SSAVar,
+) -> String {
     // The entry-edge block has no address of its own; its key is spelled
     // for what it stands for.
     let block_name = |addr: u64| {
@@ -2883,19 +3057,23 @@ fn dump_blocks(name: Option<&str>, entry: u64, blocks: &[SSABlock], shape: &SSAF
             }
 
             // Phi nodes
-            for phi in &block.phis {
+            for phi in block.phis() {
                 let sources: Vec<String> = phi
                     .sources
                     .iter()
-                    .map(|(pred, var)| format!("[{}]: {}", block_name(*pred), var))
+                    .map(|(pred, var)| format!("[{}]: {}", block_name(*pred), spell(var)))
                     .collect();
-                out.push_str(&format!("  {} = phi({})\n", phi.dst, sources.join(", ")));
+                out.push_str(&format!(
+                    "  {} = phi({})\n",
+                    spell(&phi.dst),
+                    sources.join(", ")
+                ));
             }
 
             // Operations, spelled the way the phis above are: `SSAOp` has a
             // Display of its own and the derived Debug was shadowing it.
-            for op in &block.ops {
-                out.push_str(&format!("  {op}\n"));
+            for op in block.ops() {
+                out.push_str(&format!("  {}\n", op.map(&mut |operand| spell(operand))));
             }
 
             // Successors
@@ -2918,13 +3096,28 @@ fn dump_blocks(name: Option<&str>, entry: u64, blocks: &[SSABlock], shape: &SSAF
     out
 }
 
+impl<V> PhiNode<V> {
+    /// The same merge over other operands.
+    pub fn map<W>(&self, f: &mut impl FnMut(&V) -> W) -> PhiNode<W> {
+        PhiNode {
+            dst: f(&self.dst),
+            sources: self
+                .sources
+                .iter()
+                .map(|(pred, source)| (*pred, f(source)))
+                .collect(),
+            canonical_storage: self.canonical_storage,
+        }
+    }
+}
+
 /// A phi node in SSA form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PhiNode {
+pub struct PhiNode<V = SSAVar> {
     /// The destination variable.
-    pub dst: SSAVar,
+    pub dst: V,
     /// The source variables, one per predecessor.
-    pub sources: Vec<(u64, SSAVar)>, // (predecessor addr, variable)
+    pub sources: Vec<(u64, V)>, // (predecessor addr, variable)
     /// Name-independent lifted storage identity.
     #[serde(default)]
     pub canonical_storage: Option<CanonicalStorageId>,
@@ -2945,8 +3138,8 @@ pub enum SourceSite {
 
 /// A source variable with its location metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SourceRef<'a> {
-    pub var: &'a SSAVar,
+pub struct SourceRef<'a, V = SSAVar> {
+    pub var: &'a V,
     pub site: SourceSite,
 }
 
@@ -2961,8 +3154,8 @@ pub enum DefSite {
 
 /// A destination variable with its definition site metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DefRef<'a> {
-    pub var: &'a SSAVar,
+pub struct DefRef<'a, V = SSAVar> {
+    pub var: &'a V,
     pub site: DefSite,
 }
 
@@ -2976,6 +3169,19 @@ pub struct DefRef<'a> {
 /// reaches the value the compiler meant rather than a clobber that never
 /// happened.
 pub type CalleePreservedCarriers = BTreeMap<u64, BTreeSet<CanonicalStorageId>>;
+
+/// What the engine knows of the functions a body calls, by entry address.
+#[derive(Debug, Clone, Default)]
+pub struct CalleeEvidence {
+    /// The interface each callee's own body proved.
+    pub interfaces: BTreeMap<u64, SourceFunctionInterface>,
+    /// The registers each callee's body proves it leaves alone.
+    pub preserved: CalleePreservedCarriers,
+    /// How far each callee reaches through each pointer it is handed.
+    pub reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
+    /// The model of each imported library routine called, from r2abi.
+    pub library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
+}
 
 /// What the callees this function calls said about their own boundaries.
 ///
@@ -3008,8 +3214,11 @@ impl CalleeBoundaries {
             };
             // The same boundary cannot both hand a register back untouched and
             // name it as what it returns.
+            let overlaps = |carrier: &CanonicalStorageId| {
+                crate::semantic::register_storages_overlap(*carrier, storage)
+            };
             if let Some(carriers) = preserved.get_mut(address) {
-                carriers.retain(|carrier| carrier.location() != storage.location());
+                carriers.retain(|carrier| !overlaps(carrier));
             }
             let Some(name) = names
                 .as_ref()
@@ -3033,6 +3242,11 @@ impl CalleeBoundaries {
             results,
             return_addresses,
         }
+    }
+
+    /// What each callee proves it leaves alone, less its own result carrier.
+    pub(crate) const fn preserved(&self) -> &CalleePreservedCarriers {
+        &self.preserved
     }
 
     /// The carrier each callee proves holds the address the call pushed.
@@ -3067,9 +3281,9 @@ fn decompile_call_boundary_config(
         );
         return Err(SsaPrepareError::NoCallEffect);
     }
-    let Some(arch) = arch else {
+    if arch.is_none() {
         return Ok(None);
-    };
+    }
     // A body that never calls has no call to clobber anything.
     // What a call keeps is what the convention preserves and what the
     // platform reserves to the system alike: neither is a definition the call
@@ -3088,98 +3302,23 @@ fn decompile_call_boundary_config(
         ),
         None => (Vec::new(), Vec::new()),
     };
+    let reads = machine_context
+        .call_effect()
+        .map(crate::SourceCallEffect::reads);
     let config = CallBoundaryConfig {
         clobbered,
         preserved,
         stack_pointer_restored_by_callee,
         preserved_by_target: callees.preserved,
         result_by_target: callees.results,
-        argument_regs: call_argument_register_defs(arch),
-        return_regs: return_read_register_defs(arch),
+        argument_regs: reads.map(|reads| reads.call().to_vec()).unwrap_or_default(),
+        return_regs: reads.map(|reads| reads.ret().to_vec()).unwrap_or_default(),
     };
     let inert = config.clobbered.is_empty()
         && config.stack_pointer_restored_by_callee.is_none()
         && config.argument_regs.is_empty()
         && config.return_regs.is_empty();
     Ok((!inert).then_some(config))
-}
-
-/// The registers a call reads without naming them in an operand: the
-/// convention's argument carriers.
-fn call_argument_register_defs(arch: &ArchSpec) -> Vec<CallBoundaryDef> {
-    let named = |names: &[(&str, u32)]| {
-        names
-            .iter()
-            .map(|(name, size)| CallBoundaryDef {
-                name: (*name).to_string(),
-                size: *size,
-            })
-            .collect()
-    };
-    match arch.name.to_ascii_lowercase().as_str() {
-        "x86-64" | "x86_64" | "x64" | "amd64" => named(&[
-            ("rdi", 8),
-            ("edi", 4),
-            ("rsi", 8),
-            ("esi", 4),
-            ("rdx", 8),
-            ("edx", 4),
-            ("rcx", 8),
-            ("ecx", 4),
-            ("r8", 8),
-            ("r8d", 4),
-            ("r9", 8),
-            ("r9d", 4),
-            ("rax", 8),
-            ("eax", 4),
-        ]),
-        "x86" | "x86-32" | "i386" | "i686" => named(&[("eax", 4)]),
-        "arm" if arch.addr_size == 4 => named(&[("r0", 4), ("r1", 4), ("r2", 4), ("r3", 4)]),
-        "aarch64" | "arm64" => named(&[
-            ("x0", 8),
-            ("w0", 4),
-            ("x1", 8),
-            ("w1", 4),
-            ("x2", 8),
-            ("w2", 4),
-            ("x3", 8),
-            ("w3", 4),
-            ("x4", 8),
-            ("w4", 4),
-            ("x5", 8),
-            ("w5", 4),
-            ("x6", 8),
-            ("w6", 4),
-            ("x7", 8),
-            ("w7", 4),
-            ("x8", 8),
-            ("w8", 4),
-        ]),
-        _ => Vec::new(),
-    }
-}
-
-/// The registers a return reads without naming them in an operand: the
-/// convention's result carriers, plus the stack and frame it hands back.
-fn return_read_register_defs(arch: &ArchSpec) -> Vec<CallBoundaryDef> {
-    let named = |names: &[(&str, u32)]| {
-        names
-            .iter()
-            .map(|(name, size)| CallBoundaryDef {
-                name: (*name).to_string(),
-                size: *size,
-            })
-            .collect()
-    };
-    match arch.name.to_ascii_lowercase().as_str() {
-        "x86-64" | "x86_64" | "x64" | "amd64" => {
-            named(&[("rax", 8), ("eax", 4), ("rdx", 8), ("edx", 4)])
-        }
-        "x86" | "x86-32" | "i386" | "i686" => named(&[("eax", 4), ("edx", 4)]),
-        "arm" if arch.addr_size == 4 => named(&[("r0", 4), ("r1", 4)]),
-        "aarch64" | "arm64" => named(&[("x0", 8), ("w0", 4), ("x1", 8), ("w1", 4)]),
-        _ => Vec::new(),
-    }
 }
 
 impl SSAFunction {
@@ -3189,7 +3328,7 @@ impl SSAFunction {
     }
 
     /// Whether this user operation enters the supervisor, whose kernel-written result no contract names.
-    pub fn enters_supervisor(&self, op: &SSAOp) -> bool {
+    pub fn enters_supervisor<V>(&self, op: &SSAOp<V>) -> bool {
         matches!(op, SSAOp::CallOther { userop, .. } if self.supervisor_calls.contains(userop))
     }
 
@@ -3217,38 +3356,49 @@ impl SSAFunction {
         self.cfg.entry
     }
 
-    /// Get the entry block: the [`Self::root`].
-    pub fn entry_block(&self) -> Option<&SSABlock> {
-        self.get_block(self.root())
-    }
-
     /// Get a block by address.
-    pub fn get_block(&self, addr: u64) -> Option<&SSABlock> {
+    pub fn get_block(&self, addr: u64) -> Option<&SSABlock<VarId>> {
         self.blocks.get(*self.block_index.get(&addr)? as usize)
     }
 
-    /// One operation, to be rewritten in place.
-    ///
-    /// The blocks' revision moves, so the decompile-prep facts no longer
-    /// answer for them until they are collected again; unlike
-    /// [`Self::get_block_mut`] they are kept, for that collection to refresh.
-    pub(crate) fn op_mut(&mut self, block: u64, index: usize) -> Option<&mut SSAOp> {
-        let position = *self.block_index.get(&block)? as usize;
-        self.invalidate_query_index();
-        self.blocks.edit().get_mut(position)?.ops.get_mut(index)
-    }
-
-    /// Get a mutable block by address.
-    pub fn get_block_mut(&mut self, addr: u64) -> Option<&mut SSABlock> {
-        let index = *self.block_index.get(&addr)? as usize;
-        self.invalidate_query_index();
-        self.decompile_prep_facts = None;
-        self.blocks.edit().get_mut(index)
-    }
-
     /// All blocks in reverse postorder.
-    pub fn blocks(&self) -> &[SSABlock] {
+    pub fn blocks(&self) -> &[SSABlock<VarId>] {
         &self.blocks
+    }
+
+    /// The variable an operand id is spelled as.
+    pub fn var(&self, id: VarId) -> &SSAVar {
+        self.values.var(id)
+    }
+
+    /// The table of every operand id.
+    pub const fn values(&self) -> &crate::value_table::ValueTable {
+        &self.values
+    }
+
+    /// An operation with its operands spelled as variables, for a reader
+    /// that still works in names (doc/adr-one-ir.md, stages 4 and 5 move the
+    /// last of them onto ids). A variable's name is interned, so the copy
+    /// clones no string.
+    pub fn named(&self, op: &SSAOp<VarId>) -> SSAOp {
+        op.map(&mut |id| self.var(*id).clone())
+    }
+
+    /// A block with its operands spelled as variables, every operation and
+    /// phi keeping its id; see [`Self::named`].
+    pub fn named_block(&self, addr: u64) -> Option<SSABlock> {
+        Some(
+            self.get_block(addr)?
+                .map_operands(&mut |id| self.var(*id).clone()),
+        )
+    }
+
+    /// Every block, named; see [`Self::named_block`].
+    pub fn named_blocks(&self) -> Vec<SSABlock> {
+        self.blocks()
+            .iter()
+            .map(|block| block.map_operands(&mut |id| self.var(*id).clone()))
+            .collect()
     }
 
     /// Get block addresses in reverse postorder.
@@ -3258,8 +3408,17 @@ impl SSAFunction {
 
     /// Return name-independent storage provenance retained from the lifted
     /// varnode that produced or supplied this SSA value.
+    ///
+    /// Values are attached from raw varnodes at the lift/SSA seam, into the
+    /// value table's storage column. Consumers must not reconstruct this
+    /// information from `SSAVar::name`.
     pub(crate) fn canonical_storage_for_var(&self, var: &SSAVar) -> Option<CanonicalStorageId> {
-        self.canonical_storage_by_var.get(var).copied()
+        self.values.storage_of_var(var)
+    }
+
+    /// The lifted storage of a variable the function holds by id.
+    pub(crate) fn storage_of(&self, id: VarId) -> Option<CanonicalStorageId> {
+        self.values.storage(id)
     }
 
     /// Get the number of blocks.
@@ -3272,16 +3431,15 @@ impl SSAFunction {
         &self.cfg
     }
 
-    /// Get mutable access to the CFG.
-    pub fn cfg_mut(&mut self) -> &mut CFG {
-        self.invalidate_query_index();
-        self.decompile_prep_facts = None;
-        &mut self.cfg
-    }
-
     /// Get the dominator tree.
     pub fn domtree(&self) -> &DomTree {
         &self.domtree
+    }
+
+    /// The natural loops of the control graph.
+    pub fn natural_loops(&self) -> &crate::natural_loops::NaturalLoops {
+        self.natural_loops
+            .get_or_init(|| crate::natural_loops::NaturalLoops::compute(&self.cfg, &self.domtree))
     }
 
     /// Get predecessors of a block.
@@ -3345,359 +3503,61 @@ impl SSAFunction {
         self.cfg.edge_type(from, to)
     }
 
-    /// Remove a block from SSA and CFG.
-    pub fn remove_block(&mut self, addr: u64) {
-        self.blocks.edit().retain(|block| block.addr != addr);
-        self.block_order.retain(|&a| a != addr);
-        self.block_index = block_index_of(&self.blocks);
-        self.cfg.remove_block(addr);
-        self.decompile_prep_facts = None;
-        self.invalidate_query_index();
-    }
-
-    /// Remove phi sources for a specific predecessor edge.
-    pub fn remove_phi_source(&mut self, block_addr: u64, pred_addr: u64) {
-        if let Some(block) = self.get_block_mut(block_addr) {
-            for phi in &mut block.phis {
-                phi.sources.retain(|(pred, _)| *pred != pred_addr);
-            }
-        }
-        self.decompile_prep_facts = None;
-        self.invalidate_query_index();
-    }
-
-    /// Recompute cached metadata after CFG mutation.
     /// Put the blocks back in the order `block_order` states, and reindex.
     fn reorder_blocks(&mut self) {
-        let mut ordered = Vec::with_capacity(self.block_order.len());
-        for &addr in &self.block_order {
-            if let Some(position) = self.blocks.iter().position(|block| block.addr == addr) {
-                ordered.push(self.blocks.edit().swap_remove(position));
-            }
-        }
-        *self.blocks.edit() = ordered;
+        self.blocks.reorder(&self.block_order);
         self.block_index = block_index_of(&self.blocks);
     }
 
     /// Iterate over all SSA operations in the function.
-    pub fn all_ops(&self) -> impl Iterator<Item = &SSAOp> {
-        self.blocks.iter().flat_map(|b| b.ops.iter())
-    }
-
-    /// Iterate over all phi nodes in the function.
-    pub fn all_phis(&self) -> impl Iterator<Item = &PhiNode> {
-        self.blocks.iter().flat_map(|b| b.phis.iter())
-    }
-
-    /// Get all variables defined in this function.
-    pub fn defined_vars(&self) -> Vec<SSAVar> {
-        let mut vars = Vec::new();
-
-        // Collect from phi nodes
-        for phi in self.all_phis() {
-            vars.push(phi.dst.clone());
-        }
-
-        // Collect from operations
-        for op in self.all_ops() {
-            if let Some(dst) = op.dst() {
-                vars.push(dst.clone());
-            }
-        }
-
-        vars
-    }
-
-    /// Get all variables used in this function.
-    pub fn used_vars(&self) -> Vec<SSAVar> {
-        let mut vars = Vec::new();
-
-        // Collect from phi nodes
-        for phi in self.all_phis() {
-            for (_, var) in &phi.sources {
-                vars.push(var.clone());
-            }
-        }
-
-        // Collect from operations
-        for op in self.all_ops() {
-            for src in op.sources() {
-                vars.push(src.clone());
-            }
-        }
-
-        vars
-    }
-
-    /// Find the definition of a variable.
-    ///
-    /// Returns the block address and operation index where the variable is defined.
-    pub fn find_def(&self, var: &SSAVar) -> Option<(u64, DefLocation)> {
-        self.ensure_query_index();
-        self.query_index
-            .read()
-            .expect("SSA query index lock poisoned")
-            .as_ref()
-            .and_then(|index| index.find_def(&self.blocks, var))
-    }
-
-    /// Find all uses of a variable.
-    ///
-    /// Returns a list of (block address, use location) pairs.
-    pub fn find_uses(&self, var: &SSAVar) -> Vec<(u64, UseLocation)> {
-        self.ensure_query_index();
-        self.query_index
-            .read()
-            .expect("SSA query index lock poisoned")
-            .as_ref()
-            .map(|index| index.find_uses(&self.blocks, var))
-            .unwrap_or_default()
-    }
-
-    /// Return whether a value reaches any use other than a pure SSA carrier.
-    ///
-    /// Copy destinations and phi destinations are followed transitively. This
-    /// makes dead carrier cycles removable without relying on register names,
-    /// while conservatively treating malformed use locations as meaningful.
-    pub fn has_noncarrier_use(&self, var: &SSAVar) -> bool {
-        let mut pending = vec![var.clone()];
-        let mut visited = HashSet::new();
-        while let Some(current) = pending.pop() {
-            if !visited.insert(current.clone()) {
-                continue;
-            }
-            for (block_addr, location) in self.find_uses(&current) {
-                let Some(block) = self.get_block(block_addr) else {
-                    return true;
-                };
-                let carrier = match location {
-                    UseLocation::Phi { phi_idx, .. } => {
-                        block.phis.get(phi_idx).map(|phi| phi.dst.clone())
-                    }
-                    UseLocation::Op { op_idx, .. } => {
-                        block.ops.get(op_idx).and_then(|op| match op {
-                            SSAOp::Copy { dst, .. } => Some(dst.clone()),
-                            _ => None,
-                        })
-                    }
-                };
-                let Some(carrier) = carrier else {
-                    return true;
-                };
-                pending.push(carrier);
-            }
-        }
-        false
+    pub fn all_ops(&self) -> impl Iterator<Item = &SSAOp<VarId>> {
+        self.blocks.iter().flat_map(|b| b.ops().iter())
     }
 
     /// Iterate over all source uses in all blocks.
     pub fn for_each_source<F: FnMut(u64, SourceRef<'_>)>(&self, mut f: F) {
         for block in self.blocks() {
-            block.for_each_source(|src| f(block.addr, src));
+            block.for_each_source(|src| {
+                f(
+                    block.addr,
+                    SourceRef {
+                        var: self.var(*src.var),
+                        site: src.site,
+                    },
+                );
+            });
         }
     }
 
-    /// Iterate over all definitions in all blocks.
-    pub fn for_each_def<F: FnMut(u64, DefRef<'_>)>(&self, mut f: F) {
-        for block in self.blocks() {
-            block.for_each_def(|def| f(block.addr, def));
-        }
-    }
-
-    /// Seal-check the complete SSA definition/use, phi, storage, and width contract.
-    #[expect(
-        clippy::result_large_err,
-        reason = "the public validator returns the exact typed SSA failure; validation is an artifact-boundary operation"
-    )]
-    pub fn validate_integrity(&self) -> Result<(), SsaIntegrityError> {
-        validate_ssa_function(self)
-    }
-
-    /// Run SSA optimizations on this function.
-    pub fn optimize(
-        &mut self,
-        config: &crate::optimize::OptimizationConfig,
-    ) -> crate::optimize::OptimizationStats {
-        self.decompile_prep_facts = None;
-        self.invalidate_query_index();
-        crate::optimize::optimize_function(self, config)
-    }
-
-    /// Snapshot the current decompiler-prep fact view, if available.
-    ///
-    /// Facts computed from blocks that have since been rewritten describe an
-    /// IR that no longer exists, and answering with them is how one value
-    /// came to have two identities. That is a defect in whichever rewrite did
-    /// not refresh them, so it stops here, loudly: the engine's isolation
-    /// boundary turns the panic into this function's refusal, naming where.
-    pub fn decompile_prep_facts(&self) -> Option<&DecompilePrepFacts> {
-        let facts = self.decompile_prep_facts.as_ref()?;
-        assert_eq!(
-            facts.revision,
-            self.blocks.revision(),
-            "the prep facts of {:#x} were collected at IR revision {:?} and read at {:?}: \
-             a rewrite did not refresh them",
-            self.entry,
-            facts.revision,
-            self.blocks.revision()
-        );
-        Some(facts)
-    }
-
-    /// Collect the prep facts again over the blocks as they now are, with the
-    /// interface they were first collected with; nothing where none were.
-    ///
-    /// The rewrites after preparation -- boundary constants, entry lanes,
-    /// forwarded copies -- each change the blocks the facts describe, and the
-    /// facts are collected once after the last of them rather than patched by
-    /// each. O(collection), once per prepared function.
-    pub(crate) fn recollect_decompile_prep_facts(&mut self) {
-        if self.decompile_prep_facts.is_none() {
-            return;
-        }
-        let interface = self.prep_interface.clone();
-        self.refresh_decompile_prep_facts_with_interface_and_control(
-            interface.as_ref(),
-            &UncheckedSsaWorkControl,
-        )
-        .expect("unchecked decompiler fact collection cannot stop");
-    }
-
-    /// Install the canonical source-boundary parameter projection into the
-    /// decompiler preparation view. This deliberately accepts `ValueId`
-    /// facts, then resolves the already-built graph value back to its `SSAVar`;
-    /// no register spelling participates in slot identity.
     /// The storage an entry-lane projection stands for.
-    pub fn formal_projection_storage(&self, var: &SSAVar) -> Option<CanonicalStorageId> {
-        self.formal_projections.get(var).copied()
+    pub fn formal_projection_storage(&self, id: VarId) -> Option<CanonicalStorageId> {
+        self.formal_projections.get(id).copied()
     }
 
-    pub(crate) fn formal_projection_vars(
+    pub(crate) fn formal_projection_ids(
         &self,
-    ) -> impl Iterator<Item = (&SSAVar, &CanonicalStorageId)> {
+    ) -> impl Iterator<Item = (VarId, &CanonicalStorageId)> {
         self.formal_projections.iter()
     }
 
-    pub(crate) fn formal_root_vars(&self) -> impl Iterator<Item = (&SSAVar, &CanonicalStorageId)> {
+    pub(crate) fn formal_root_ids(&self) -> impl Iterator<Item = (VarId, &CanonicalStorageId)> {
         self.formal_roots.iter()
     }
 
-    /// Root the stack pointer a mask realigned, as an origin of its own.
-    ///
-    /// `and esp, -16` keeps the pointer and throws away up to fifteen bytes of
-    /// where it came from, so no coordinate in the entry frame names it. What
-    /// it does name is a frame of its own: every push and every local below it
-    /// sits at a distance from the masked pointer the arithmetic states, and
-    /// every call in the body finds its outgoing argument area there. Exactly
-    /// one realignment is rooted, because two would be two origins nothing
-    /// here can tell apart.
-    fn root_realigned_stack_pointer(
-        &self,
-        facts: &mut DecompilePrepFacts,
-        entry_stack_address_size: Option<u32>,
-    ) -> bool {
-        let mut realigned = None;
-        for block in self.blocks() {
-            for op in &block.ops {
-                let SSAOp::IntAnd { dst, a, b } = op else {
-                    continue;
-                };
-                if entry_stack_address_size != Some(dst.size) {
-                    continue;
-                }
-                let a_root = facts.views.representative(a);
-                let b_root = facts.views.representative(b);
-                if !aligns_stack_pointer(a, a_root, b, b_root, &facts.stack_address_roots)
-                    && !aligns_stack_pointer(b, b_root, a, a_root, &facts.stack_address_roots)
-                {
-                    continue;
-                }
-                if realigned.replace(dst.clone()).is_some() {
-                    r2il::refusal_evidence!(
-                        "stack-root-realign",
-                        "{:#x}: more than one mask realigns the stack pointer",
-                        self.entry
-                    );
-                    return false;
-                }
-            }
-        }
-        let Some(dst) = realigned else {
-            return false;
-        };
-        let root = StackAddressRoot {
-            base: StackAddressBase::Realigned,
-            offset: 0,
-        };
-        r2il::refusal_evidence!(
-            "stack-root-realign",
-            "{:#x}: {dst} is the realigned frame's origin",
-            self.entry
-        );
-        insert_stack_root(&mut facts.stack_address_roots, dst.clone(), root);
-        insert_stack_root(&mut facts.entry_stack_address_roots, dst, root);
-        true
-    }
-
-    /// The assumptions a second propagation did not bear out.
-    ///
-    /// A speculation holds when every source of the phi is now rooted and every
-    /// one of them agrees with what was assumed.
-    fn unverified_stack_root_speculations(
-        &self,
-        facts: &DecompilePrepFacts,
-        speculated: &[(SSAVar, StackAddressRoot, bool)],
-    ) -> Vec<SSAVar> {
-        let mut failed = Vec::new();
-        for &addr in &self.block_order {
-            let Some(block) = self.get_block(addr) else {
-                continue;
-            };
-            for phi in &block.phis {
-                for (dst, root, entry) in speculated {
-                    if *dst != phi.dst {
-                        continue;
-                    }
-                    let roots = if *entry {
-                        &facts.entry_stack_address_roots
-                    } else {
-                        &facts.stack_address_roots
-                    };
-                    if common_stack_root(&phi.sources, &facts.views, roots) != Some(*root) {
-                        failed.push(phi.dst.clone());
-                    }
-                }
-            }
-        }
-        failed
-    }
-
-    fn ensure_query_index(&self) {
-        if self
-            .query_index
-            .read()
-            .expect("SSA query index lock poisoned")
-            .is_some()
-        {
-            return;
-        }
-        let index = SsaQueryIndex::build(self);
-        *self
-            .query_index
-            .write()
-            .expect("SSA query index lock poisoned") = Some(index);
-    }
-
-    fn invalidate_query_index(&self) {
-        *self
-            .query_index
-            .write()
-            .expect("SSA query index lock poisoned") = None;
+    /// Each entry-lane formal at the low end of its root, with the root.
+    pub(crate) fn entry_lanes(&self) -> impl Iterator<Item = (VarId, VarId)> + '_ {
+        self.entry_lanes.iter().map(|(lane, root)| (lane, *root))
     }
 
     /// Print the function in a human-readable format.
     pub fn dump(&self) -> String {
-        dump_blocks(self.name.as_deref(), self.entry, self.blocks(), self)
+        dump_blocks(
+            self.name.as_deref(),
+            self.entry,
+            self.blocks(),
+            self,
+            |id| self.var(*id).clone(),
+        )
     }
 }
 
@@ -3983,21 +3843,11 @@ impl RegisterFamilyInfo {
         }
     }
 
-    /// The slot a named register occupies, or `None` when the architecture
-    /// does not name it.
-    pub fn slot_for_name(&self, name: &str) -> Option<RegisterFamilySlot> {
+    /// The program root containing the named register: the identity of its
+    /// family in this function, as `root_slot_containing` answers for storage.
+    pub fn root_slot_for_name(&self, name: &str) -> Option<RegisterFamilySlot> {
         let member = self.member_for_name(name)?;
-        Some(RegisterFamilySlot {
-            family_id: member.family_id,
-            offset: member.offset,
-            width: member.width,
-        })
-    }
-
-    /// The widest register containing the named one: the canonical identity of
-    /// the family, which every alias of it shares.
-    pub fn widest_slot_for_name(&self, name: &str) -> Option<RegisterFamilySlot> {
-        self.widest_slot_containing(self.member_for_name(name)?)
+        self.root_slot_containing(member.offset, member.width)
     }
 
     fn member_for_name(&self, name: &str) -> Option<RegisterFamilyMember> {
@@ -4069,358 +3919,10 @@ impl RegisterFamilyInfo {
     }
 }
 
-/// The one stack root every incoming edge names, given their resolved roots.
-fn common_stack_root_of(
-    sources: &[(u64, SSAVar)],
-    resolved: &[&SSAVar],
-    stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-) -> Option<StackAddressRoot> {
-    let of = |index: usize| {
-        let (_, source) = sources.get(index)?;
-        stack_roots
-            .get(source)
-            .copied()
-            .or_else(|| stack_roots.get(*resolved.get(index)?).copied())
-    };
-    let first = of(0)?;
-    (1..sources.len())
-        .all(|index| of(index) == Some(first))
-        .then_some(first)
-}
-
-fn resolve_stack_root(
-    var: &SSAVar,
-    views: &crate::view::ValueViews,
-    stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-) -> Option<StackAddressRoot> {
-    // The variable's own answer first. Resolving its canonical root before
-    // asking cost a walk and a copy of the root's name on every call, and the
-    // root propagation makes three and a half million of them for one
-    // five-hundred-block function; the root is only needed when the variable
-    // itself has no stack root recorded.
-    if let Some(root) = stack_roots.get(var).copied() {
-        return Some(root);
-    }
-    stack_roots.get(views.representative(var)).copied()
-}
-
-fn common_stack_root(
-    sources: &[(u64, SSAVar)],
-    views: &crate::view::ValueViews,
-    stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-) -> Option<StackAddressRoot> {
-    let mut iter = sources.iter();
-    let (_, first_src) = iter.next()?;
-    let first = resolve_stack_root(first_src, views, stack_roots)?;
-    if iter.all(|(_, src)| resolve_stack_root(src, views, stack_roots) == Some(first)) {
-        Some(first)
-    } else {
-        None
-    }
-}
-
-/// The stack root a variable names, given the root it already resolved to.
-fn stack_root_of(
-    var: &SSAVar,
-    root: &SSAVar,
-    stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-) -> Option<StackAddressRoot> {
-    stack_roots
-        .get(var)
-        .copied()
-        .or_else(|| stack_roots.get(root).copied())
-}
-
-/// The displacement a variable adds, given the root it already resolved to.
-fn signed_stack_delta_of(var: &SSAVar, root: &SSAVar) -> Option<i64> {
-    signed_stack_delta(var).or_else(|| (root != var).then(|| signed_stack_delta(root)).flatten())
-}
-
-fn stack_address_root_from_add(
-    a: &SSAVar,
-    a_root: &SSAVar,
-    b: &SSAVar,
-    b_root: &SSAVar,
-    stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-) -> Option<StackAddressRoot> {
-    // One side at a time: an operand with no stack root is the ordinary case,
-    // and asking for the other side's displacement first cost work for every
-    // sum in the function.
-    if let Some(base) = stack_root_of(a, a_root, stack_roots)
-        && let Some(delta) = signed_stack_delta_of(b, b_root)
-    {
-        return Some(StackAddressRoot {
-            base: base.base,
-            offset: base.offset.checked_add(delta)?,
-        });
-    }
-    if let Some(base) = stack_root_of(b, b_root, stack_roots)
-        && let Some(delta) = signed_stack_delta_of(a, a_root)
-    {
-        return Some(StackAddressRoot {
-            base: base.base,
-            offset: base.offset.checked_add(delta)?,
-        });
-    }
-    None
-}
-
-/// The stack object an address is inside when its offset within it is not a
-/// constant.
-///
-/// One operand carries a stack root -- exact, or itself already indexed -- and
-/// the other is not a constant the analysis can fold. The sum is therefore
-/// inside the same object at an offset nobody knows, which is what an element
-/// of an array on the stack is. An operand that *is* a foldable constant is
-/// left to `stack_address_root_from_add`, whose answer is stronger.
-fn indexed_stack_address_root_from_add(
-    a: &SSAVar,
-    a_root: &SSAVar,
-    b: &SSAVar,
-    b_root: &SSAVar,
-    stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-    indexed_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-) -> Option<StackAddressRoot> {
-    let base_of = |var: &SSAVar, root: &SSAVar| {
-        stack_root_of(var, root, stack_roots).or_else(|| stack_root_of(var, root, indexed_roots))
-    };
-    let index_is_opaque = |var: &SSAVar, root: &SSAVar| {
-        signed_stack_delta_of(var, root).is_none() && base_of(var, root).is_none()
-    };
-    if let Some(base) = base_of(a, a_root)
-        && index_is_opaque(b, b_root)
-    {
-        return Some(base);
-    }
-    if let Some(base) = base_of(b, b_root)
-        && index_is_opaque(a, a_root)
-    {
-        return Some(base);
-    }
-    // `buf + i + 4` is still inside `buf`, exactly as `buf + i - 3` is: a
-    // base that is already indexed stays in its object when a constant
-    // displaces it, which is how a machine folds a member's offset into the
-    // addressing mode of an indexed access.
-    if let Some(base) = stack_root_of(a, a_root, indexed_roots)
-        && signed_stack_delta_of(b, b_root).is_some()
-    {
-        return Some(base);
-    }
-    if let Some(base) = stack_root_of(b, b_root, indexed_roots)
-        && signed_stack_delta_of(a, a_root).is_some()
-    {
-        return Some(base);
-    }
-    None
-}
-
-/// An address inside an object, taken back by a constant.
-///
-/// `buf + i - 3` is still inside `buf` at an offset nothing states, exactly as
-/// `buf + i` is. Only an already-indexed base qualifies: an exact base less a
-/// constant is an exact position and `stack_address_root_from_sub` states it,
-/// and an exact base less an opaque amount points below the object.
-fn indexed_stack_address_root_from_sub(
-    a: &SSAVar,
-    a_root: &SSAVar,
-    b: &SSAVar,
-    b_root: &SSAVar,
-    indexed_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-) -> Option<StackAddressRoot> {
-    let base = stack_root_of(a, a_root, indexed_roots)?;
-    signed_stack_delta_of(b, b_root).is_some().then_some(base)
-}
-
-/// Whether `mask` aligns a value that is a position in the entry stack frame.
-///
-/// The mask clears low bits, which is a negative power of two read as a signed
-/// displacement. A mask of anything else, or of a pointer already realigned,
-/// is not one this can name.
-fn aligns_stack_pointer(
-    value: &SSAVar,
-    value_root: &SSAVar,
-    mask: &SSAVar,
-    mask_root: &SSAVar,
-    stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-) -> bool {
-    let Some(base) = stack_root_of(value, value_root, stack_roots) else {
-        return false;
-    };
-    let Some(alignment) = signed_stack_delta_of(mask, mask_root).and_then(i64::checked_neg) else {
-        return false;
-    };
-    base.base == StackAddressBase::StackPointer
-        && alignment >= 2
-        && alignment.unsigned_abs().is_power_of_two()
-}
-
-fn stack_address_root_from_sub(
-    a: &SSAVar,
-    a_root: &SSAVar,
-    b: &SSAVar,
-    b_root: &SSAVar,
-    stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-) -> Option<StackAddressRoot> {
-    let base = stack_root_of(a, a_root, stack_roots)?;
-    let delta = signed_stack_delta_of(b, b_root)?;
-    Some(StackAddressRoot {
-        base: base.base,
-        offset: base.offset.checked_sub(delta)?,
-    })
-}
-
-/// The displacement an address computation adds, resolved through copies.
-///
-/// A displacement does not always arrive as a constant operand. AArch64 Sleigh
-/// materialises `add x29, sp, 0x60` as `tmp:A = 0x60; x29 = sp + tmp:A`, so the
-/// operand is a temp and the constant is one copy away. Reading only the operand
-/// left every frame pointer established that way without a stack root, and with
-/// it every address derived from the frame pointer -- which is most of a
-/// non-leaf function's locals.
-fn signed_stack_delta(var: &SSAVar) -> Option<i64> {
-    let value = var.constant_bits()?;
-    let bits = var.size.checked_mul(8)?;
-    match bits {
-        0 => None,
-        64 => Some(value as i64),
-        1..=63 => {
-            let sign = 1u64.checked_shl(bits - 1)?;
-            let mask = 1u64.checked_shl(bits)?.wrapping_sub(1);
-            let value = value & mask;
-            Some(if value & sign == 0 {
-                value as i64
-            } else {
-                (value | !mask) as i64
-            })
-        }
-        _ => None,
-    }
-}
-
-fn insert_stack_root(
-    stack_roots: &mut BTreeMap<SSAVar, StackAddressRoot>,
-    dst: SSAVar,
-    root: StackAddressRoot,
-) -> bool {
-    match stack_roots.get(&dst) {
-        Some(existing) if *existing == root => false,
-        _ => {
-            stack_roots.insert(dst, root);
-            true
-        }
-    }
-}
-
-/// Location of a variable definition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum DefLocation {
-    /// Defined by a phi node at the given index.
-    Phi(usize),
-    /// Defined by an operation at the given index.
-    Op(usize),
-}
-
-/// Location of a variable use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum UseLocation {
-    /// Used in a phi node.
-    Phi { phi_idx: usize, src_idx: usize },
-    /// Used in an operation.
-    Op { op_idx: usize, src_idx: usize },
-}
-
-/// The variable a definition site names, read back out of the blocks.
-fn defined_var<'a>(blocks: &'a [SSABlock], site: &(u32, DefLocation)) -> Option<&'a SSAVar> {
-    let block = blocks.get(site.0 as usize)?;
-    match site.1 {
-        DefLocation::Phi(phi_idx) => block.phis.get(phi_idx).map(|phi| &phi.dst),
-        DefLocation::Op(op_idx) => block.ops.get(op_idx)?.dst(),
-    }
-}
-
-/// The variable a use site reads, read back out of the blocks.
-fn used_var<'a>(blocks: &'a [SSABlock], site: &(u32, UseLocation)) -> Option<&'a SSAVar> {
-    let block = blocks.get(site.0 as usize)?;
-    match site.1 {
-        UseLocation::Phi { phi_idx, src_idx } => block
-            .phis
-            .get(phi_idx)?
-            .sources
-            .get(src_idx)
-            .map(|(_, src)| src),
-        UseLocation::Op { op_idx, src_idx } => {
-            block.ops.get(op_idx)?.sources().get(src_idx).copied()
-        }
-    }
-}
-
-impl SsaQueryIndex {
-    fn build(function: &SSAFunction) -> Self {
-        let blocks = function.blocks();
-        let mut defs = Vec::new();
-        let mut uses = Vec::new();
-        for (index, block) in blocks.iter().enumerate() {
-            let index = u32::try_from(index).unwrap_or(u32::MAX);
-            for (phi_idx, phi) in block.phis.iter().enumerate() {
-                defs.push((index, DefLocation::Phi(phi_idx)));
-                for src_idx in 0..phi.sources.len() {
-                    uses.push((index, UseLocation::Phi { phi_idx, src_idx }));
-                }
-            }
-            for (op_idx, op) in block.ops.iter().enumerate() {
-                if op.dst().is_some() {
-                    defs.push((index, DefLocation::Op(op_idx)));
-                }
-                for src_idx in 0..op.sources().len() {
-                    uses.push((index, UseLocation::Op { op_idx, src_idx }));
-                }
-            }
-        }
-        // Ordered by the variable and then by the site, so a query's range is
-        // contiguous and the sites inside it arrive in the order a walk of the
-        // blocks would have produced.
-        defs.sort_by(|left, right| {
-            defined_var(blocks, left)
-                .cmp(&defined_var(blocks, right))
-                .then_with(|| left.cmp(right))
-        });
-        uses.sort_by(|left, right| {
-            used_var(blocks, left)
-                .cmp(&used_var(blocks, right))
-                .then_with(|| left.cmp(right))
-        });
-        Self { defs, uses }
-    }
-
-    /// The last site defining `var`, which is the one an insert-ordered map
-    /// kept when a malformed function defines a variable twice.
-    fn find_def(&self, blocks: &[SSABlock], var: &SSAVar) -> Option<(u64, DefLocation)> {
-        let start = self
-            .defs
-            .partition_point(|site| defined_var(blocks, site) < Some(var));
-        let site = self.defs[start..]
-            .iter()
-            .take_while(|site| defined_var(blocks, site) == Some(var))
-            .last()?;
-        Some((blocks.get(site.0 as usize)?.addr, site.1))
-    }
-
-    fn find_uses(&self, blocks: &[SSABlock], var: &SSAVar) -> Vec<(u64, UseLocation)> {
-        let start = self
-            .uses
-            .partition_point(|site| used_var(blocks, site) < Some(var));
-        self.uses[start..]
-            .iter()
-            .take_while(|site| used_var(blocks, site) == Some(var))
-            .filter_map(|site| Some((blocks.get(site.0 as usize)?.addr, site.1)))
-            .collect()
-    }
-}
-
-impl SSABlock {
+impl<V> SSABlock<V> {
     /// Visit all phi source variables in deterministic index order.
-    pub fn for_each_phi_source<F: FnMut(SourceRef<'_>)>(&self, mut f: F) {
-        for (phi_idx, phi) in self.phis.iter().enumerate() {
+    pub fn for_each_phi_source<F: FnMut(SourceRef<'_, V>)>(&self, mut f: F) {
+        for (phi_idx, phi) in self.phis().iter().enumerate() {
             for (src_idx, (pred_addr, src)) in phi.sources.iter().enumerate() {
                 f(SourceRef {
                     var: src,
@@ -4435,8 +3937,8 @@ impl SSABlock {
     }
 
     /// Visit all operation source variables in deterministic index order.
-    pub fn for_each_op_source<F: FnMut(SourceRef<'_>)>(&self, mut f: F) {
-        for (op_idx, op) in self.ops.iter().enumerate() {
+    pub fn for_each_op_source<F: FnMut(SourceRef<'_, V>)>(&self, mut f: F) {
+        for (op_idx, op) in self.ops().iter().enumerate() {
             let mut src_idx = 0usize;
             op.for_each_source(|src| {
                 f(SourceRef {
@@ -4449,21 +3951,21 @@ impl SSABlock {
     }
 
     /// Visit all source variables (phis first, then ops) in index order.
-    pub fn for_each_source<F: FnMut(SourceRef<'_>)>(&self, mut f: F) {
+    pub fn for_each_source<F: FnMut(SourceRef<'_, V>)>(&self, mut f: F) {
         self.for_each_phi_source(&mut f);
         self.for_each_op_source(f);
     }
 
     /// Visit all destination definitions (phis first, then ops) in index order.
-    pub fn for_each_def<F: FnMut(DefRef<'_>)>(&self, mut f: F) {
-        for (phi_idx, phi) in self.phis.iter().enumerate() {
+    pub fn for_each_def<F: FnMut(DefRef<'_, V>)>(&self, mut f: F) {
+        for (phi_idx, phi) in self.phis().iter().enumerate() {
             f(DefRef {
                 var: &phi.dst,
                 site: DefSite::Phi { phi_idx },
             });
         }
 
-        for (op_idx, op) in self.ops.iter().enumerate() {
+        for (op_idx, op) in self.ops().iter().enumerate() {
             if let Some(dst) = op.dst() {
                 f(DefRef {
                     var: dst,
@@ -4473,28 +3975,19 @@ impl SSABlock {
         }
     }
 
-    /// Get all operations including phi nodes (as SSAOp::Phi).
-    pub fn all_ops(&self) -> impl Iterator<Item = SSAOp> + '_ {
-        let phi_ops = self.phis.iter().map(|phi| SSAOp::Phi {
-            dst: phi.dst.clone(),
-            sources: phi.sources.iter().map(|(_, v)| v.clone()).collect(),
-        });
-        phi_ops.chain(self.ops.iter().cloned())
-    }
-
     /// Check if this block has any phi nodes.
     pub fn has_phis(&self) -> bool {
-        !self.phis.is_empty()
+        !self.phis().is_empty()
     }
 
     /// Get the number of phi nodes.
     pub fn num_phis(&self) -> usize {
-        self.phis.len()
+        self.phis().len()
     }
 
     /// Get the number of operations (excluding phi nodes).
     pub fn num_ops(&self) -> usize {
-        self.ops.len()
+        self.ops().len()
     }
 }
 
@@ -4502,3 +3995,27 @@ mod forward;
 
 #[cfg(test)]
 mod tests;
+
+/// Prep facts and the graph whose values key them, for a function analysed but not sealed.
+pub(crate) struct Provisional {
+    pub(crate) graph: SsaGraph,
+    pub(crate) facts: DecompilePrepFacts,
+}
+
+#[cfg(test)]
+impl Provisional {
+    /// The graph's value for a variable the test names.
+    pub(crate) fn value(&self, var: &SSAVar) -> ValueId {
+        self.graph
+            .value_id_for_var(var)
+            .unwrap_or_else(|| panic!("{var} is a value of the graph"))
+    }
+}
+
+impl Deref for Provisional {
+    type Target = DecompilePrepFacts;
+
+    fn deref(&self) -> &DecompilePrepFacts {
+        &self.facts
+    }
+}

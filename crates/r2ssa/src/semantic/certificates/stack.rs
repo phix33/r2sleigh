@@ -107,8 +107,8 @@ pub struct StackFrameRoundTripCertificate {
 /// removes the value and every dependent computation from this certificate.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StackGeometryCertificate {
-    pub insts: BTreeSet<InstId>,
-    pub values: BTreeSet<ValueId>,
+    pub insts: crate::dense::IdSet<InstId>,
+    pub values: crate::dense::IdSet<ValueId>,
     pub uses: BTreeSet<UseSite>,
 }
 
@@ -120,7 +120,7 @@ pub struct StackCallArgumentCertificate {
 }
 
 pub(crate) fn exact_stack_pointer_offset(
-    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     state: ReachingStorageState,
 ) -> Option<i64> {
@@ -128,7 +128,7 @@ pub(crate) fn exact_stack_pointer_offset(
         ReachingStorageState::PreservedEntry => Some(0),
         ReachingStorageState::Value(value) => graph
             .value(value)
-            .and_then(|value| resolve_entry_stack_root(function.decompile_prep_facts(), &value.var))
+            .and_then(|value| resolve_entry_stack_root(prep, value.id))
             .filter(|root| root.base == StackAddressBase::StackPointer)
             .map(|root| root.offset),
         ReachingStorageState::Unknown | ReachingStorageState::Conflict => None,
@@ -152,6 +152,7 @@ pub(crate) fn checked_ranges_overlap(
 
 pub(crate) fn collect_callee_stack_allocation_certificates(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
     objects: &ObjectModel,
@@ -174,7 +175,7 @@ pub(crate) fn collect_callee_stack_allocation_certificates(
         return BTreeMap::new();
     };
     let contains_call = function.blocks().iter().any(|block| {
-        block.ops.iter().any(|op| {
+        block.ops().iter().any(|op| {
             matches!(
                 op,
                 SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::CallOther { .. }
@@ -233,7 +234,7 @@ pub(crate) fn collect_callee_stack_allocation_certificates(
             || accesses.iter().any(|access| {
                 access.width != element_width
                     || !access.provenance_complete
-                    || !ram_memory_access_matches_source(function, graph, objects, access)
+                    || !ram_memory_access_matches_source(graph, objects, access)
             })
         {
             continue;
@@ -258,9 +259,9 @@ pub(crate) fn collect_callee_stack_allocation_certificates(
         let mut complete = true;
         for access in &accesses {
             let Some(active_sp_offset) = active_stack_pointer_states
-                .get(&access.id.inst)
+                .get(access.id.inst)
                 .copied()
-                .and_then(|state| exact_stack_pointer_offset(function, graph, state))
+                .and_then(|state| exact_stack_pointer_offset(prep, graph, state))
             else {
                 complete = false;
                 break;
@@ -356,6 +357,13 @@ pub(crate) fn collect_callee_stack_allocation_certificates(
     candidates
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub(crate) fn exact_copy_chain_to_storage(
     graph: &SsaGraph,
     start: ValueId,
@@ -383,10 +391,10 @@ pub(crate) fn exact_copy_chain_to_storage(
         let output = definition.output?;
         if site.input_idx != 0
             || definition.inputs.as_slice() != [current]
-            || graph.value_id_for_var(src) != Some(current)
-            || graph.value_id_for_var(dst) != Some(output)
-            || src.size != storage.size
-            || dst.size != storage.size
+            || *src != current
+            || *dst != output
+            || graph.var(*src).size != storage.size
+            || graph.var(*dst).size != storage.size
             || !insts.insert(site.inst)
             || !values.insert(output)
         {
@@ -402,19 +410,34 @@ pub(crate) fn instruction_strictly_precedes(
     first: InstId,
     second: InstId,
 ) -> bool {
-    let Some((first_block, first_op)) = graph.op_site_for_inst(first) else {
+    // Phis stand first in a block and precede no operation here.
+    let operation = |id: InstId| {
+        graph
+            .inst(id)
+            .filter(|inst| matches!(inst.payload, InstPayload::Op(_)))
+    };
+    let (Some(first), Some(second)) = (operation(first), operation(second)) else {
         return false;
     };
-    let Some((second_block, second_op)) = graph.op_site_for_inst(second) else {
-        return false;
-    };
-    if first_block == second_block {
-        first_op < second_op
-    } else {
-        function.dominates(first_block, second_block)
+    if first.block == second.block {
+        return first.ordinal < second.ordinal;
+    }
+    match (
+        graph.block(first.block).map(|block| block.addr),
+        graph.block(second.block).map(|block| block.addr),
+    ) {
+        (Some(first), Some(second)) => function.dominates(first, second),
+        _ => false,
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub(crate) fn collect_stack_frame_round_trip_certificates(
     body: Body<'_>,
     derived: Derived<'_>,
@@ -423,16 +446,17 @@ pub(crate) fn collect_stack_frame_round_trip_certificates(
     live_out: &crate::liveout::FunctionLiveOut,
 ) -> (
     BTreeMap<ObjectId, StackFrameRoundTripCertificate>,
-    BTreeMap<InstId, ObjectId>,
+    crate::dense::IdMap<InstId, ObjectId>,
 ) {
     let Body {
         function,
         graph,
         machine_context,
+        ..
     } = body;
     let (boundaries, structured) = (derived.boundaries, derived.structured);
     let mut certificates = BTreeMap::new();
-    let mut by_inst = BTreeMap::new();
+    let mut by_inst = crate::dense::IdMap::default();
     for (object, allocation) in callee_allocations {
         let accesses = structured
             .memory_accesses
@@ -650,9 +674,7 @@ pub(crate) fn collect_stack_frame_round_trip_certificates(
                 })
                 .map(|site| (*value, *site))
         });
-        if !complete
-            || escaping_read.is_some()
-            || insts.iter().any(|inst| by_inst.contains_key(inst))
+        if !complete || escaping_read.is_some() || insts.iter().any(|inst| by_inst.contains(*inst))
         {
             r2il::refusal_evidence!(
                 "frame-round-trip",
@@ -689,15 +711,22 @@ pub(crate) fn collect_stack_frame_round_trip_certificates(
 /// return control, and the merge analysis have already accounted for.
 pub(crate) struct StackGeometryContext<'a> {
     pub(crate) frame_round_trips: &'a BTreeMap<ObjectId, StackFrameRoundTripCertificate>,
-    pub(crate) return_controls: &'a BTreeMap<InstId, MachineReturnControlCertificate>,
+    pub(crate) return_controls: &'a crate::dense::IdMap<InstId, MachineReturnControlCertificate>,
     pub(crate) unobserved: &'a crate::deadphi::DeadPhis,
     pub(crate) machine_context: Option<&'a SourceMachineContext>,
     pub(crate) declared_slots: &'a DeclaredStackSlots,
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn collect_stack_geometry_certificate(
     boundaries: &SourceBoundaryFacts,
-    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
@@ -710,13 +739,13 @@ pub(crate) fn collect_stack_geometry_certificate(
         machine_context,
         declared_slots,
     } = answered;
-    let Some(prep) = function.decompile_prep_facts() else {
+    let Some(prep) = prep else {
         return StackGeometryCertificate::default();
     };
     let stack_root = |value: ValueId| {
         graph
             .value(value)
-            .and_then(|value| resolve_entry_stack_root(Some(prep), &value.var))
+            .and_then(|value| resolve_entry_stack_root(Some(prep), value.id))
     };
     // A constant that arrived through a copy is still a constant. `add x29,
     // sp, #0x60` lifts to a copy of the immediate into a temporary and an add
@@ -782,8 +811,8 @@ pub(crate) fn collect_stack_geometry_certificate(
                     _ => false,
                 })
     };
-    let mut geometry_outputs = BTreeMap::<InstId, ValueId>::new();
-    let mut geometry_inputs = BTreeSet::<ValueId>::new();
+    let mut geometry_outputs = crate::dense::IdMap::<InstId, ValueId>::default();
+    let mut geometry_inputs = crate::dense::IdSet::<ValueId>::default();
     for inst in &graph.insts {
         let Some(output) = inst.output.filter(|output| stack_root(*output).is_some()) else {
             continue;
@@ -859,7 +888,7 @@ pub(crate) fn collect_stack_geometry_certificate(
     let frame_values = frame_round_trips
         .values()
         .flat_map(|certificate| certificate.values.iter().copied())
-        .collect::<BTreeSet<_>>();
+        .collect::<crate::dense::IdSet<_>>();
     let return_control_uses = return_controls
         .values()
         .flat_map(|certificate| certificate.uses.iter().copied())
@@ -867,13 +896,13 @@ pub(crate) fn collect_stack_geometry_certificate(
     let return_control_values = return_controls
         .values()
         .flat_map(|certificate| certificate.values.iter().copied())
-        .collect::<BTreeSet<_>>();
+        .collect::<crate::dense::IdSet<_>>();
 
     let mut program_values = boundaries
         .parameters
         .values()
         .map(|parameter| parameter.value)
-        .collect::<BTreeSet<_>>();
+        .collect::<crate::dense::IdSet<_>>();
     for boundary in boundaries.calls.values() {
         program_values.extend(boundary.arguments.iter().filter_map(
             |argument| match argument.value {
@@ -891,81 +920,83 @@ pub(crate) fn collect_stack_geometry_certificate(
         .values
         .iter()
         .filter(|value| {
-            !program_values.contains(&value.id)
-                && !frame_values.contains(&value.id)
-                && !return_control_values.contains(&value.id)
-                && (stack_root(value.id).is_some() || geometry_inputs.contains(&value.id))
+            !program_values.contains(value.id)
+                && !frame_values.contains(value.id)
+                && !return_control_values.contains(value.id)
+                && (stack_root(value.id).is_some() || geometry_inputs.contains(value.id))
                 && graph
                     .def_inst(value.id)
-                    .is_none_or(|inst| geometry_outputs.get(&inst).copied() == Some(value.id))
+                    .is_none_or(|inst| geometry_outputs.get(inst).copied() == Some(value.id))
         })
         .map(|value| value.id)
-        .collect::<BTreeSet<_>>();
-    loop {
-        let removed = values
-            .iter()
-            .copied()
-            .filter_map(|value| {
-                let site = graph.use_sites(value).iter().find(|site| {
-                    !frame_uses.contains(site)
-                        && !return_control_uses.contains(site)
-                        && !stack_address_uses.contains(site)
-                        // A use inside a definition nothing observes is not a
-                        // reader. `sub sp, sp, #0x70` lifts with the carry and
-                        // sign computations beside it, and nothing reads those
-                        // flags; counting them dropped the stack pointer from
-                        // its own geometry, and the prologue then rendered as
-                        // `SP_0 = SP_0 - 112` over an entry value no statement
-                        // had written.
-                        && !unobserved.unobserved_uses().contains(site)
-                        && !geometry_outputs
-                            .get(&site.inst)
-                            .is_some_and(|output| values.contains(output))
-                })?;
-                Some((value, *site))
-            })
-            .collect::<Vec<_>>();
-        if removed.is_empty() {
-            break;
+        .collect::<crate::dense::IdSet<_>>();
+    // The greatest set whose every use stays inside the geometry: a worklist
+    // from the whole candidate set. A value that leaves can only make the
+    // operands of the instruction defining it leave, so those are what it
+    // re-checks.
+    let mut pending = values.iter().collect::<Vec<_>>();
+    while let Some(value) = pending.pop() {
+        if !values.contains(value) {
+            continue;
         }
-        for (value, site) in removed {
-            r2il::refusal_evidence!(
-                "stack-geometry",
-                "{value:?} leaves the geometry: read at {site:?} by {:?}; reader unobserved={} reader output unobserved={:?}; entry root {:?} of {} entry roots, reader output root {:?}",
-                graph.inst(site.inst).map(|inst| &inst.payload),
-                unobserved.unobserved_uses().contains(&site),
-                graph
-                    .inst(site.inst)
-                    .and_then(|inst| inst.output)
-                    .map(|output| unobserved.unobserved_values().contains(&output)),
-                stack_root(value),
-                prep.entry_stack_address_roots.len(),
-                graph
-                    .inst(site.inst)
-                    .and_then(|inst| inst.output)
-                    .map(stack_root)
-            );
-            values.remove(&value);
+        let Some(site) = graph.use_sites(value).iter().copied().find(|site| {
+            !frame_uses.contains(site)
+                && !return_control_uses.contains(site)
+                && !stack_address_uses.contains(site)
+                // A use inside a definition nothing observes is not a
+                // reader. `sub sp, sp, #0x70` lifts with the carry and
+                // sign computations beside it, and nothing reads those
+                // flags; counting them dropped the stack pointer from
+                // its own geometry, and the prologue then rendered as
+                // `SP_0 = SP_0 - 112` over an entry value no statement
+                // had written.
+                && !unobserved.unobserved_uses().contains(site)
+                && !geometry_outputs
+                    .get(site.inst)
+                    .is_some_and(|output| values.contains(*output))
+        }) else {
+            continue;
+        };
+        r2il::refusal_evidence!(
+            "stack-geometry",
+            "{value:?} leaves the geometry: read at {site:?} by {:?}; reader unobserved={} reader output unobserved={:?}; entry root {:?} of {} entry roots, reader output root {:?}",
+            graph.inst(site.inst).map(|inst| &inst.payload),
+            unobserved.unobserved_uses().contains(&site),
+            graph
+                .inst(site.inst)
+                .and_then(|inst| inst.output)
+                .map(|output| unobserved.unobserved_values().contains(output)),
+            stack_root(value),
+            prep.entry_stack_address_roots.len(),
+            graph
+                .inst(site.inst)
+                .and_then(|inst| inst.output)
+                .map(stack_root)
+        );
+        values.remove(value);
+        if let Some(inputs) = graph
+            .def_inst(value)
+            .and_then(|inst| graph.inst(inst))
+            .map(|inst| inst.inputs.clone())
+        {
+            pending.extend(inputs.into_iter().filter(|input| values.contains(*input)));
         }
     }
 
     let insts = geometry_outputs
         .into_iter()
-        .filter_map(|(inst, output)| values.contains(&output).then_some(inst))
-        .collect::<BTreeSet<_>>();
+        .filter_map(|(inst, output)| values.contains(output).then_some(inst))
+        .collect::<crate::dense::IdSet<_>>();
     let mut uses = stack_address_uses
         .difference(&frame_uses)
         .copied()
         .filter(|site| !return_control_uses.contains(site))
         .collect::<BTreeSet<_>>();
     for inst in &insts {
-        let Some(definition) = graph.inst(*inst) else {
+        let Some(definition) = graph.inst(inst) else {
             continue;
         };
-        uses.extend((0..definition.inputs.len()).map(|input_idx| UseSite {
-            inst: *inst,
-            input_idx,
-        }));
+        uses.extend((0..definition.inputs.len()).map(|input_idx| UseSite { inst, input_idx }));
     }
     StackGeometryCertificate {
         insts,
@@ -1030,7 +1061,7 @@ pub(crate) fn accessed_object_storage(
             Some(existing) => {
                 // Which accesses disagree, at what offsets, is what says
                 // whether this is one object read two ways or two objects.
-                let site_of = |id: &StructuredAccessId| graph.op_site_for_inst(id.inst);
+                let site_of = |id: &StructuredAccessId| graph.walk_start(id.inst);
                 let filed = structured
                     .memory_accesses
                     .iter()
@@ -1156,18 +1187,18 @@ pub(crate) struct AllocationSizing<'a> {
 }
 
 pub(crate) fn collect_stack_reload_source_certificates(
-    function: &SSAFunction,
-    graph: &SsaGraph,
+    body: Body<'_>,
     objects: &ObjectModel,
     memory: &MemorySSAFacts,
     accesses: &BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
-) -> BTreeMap<ValueId, StackReloadSourceCertificate> {
-    let store_sources = collect_stack_store_sources(function, graph, objects, memory, accesses);
-    let mut certificates = BTreeMap::new();
+) -> crate::dense::IdMap<ValueId, StackReloadSourceCertificate> {
+    let Body { prep, graph, .. } = body;
+    let store_sources = collect_stack_store_sources(body, objects, memory, accesses);
+    let mut certificates = crate::dense::IdMap::default();
     let mut ready = VecDeque::new();
 
     for access in accesses.values().filter(|access| {
-        !access.is_write && ram_memory_access_matches_source(function, graph, objects, access)
+        !access.is_write && ram_memory_access_matches_source(graph, objects, access)
     }) {
         let Some(value) = access.value else {
             continue;
@@ -1208,19 +1239,19 @@ pub(crate) fn collect_stack_reload_source_certificates(
 
     // Whether a value computed from the reload is the reload's bits is the
     // view's answer; no operation is assumed to preserve them.
-    let views = function.decompile_prep_facts().map(|facts| &facts.views);
+    let views = prep.map(|facts| &facts.views);
     let relation_to_reload = |output: ValueId, reload: ValueId| {
-        let (Some(output), Some(reload)) = (graph.value(output), graph.value(reload)) else {
+        if graph.value(output).is_none() || graph.value(reload).is_none() {
             return ViewRelation::Derived;
-        };
+        }
         match views {
-            Some(views) => views.relation(&output.var, &reload.var),
-            None if output.var == reload.var => ViewRelation::Identity,
+            Some(views) => views.relation(output, reload),
+            None if output == reload => ViewRelation::Identity,
             None => ViewRelation::Derived,
         }
     };
     while let Some(value) = ready.pop_front() {
-        let Some(cert) = certificates.get(&value).cloned() else {
+        let Some(cert) = certificates.get(value).cloned() else {
             continue;
         };
         for use_site in graph.use_sites(value) {
@@ -1230,7 +1261,7 @@ pub(crate) fn collect_stack_reload_source_certificates(
             let Some(output) = stack_reload_propagation_output(inst, value) else {
                 continue;
             };
-            if certificates.contains_key(&output) {
+            if certificates.contains(output) {
                 continue;
             }
             let value_width = graph
@@ -1263,15 +1294,15 @@ pub(crate) struct StackStoreSource {
 }
 
 pub(crate) fn collect_stack_store_sources(
-    function: &SSAFunction,
-    graph: &SsaGraph,
+    body: Body<'_>,
     objects: &ObjectModel,
     memory: &MemorySSAFacts,
     accesses: &BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
 ) -> BTreeMap<MemoryVersion, StackStoreSource> {
+    let Body { prep, graph, .. } = body;
     let mut sources = BTreeMap::new();
     for access in accesses.values().filter(|access| {
-        access.is_write && ram_memory_access_matches_source(function, graph, objects, access)
+        access.is_write && ram_memory_access_matches_source(graph, objects, access)
     }) {
         let Some(value) = access.value else {
             continue;
@@ -1286,7 +1317,7 @@ pub(crate) fn collect_stack_store_sources(
             def_fact.next_version,
             StackStoreSource {
                 value,
-                canonical_source: canonical_stack_source_value(function, graph, value),
+                canonical_source: canonical_stack_source_value(prep, graph, value),
                 object: access.object,
                 memory_width: access.width,
                 access: access.id,
@@ -1297,12 +1328,12 @@ pub(crate) fn collect_stack_store_sources(
 }
 
 pub(crate) fn insert_stack_reload_source_certificate(
-    certificates: &mut BTreeMap<ValueId, StackReloadSourceCertificate>,
+    certificates: &mut crate::dense::IdMap<ValueId, StackReloadSourceCertificate>,
     ready: &mut VecDeque<ValueId>,
     cert: StackReloadSourceCertificate,
 ) {
     let value = cert.value;
-    if certificates.contains_key(&value) {
+    if certificates.contains(value) {
         return;
     }
     certificates.insert(value, cert);
@@ -1336,7 +1367,7 @@ pub(crate) fn unique_memory_def_for_access<'a>(
 ) -> Option<&'a MemoryDefFact> {
     let mut matches = memory
         .defs_by_inst
-        .get(&access.id.inst)
+        .get(access.id.inst)
         .into_iter()
         .flatten()
         .filter(|def| {
@@ -1354,7 +1385,7 @@ pub(crate) fn unique_memory_use_for_access<'a>(
 ) -> Option<&'a MemoryUseFact> {
     let mut matches = memory
         .uses_by_inst
-        .get(&access.id.inst)
+        .get(access.id.inst)
         .into_iter()
         .flatten()
         .filter(|use_fact| {
@@ -1367,26 +1398,26 @@ pub(crate) fn unique_memory_use_for_access<'a>(
 }
 
 pub(crate) fn canonical_stack_source_value(
-    function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     source: ValueId,
 ) -> ValueId {
-    let Some(var) = graph.value(source).map(|value| &value.var) else {
+    if graph.value(source).is_none() {
         return source;
-    };
-    let root = canonical_value_root(function.decompile_prep_facts(), var);
-    graph.value_id_for_var(root).unwrap_or(source)
+    }
+    crate::view::class_value(graph, prep.map(|prep| &prep.views), source)
 }
 
 pub(crate) fn collect_stack_call_argument_values(
     function: &SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
     call_site: &CallSiteFact,
     calls_move_stack_pointer: bool,
 ) -> Vec<StackCallArgumentCertificate> {
-    let Some((block_addr, op_idx)) = graph.op_site_for_inst(call_site.at) else {
+    let Some((block_addr, op_idx)) = graph.walk_start(call_site.at) else {
         return Vec::new();
     };
     let Some(block) = function.get_block(block_addr) else {
@@ -1397,17 +1428,20 @@ pub(crate) fn collect_stack_call_argument_values(
     // instruction finds it. Objects are keyed by their position in a frame, so
     // the boundary is that pointer's position in the same frame: anything
     // below it is this function's own, not an argument.
-    let Some((entering, _)) = call_entering_stack_pointer_offset(
-        function,
-        graph,
-        block,
-        op_idx,
-        calls_move_stack_pointer,
-    ) else {
+    let Some((entering, _)) =
+        call_entering_stack_pointer_offset(super::super::boundaries::CallPosition {
+            function,
+            prep,
+            graph,
+            block_addr,
+            op_index: op_idx,
+            calls_move_stack_pointer,
+        })
+    else {
         return Vec::new();
     };
     let mut by_offset = BTreeMap::<i64, StackCallArgumentCertificate>::new();
-    for (producer_idx, op) in block.ops[..op_idx].iter().enumerate().rev() {
+    for (producer_idx, op) in block.ops()[..op_idx].iter().enumerate().rev() {
         if matches!(
             op,
             SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::Return { .. }
@@ -1422,16 +1456,31 @@ pub(crate) fn collect_stack_call_argument_values(
         else {
             continue;
         };
-        let Some(value) = graph.value_id_for_var(val) else {
+        let Some(value) = graph.value_of(*val) else {
             continue;
         };
 
-        for (access_id, access) in structured.memory_accesses.iter().filter(|(_, access)| {
-            access.block_addr == block_addr
-                && access.op_index == producer_idx
-                && access.is_write
-                && ram_memory_access_matches_source(function, graph, objects, access)
-        }) {
+        let Some(producer) = block
+            .op_id(producer_idx)
+            .and_then(|id| graph.inst_for_op(id))
+        else {
+            continue;
+        };
+        let accesses = StructuredAccessId {
+            inst: producer,
+            ordinal: 0,
+        }..=StructuredAccessId {
+            inst: producer,
+            ordinal: u32::MAX,
+        };
+        for (access_id, access) in
+            structured
+                .memory_accesses
+                .range(accesses)
+                .filter(|(_, access)| {
+                    access.is_write && ram_memory_access_matches_source(graph, objects, access)
+                })
+        {
             if access.value != Some(value) {
                 continue;
             }

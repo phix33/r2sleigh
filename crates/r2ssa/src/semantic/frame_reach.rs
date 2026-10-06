@@ -40,7 +40,7 @@ pub struct FrameReach {
     /// A frame address escaped that names no object, so every frame object is
     /// reachable.
     whole: bool,
-    by_call: BTreeMap<InstId, CallFrameReach>,
+    by_call: crate::dense::IdMap<InstId, CallFrameReach>,
 }
 
 impl FrameReach {
@@ -58,23 +58,24 @@ impl FrameReach {
 
     /// Every call this fact bounds or does not, in instruction order.
     pub fn calls(&self) -> impl Iterator<Item = (InstId, &CallFrameReach)> {
-        self.by_call.iter().map(|(call, reach)| (*call, reach))
+        self.by_call.iter()
     }
 
     /// The frame objects this call reaches through its argument area, beyond
     /// those that have escaped. A call this fact does not know reaches all.
     pub fn call(&self, call: InstId) -> &CallFrameReach {
         const WHOLE: &CallFrameReach = &CallFrameReach::Whole;
-        self.by_call.get(&call).unwrap_or(WHOLE)
+        self.by_call.get(call).unwrap_or(WHOLE)
     }
 
     pub(crate) fn of(
         function: &SSAFunction,
+        prep: Option<&crate::DecompilePrepFacts>,
         graph: &SsaGraph,
         model: &ObjectModel,
         machine_context: Option<&SourceMachineContext>,
     ) -> Self {
-        let Some(facts) = function.decompile_prep_facts() else {
+        let Some(facts) = prep else {
             // Nothing places a frame address, so nothing is proven private.
             return Self {
                 whole: true,
@@ -138,10 +139,10 @@ fn containing(frame: &BTreeMap<ObjectId, Option<i64>>, offset: i64) -> Option<Ob
 }
 
 /// Where a frame address points, entry-relative, when the prep facts place it.
-fn entry_offset(facts: &DecompilePrepFacts, var: &SSAVar) -> Option<i64> {
+fn entry_offset(facts: &DecompilePrepFacts, value: ValueId) -> Option<i64> {
     facts
-        .stack_address_root_of(var)
-        .or_else(|| facts.indexed_stack_address_root_of(var))
+        .stack_address_root_of(value)
+        .or_else(|| facts.indexed_stack_address_root_of(value))
         .filter(|root| root.base == StackAddressBase::StackPointer)
         .map(|root| root.offset)
 }
@@ -156,11 +157,11 @@ fn escaped_objects(
 ) -> (BTreeSet<ObjectId>, bool) {
     let frame_address = |value: ValueId| {
         graph.value(value).is_some_and(|value| {
-            facts.stack_address_root_of(&value.var).is_some()
-                || facts.indexed_stack_address_root_of(&value.var).is_some()
+            facts.stack_address_root_of(value.id).is_some()
+                || facts.indexed_stack_address_root_of(value.id).is_some()
         })
     };
-    let mut tainted = BTreeSet::new();
+    let mut tainted = crate::dense::IdSet::default();
     let mut pending = Vec::new();
     for value in graph.values.iter().map(|value| value.id) {
         if frame_address(value) && tainted.insert(value) {
@@ -217,7 +218,7 @@ fn escaping_object(
     frame: &BTreeMap<ObjectId, Option<i64>>,
     value: ValueId,
 ) -> Option<ObjectId> {
-    let offset = entry_offset(facts, &graph.value(value)?.var)?;
+    let offset = entry_offset(facts, graph.value(value)?.id)?;
     containing(frame, offset)
 }
 
@@ -266,8 +267,8 @@ fn call_reaches(
     facts: &DecompilePrepFacts,
     frame: &BTreeMap<ObjectId, Option<i64>>,
     machine_context: Option<&SourceMachineContext>,
-) -> BTreeMap<InstId, CallFrameReach> {
-    let mut out = BTreeMap::new();
+) -> crate::dense::IdMap<InstId, CallFrameReach> {
+    let mut out = crate::dense::IdMap::default();
     let Some(machine_context) = machine_context else {
         return out;
     };
@@ -280,21 +281,21 @@ fn call_reaches(
         .and_then(r2source::SourceConventionSlots::stack_arguments)
         .map_or(0, |placement| placement.first_offset().max(0));
     let states = reaching_storage_states_before(function, graph, stack_pointer);
-    for block in function.blocks() {
-        for (op_idx, op) in block.ops.iter().enumerate() {
+    for block in function.named_blocks() {
+        for (op_id, op) in block.sited() {
             let instruction = match op {
                 SSAOp::Call { instruction, .. } | SSAOp::CallInd { instruction, .. } => {
                     *instruction
                 }
                 _ => continue,
             };
-            let Some(call) = graph.inst_id_for_op_site(block.addr, op_idx) else {
+            let Some(call) = graph.inst_for_op(op_id) else {
                 continue;
             };
-            let sp = match states.get(&call) {
+            let sp = match states.get(call) {
                 Some(ReachingStorageState::Value(value)) => graph
                     .value(*value)
-                    .and_then(|value| entry_offset(facts, &value.var)),
+                    .and_then(|value| entry_offset(facts, value.id)),
                 _ => None,
             };
             let interface = instruction

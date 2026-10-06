@@ -5,11 +5,13 @@
 //! the request-level scheduler boundary that decides which artifacts are
 //! needed for a request. Analysis artifacts are built directly for each
 //! source snapshot request.
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(cache_outside_query_database))]
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
 
+pub mod body;
 mod declared;
 pub mod discovery;
 pub mod isolation;
@@ -33,19 +35,21 @@ use r2types::{
 use serde::{Deserialize, Serialize};
 
 mod json;
+mod library;
 use json::*;
 pub use json::{
     RenderProofJson, RenderRefusalJson, RenderedFunctionJson, RenderedLineJson, RenderedLinkJson,
     RenderedResidualJson, RenderedVariableJson,
 };
 pub use r2sleigh_lift::disasm::syntax::number_spans;
+pub use r2sleigh_lift::flow::Flow;
 pub use r2sleigh_lift::{NumberSpan, Syntax};
 
 mod route;
 
 pub use r2dec::{
     BindingMachineProjectionFailure, BindingObservationAudit, BindingObservationDomainAudit,
-    BindingObservationJournalFailure, BindingShadowAuditFailure, DecompileRenderRefusal,
+    BindingObservationJournalFailure, BindingShadowAuditFailure, CRole, DecompileRenderRefusal,
     EffectObligationAudit, EffectObligationDisposition, PlacementAudit, PlacementAuditRefusal,
 };
 use route::decompile_route_decision;
@@ -175,51 +179,6 @@ impl EngineSourceSnapshot {
     }
 }
 
-pub fn direct_block_c_residual_comment(block_addr: u64) -> String {
-    format!(
-        "/* r2dec residual: block C output for 0x{block_addr:x} requires engine FunctionFacts route; direct C-like block decompile suppressed */"
-    )
-}
-
-pub fn direct_block_ast_residual_json(block_addr: u64) -> String {
-    let comment = format!(
-        "r2dec residual: block AST for 0x{block_addr:x} requires engine FunctionFacts route; direct SSA op lowering suppressed"
-    );
-    let value = serde_json::json!([{ "Comment": comment }]);
-    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "[]".to_string())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EngineAutoCallbackKind {
-    AnalyzeFunction,
-    DataRefs,
-    PostAnalysisTaint,
-    PostAnalysisXref,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EngineAutoCallbackRefusalReason {
-    Allowed,
-    ModeNotFull,
-    TooManyBlocks,
-    TooLarge,
-    TooCostly,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineAutoCallbackMetrics {
-    pub basic_block_count: u32,
-    pub cost: u32,
-    pub linear_size: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineAutoCallbackPlan {
-    pub allowed: bool,
-    pub kind: EngineAutoCallbackKind,
-    pub reason: EngineAutoCallbackRefusalReason,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnginePhase {
@@ -296,72 +255,13 @@ fn empty_engine_phase_timings() -> Vec<EnginePhaseTimingJson> {
         .collect()
 }
 
-pub fn engine_normalized_arch_name(arch: Option<&r2il::ArchSpec>) -> Option<String> {
-    let arch = arch?;
-    let family = r2ssa::MachineArchitectureFamily::from_arch_spec(Some(arch));
-    Some(
-        match family {
-            r2ssa::MachineArchitectureFamily::X86 => "x86",
-            r2ssa::MachineArchitectureFamily::X86_64 => "x86-64",
-            r2ssa::MachineArchitectureFamily::Arm => "arm",
-            r2ssa::MachineArchitectureFamily::AArch64 => "aarch64",
-            r2ssa::MachineArchitectureFamily::RiscV32 => "riscv32",
-            r2ssa::MachineArchitectureFamily::RiscV64 => "riscv64",
-            r2ssa::MachineArchitectureFamily::Mips32 => "mips",
-            r2ssa::MachineArchitectureFamily::Mips64 => "mips64",
-            r2ssa::MachineArchitectureFamily::PowerPc32 => "powerpc",
-            r2ssa::MachineArchitectureFamily::PowerPc64 => "powerpc64",
-            r2ssa::MachineArchitectureFamily::Unknown => return Some(arch.name.clone()),
-        }
-        .to_string(),
-    )
-}
-
-pub fn engine_arch_target(arch: Option<&r2il::ArchSpec>) -> (String, u32) {
-    let arch_name = engine_normalized_arch_name(arch).unwrap_or_else(|| "unknown".to_string());
-    let ptr_bits = arch.map(engine_effective_ptr_bits).unwrap_or(64);
-    (arch_name, ptr_bits)
+/// The pointer width of the lifted machine, 64 when none was given.
+pub fn engine_ptr_bits(arch: Option<&r2il::ArchSpec>) -> u32 {
+    arch.map(engine_effective_ptr_bits).unwrap_or(64)
 }
 
 pub fn engine_effective_ptr_bits(arch: &r2il::ArchSpec) -> u32 {
-    engine_effective_addr_size_bytes(arch).saturating_mul(8)
-}
-
-fn engine_effective_addr_size_bytes(arch: &r2il::ArchSpec) -> u32 {
-    if arch.addr_size > 1 {
-        return arch.addr_size;
-    }
-
-    if let Some(pc_size) = arch
-        .registers
-        .iter()
-        .find(|reg| {
-            matches!(
-                reg.name.to_ascii_lowercase().as_str(),
-                "pc" | "ip" | "eip" | "rip"
-            )
-        })
-        .map(|reg| reg.size)
-        .filter(|size| *size > 1)
-    {
-        return pc_size;
-    }
-
-    if let Some(default_size) = arch
-        .spaces
-        .iter()
-        .find(|space| space.is_default && space.addr_size > 1)
-        .map(|space| space.addr_size)
-    {
-        return default_size;
-    }
-
-    arch.spaces
-        .iter()
-        .map(|space| space.addr_size)
-        .max()
-        .filter(|size| *size > 1)
-        .unwrap_or(arch.addr_size.max(1))
+    r2il::effective_arch_address_size(arch).saturating_mul(8)
 }
 
 fn metadata_scalar_kind_from_r2il(kind: r2il::ScalarKind) -> MetadataScalarKind {
@@ -422,75 +322,38 @@ where
     hints
 }
 
+/// The machine a rendering is for: the lifted machine's identity and pointer width.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EngineRenderTarget {
-    pub arch_name: String,
+    pub architecture: String,
     pub ptr_bits: u32,
 }
 
-impl Default for EngineRenderTarget {
-    fn default() -> Self {
-        Self::for_arch_name("x86-64", 64)
-    }
-}
-
 impl EngineRenderTarget {
-    pub fn for_arch_name(arch_name: &str, ptr_bits: u32) -> Self {
-        let arch_name = match (arch_name.to_ascii_lowercase().as_str(), ptr_bits) {
-            ("x86_64" | "x64" | "amd64", _) => "x86-64".to_string(),
-            ("x86-64", _) => "x86-64".to_string(),
-            ("x86-32" | "i386" | "i686", _) => "x86".to_string(),
-            ("x86", _) => "x86".to_string(),
-            _ => arch_name.to_string(),
-        };
+    /// The target a request names: its architecture's identity at this width.
+    pub fn for_arch(arch: Option<&r2il::ArchSpec>, ptr_bits: u32) -> Self {
         Self {
-            arch_name,
+            architecture: arch.map(|arch| arch.name.clone()).unwrap_or_default(),
             ptr_bits,
         }
     }
 
-    pub fn for_arch(arch: Option<&r2il::ArchSpec>) -> (String, u32, Self) {
-        let (arch_name, ptr_bits) = engine_arch_target(arch);
-        let target = Self::for_arch_name(&arch_name, ptr_bits);
-        (arch_name, ptr_bits, target)
-    }
-
-    pub fn for_arch_with_ptr_bits(arch: Option<&r2il::ArchSpec>, ptr_bits: u32) -> (String, Self) {
-        let arch_name = engine_normalized_arch_name(arch).unwrap_or_else(|| "unknown".to_string());
-        let target = Self::for_arch_name(&arch_name, ptr_bits);
-        (arch_name, target)
-    }
-
     fn for_prepared(source: &SsaArtifact) -> Option<Self> {
-        let memory = source.machine_context().memory_model();
-        if !memory.is_available() || !memory.is_coherent() {
-            return None;
-        }
+        let context = source.machine_context();
+        let memory = context.memory_model();
         let ptr_bits = memory.default_address_bits();
-        if ptr_bits == 0 {
-            return None;
-        }
-        let (arch_name, expected_bits) = match source.machine_context().architecture_family() {
-            r2ssa::MachineArchitectureFamily::X86 => ("x86", 32),
-            r2ssa::MachineArchitectureFamily::X86_64 => ("x86-64", 64),
-            r2ssa::MachineArchitectureFamily::Arm => ("arm", 32),
-            r2ssa::MachineArchitectureFamily::AArch64 => ("aarch64", 64),
-            r2ssa::MachineArchitectureFamily::RiscV32 => ("riscv32", 32),
-            r2ssa::MachineArchitectureFamily::RiscV64 => ("riscv64", 64),
-            r2ssa::MachineArchitectureFamily::Mips32 => ("mips", 32),
-            r2ssa::MachineArchitectureFamily::Mips64 => ("mips64", 64),
-            r2ssa::MachineArchitectureFamily::PowerPc32 => ("powerpc", 32),
-            r2ssa::MachineArchitectureFamily::PowerPc64 => ("powerpc64", 64),
-            r2ssa::MachineArchitectureFamily::Unknown => return None,
-        };
-        if ptr_bits != expected_bits {
-            return None;
-        }
-        Some(Self::for_arch_name(arch_name, ptr_bits))
+        (memory.is_available()
+            && memory.is_coherent()
+            && ptr_bits != 0
+            && !context.architecture().is_empty())
+        .then(|| Self {
+            architecture: context.architecture().to_string(),
+            ptr_bits,
+        })
     }
 
     fn to_decompiler_config(&self) -> r2dec::DecompilerConfig {
-        r2dec::DecompilerConfig::for_arch_name(&self.arch_name, self.ptr_bits)
+        r2dec::DecompilerConfig::for_pointer_bits(self.ptr_bits)
     }
 }
 
@@ -498,7 +361,6 @@ impl EngineRenderTarget {
 pub struct EngineMetrics {
     pub planning_time: Duration,
     pub ssa_time: Duration,
-    pub semantic_time: Duration,
     pub type_time: Duration,
     pub render_time: Duration,
     /// Units of work this request counted, the deterministic measure of what
@@ -515,7 +377,6 @@ impl Default for EngineMetrics {
             work_spent: 0,
             planning_time: Duration::default(),
             ssa_time: Duration::default(),
-            semantic_time: Duration::default(),
             type_time: Duration::default(),
             render_time: Duration::default(),
             phase_timings: empty_engine_phase_timings(),
@@ -572,11 +433,6 @@ impl EngineAnalysis {
         Self { ssa_func }
     }
 
-    /// Borrow the immutable prepared SSA consumed by this analysis.
-    pub fn ssa_func(&self) -> &SsaArtifact {
-        self.ssa_func.as_ref()
-    }
-
     fn from_trusted_ssa(trusted: &r2ssa::TrustedSsaArtifact) -> Self {
         Self {
             ssa_func: trusted.shared_artifact(),
@@ -618,16 +474,6 @@ impl EngineAnalysisArtifact {
     /// Borrow the report sealed to the exact immutable SSA owner.
     pub fn function_facts(&self) -> &FunctionFacts {
         self.type_analysis.function_facts()
-    }
-
-    /// Borrow the inseparable source-owned type analysis.
-    pub fn type_analysis(&self) -> &r2types::TypeAnalysis {
-        &self.type_analysis
-    }
-
-    /// Borrow request-local certification authority when this artifact retains it.
-    pub fn trusted_ssa(&self) -> Option<&r2ssa::TrustedSsaArtifact> {
-        self.trusted_ssa.as_deref()
     }
 }
 
@@ -687,22 +533,6 @@ impl EngineExecutionControl {
         Self::new(cancellation, None)
     }
 
-    pub fn with_deadline(deadline: Instant) -> Self {
-        Self::new(EngineCancellationToken::default(), Some(deadline))
-    }
-
-    pub fn with_timeout(timeout: Duration) -> Self {
-        Self::with_deadline(
-            Instant::now()
-                .checked_add(timeout)
-                .unwrap_or_else(Instant::now),
-        )
-    }
-
-    pub fn cancellation(&self) -> EngineCancellationToken {
-        self.cancellation.clone()
-    }
-
     pub fn deadline(&self) -> Option<Instant> {
         self.deadline
     }
@@ -718,6 +548,14 @@ impl EngineExecutionControl {
 
     fn replace_deadline(&mut self, deadline: Instant) {
         self.deadline = Some(deadline);
+    }
+
+    /// Whether anything checking this control could have stopped by now: cancellation is sticky and the deadline only passes.
+    pub fn stopped(&self) -> bool {
+        self.cancellation.is_cancelled()
+            || self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
     fn refusal_reason(&self, phase: EnginePhase) -> Option<String> {
@@ -1197,6 +1035,7 @@ fn source_member_type_spelling(
     let element = match source_type.kind() {
         r2ssa::SourceTypeKind::SignedInteger => format!("int{bits}_t"),
         r2ssa::SourceTypeKind::UnsignedInteger => format!("uint{bits}_t"),
+        r2ssa::SourceTypeKind::Char { .. } => "char".to_string(),
         r2ssa::SourceTypeKind::Pointer { .. } => "void *".to_string(),
         r2ssa::SourceTypeKind::Float if bits == 32 => "float".to_string(),
         r2ssa::SourceTypeKind::Float if bits == 64 => "double".to_string(),
@@ -1605,7 +1444,7 @@ impl EngineAnalyzeRequest {
         self.function_addr = function_addr;
         self.blocks = Vec::new();
         self.arch = Some(trusted.arch_spec().clone());
-        self.ptr_bits = engine_arch_target(self.arch.as_ref()).1;
+        self.ptr_bits = engine_ptr_bits(self.arch.as_ref());
         self.source_snapshot = None;
         self.semantic_metadata_enabled = true;
         self.reg_type_hints.clear();
@@ -1674,20 +1513,6 @@ impl EngineAnalyzeRequest {
         self.execution.replace_cancellation(cancellation);
         self
     }
-
-    pub fn with_deadline(mut self, deadline: Instant) -> Self {
-        self.execution.replace_deadline(deadline);
-        self
-    }
-
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.execution.replace_deadline(
-            Instant::now()
-                .checked_add(timeout)
-                .unwrap_or_else(Instant::now),
-        );
-        self
-    }
 }
 
 fn engine_analyze_request_input_from_function(
@@ -1712,7 +1537,7 @@ fn engine_analyze_request_parts_from_input(
 ) -> EngineAnalyzeRequestParts {
     let ptr_bits = input
         .ptr_bits
-        .unwrap_or_else(|| engine_arch_target(input.arch.as_ref()).1);
+        .unwrap_or_else(|| engine_ptr_bits(input.arch.as_ref()));
     EngineAnalyzeRequestParts {
         function_name: input.function_name,
         function_addr: input.function_addr,
@@ -1777,7 +1602,7 @@ pub(crate) struct EngineFunctionDecompileRequest {
 /// The analysis is the same either way; this decides only what is rendered
 /// from it, which is why it travels with the rendering rather than with the
 /// request that computes the facts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum RenderTier {
     #[default]
     C,
@@ -1850,14 +1675,6 @@ impl EngineFunctionDecompileRequestInput {
         self
     }
 
-    /// Attach the signatures the program declares for callees it carries no
-    /// body for, which is what an import is.
-    /// Render the structured tree instead of the C generated from it.
-    pub fn rendering(mut self, tier: RenderTier) -> Self {
-        self.tier = tier;
-        self
-    }
-
     pub fn with_declared_signatures(
         mut self,
         signatures: impl IntoIterator<Item = r2types::SourceOwnedCalleeSignature>,
@@ -1873,15 +1690,6 @@ impl EngineFunctionDecompileRequestInput {
 
     pub fn with_deadline(mut self, deadline: Instant) -> Self {
         self.execution.replace_deadline(deadline);
-        self
-    }
-
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.execution.replace_deadline(
-            Instant::now()
-                .checked_add(timeout)
-                .unwrap_or_else(Instant::now),
-        );
         self
     }
 }
@@ -1910,29 +1718,9 @@ impl EngineFunctionDecompileRequest {
     }
 }
 
-pub struct EngineSignatureInferenceRequest<'a> {
-    pub analysis: &'a EngineAnalysis,
-}
-
 #[derive(Debug, Clone)]
 pub struct EngineFunctionAnalysisArtifactRequest {
     pub analysis: EngineAnalyzeRequest,
-}
-
-#[derive(Debug, Clone)]
-pub struct EngineInterprocSummaryReportRequest {
-    pub analysis: EngineAnalyzeRequest,
-    pub iterations: usize,
-    pub max_iterations: usize,
-    pub converged: bool,
-    pub scope_report: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone)]
-pub struct EngineInterprocSummaryReportResponse {
-    pub report: EngineInterprocSummaryJson,
-    pub metrics: EngineMetrics,
-    pub diagnostics: EngineDiagnostics,
 }
 
 #[derive(Debug, Clone)]
@@ -1954,71 +1742,6 @@ impl EngineFunctionAnalysisArtifactRequest {
                     include_interproc_summary_set: true,
                 },
             ),
-        }
-    }
-
-    pub fn full_semantics_for_function_with_register_names<F>(
-        input: EngineFunctionAnalysisArtifactRequestInput,
-        register_name: F,
-    ) -> Self
-    where
-        F: FnMut(&r2il::Varnode) -> Option<String>,
-    {
-        Self {
-            analysis: EngineAnalyzeRequest::full_semantics_for_function_with_register_names(
-                EngineAnalyzeFunctionRequestInput {
-                    function: input.function,
-                    ptr_bits: input.ptr_bits,
-                    reg_type_hints: HashMap::new(),
-                    parsed_context: input.parsed_context,
-                    include_interproc_summary_set: true,
-                },
-                register_name,
-            ),
-        }
-    }
-}
-
-impl EngineInterprocSummaryReportRequest {
-    pub fn full_semantics_for_function(
-        input: EngineFunctionAnalysisArtifactRequestInput,
-        iterations: usize,
-        max_iterations: usize,
-        converged: bool,
-        scope_report: Option<serde_json::Value>,
-    ) -> Self {
-        Self {
-            analysis: EngineFunctionAnalysisArtifactRequest::full_semantics_for_function(input)
-                .analysis,
-            iterations,
-            max_iterations,
-            converged,
-            scope_report,
-        }
-    }
-
-    pub fn full_semantics_for_function_with_register_names<F>(
-        input: EngineFunctionAnalysisArtifactRequestInput,
-        register_name: F,
-        iterations: usize,
-        max_iterations: usize,
-        converged: bool,
-        scope_report: Option<serde_json::Value>,
-    ) -> Self
-    where
-        F: FnMut(&r2il::Varnode) -> Option<String>,
-    {
-        Self {
-            analysis:
-                EngineFunctionAnalysisArtifactRequest::full_semantics_for_function_with_register_names(
-                    input,
-                    register_name,
-                )
-                .analysis,
-            iterations,
-            max_iterations,
-            converged,
-            scope_report,
         }
     }
 }
@@ -2133,39 +1856,6 @@ impl EngineSession {
         );
         let ssa_control = request.execution.ssa_execution_control();
         self.analyze_with_ssa_control(request, started, metrics, &ssa_control)
-    }
-
-    pub fn interproc_summary_report(
-        &self,
-        request: EngineInterprocSummaryReportRequest,
-    ) -> Option<EngineInterprocSummaryReportResponse> {
-        let EngineInterprocSummaryReportRequest {
-            analysis,
-            iterations,
-            max_iterations,
-            converged,
-            scope_report,
-        } = request;
-        let analysis = analysis.canonicalize_trusted();
-        let response = self.analyze(analysis)?;
-        let summary = response
-            .artifact
-            .function_facts()
-            .summary_view()
-            .root_summary();
-        let report = interproc_summary_json(EngineInterprocSummaryJsonInput {
-            callsite_count: summary.map(|summary| summary.callsite_count).unwrap_or(0),
-            iterations,
-            max_iterations,
-            converged,
-            summary,
-            scope_report: scope_report.as_ref(),
-        });
-        Some(EngineInterprocSummaryReportResponse {
-            report,
-            metrics: response.metrics,
-            diagnostics: response.diagnostics,
-        })
     }
 
     fn analyze_with_ssa_control<C: r2ssa::SsaWorkControl + ?Sized>(
@@ -2293,10 +1983,8 @@ impl EngineSession {
         } else {
             None
         };
-        let (_, requested_render_target) = EngineRenderTarget::for_arch_with_ptr_bits(
-            analysis_request.arch.as_ref(),
-            analysis_request.ptr_bits,
-        );
+        let requested_render_target =
+            EngineRenderTarget::for_arch(analysis_request.arch.as_ref(), analysis_request.ptr_bits);
         let analyze_response = match self.analyze_checked(analysis_request) {
             Ok(response) => response,
             Err(refusal) => {
@@ -2694,11 +2382,17 @@ fn effect_obligation_refusal_reason(audit: EffectObligationAudit) -> Option<Stri
             fn tally(
                 count: usize,
                 label: &str,
-                obligation: Option<r2ssa::SemanticObligationId>,
+                obligation: Option<r2ssa::SpelledObligation>,
             ) -> String {
                 obligation.map_or_else(
                     || format!("{count} {label}"),
-                    |id| format!("{count} {label} ({} at {})", id.kind, id.instruction),
+                    |spelled| {
+                        format!(
+                            "{count} {label} ({} at {})",
+                            spelled.id().kind,
+                            spelled.instruction()
+                        )
+                    },
                 )
             }
             format!(

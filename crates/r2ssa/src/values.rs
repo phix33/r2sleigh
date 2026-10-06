@@ -83,9 +83,10 @@ impl ValueRanges {
 pub fn solve_value_ranges(
     graph: &SsaGraph,
     function: &crate::SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     predicates: &crate::semantic::PredicateFacts,
 ) -> ValueRanges {
-    solve_counted(graph, function, predicates).0
+    solve_counted(graph, function, prep, predicates).0
 }
 
 /// What one instruction alone makes of the value it leaves in a storage.
@@ -98,6 +99,13 @@ pub struct InstructionBound {
 }
 
 /// The instruction's own operations transferred in `O(k)`, earlier values at top, over a graph no pass folded constants into.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
+    )
+)]
 pub fn instruction_bound(
     graph: &SsaGraph,
     instruction: u64,
@@ -125,6 +133,13 @@ pub fn instruction_bound(
 }
 
 /// Whether the instruction alone leaves a value unbounded at the width it wrote, following its zero extensions back.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
+    )
+)]
 fn spans_width_written(
     graph: &SsaGraph,
     local: &BTreeMap<ValueId, StridedInterval>,
@@ -167,16 +182,14 @@ fn literal_or_top(graph: &SsaGraph, value: ValueId) -> StridedInterval {
 fn solve_counted(
     graph: &SsaGraph,
     function: &crate::SSAFunction,
+    prep: Option<&crate::DecompilePrepFacts>,
     predicates: &crate::semantic::PredicateFacts,
 ) -> (ValueRanges, usize) {
     let (mut by_value, transfers) = ascend(graph, &widening_set(function));
     // What a branch proves about a value it compares holds of every value
     // with the same bits: the narrowing is keyed by copy class, so a copy or
     // a lane read of the compared value read further on is narrowed too.
-    let class = crate::view::class_values(
-        graph,
-        function.decompile_prep_facts().map(|facts| &facts.views),
-    );
+    let class = crate::view::class_values(graph, prep.map(|facts| &facts.views));
     narrow_where_defined(graph, function, predicates, &class, &mut by_value);
     (ValueRanges { by_value }, transfers)
 }
@@ -211,25 +224,19 @@ fn ascend(graph: &SsaGraph, widen_at: &BTreeSet<u64>) -> (Vec<StridedInterval>, 
         .insts
         .iter()
         .filter(|inst| matches!(inst.payload, InstPayload::Phi { .. }))
-        .filter(|inst| {
-            graph
-                .op_site_for_inst(inst.id)
-                .map(|(block_addr, _)| block_addr)
-                .or_else(|| block_addr(graph, inst))
-                .is_some_and(|addr| widen_at.contains(&addr))
-        })
+        .filter(|inst| block_addr(graph, inst).is_some_and(|addr| widen_at.contains(&addr)))
         .map(|inst| inst.id)
-        .collect::<BTreeSet<_>>();
+        .collect::<crate::dense::IdSet<_>>();
 
     let mut queued = graph
         .insts
         .iter()
         .map(|inst| inst.id)
-        .collect::<BTreeSet<_>>();
-    let mut ready = queued.iter().copied().collect::<VecDeque<_>>();
+        .collect::<crate::dense::IdSet<_>>();
+    let mut ready = queued.iter().collect::<VecDeque<_>>();
     let mut transfers = 0usize;
     while let Some(inst_id) = ready.pop_front() {
-        queued.remove(&inst_id);
+        queued.remove(inst_id);
         let Some(inst) = graph.inst(inst_id) else {
             continue;
         };
@@ -246,7 +253,7 @@ fn ascend(graph: &SsaGraph, widen_at: &BTreeSet<u64>) -> (Vec<StridedInterval>, 
                 .copied()
                 .unwrap_or_else(|| StridedInterval::top(64))
         });
-        let next = match widen_insts.contains(&inst_id) {
+        let next = match widen_insts.contains(inst_id) {
             true => slot.widen(&slot.join(&computed)),
             false => slot.join(&computed),
         };
@@ -400,7 +407,7 @@ fn transfer(
 fn exact(
     graph: &SsaGraph,
     inst: &GraphInst,
-    op: &SSAOp,
+    op: &SSAOp<ValueId>,
     lookup: &dyn Fn(ValueId) -> StridedInterval,
 ) -> Option<u64> {
     // A number less itself, or exclusive-or itself, is nought whatever it is: `xor eax, eax`.
@@ -431,7 +438,7 @@ fn read_at(range: StridedInterval, width: u32) -> StridedInterval {
 }
 
 /// Whether an operation's transfer would read an unknown value past sixty-four bits as below `2^64`.
-fn bounds_unknown_as_known(graph: &SsaGraph, inst: &GraphInst, op: &SSAOp) -> bool {
+fn bounds_unknown_as_known(graph: &SsaGraph, inst: &GraphInst, op: &SSAOp<ValueId>) -> bool {
     inst.output.is_some_and(|output| wide(graph, output))
         && matches!(
             op,
@@ -443,7 +450,7 @@ fn bounds_unknown_as_known(graph: &SsaGraph, inst: &GraphInst, op: &SSAOp) -> bo
 }
 
 /// A carry, borrow or boolean operation, which yields a flag.
-fn is_flag(op: &SSAOp) -> bool {
+fn is_flag<V>(op: &SSAOp<V>) -> bool {
     matches!(
         op,
         SSAOp::IntCarry { .. }
@@ -470,6 +477,13 @@ const fn mask_of(width_bits: u32) -> u64 {
 /// chain from each instruction would gather, gathered once.
 ///
 /// An assumption holds at `B` only where its edge dominates `B` (doc/ssa.md, "Branch assumptions").
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
+    )
+)]
 fn assumptions_by_block(
     function: &crate::SSAFunction,
     graph: &SsaGraph,
@@ -554,6 +568,13 @@ fn class_of(class: &[ValueId], value: ValueId) -> ValueId {
 /// Narrow what a block holds by one comparison, taken the way `truth` says.
 ///
 /// `held` is keyed by copy class.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
+    )
+)]
 fn assume(
     held: &mut BTreeMap<ValueId, StridedInterval>,
     graph: &SsaGraph,
@@ -603,6 +624,13 @@ fn selected_arm(
 ///
 /// `None` where the side has no range yet or where the comparison leaves it
 /// exactly as it was, so the caller inserts only what it has learned.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
+    )
+)]
 fn narrowed_side(
     held: &std::collections::BTreeMap<ValueId, StridedInterval>,
     solved: Solved<'_>,
@@ -695,7 +723,7 @@ fn comparison_of(
 }
 
 /// Which comparison an operation is, where it is one.
-fn comparison_kind(op: &SSAOp) -> Option<crate::semantic::CompareKind> {
+fn comparison_kind<V>(op: &SSAOp<V>) -> Option<crate::semantic::CompareKind> {
     use crate::semantic::CompareKind;
     Some(match op {
         SSAOp::IntEqual { .. } => CompareKind::Equal,
@@ -770,10 +798,10 @@ fn narrow_where_defined(
                 .inst(*inst)
                 .is_some_and(|inst| !matches!(inst.payload, InstPayload::Phi { .. }))
         })
-        .collect::<BTreeSet<_>>();
-    let mut ready = queued.iter().copied().collect::<VecDeque<_>>();
+        .collect::<crate::dense::IdSet<_>>();
+    let mut ready = queued.iter().collect::<VecDeque<_>>();
     while let Some(inst_id) = ready.pop_front() {
-        queued.remove(&inst_id);
+        queued.remove(inst_id);
         let Some(inst) = graph.inst(inst_id) else {
             continue;
         };
@@ -836,7 +864,7 @@ mod tests {
         let function = SSAFunction::from_exact_test_blocks(blocks, cfg);
         let graph = SsaGraph::from_function(&function);
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
-        let (ranges, transfers) = solve_counted(&graph, &function, &predicates);
+        let (ranges, transfers) = solve_counted(&graph, &function, None, &predicates);
         (ranges, graph, transfers)
     }
 
@@ -872,7 +900,7 @@ mod tests {
     fn constants_travel_through_arithmetic() {
         let sum = var("sum", 1, 4);
         let mut block = SSABlock::new(0x1000, 8);
-        block.ops.push(crate::op::SSAOp::IntAdd {
+        block.push(crate::op::SSAOp::IntAdd {
             dst: sum.clone(),
             a: constant(4, 4),
             b: constant(6, 4),
@@ -888,12 +916,12 @@ mod tests {
         let index = var("index", 1, 4);
         let offset = var("offset", 1, 4);
         let mut block = SSABlock::new(0x1000, 12);
-        block.ops.push(crate::op::SSAOp::IntAnd {
+        block.push(crate::op::SSAOp::IntAnd {
             dst: index.clone(),
             a: var("raw", 0, 4),
             b: constant(7, 4),
         });
-        block.ops.push(crate::op::SSAOp::IntMult {
+        block.push(crate::op::SSAOp::IntMult {
             dst: offset.clone(),
             a: index.clone(),
             b: constant(4, 4),
@@ -918,17 +946,17 @@ mod tests {
 
         let head = SSABlock::new(entry, 16);
         let mut left_block = SSABlock::new(left, 16);
-        left_block.ops.push(crate::op::SSAOp::Copy {
+        left_block.push(crate::op::SSAOp::Copy {
             dst: taken.clone(),
             src: constant(3, 4),
         });
         let mut right_block = SSABlock::new(right, 16);
-        right_block.ops.push(crate::op::SSAOp::Copy {
+        right_block.push(crate::op::SSAOp::Copy {
             dst: other.clone(),
             src: constant(7, 4),
         });
         let mut merge_block = SSABlock::new(merge, 16);
-        merge_block.phis.push(PhiNode {
+        merge_block.push_phi(PhiNode {
             dst: merged.clone(),
             sources: vec![(left, taken), (right, other)],
             canonical_storage: None,
@@ -973,12 +1001,12 @@ mod tests {
 
         let head = SSABlock::new(entry, 16);
         let mut header_block = SSABlock::new(header, 16);
-        header_block.phis.push(PhiNode {
+        header_block.push_phi(PhiNode {
             dst: counter.clone(),
             sources: vec![(entry, constant(0, 4)), (header, stepped.clone())],
             canonical_storage: None,
         });
-        header_block.ops.push(crate::op::SSAOp::IntAdd {
+        header_block.push(crate::op::SSAOp::IntAdd {
             dst: stepped,
             a: counter.clone(),
             b: constant(1, 4),
@@ -1016,22 +1044,22 @@ mod tests {
         let (divisor, quotient) = (var("divisor", 1, 16), var("quotient", 1, 16));
         let (low, high) = (var("low", 1, 8), var("high", 1, 8));
         let mut block = SSABlock::new(0x1000, 8);
-        block.ops.push(crate::op::SSAOp::IntZExt {
+        block.push(crate::op::SSAOp::IntZExt {
             dst: divisor.clone(),
             src: constant(2, 8),
         });
-        block.ops.push(crate::op::SSAOp::IntDiv {
+        block.push(crate::op::SSAOp::IntDiv {
             dst: quotient.clone(),
             a: dividend.clone(),
             b: divisor,
         });
-        block.ops.push(crate::op::SSAOp::Subpiece {
+        block.push(crate::op::SSAOp::Subpiece {
             dst: low.clone(),
             src: quotient,
             offset: 0,
         });
         // The high half of an unknown value is unknown, not the nought a shift past sixty-four bits gives.
-        block.ops.push(crate::op::SSAOp::Subpiece {
+        block.push(crate::op::SSAOp::Subpiece {
             dst: high.clone(),
             src: dividend,
             offset: 8,
@@ -1048,17 +1076,17 @@ mod tests {
         let (entry, taken, merge) = (0x1000, 0x1010, 0x1020);
         let (x, below, y) = (var("x", 0, 4), var("below", 1, 1), var("y", 1, 4));
         let mut head = SSABlock::new(entry, 16);
-        head.ops.push(crate::op::SSAOp::IntLess {
+        head.push(crate::op::SSAOp::IntLess {
             dst: below.clone(),
             a: x.clone(),
             b: constant(10, 4),
         });
-        head.ops.push(crate::op::SSAOp::CBranch {
+        head.push(crate::op::SSAOp::CBranch {
             target: constant(taken, 8),
             cond: below,
         });
         let mut merge_block = SSABlock::new(merge, 16);
-        merge_block.ops.push(crate::op::SSAOp::Copy {
+        merge_block.push(crate::op::SSAOp::Copy {
             dst: y.clone(),
             src: x,
         });
@@ -1090,23 +1118,23 @@ mod tests {
         let (at_b, from_b) = (var("i", 3, 4), var("i", 4, 4));
         let choice = var("choice", 1, 1);
         let mut head = SSABlock::new(entry, 16);
-        head.ops.push(crate::op::SSAOp::IntLess {
+        head.push(crate::op::SSAOp::IntLess {
             dst: choice.clone(),
             a: var("arg", 0, 4),
             b: constant(5, 4),
         });
-        head.ops.push(crate::op::SSAOp::CBranch {
+        head.push(crate::op::SSAOp::CBranch {
             target: constant(a, 8),
             cond: choice,
         });
         let counted = |addr: u64, phi: &SSAVar, stepped: &SSAVar, back: (u64, &SSAVar)| {
             let mut block = SSABlock::new(addr, 16);
-            block.phis.push(PhiNode {
+            block.push_phi(PhiNode {
                 dst: phi.clone(),
                 sources: vec![(entry, constant(0, 4)), (back.0, back.1.clone())],
                 canonical_storage: None,
             });
-            block.ops.push(crate::op::SSAOp::IntAdd {
+            block.push(crate::op::SSAOp::IntAdd {
                 dst: stepped.clone(),
                 a: phi.clone(),
                 b: constant(1, 4),
@@ -1161,28 +1189,28 @@ mod tests {
 
         let head = SSABlock::new(entry, 16);
         let mut header_block = SSABlock::new(header, 16);
-        header_block.phis.push(PhiNode {
+        header_block.push_phi(PhiNode {
             dst: counter.clone(),
             sources: vec![(entry, constant(0, 4)), (latch, stepped.clone())],
             canonical_storage: None,
         });
-        header_block.ops.push(crate::op::SSAOp::IntLess {
+        header_block.push(crate::op::SSAOp::IntLess {
             dst: guard.clone(),
             a: counter.clone(),
             b: constant(8, 4),
         });
-        header_block.ops.push(crate::op::SSAOp::CBranch {
+        header_block.push(crate::op::SSAOp::CBranch {
             target: constant(body, 8),
             cond: guard,
         });
         let mut body_block = SSABlock::new(body, 16);
-        body_block.ops.push(crate::op::SSAOp::IntMult {
+        body_block.push(crate::op::SSAOp::IntMult {
             dst: offset.clone(),
             a: counter.clone(),
             b: constant(4, 4),
         });
         let mut latch_block = SSABlock::new(latch, 16);
-        latch_block.ops.push(crate::op::SSAOp::IntAdd {
+        latch_block.push(crate::op::SSAOp::IntAdd {
             dst: stepped,
             a: counter,
             b: constant(1, 4),
@@ -1234,40 +1262,40 @@ mod tests {
         let offset = var("offset", 1, 8);
 
         let mut head = SSABlock::new(entry, 16);
-        head.ops.push(crate::op::SSAOp::Load {
+        head.push(crate::op::SSAOp::Load {
             dst: loaded.clone(),
             space: r2il::SpaceId::Ram,
             addr: var("rdi", 0, 8),
         });
-        head.ops.push(crate::op::SSAOp::IntZExt {
+        head.push(crate::op::SSAOp::IntZExt {
             dst: wide.clone(),
             src: loaded,
         });
-        head.ops.push(crate::op::SSAOp::Subpiece {
+        head.push(crate::op::SSAOp::Subpiece {
             dst: compared.clone(),
             src: wide.clone(),
             offset: 0,
         });
-        head.ops.push(crate::op::SSAOp::IntLess {
+        head.push(crate::op::SSAOp::IntLess {
             dst: guard.clone(),
             a: compared,
             b: constant(8, 4),
         });
-        head.ops.push(crate::op::SSAOp::CBranch {
+        head.push(crate::op::SSAOp::CBranch {
             target: constant(body, 8),
             cond: guard,
         });
         let mut body_block = SSABlock::new(body, 16);
-        body_block.ops.push(crate::op::SSAOp::Subpiece {
+        body_block.push(crate::op::SSAOp::Subpiece {
             dst: indexed.clone(),
             src: wide,
             offset: 0,
         });
-        body_block.ops.push(crate::op::SSAOp::IntZExt {
+        body_block.push(crate::op::SSAOp::IntZExt {
             dst: index.clone(),
             src: indexed,
         });
-        body_block.ops.push(crate::op::SSAOp::IntMult {
+        body_block.push(crate::op::SSAOp::IntMult {
             dst: offset.clone(),
             a: index.clone(),
             b: constant(8, 8),
@@ -1287,12 +1315,11 @@ mod tests {
                 (exit, BlockTerminator::Return),
             ],
         );
-        let mut function =
-            SSAFunction::from_exact_test_blocks(&[head, body_block, exit_block], cfg);
-        function.refresh_decompile_prep_facts();
+        let function = SSAFunction::from_exact_test_blocks(&[head, body_block, exit_block], cfg);
+        let prep = function.prep_facts_for_test();
         let graph = SsaGraph::from_function(&function);
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
-        let ranges = solve_value_ranges(&graph, &function, &predicates);
+        let ranges = solve_value_ranges(&graph, &function, Some(&prep), &predicates);
         assert_eq!(range_of(&ranges, &graph, &index).bounds(), Some((0, 7)));
         assert_eq!(range_of(&ranges, &graph, &offset).bounds(), Some((0, 56)));
     }
@@ -1308,24 +1335,24 @@ mod tests {
         let merged = var("eax", 3, 4);
         let inverted = var("r3", 1, 4);
         let mut head = SSABlock::new(entry, 16);
-        head.ops.push(crate::op::SSAOp::IntNot {
+        head.push(crate::op::SSAOp::IntNot {
             dst: inverted.clone(),
             src: constant(0, 4),
         });
         // `xor eax, eax` on one arm, `mov eax, 7` on the other.
         let mut left_block = SSABlock::new(left, 16);
-        left_block.ops.push(crate::op::SSAOp::IntXor {
+        left_block.push(crate::op::SSAOp::IntXor {
             dst: cleared.clone(),
             a: raw.clone(),
             b: raw,
         });
         let mut right_block = SSABlock::new(right, 16);
-        right_block.ops.push(crate::op::SSAOp::Copy {
+        right_block.push(crate::op::SSAOp::Copy {
             dst: seven.clone(),
             src: constant(7, 4),
         });
         let mut merge_block = SSABlock::new(merge, 16);
-        merge_block.phis.push(PhiNode {
+        merge_block.push_phi(PhiNode {
             dst: merged.clone(),
             sources: vec![(left, cleared.clone()), (right, seven)],
             canonical_storage: None,

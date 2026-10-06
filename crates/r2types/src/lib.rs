@@ -1,3 +1,8 @@
+// A fact about a function's values, instructions or blocks is an index over
+// their dense ids (doc/adr-one-ir.md, ROADMAP D11). The exceptions say why
+// at the item that keeps one.
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
+
 pub(crate) mod analysis;
 pub(crate) mod callee;
 pub(crate) mod constraint;
@@ -11,7 +16,6 @@ pub(crate) mod lattice;
 pub(crate) mod model;
 pub(crate) mod prepare;
 mod register_identity;
-pub(crate) mod signature;
 pub(crate) mod signature_infer;
 mod signedness;
 pub(crate) mod solver;
@@ -37,7 +41,6 @@ pub use callee::{
 };
 pub use constraint::{Constraint, ConstraintSource, SolverNode};
 pub(crate) use register_identity::RegisterIdentity;
-pub(crate) use signature::SignatureRegistry;
 pub(crate) use signature_infer::{
     format_signature_prototype, infer_signature_from_prepared_ssa,
     inferred_signature_from_signature_spec, render_signature_type,

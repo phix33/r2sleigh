@@ -25,7 +25,9 @@
 
 pub mod context;
 pub mod disasm;
+pub mod flow;
 mod internal_control;
+pub mod profile;
 pub mod sleigh;
 pub mod text;
 pub mod translate;
@@ -41,7 +43,7 @@ pub use disasm::{
 };
 pub use disasm::{
     EmbeddedMachine, embedded_arch_and_disassembler, embedded_machine, embedded_thumb_machine,
-    lifted_register_storage,
+    embedded_windows_machine, lifted_register_storage,
 };
 use r2il::ArchSpec;
 use r2il::Endianness;
@@ -111,11 +113,6 @@ impl Lifter {
         Ok(Self::from_spec(spec))
     }
 
-    /// Get mutable access to the lift context.
-    pub fn context_mut(&mut self) -> &mut LiftContext {
-        &mut self.ctx
-    }
-
     /// Get read access to the lift context.
     pub fn context(&self) -> &LiftContext {
         &self.ctx
@@ -130,12 +127,6 @@ impl Lifter {
     /// Set memory endianness.
     pub fn set_memory_endianness(&mut self, endianness: Endianness) -> &mut Self {
         self.ctx.set_memory_endianness(endianness);
-        self
-    }
-
-    /// Set the address size.
-    pub fn set_addr_size(&mut self, size: u32) -> &mut Self {
-        self.ctx.set_addr_size(size);
         self
     }
 

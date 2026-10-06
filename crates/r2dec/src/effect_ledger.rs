@@ -13,14 +13,72 @@ use r2ssa::{
     SemanticObligationKind, SsaArtifact,
 };
 
-fn rendered_site(id: SemanticObligationId) -> Option<(u64, usize)> {
-    match id.instruction.site {
-        CanonicalInstructionSite::Phi(_) => Some((id.instruction.block_addr, 0)),
-        CanonicalInstructionSite::Op(op_idx) => usize::try_from(op_idx)
-            .ok()
-            .map(|op_idx| (id.instruction.block_addr, op_idx)),
-        CanonicalInstructionSite::NativeSpan { .. } => None,
+/// What the per-obligation rules ask of the whole function, answered once.
+///
+/// Each was a walk of the function -- every stack slot, round trip, return
+/// control, call target, switch dispatch and removed merge -- made again for
+/// every obligation with no occurrence: on pumasim's `Gui` constructor that
+/// was 411 ms of a 1.25 s render. Built in one pass over each source, each
+/// answer is an indexed lookup.
+struct ElisionIndex<'a> {
+    origins: &'a NormalizationOrigins,
+    dead_frame_slot_accesses: std::collections::BTreeSet<r2ssa::InstId>,
+    round_trip_insts: r2ssa::dense::IdSet<r2ssa::InstId>,
+    return_control_insts: std::collections::BTreeSet<r2ssa::InstId>,
+    direct_call_target_insts: std::collections::BTreeSet<r2ssa::InstId>,
+    switch_dispatch: r2ssa::dense::IdSet<r2ssa::InstId>,
+    /// The first merge normalization removed, by the instruction defining it.
+    removed_phi: std::collections::BTreeMap<r2ssa::InstId, usize>,
+    materialized_phi_edges:
+        std::collections::BTreeMap<r2ssa::InstId, std::collections::BTreeSet<r2ssa::UseSite>>,
+}
+
+impl<'a> ElisionIndex<'a> {
+    fn of(prepared: &SsaArtifact, origins: &'a NormalizationOrigins) -> Self {
+        let certificates = prepared.certificates();
+        let mut removed_phi = std::collections::BTreeMap::new();
+        for (index, removed) in origins.removed_phis().iter().enumerate() {
+            removed_phi.entry(removed.definition.inst).or_insert(index);
+        }
+        Self {
+            origins,
+            dead_frame_slot_accesses: crate::binding_plan::certified_dead_frame_slot_accesses(
+                prepared,
+            ),
+            round_trip_insts: certificates
+                .memory_round_trips
+                .values()
+                .flat_map(|certificate| {
+                    [certificate.write, certificate.read]
+                        .into_iter()
+                        .chain(certificate.redundant_reads.iter().copied())
+                        .map(|access| access.inst)
+                })
+                .collect(),
+            return_control_insts: crate::binding_plan::certified_return_control_insts(prepared),
+            direct_call_target_insts: crate::binding_plan::certified_direct_call_target_insts(
+                prepared,
+            ),
+            switch_dispatch: certificates
+                .switches
+                .values()
+                .flat_map(|switch| switch.dispatch.iter().copied())
+                .collect(),
+            removed_phi,
+            materialized_phi_edges: origins.materialized_phi_edges_by_definition(),
+        }
     }
+}
+
+/// What one surviving occurrence of an obligation discharges: a rendering, for
+/// an instruction the output can stand at. A native span with no operation
+/// has nowhere to render.
+fn rendered_outcome(id: SemanticObligationId) -> Option<Outcome> {
+    (!matches!(
+        id.instruction.site,
+        CanonicalInstructionSite::NativeSpan { .. }
+    ))
+    .then_some(Outcome::Rendered)
 }
 
 /// The zero-occurrence disposition, with an eye on the ones that must not be
@@ -33,11 +91,11 @@ fn rendered_site(id: SemanticObligationId) -> Option<(u64, usize)> {
 /// that took it is named rather than hunted.
 fn traced_zero_occurrence_outcome(
     prepared: &SsaArtifact,
-    origins: &NormalizationOrigins,
+    index: &ElisionIndex<'_>,
     effects: &SurvivingEffectObservations,
     id: SemanticObligationId,
 ) -> Option<Outcome> {
-    let outcome = upstream_zero_occurrence_outcome(prepared, origins, effects, id);
+    let outcome = upstream_zero_occurrence_outcome(prepared, index, effects, id);
     if matches!(
         id.kind,
         SemanticObligationKind::Call
@@ -64,16 +122,16 @@ fn traced_zero_occurrence_outcome(
 /// of the effect stream rather than of a certificate.
 fn observed_object_elision(
     prepared: &SsaArtifact,
+    index: &ElisionIndex<'_>,
     id: SemanticObligationId,
 ) -> Option<ElisionReason> {
     // A store into a frame slot this function owns and never reads. The
     // obligation is real -- writing memory is an effect -- and it is answered
     // by the certificate that nothing can observe the result.
     if id.kind == SemanticObligationKind::ObservableMemoryWrite
-        && let CanonicalInstructionSite::Op(op_index) = id.instruction.site
-        && let Ok(op_index) = usize::try_from(op_index)
-        && crate::binding_plan::certified_dead_frame_slot_accesses(prepared)
-            .contains(&(id.instruction.block_addr, op_index))
+        && let CanonicalInstructionSite::Op(op) = id.instruction.site
+        && let Some(inst) = prepared.graph().inst_for_op(op)
+        && index.dead_frame_slot_accesses.contains(&inst)
     {
         return Some(ElisionReason::DeadFrameSlotStore);
     }
@@ -85,18 +143,9 @@ fn observed_object_elision(
         SemanticObligationKind::ObservableMemoryWrite
             | SemanticObligationKind::ObservableMemoryRead
             | SemanticObligationKind::LiveValueProducer
-    ) && let CanonicalInstructionSite::Op(op_index) = id.instruction.site
-        && let Ok(op_index) = usize::try_from(op_index)
-        && prepared
-            .certificates()
-            .memory_round_trips
-            .values()
-            .any(|certificate| {
-                certificate.block_addr == id.instruction.block_addr
-                    && (certificate.write_op_index == op_index
-                        || certificate.read_op_index == op_index
-                        || certificate.redundant_read_op_indexes.contains(&op_index))
-            })
+    ) && let CanonicalInstructionSite::Op(op) = id.instruction.site
+        && let Some(inst) = prepared.graph().inst_for_op(op)
+        && index.round_trip_insts.contains(inst)
     {
         return Some(ElisionReason::MemoryRoundTrip);
     }
@@ -110,6 +159,7 @@ fn observed_object_elision(
 /// and the caller reads one name instead of seven.
 fn certified_instruction_elision(
     prepared: &SsaArtifact,
+    index: &ElisionIndex<'_>,
     id: SemanticObligationId,
     source_inst: Option<r2ssa::InstId>,
 ) -> Option<ElisionReason> {
@@ -118,7 +168,7 @@ fn certified_instruction_elision(
         prepared
             .certificates()
             .stack_frame_round_trip_by_inst
-            .contains_key(&inst)
+            .contains(inst)
     }) {
         return Some(ElisionReason::StackFrame);
     }
@@ -126,7 +176,7 @@ fn certified_instruction_elision(
         prepared
             .certificates()
             .machine_return_control_by_inst
-            .contains_key(&inst)
+            .contains(inst)
     }) {
         return Some(ElisionReason::ReturnControl);
     }
@@ -134,12 +184,10 @@ fn certified_instruction_elision(
     // is a copy of the link register into the program counter followed by a
     // return on that, and the copy carries an obligation of its own that no
     // statement answers, because the structured form says `return`.
-    if source_inst.is_some_and(|inst| {
-        crate::binding_plan::certified_return_control_insts(prepared).contains(&inst)
-    }) {
+    if source_inst.is_some_and(|inst| index.return_control_insts.contains(&inst)) {
         return Some(ElisionReason::ReturnControl);
     }
-    if let Some(reason) = observed_object_elision(prepared, id) {
+    if let Some(reason) = observed_object_elision(prepared, index, id) {
         return Some(reason);
     }
     // The lane of an entry register a formal was minted from: its definition
@@ -163,7 +211,7 @@ fn certified_instruction_elision(
                 r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. })
             ) && inst
                 .output
-                .is_some_and(|output| !prepared.certificates().call_results.contains_key(&output))
+                .is_some_and(|output| !prepared.certificates().call_results.contains(output))
         })
     }) {
         return Some(ElisionReason::UnclaimedCallClobber);
@@ -174,20 +222,17 @@ fn certified_instruction_elision(
         prepared
             .certificates()
             .call_return_address_stores
-            .contains(&inst)
+            .contains(inst)
     }) {
         return Some(ElisionReason::CallReturnAddress);
     }
     // The copies a callee's address reaches its call through. The call spells
     // the callee's name, so no statement answers for the copy that put the
     // address in a temporary first.
-    if source_inst.is_some_and(|inst| {
-        crate::binding_plan::certified_direct_call_target_insts(prepared).contains(&inst)
-    }) {
+    if source_inst.is_some_and(|inst| index.direct_call_target_insts.contains(&inst)) {
         return Some(ElisionReason::DirectCallTarget);
     }
-    if source_inst.is_some_and(|inst| prepared.certificates().stack_geometry.insts.contains(&inst))
-    {
+    if source_inst.is_some_and(|inst| prepared.certificates().stack_geometry.insts.contains(inst)) {
         return Some(ElisionReason::DeadStackBase);
     }
     None
@@ -200,15 +245,15 @@ fn certified_instruction_elision(
 /// reported the merge as unrendered when what it stood for is rendered.
 fn removed_phi_edge_elision(
     prepared: &SsaArtifact,
-    origins: &NormalizationOrigins,
+    index: &ElisionIndex<'_>,
     id: SemanticObligationId,
     source_inst: Option<r2ssa::InstId>,
 ) -> Option<ElisionReason> {
     if let Some(inst) = source_inst
-        && let Some(removed) = origins
-            .removed_phis()
-            .iter()
-            .find(|removed| removed.definition.inst == inst)
+        && let Some(removed) = index
+            .removed_phi
+            .get(&inst)
+            .map(|at| &index.origins.removed_phis()[*at])
     {
         match (id.kind, id.component) {
             (
@@ -241,11 +286,11 @@ fn removed_phi_edge_elision(
                 | SemanticObligationKind::LiveValueProducer,
                 _,
             ) if {
-                let materialized = origins.materialized_phi_edges(inst);
-                removed
-                    .incoming_sites
-                    .iter()
-                    .all(|site| removed.noop_sites().contains(site) || materialized.contains(site))
+                let materialized = index.materialized_phi_edges.get(&inst);
+                removed.incoming_sites.iter().all(|site| {
+                    removed.noop_sites().contains(site)
+                        || materialized.is_some_and(|edges| edges.contains(site))
+                })
             } =>
             {
                 return Some(ElisionReason::MaterializedPhiEdges);
@@ -264,7 +309,7 @@ fn removed_phi_edge_elision(
 fn merge_and_copy_elision(
     prepared: &SsaArtifact,
     effects: &SurvivingEffectObservations,
-    origins: &NormalizationOrigins,
+    index: &ElisionIndex<'_>,
     id: SemanticObligationId,
     source_inst: Option<r2ssa::InstId>,
 ) -> Option<ElisionReason> {
@@ -311,7 +356,7 @@ fn merge_and_copy_elision(
         return Some(ElisionReason::CoalescedCopy);
     }
 
-    if let Some(reason) = removed_phi_edge_elision(prepared, origins, id, source_inst) {
+    if let Some(reason) = removed_phi_edge_elision(prepared, index, id, source_inst) {
         return Some(reason);
     }
     None
@@ -320,6 +365,7 @@ fn merge_and_copy_elision(
 /// The elision a transfer the structured form expresses by placement answers.
 fn structured_transfer_elision(
     prepared: &SsaArtifact,
+    index: &ElisionIndex<'_>,
     id: SemanticObligationId,
     source_inst: Option<r2ssa::InstId>,
 ) -> Option<ElisionReason> {
@@ -373,11 +419,7 @@ fn structured_transfer_elision(
     // of all of that, so none of it is an effect the rendered program performs
     // beside the switch.
     if let Some(inst) = source_inst
-        && prepared
-            .certificates()
-            .switches
-            .values()
-            .any(|switch| switch.dispatch.contains(&inst))
+        && index.switch_dispatch.contains(inst)
     {
         return Some(ElisionReason::DirectControlTarget);
     }
@@ -392,7 +434,7 @@ fn structured_transfer_elision(
 /// typed codegen refusal so deletion cannot be relabelled as successful elision.
 fn upstream_zero_occurrence_outcome(
     prepared: &SsaArtifact,
-    origins: &NormalizationOrigins,
+    index: &ElisionIndex<'_>,
     effects: &SurvivingEffectObservations,
     id: SemanticObligationId,
 ) -> Option<Outcome> {
@@ -417,14 +459,14 @@ fn upstream_zero_occurrence_outcome(
         .obligations()
         .get(&id)
         .and_then(|obligation| obligation.source.graph_inst());
-    if let Some(reason) = certified_instruction_elision(prepared, id, source_inst) {
+    if let Some(reason) = certified_instruction_elision(prepared, index, id, source_inst) {
         return Some(Outcome::Elided(reason));
     }
-    if let Some(reason) = merge_and_copy_elision(prepared, effects, origins, id, source_inst) {
+    if let Some(reason) = merge_and_copy_elision(prepared, effects, index, id, source_inst) {
         return Some(Outcome::Elided(reason));
     }
 
-    if let Some(reason) = structured_transfer_elision(prepared, id, source_inst) {
+    if let Some(reason) = structured_transfer_elision(prepared, index, id, source_inst) {
         return Some(Outcome::Elided(reason));
     }
 
@@ -503,7 +545,8 @@ pub(crate) fn build_obligation_ledger(
     residual: &std::collections::BTreeSet<SemanticObligationId>,
 ) -> ObligationLedger {
     let obligations = prepared.obligations();
-    let mut ledger = ObligationLedger::open(obligations);
+    let index = ElisionIndex::of(prepared, origins);
+    let mut ledger = ObligationLedger::open(obligations, prepared.graph());
     for id in obligations.obligations().keys().copied() {
         let count = effects
             .occurrence_count(id)
@@ -515,22 +558,23 @@ pub(crate) fn build_obligation_ledger(
         // obligation a residual read stands in for has its occurrence, and
         // reading one as rendered would count a statement that traps.
         if effects.gapped_effect(id) || residual.contains(&id) {
-            if let Some((block_addr, op_idx)) = rendered_site(id) {
-                let _ = ledger.record(id, Outcome::Gapped { block_addr, op_idx });
+            if !matches!(
+                id.instruction.site,
+                CanonicalInstructionSite::NativeSpan { .. }
+            ) {
+                let _ = ledger.record(id, Outcome::Gapped);
             }
             continue;
         }
         let outcome = match count {
-            0 => traced_zero_occurrence_outcome(prepared, origins, effects, id),
-            1 => rendered_site(id)
-                .map(|(block_addr, op_idx)| Outcome::Rendered { block_addr, op_idx }),
+            0 => traced_zero_occurrence_outcome(prepared, &index, effects, id),
+            1 => rendered_outcome(id),
             // Several occurrences are one execution when the structured form
             // put them on paths that exclude one another -- a shared tail
             // emitted once per path that reaches it rather than jumped to.
             // Anything else rendered twice is a duplicate, which changes what
             // the program does and is scored as a refusal.
-            _ if effects.duplicates_are_exclusive(id) => rendered_site(id)
-                .map(|(block_addr, op_idx)| Outcome::Rendered { block_addr, op_idx }),
+            _ if effects.duplicates_are_exclusive(id) => rendered_outcome(id),
             // And several occurrences are one execution when what was rendered
             // is a literal. The machine writes the temporary once; a reader
             // that spells the constant instead of naming it performs nothing,
@@ -538,17 +582,13 @@ pub(crate) fn build_obligation_ledger(
             // many times it was computed. Admitted only for a value that reads
             // nothing at all, because an expression repeated at three readers
             // would be three evaluations.
-            _ if effects.duplicates_are_a_repeated_literal(id) => rendered_site(id)
-                .map(|(block_addr, op_idx)| Outcome::Rendered { block_addr, op_idx }),
+            _ if effects.duplicates_are_a_repeated_literal(id) => rendered_outcome(id),
             // And an address computation every access spells by naming its
             // object. The machine computes it once and no rendered access
             // performs it, so the count is how many accesses named it.
-            _ if effects.duplicates_are_a_named_object_address(id) => rendered_site(id)
-                .map(|(block_addr, op_idx)| Outcome::Rendered { block_addr, op_idx }),
+            _ if effects.duplicates_are_a_named_object_address(id) => rendered_outcome(id),
             _ => {
-                if let Some(outcome) = rendered_site(id)
-                    .map(|(block_addr, op_idx)| Outcome::Rendered { block_addr, op_idx })
-                {
+                if let Some(outcome) = rendered_outcome(id) {
                     let _ = ledger.record(id, outcome);
                 }
                 let _ = ledger.record_conflict(id);

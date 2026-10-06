@@ -80,6 +80,34 @@ jobs:
           cargo nextest run --workspace --all-features --no-fail-fast
           cargo test --workspace --all-features --doc --no-fail-fast
 
+  # ── The repository's own lints (tools/dylints/r2sleigh_lints) ──────
+  #
+  # A crate that has cleared a rule denies it at its root, so a new
+  # violation fails here: r2ssa and r2types deny entity_keyed_map
+  # (doc/adr-one-ir.md).
+  # The other rules still warn while their debt is paid down.
+  dylint:
+    name: Dylint (r2ssa, r2types)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the toolchain the lints pin
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' tools/dylints/r2sleigh_lints/rust-toolchain)"
+          rustup toolchain install "$channel" --profile minimal --component rustc-dev,llvm-tools-preview
+          rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            tools/dylints/r2sleigh_lints -> target
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-dylint,dylint-link
+      - name: r2ssa and r2types
+        run: cargo dylint --path tools/dylints/r2sleigh_lints -p r2ssa -p r2types -- --all-features --lib
+
   # ── One build of the shell every gate grades ───────────────────────
   #
   # Built once, with the `ci` profile: optimised, so the gates fit in minutes,
@@ -147,6 +175,71 @@ jobs:
             --bins "$RUNNER_TEMP/testbins/elf" \
             --r2s target/ci/r2s \
             --limit 12 --functions 8
+
+  # ── Census and release timing, against the base ───────────────────
+  #
+  # Every function of the repository's binaries rendered by the base and by
+  # this change: a structural change is byte-identical or says which lines
+  # moved. The big functions are timed on both builds on the same runner, so a
+  # quadratic pass fails here rather than in someone's session.
+  census:
+    name: Census + Timing vs Base
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: r2s
+          path: ${{ runner.temp }}/head
+      - run: chmod +x "$RUNNER_TEMP/head/r2s"
+      - name: Install the toolchain the repository pins
+        run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-shell
+      - name: Build the base
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -eu
+          git worktree add -q "$RUNNER_TEMP/base-src" "$BASE"
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
+            cargo build --profile ci -p r2s --features sleigh \
+            --manifest-path "$RUNNER_TEMP/base-src/Cargo.toml"
+          mkdir -p "$RUNNER_TEMP/base"
+          cp target/ci/r2s "$RUNNER_TEMP/base/r2s"
+      - name: Fetch radare2's test binaries
+        run: |
+          set -eu
+          dir="$RUNNER_TEMP/testbins"
+          git init -q "$dir"
+          git -C "$dir" remote add origin "$TESTBINS_URL"
+          git -C "$dir" sparse-checkout set elf
+          git -C "$dir" fetch -q --depth 1 --filter=blob:none origin "$TESTBINS_REF"
+          git -C "$dir" checkout -q FETCH_HEAD
+      - name: Census
+        run: |
+          set -eu
+          for side in base head; do
+            python3 scripts/census.py run --r2s "$RUNNER_TEMP/$side/r2s" --out "$RUNNER_TEMP/census-$side"
+          done
+          python3 scripts/census.py diff "$RUNNER_TEMP/census-base" "$RUNNER_TEMP/census-head" \
+            --report "$RUNNER_TEMP/census.diff" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Release timing
+        run: |
+          set -o pipefail
+          python3 scripts/census.py time --r2s "$RUNNER_TEMP/base/r2s" --r2s "$RUNNER_TEMP/head/r2s" \
+            --bins "$RUNNER_TEMP/testbins/elf" --runs 5 --budget 1.3 | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: census-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/census.diff
+          if-no-files-found: warn
 
   # ── Source-gold: graded against the source, not against another tool ──
   #
@@ -294,6 +387,89 @@ jobs:
             ${{ runner.temp }}/equiv/baseline.proposed.json
           if-no-files-found: warn
 
+  # The same ratchet for AArch64 (D6): built with Ubuntu 24.04's cross gcc 13 and
+  # clang 18 `--target=aarch64-linux-gnu`, run under qemu-user, which is the
+  # toolchain baseline-aarch64.json was blessed on. Emulation makes each
+  # configuration slower, so the sources split three ways.
+  equivalence-shard-aarch64:
+    name: Equivalence aarch64 ${{ matrix.compiler }}-${{ matrix.opt }} ${{ matrix.part.name }}
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        opt: [O0, O1, O2]
+        part:
+          - name: a
+            sources: tests/corpus/branchy.c tests/corpus/hashes.c
+          - name: b
+            sources: tests/corpus/values.c tests/gold/flag_materialisation.c tests/gold/review.c tests/gold/manual_limits.c tests/gold/code_pointer_table.c
+          - name: shapes
+            sources: tests/corpus/shapes.c
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: r2s
+          path: target/ci
+      - run: chmod +x target/ci/r2s
+      - name: Install the AArch64 cross toolchain and qemu-user
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user
+      - name: Print the compilers
+        run: |
+          aarch64-linux-gnu-gcc --version | head -n 1
+          clang --version | head -n 1
+          qemu-aarch64 --version | head -n 1
+      - name: Grade the shard
+        run: |
+          timeout -s ABRT 22m python3 tests/equiv/run_equiv.py \
+            --r2s target/ci/r2s \
+            --target aarch64 \
+            --sources ${{ matrix.part.sources }} \
+            --compilers ${{ matrix.compiler }} \
+            --opts ${{ matrix.opt }} \
+            --jobs 4 \
+            --out "$RUNNER_TEMP/equiv"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: equiv-aarch64-shard-${{ matrix.compiler }}-${{ matrix.opt }}-${{ matrix.part.name }}
+          path: ${{ runner.temp }}/equiv/records.json
+          retention-days: 7
+          if-no-files-found: error
+
+  equivalence-aarch64:
+    name: Equivalence Ratchet aarch64
+    runs-on: ubuntu-24.04
+    needs: equivalence-shard-aarch64
+    if: ${{ !cancelled() }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: equiv-aarch64-shard-*
+          path: ${{ runner.temp }}/shards
+      - name: Hold every function to the baseline
+        run: |
+          python3 tests/equiv/merge_shards.py \
+            --baseline tests/equiv/baseline-aarch64.json \
+            --out "$RUNNER_TEMP/equiv" \
+            "$RUNNER_TEMP"/shards/*/records.json
+      - name: Archive the records and the proposed baseline
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: equivalence-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/equiv/records.json
+            ${{ runner.temp }}/equiv/baseline.proposed.json
+          if-no-files-found: warn
+
   # ── Whole-binary render coverage ────────────────────────────────────
   #
   # The other gates score nine hand-picked functions and check that what they
@@ -334,7 +510,7 @@ jobs:
     name: Release Build
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    needs: [quality, capture-gate, source-gold, equivalence-harness, equivalence, coverage]
+    needs: [quality, capture-gate, source-gold, equivalence-harness, equivalence, equivalence-aarch64, coverage]
     if: github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v6

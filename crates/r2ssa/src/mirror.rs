@@ -26,6 +26,13 @@ use crate::semantic::{ObjectKind, ObjectModel, StructuredDataflowFacts, Structur
 /// a member is computed from is what the loop loaded. So the question is whether
 /// a frame-slot read inside the loop reaches a value the carrier passes through.
 /// If it does, the slot carried the value and the register was handed a copy.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub fn carrier_mirrors_memory(
     structured: &StructuredDataflowFacts,
     objects: &ObjectModel,
@@ -49,7 +56,9 @@ pub fn carrier_mirrors_memory(
         .filter(|access| {
             !access.is_write
                 && access.provenance_complete
-                && in_loop.contains(&access.block_addr)
+                && graph
+                    .block_addr_of(access.id.inst)
+                    .is_some_and(|block_addr| in_loop.contains(&block_addr))
                 && objects
                     .object(access.object)
                     .is_some_and(|object| matches!(object.kind, ObjectKind::StackSlot { .. }))

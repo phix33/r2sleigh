@@ -185,6 +185,22 @@ impl CTypeLike {
         }
     }
 
+    /// Plain `char`, spelled as itself over the byte it is.
+    pub fn plain_char(signed: bool) -> Self {
+        let signedness = if signed {
+            Signedness::Signed
+        } else {
+            Signedness::Unsigned
+        };
+        Self::named(
+            "char",
+            CTypeLike::Int {
+                bits: 8,
+                signedness,
+            },
+        )
+    }
+
     /// A name over the type it stands for.
     pub fn named(name: impl Into<String>, ty: CTypeLike) -> Self {
         CTypeLike::Typedef {
@@ -228,11 +244,6 @@ impl CTypeLike {
     /// Whether this is a struct or union, through any names.
     pub fn is_aggregate(&self) -> bool {
         self.aggregate_tag().is_some()
-    }
-
-    /// Whether this is a union rather than a struct, through any names.
-    pub fn is_union(&self) -> bool {
-        matches!(self.unaliased(), CTypeLike::Union(_))
     }
 
     /// Whether this is an array, through any names.
@@ -281,17 +292,6 @@ impl CTypeLike {
         }
     }
 
-    /// Whether this is a signed integer.
-    pub fn is_signed(&self) -> bool {
-        matches!(
-            self,
-            CTypeLike::Int {
-                signedness: Signedness::Signed,
-                ..
-            }
-        )
-    }
-
     /// Whether this is an integer, boolean included.
     pub fn is_integer(&self) -> bool {
         matches!(self, CTypeLike::Int { .. } | CTypeLike::Bool)
@@ -300,11 +300,6 @@ impl CTypeLike {
     /// Whether this is a pointer to anything.
     pub fn is_pointer(&self) -> bool {
         matches!(self, CTypeLike::Pointer(_))
-    }
-
-    /// Whether this is `void *`.
-    pub fn is_void_pointer(&self) -> bool {
-        matches!(self, CTypeLike::Pointer(inner) if matches!(**inner, CTypeLike::Void))
     }
 }
 

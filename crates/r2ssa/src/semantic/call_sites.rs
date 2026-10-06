@@ -9,7 +9,7 @@ pub(crate) fn collect_call_sites(
     machine_context: Option<&SourceMachineContext>,
 ) -> CallSiteFacts {
     let mut by_id = BTreeMap::new();
-    let mut by_inst = BTreeMap::new();
+    let mut by_inst = crate::dense::IdMap::default();
     let mut next_id = 0u32;
 
     for &block_addr in function.block_addrs() {
@@ -26,7 +26,7 @@ pub(crate) fn collect_call_sites(
             _ => None,
         };
 
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_idx, (op_id, op)) in block.sited().enumerate() {
             let id = CallSiteId(next_id);
             // The transfer names the instruction it was lifted from, and the
             // raw input names which of its instructions are call sites; that
@@ -44,7 +44,7 @@ pub(crate) fn collect_call_sites(
                 .and_then(|(context, instruction)| context.raw_call_site_at(instruction));
             let (target, transfer) = match op {
                 SSAOp::Call { target, .. } | SSAOp::CallInd { target, .. } => {
-                    (target.clone(), CallSiteTransfer::Call)
+                    (*target, CallSiteTransfer::Call)
                 }
                 SSAOp::Branch { target, .. } | SSAOp::BranchInd { target, .. }
                     if machine_context.is_some_and(|context| {
@@ -52,7 +52,7 @@ pub(crate) fn collect_call_sites(
                             context.is_tail_call_site(identity)
                                 && match op {
                                     SSAOp::Branch { .. } => graph
-                                        .value_id_for_var(target)
+                                        .value_of(*target)
                                         .and_then(|value| graph.value(value))
                                         .is_some_and(|value| {
                                             value.canonical_storage == Some(identity.target())
@@ -66,7 +66,7 @@ pub(crate) fn collect_call_sites(
                                     SSAOp::BranchInd { .. } => {
                                         identity.target().space == crate::CanonicalStorageSpace::Ram
                                             || graph
-                                                .value_id_for_var(target)
+                                                .value_of(*target)
                                                 .and_then(|value| graph.value(value))
                                                 .is_some_and(|value| {
                                                     value.canonical_storage
@@ -78,18 +78,18 @@ pub(crate) fn collect_call_sites(
                         })
                     }) =>
                 {
-                    (target.clone(), CallSiteTransfer::TailCall)
+                    (*target, CallSiteTransfer::TailCall)
                 }
                 _ => continue,
             };
-            let Some(inst_id) = graph.inst_id_for_op_site(block_addr, op_idx) else {
+            let Some(inst_id) = graph.inst_for_op(op_id) else {
                 continue;
             };
-            let Some(target_id) = graph.value_id_for_var(&target) else {
+            let Some(target_id) = graph.value_of(target) else {
                 continue;
             };
             next_id = next_id.saturating_add(1);
-            let direct_target = resolve_graph_literal_value(graph, prep_facts, &target)
+            let direct_target = resolve_graph_literal_value(graph, prep_facts, target_id)
                 .or_else(|| raw_identity.and_then(direct_target_from_raw_identity));
             by_inst.insert(inst_id, id);
             by_id.insert(
@@ -102,7 +102,7 @@ pub(crate) fn collect_call_sites(
                     direct_target,
                     fallthrough: if transfer == CallSiteTransfer::TailCall {
                         None
-                    } else if op_idx + 1 == block.ops.len() {
+                    } else if op_idx + 1 == block.ops().len() {
                         fallthrough
                     } else {
                         None

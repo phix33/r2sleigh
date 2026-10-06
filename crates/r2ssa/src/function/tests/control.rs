@@ -62,23 +62,23 @@ fn unchecked_and_controlled_decompile_builders_produce_identical_artifacts() {
     );
     for (lhs, rhs) in unchecked
         .function()
-        .blocks()
+        .named_blocks()
         .iter()
-        .zip(controlled.function().blocks())
+        .zip(controlled.function().named_blocks())
     {
         assert_eq!(lhs.addr, rhs.addr);
         assert_eq!(lhs.size, rhs.size);
-        assert_eq!(lhs.ops, rhs.ops);
-        assert_eq!(lhs.phis.len(), rhs.phis.len());
-        for (lhs_phi, rhs_phi) in lhs.phis.iter().zip(&rhs.phis) {
+        assert_eq!(lhs.ops(), rhs.ops());
+        assert_eq!(lhs.phis().len(), rhs.phis().len());
+        for (lhs_phi, rhs_phi) in lhs.phis().iter().zip(rhs.phis()) {
             assert_eq!(lhs_phi.dst, rhs_phi.dst);
             assert_eq!(lhs_phi.sources, rhs_phi.sources);
             assert_eq!(lhs_phi.canonical_storage, rhs_phi.canonical_storage);
         }
     }
     assert_eq!(
-        unchecked.function().decompile_prep_facts(),
-        controlled.function().decompile_prep_facts()
+        unchecked.decompile_prep_facts(),
+        controlled.decompile_prep_facts()
     );
     assert_eq!(unchecked.graph(), controlled.graph());
     assert_eq!(unchecked.facts(), controlled.facts());
@@ -109,25 +109,13 @@ fn prepared_function_ssa_tracks_mode_and_keeps_named_blocks() {
         .with_name("prepared_demo");
 
     assert_eq!(prepared.name.as_deref(), Some("prepared_demo"));
-    assert!(
-        prepared.decompile_prep_facts().is_some(),
-        "decompile preparation should retain prep facts"
-    );
 
-    let local_blocks = prepared.local_ssa_blocks();
-    assert_eq!(local_blocks.len(), 1);
-    assert_eq!(local_blocks[0].addr, 0x1000);
-    assert_eq!(
-        local_blocks[0].ops,
-        prepared.blocks().iter().next().expect("entry block").ops
-    );
+    assert_eq!(prepared.function().named_blocks().len(), 1);
+    assert_eq!(prepared.function().named_blocks()[0].addr, 0x1000);
 
-    let symbolic = SsaArtifact::for_symbolic(&blocks, Some(&arch))
-        .expect("symbolic prepared SSA should build");
-    assert!(
-        symbolic.decompile_prep_facts().is_some(),
-        "symbolic preparation should retain canonical prep facts for shared consumers"
-    );
+    // Every artifact is sealed, so the symbolic one carries prep facts too:
+    // the type says so, where a test used to.
+    SsaArtifact::for_symbolic(&blocks, Some(&arch)).expect("symbolic prepared SSA should build");
 }
 
 #[test]
@@ -188,7 +176,12 @@ fn prepared_function_does_not_infer_return_phi_without_source_boundary_authority
     let prepared =
         SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
     assert!(prepared.certificates().returns.is_empty());
-    assert!(prepared.return_certificate_for_op(0x1114, 0).is_none());
+    assert!(
+        prepared
+            .inst_at(0x1114, 0)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
+            .is_none()
+    );
 }
 
 #[test]
@@ -252,7 +245,7 @@ fn prepared_expression_certificates_render_only_identity_phis() {
     let identity_phi = prepared_with_phi_values(7, 7);
     let identity_value = identity_phi
         .graph()
-        .inst_id_for_op_site(0x1730, 0)
+        .inst_spelled_at(0x1730, 0)
         .and_then(|inst| identity_phi.graph().inst(inst))
         .and_then(|inst| inst.inputs.first().copied())
         .expect("identity phi return input");
@@ -260,7 +253,7 @@ fn prepared_expression_certificates_render_only_identity_phis() {
         identity_phi
             .certificates()
             .expressions
-            .get(&identity_value)
+            .get(identity_value)
             .is_some_and(|cert| cert.renderable),
         "identity phi over one renderable ValueId should be renderable"
     );
@@ -268,7 +261,7 @@ fn prepared_expression_certificates_render_only_identity_phis() {
     let mixed_phi = prepared_with_phi_values(7, 9);
     let mixed_value = mixed_phi
         .graph()
-        .inst_id_for_op_site(0x1730, 0)
+        .inst_spelled_at(0x1730, 0)
         .and_then(|inst| mixed_phi.graph().inst(inst))
         .and_then(|inst| inst.inputs.first().copied())
         .expect("mixed phi return input");
@@ -276,7 +269,7 @@ fn prepared_expression_certificates_render_only_identity_phis() {
         mixed_phi
             .certificates()
             .expressions
-            .get(&mixed_value)
+            .get(mixed_value)
             .is_some_and(|cert| cert.renderable),
         "non-memory phi with sibling values should be renderable; divergence handled by structurer"
     );
@@ -328,29 +321,44 @@ fn prepared_expression_certificates_render_loop_carried_recurrence_phi() {
     let phi = SSAVar::new("RAX", 2, 8);
     let update_source = SSAVar::new("tmp:update", 1, 8);
     let update = SSAVar::new("RAX", 3, 8);
-    function.get_block_mut(0x1810).expect("loop header").phis = vec![PhiNode {
-        dst: phi.clone(),
-        sources: vec![(0x1800, init), (0x1820, update.clone())],
-        canonical_storage: None,
-    }];
-    function.get_block_mut(0x1820).expect("loop latch").ops = vec![
-        SSAOp::IntAdd {
-            dst: update_source.clone(),
-            a: phi.clone(),
-            b: SSAVar::constant(1, 8),
-        },
-        SSAOp::Copy {
-            dst: update,
-            src: update_source.clone(),
-        },
-        SSAOp::Branch {
-            target: SSAVar::new("ram:1810", 0, 8),
-            instruction: None,
-        },
-    ];
-    function.get_block_mut(0x1814).expect("loop exit").ops = vec![SSAOp::Return {
-        target: phi.clone(),
-    }];
+    function
+        .edit_block(0x1810)
+        .expect("loop header")
+        .replace_phis(
+            crate::Pass::Fixture,
+            vec![PhiNode {
+                dst: phi.clone(),
+                sources: vec![(0x1800, init), (0x1820, update.clone())],
+                canonical_storage: None,
+            }],
+        );
+    function
+        .edit_block(0x1820)
+        .expect("loop latch")
+        .replace_ops(
+            crate::Pass::Fixture,
+            vec![
+                SSAOp::IntAdd {
+                    dst: update_source.clone(),
+                    a: phi.clone(),
+                    b: SSAVar::constant(1, 8),
+                },
+                SSAOp::Copy {
+                    dst: update,
+                    src: update_source.clone(),
+                },
+                SSAOp::Branch {
+                    target: SSAVar::new("ram:1810", 0, 8),
+                    instruction: None,
+                },
+            ],
+        );
+    function.edit_block(0x1814).expect("loop exit").replace_ops(
+        crate::Pass::Fixture,
+        vec![SSAOp::Return {
+            target: phi.clone(),
+        }],
+    );
 
     let prepared = SsaArtifact::new(function);
     let carrier = prepared
@@ -374,7 +382,7 @@ fn prepared_expression_certificates_render_loop_carried_recurrence_phi() {
         prepared
             .certificates()
             .expressions
-            .get(&carrier.phi)
+            .get(carrier.phi)
             .is_some_and(|cert| cert.renderable),
         "loop-header phi is renderable when the loop certificate proves the backedge and the update is pure modulo that phi"
     );
@@ -418,22 +426,28 @@ fn prepared_predicates_preserve_machine_point_comparison_before_normalization() 
     let updated = SSAVar::new("tmp:updated", 1, 8);
     let zero = SSAVar::constant(0, 8);
     let condition = SSAVar::new("tmp:condition", 1, 1);
-    function.get_block_mut(0x1900).expect("branch block").ops = vec![
-        SSAOp::IntSub {
-            dst: updated.clone(),
-            a: before.clone(),
-            b: one.clone(),
-        },
-        SSAOp::IntNotEqual {
-            dst: condition.clone(),
-            a: updated.clone(),
-            b: zero.clone(),
-        },
-        SSAOp::CBranch {
-            target: SSAVar::new("ram:1910", 0, 8),
-            cond: condition,
-        },
-    ];
+    function
+        .edit_block(0x1900)
+        .expect("branch block")
+        .replace_ops(
+            crate::Pass::Fixture,
+            vec![
+                SSAOp::IntSub {
+                    dst: updated.clone(),
+                    a: before.clone(),
+                    b: one.clone(),
+                },
+                SSAOp::IntNotEqual {
+                    dst: condition.clone(),
+                    a: updated.clone(),
+                    b: zero.clone(),
+                },
+                SSAOp::CBranch {
+                    target: SSAVar::new("ram:1910", 0, 8),
+                    cond: condition,
+                },
+            ],
+        );
 
     let prepared = SsaArtifact::new(function);
     let predicate = prepared
@@ -509,32 +523,38 @@ fn prepared_predicates_recover_signed_greater_equal_from_x86_flags() {
     let overflow = SSAVar::new("OF", 1, 1);
     let sign = SSAVar::new("SF", 1, 1);
     let condition = SSAVar::new("tmp:condition", 1, 1);
-    function.get_block_mut(0x1920).expect("branch block").ops = vec![
-        SSAOp::IntSBorrow {
-            dst: overflow.clone(),
-            a: lhs.clone(),
-            b: rhs.clone(),
-        },
-        SSAOp::IntSub {
-            dst: difference.clone(),
-            a: lhs.clone(),
-            b: rhs.clone(),
-        },
-        SSAOp::IntSLess {
-            dst: sign.clone(),
-            a: difference,
-            b: SSAVar::constant(0, 4),
-        },
-        SSAOp::IntEqual {
-            dst: condition.clone(),
-            a: overflow,
-            b: sign,
-        },
-        SSAOp::CBranch {
-            target: SSAVar::new("ram:1930", 0, 8),
-            cond: condition,
-        },
-    ];
+    function
+        .edit_block(0x1920)
+        .expect("branch block")
+        .replace_ops(
+            crate::Pass::Fixture,
+            vec![
+                SSAOp::IntSBorrow {
+                    dst: overflow.clone(),
+                    a: lhs.clone(),
+                    b: rhs.clone(),
+                },
+                SSAOp::IntSub {
+                    dst: difference.clone(),
+                    a: lhs.clone(),
+                    b: rhs.clone(),
+                },
+                SSAOp::IntSLess {
+                    dst: sign.clone(),
+                    a: difference,
+                    b: SSAVar::constant(0, 4),
+                },
+                SSAOp::IntEqual {
+                    dst: condition.clone(),
+                    a: overflow,
+                    b: sign,
+                },
+                SSAOp::CBranch {
+                    target: SSAVar::new("ram:1930", 0, 8),
+                    cond: condition,
+                },
+            ],
+        );
 
     let prepared = SsaArtifact::new(function);
     let comparison = prepared
@@ -625,47 +645,86 @@ fn loop_carrier_certifies_dominating_initializer_for_zero_iteration_exit() {
     let update = SSAVar::new("RAX", 3, 8);
     let result = SSAVar::new("RAX", 4, 8);
     let chained_result = SSAVar::new("RAX", 5, 8);
-    function.get_block_mut(0x1a20).expect("loop header").phis = vec![PhiNode {
-        dst: phi.clone(),
-        sources: vec![(0x1a10, init.clone()), (0x1a20, update.clone())],
-        canonical_storage: None,
-    }];
-    function.get_block_mut(0x1a20).expect("loop header").ops = vec![
-        SSAOp::IntAdd {
-            dst: update_source.clone(),
-            a: phi.clone(),
-            b: SSAVar::constant(1, 8),
-        },
-        SSAOp::Copy {
-            dst: update.clone(),
-            src: update_source.clone(),
-        },
-        SSAOp::CBranch {
-            target: SSAVar::new("ram:1a20", 0, 8),
+    function
+        .edit_block(0x1a20)
+        .expect("loop header")
+        .replace_phis(
+            crate::Pass::Fixture,
+            vec![PhiNode {
+                dst: phi.clone(),
+                sources: vec![(0x1a10, init.clone()), (0x1a20, update.clone())],
+                canonical_storage: None,
+            }],
+        );
+    function
+        .edit_block(0x1a20)
+        .expect("loop header")
+        .replace_ops(
+            crate::Pass::Fixture,
+            vec![
+                SSAOp::IntAdd {
+                    dst: update_source.clone(),
+                    a: phi.clone(),
+                    b: SSAVar::constant(1, 8),
+                },
+                SSAOp::Copy {
+                    dst: update.clone(),
+                    src: update_source.clone(),
+                },
+                SSAOp::CBranch {
+                    target: SSAVar::new("ram:1a20", 0, 8),
+                    cond: SSAVar::constant(1, 1),
+                },
+            ],
+        );
+    function
+        .edit_block(0x1a30)
+        .expect("loop exit")
+        .replace_phis(
+            crate::Pass::Fixture,
+            vec![PhiNode {
+                dst: result.clone(),
+                sources: vec![(0x1a00, init.clone()), (0x1a20, update.clone())],
+                canonical_storage: None,
+            }],
+        );
+    function.edit_block(0x1a30).expect("loop exit").replace_ops(
+        crate::Pass::Fixture,
+        vec![SSAOp::CBranch {
+            target: SSAVar::new("ram:1a50", 0, 8),
             cond: SSAVar::constant(1, 1),
-        },
-    ];
-    function.get_block_mut(0x1a30).expect("loop exit").phis = vec![PhiNode {
-        dst: result.clone(),
-        sources: vec![(0x1a00, init.clone()), (0x1a20, update.clone())],
-        canonical_storage: None,
-    }];
-    function.get_block_mut(0x1a30).expect("loop exit").ops = vec![SSAOp::CBranch {
-        target: SSAVar::new("ram:1a50", 0, 8),
-        cond: SSAVar::constant(1, 1),
-    }];
-    function.get_block_mut(0x1a40).expect("exit bypass").ops = vec![SSAOp::Branch {
-        target: SSAVar::new("ram:1a50", 0, 8),
-        instruction: None,
-    }];
-    function.get_block_mut(0x1a50).expect("final exit").phis = vec![PhiNode {
-        dst: chained_result.clone(),
-        sources: vec![(0x1a30, result.clone()), (0x1a40, init.clone())],
-        canonical_storage: None,
-    }];
-    function.get_block_mut(0x1a50).expect("final exit").ops = vec![SSAOp::Return {
-        target: chained_result.clone(),
-    }];
+        }],
+    );
+    function
+        .edit_block(0x1a40)
+        .expect("exit bypass")
+        .replace_ops(
+            crate::Pass::Fixture,
+            vec![SSAOp::Branch {
+                target: SSAVar::new("ram:1a50", 0, 8),
+                instruction: None,
+            }],
+        );
+    function
+        .edit_block(0x1a50)
+        .expect("final exit")
+        .replace_phis(
+            crate::Pass::Fixture,
+            vec![PhiNode {
+                dst: chained_result.clone(),
+                sources: vec![(0x1a30, result.clone()), (0x1a40, init.clone())],
+                canonical_storage: None,
+            }],
+        );
+    function
+        .edit_block(0x1a50)
+        .expect("final exit")
+        .replace_ops(
+            crate::Pass::Fixture,
+            vec![SSAOp::Return {
+                target: chained_result.clone(),
+            }],
+        );
 
     let prepared = SsaArtifact::new(function);
     let phi_value = prepared.graph().value_id_for_var(&phi).unwrap();
@@ -1132,39 +1191,6 @@ fn public_ssa_path_handles_a_deep_cycle_and_reports_its_back_edge() {
 }
 
 #[test]
-fn noncarrier_use_follows_copy_and_phi_chains() {
-    let blocks = [R2ILBlock::new(0x1000, 4), R2ILBlock::new(0x1004, 4)];
-    let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA function");
-    let source = SSAVar::new("flag", 1, 1);
-    let copied = SSAVar::new("flag", 2, 1);
-    let merged = SSAVar::new("flag", 3, 1);
-    let forwarded = SSAVar::new("flag", 4, 1);
-    func.get_block_mut(0x1000).expect("copy block").ops = vec![SSAOp::Copy {
-        dst: copied.clone(),
-        src: source.clone(),
-    }];
-    let merge = func.get_block_mut(0x1004).expect("merge block");
-    merge.phis = vec![PhiNode {
-        dst: merged.clone(),
-        sources: vec![(0x1000, copied)],
-        canonical_storage: None,
-    }];
-    merge.ops = vec![SSAOp::Copy {
-        dst: forwarded.clone(),
-        src: merged,
-    }];
-
-    assert!(!func.has_noncarrier_use(&source));
-
-    func.get_block_mut(0x1004)
-        .expect("consumer block")
-        .ops
-        .push(SSAOp::Return { target: forwarded });
-
-    assert!(func.has_noncarrier_use(&source));
-}
-
-#[test]
 fn test_from_blocks_default_runs_optimization() {
     let blocks = vec![
         R2ILBlock {
@@ -1205,7 +1231,7 @@ fn test_from_blocks_default_runs_optimization() {
 }
 
 #[test]
-fn test_refresh_after_cfg_mutation_recomputes_order_and_domtree() {
+fn a_plan_that_removes_a_block_and_reorders_recomputes_order_and_domtree() {
     let blocks = vec![
         R2ILBlock {
             addr: 0x1000,
@@ -1247,11 +1273,13 @@ fn test_refresh_after_cfg_mutation_recomputes_order_and_domtree() {
     ];
 
     let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-    func.remove_block(0x1004);
-    func.refresh_after_cfg_mutation();
+    let mut plan = crate::function::EditPlan::new();
+    plan.reshape(crate::function::ShapeEdit::RemoveBlock(0x1004));
+    plan.reorder();
+    func.apply_edits(plan);
 
     assert!(!func.block_addrs().contains(&0x1004));
-    assert!(func.get_block(0x1004).is_none());
+    assert!(func.named_block(0x1004).is_none());
     assert_eq!(func.idom(0x1008), Some(0x1000));
 }
 
@@ -1312,7 +1340,7 @@ fn test_for_each_source_reports_phi_and_op_sites() {
     ];
 
     let func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-    let merge = func.get_block(0x100c).expect("merge block");
+    let merge = func.named_block(0x100c).expect("merge block");
     assert!(merge.has_phis(), "fixture should produce a merge phi");
 
     let mut seen = Vec::new();
@@ -1356,15 +1384,10 @@ fn test_for_each_source_reports_phi_and_op_sites() {
 
 #[test]
 fn test_for_each_def_reports_phi_and_op_defs() {
-    let block = SSABlock {
-        addr: 0x2000,
-        size: 4,
-        phis: vec![PhiNode {
-            dst: SSAVar::new("reg:0", 2, 8),
-            sources: vec![(0x1000, SSAVar::new("reg:0", 0, 8))],
-            canonical_storage: None,
-        }],
-        ops: vec![
+    let block = SSABlock::from_parts(
+        0x2000,
+        4,
+        vec![
             SSAOp::Copy {
                 dst: SSAVar::new("reg:8", 1, 8),
                 src: SSAVar::new("reg:0", 2, 8),
@@ -1373,7 +1396,12 @@ fn test_for_each_def_reports_phi_and_op_defs() {
                 target: SSAVar::new("reg:8", 1, 8),
             },
         ],
-    };
+        vec![PhiNode {
+            dst: SSAVar::new("reg:0", 2, 8),
+            sources: vec![(0x1000, SSAVar::new("reg:0", 0, 8))],
+            canonical_storage: None,
+        }],
+    );
 
     let mut seen = Vec::new();
     block.for_each_def(|def| {
@@ -1447,35 +1475,44 @@ fn test_decompile_prep_facts_collapse_copy_chain_and_trivial_phi_roots() {
     let arch = make_x86_64_prep_arch();
     let func = SSAFunction::from_blocks_for_decompile(&blocks, Some(&arch))
         .expect("prepared SSA should build");
-    let facts = func.decompile_prep_facts().expect("prep facts");
-    let merge = func.get_block(0x100c).expect("merge block");
-    assert_eq!(merge.phis.len(), 1, "expected trivial merge phi");
+    let facts = func.prep_facts_for_test();
+    let merge = func.named_block(0x100c).expect("merge block");
+    assert_eq!(merge.phis().len(), 1, "expected trivial merge phi");
 
-    let const_root = SSAVar::constant(0x42, 8);
-    let phi_dst = &merge.phis[0].dst;
+    let const_root = facts.value(&SSAVar::constant(0x42, 8));
+    let phi_dst = facts.value(&merge.phis()[0].dst);
     assert_eq!(
         facts.canonical_root_of(phi_dst),
-        Some(&const_root),
+        Some(const_root),
         "merge phi should collapse to the shared constant root"
     );
 
     let left_dst = func
-        .get_block(0x1004)
+        .named_block(0x1004)
         .expect("left block")
-        .ops
+        .ops()
         .first()
-        .and_then(|op| op.dst())
+        .and_then(|op| op.dst().cloned())
         .expect("left copy dst");
     let right_dst = func
-        .get_block(0x1008)
+        .named_block(0x1008)
         .expect("right block")
-        .ops
+        .ops()
         .first()
-        .and_then(|op| op.dst())
+        .and_then(|op| op.dst().cloned())
         .expect("right copy dst");
 
-    assert_eq!(facts.canonical_root_of(left_dst), Some(&const_root));
-    assert_eq!(facts.canonical_root_of(right_dst), Some(&const_root));
+    assert_eq!(
+        facts.canonical_root_of(facts.value(&left_dst)),
+        Some(const_root)
+    );
+    assert_eq!(
+        facts.canonical_root_of(facts.value(&right_dst)),
+        Some(const_root)
+    );
     // A constant is its own representative.
-    assert_eq!(facts.canonical_root(&const_root), &const_root);
+    assert_eq!(
+        facts.canonical_root(const_root),
+        crate::view::Representative::Value(const_root)
+    );
 }

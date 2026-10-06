@@ -214,12 +214,8 @@ fn a_logical_low_byte_return_renders() {
                 value.var.size == 8 && value.canonical_storage == Some(storage(0, 8))
             })
     );
-    let (block_addr, op_index) = prepared
-        .graph()
-        .op_site_for_inst(boundary.at)
-        .expect("return op site");
     let certificate = prepared
-        .return_certificate_for_op(block_addr, op_index)
+        .return_certificate_for_inst(boundary.at)
         .expect("logical low-byte certificate");
     assert_eq!(certificate.width, 1);
     assert!(
@@ -238,7 +234,7 @@ fn a_logical_low_byte_return_renders() {
             None,
         ),
     );
-    let output = Decompiler::new(DecompilerConfig::x86_64()).decompile_input(&input);
+    let output = Decompiler::new(DecompilerConfig::default()).decompile_input(&input);
     assert!(
         !output.contains("fallback") && !output.contains("native rendering refused"),
         "an exact logical low-byte result must render: {output}"
@@ -358,9 +354,9 @@ fn a_restored_stack_pointer_renders() {
         .with_name("restore_demo");
     let restores = prepared
         .function()
-        .get_block(0x1008)
+        .named_block(0x1008)
         .expect("call arm")
-        .ops
+        .ops()
         .iter()
         .filter(|op| matches!(op, r2ssa::SSAOp::CallRestore { .. }))
         .count();
@@ -368,9 +364,9 @@ fn a_restored_stack_pointer_renders() {
     assert!(
         prepared
             .function()
-            .get_block(0x1010)
+            .named_block(0x1010)
             .expect("join")
-            .phis
+            .phis()
             .iter()
             .any(|phi| phi.canonical_storage == Some(storage(0x28))),
         "the called and uncalled paths must merge their stack carriers"
@@ -379,7 +375,7 @@ fn a_restored_stack_pointer_renders() {
         prepared,
         (r2types::DecompileRouteKind::Standard, "restore route", None),
     );
-    let decompiler = Decompiler::new(DecompilerConfig::x86_64());
+    let decompiler = Decompiler::new(DecompilerConfig::default());
     let output = decompiler.decompile_input(&input);
     // The restore performs nothing and says so: its two sides are one
     // object, licensed by the convention, so both its read and its write
@@ -490,7 +486,7 @@ fn an_unused_restored_stack_pointer_renders() {
     assert!(
         restore_outputs
             .iter()
-            .all(|value| structural_unused.contains(value)),
+            .all(|value| structural_unused.contains(*value)),
         "the regression requires an unused restore output"
     );
 
@@ -498,7 +494,7 @@ fn an_unused_restored_stack_pointer_renders() {
         prepared,
         (r2types::DecompileRouteKind::Standard, "restore route", None),
     );
-    let output = Decompiler::new(DecompilerConfig::x86_64()).decompile_input(&input);
+    let output = Decompiler::new(DecompilerConfig::default()).decompile_input(&input);
     assert!(
         !output.contains("native render refusal"),
         "an unused restored carrier must not refuse the function: {output}"
@@ -522,9 +518,12 @@ fn prepared_under_test_convention(
             size: 8,
         })
     };
-    let call_effect =
-        r2ssa::SourceCallEffect::new(storages([0x00, 0x10, 0x18]), storages([0x20, 0x28, 0x30]))
-            .expect("a call effect");
+    let call_effect = r2ssa::SourceCallEffect::new(
+        storages([0x00, 0x10, 0x18]),
+        storages([0x20, 0x28, 0x30]),
+        r2ssa::SourceBoundaryReads::new([], []).expect("no reads"),
+    )
+    .expect("a call effect");
     r2ssa::SsaArtifact::for_decompile_with(
         blocks,
         r2ssa::DecompileInputs {
@@ -615,56 +614,6 @@ fn signature_spec(
 }
 
 #[test]
-fn test_decompiler_config_default() {
-    let config = DecompilerConfig::default();
-    assert_eq!(config.ptr_size, 64);
-    assert_eq!(config.sp_name, "rsp");
-    assert_eq!(config.fp_name, "rbp");
-}
-
-#[test]
-fn test_decompiler_config_x86() {
-    let config = DecompilerConfig::x86();
-    assert_eq!(config.ptr_size, 32);
-    assert_eq!(config.sp_name, "esp");
-    assert_eq!(config.fp_name, "ebp");
-}
-
-#[test]
-fn test_decompiler_config_arm() {
-    let config = DecompilerConfig::arm();
-    assert_eq!(config.ptr_size, 32);
-    assert_eq!(config.sp_name, "sp");
-    assert_eq!(config.fp_name, "fp");
-}
-
-#[test]
-fn test_decompiler_config_aarch64() {
-    let config = DecompilerConfig::aarch64();
-    assert_eq!(config.ptr_size, 64);
-    assert_eq!(config.sp_name, "sp");
-    assert_eq!(config.fp_name, "x29");
-    assert_eq!(config.arg_regs[0], "x0");
-    assert_eq!(config.ret_regs[0], "x0");
-}
-
-#[test]
-fn test_decompiler_config_riscv32() {
-    let config = DecompilerConfig::riscv32();
-    assert_eq!(config.ptr_size, 32);
-    assert_eq!(config.sp_name, "sp");
-    assert_eq!(config.fp_name, "s0");
-}
-
-#[test]
-fn test_decompiler_config_riscv64() {
-    let config = DecompilerConfig::riscv64();
-    assert_eq!(config.ptr_size, 64);
-    assert_eq!(config.sp_name, "sp");
-    assert_eq!(config.fp_name, "s0");
-}
-
-#[test]
 fn a_named_constant_keeps_every_observation_it_collapsed() {
     let mut observations = crate::ast::RenderObservationOwner::new();
     let (leaf_id, leaf) = observations
@@ -745,7 +694,7 @@ fn radare_typed_global_renders_as_its_type_and_direct_value() {
     let mut function = CFunction::new("read_counter", CType::i32()).with_body(vec![CStmt::Return(
         Some(CExpr::deref(crate::fold::op_lower::convert::convert(
             address,
-            &r2rewrite::CValue::Typed(address_type),
+            &crate::typed::CValue::Typed(address_type),
             &CType::ptr(CType::u32()),
             64,
         ))),
@@ -799,7 +748,7 @@ fn unplaceable_global_type_keeps_the_honest_byte_declaration() {
     let mut function = CFunction::new("read_counter", CType::u32()).with_body(vec![CStmt::Return(
         Some(crate::fold::op_lower::convert::convert(
             address,
-            &r2rewrite::CValue::Typed(address_type),
+            &crate::typed::CValue::Typed(address_type),
             &CType::u32(),
             64,
         )),
@@ -905,7 +854,7 @@ fn split_block_observation_is_not_assigned_to_its_first_child() {
             CStmt::Return(Some(CExpr::IntLit(2))),
         ]))
         .expect("block observation");
-    let decompiler = Decompiler::new(DecompilerConfig::x86_64());
+    let decompiler = Decompiler::new(DecompilerConfig::default());
     let body = decompiler.stmt_to_vec(block);
     let mut function = CFunction::new(
         "split",
@@ -961,7 +910,7 @@ fn an_engine_chosen_fallback_route_does_not_pre_empt_native_lowering() {
         ),
     );
 
-    let output = Decompiler::new(DecompilerConfig::x86_64()).decompile_input(&input);
+    let output = Decompiler::new(DecompilerConfig::default()).decompile_input(&input);
 
     assert!(
         output.starts_with("/* r2dec refused stable_demo: operation lowering refusal:"),
@@ -997,7 +946,7 @@ fn a_facts_owned_fallback_route_does_not_pre_empt_native_lowering() {
         ),
     );
 
-    let output = Decompiler::new(DecompilerConfig::x86_64()).decompile_input(&input);
+    let output = Decompiler::new(DecompilerConfig::default()).decompile_input(&input);
 
     assert!(
         output.starts_with("/* r2dec refused stable_demo: operation lowering refusal:"),
@@ -1191,7 +1140,7 @@ fn raw_fallback_comments_regenerate_and_sanitize_hostile_text() {
         ),
     );
 
-    let output = Decompiler::new(DecompilerConfig::x86_64()).decompile_input(&input);
+    let output = Decompiler::new(DecompilerConfig::default()).decompile_input(&input);
     assert!(
         output.contains("r2dec refused bad____int_injected:"),
         "a hostile source name must render as one C identifier: {output}"
@@ -1228,7 +1177,7 @@ fn a_fallback_route_residualizes_the_tree_to_comments() {
         ),
     );
 
-    let audit = audited(&Decompiler::new(DecompilerConfig::x86_64()), &input);
+    let audit = audited(&Decompiler::new(DecompilerConfig::default()), &input);
     let built = audit.rendered().function();
 
     assert!(
@@ -1269,7 +1218,7 @@ fn malformed_return_boundary_refuses_before_effect_audit() {
         ),
     );
 
-    let decompiler = Decompiler::new(DecompilerConfig::x86_64());
+    let decompiler = Decompiler::new(DecompilerConfig::default());
     let audited = audited(&decompiler, &input);
     assert_eq!(
         audited.render_refusal(),
@@ -1298,9 +1247,12 @@ fn native_standard_path_renders_its_internal_build() {
         ],
         &arch,
     );
-    let block = prepared.function().get_block(0x1000).expect("entry block");
+    let block = prepared
+        .function()
+        .named_block(0x1000)
+        .expect("entry block");
     let copy_source = block
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             SSAOp::Copy { src, .. } => Some(src),
@@ -1312,15 +1264,18 @@ fn native_standard_path_renders_its_internal_build() {
         .value_id_for_var(copy_source)
         .expect("copy source must retain exact ValueId");
     let return_op = block
-        .ops
+        .ops()
         .iter()
         .position(|op| matches!(op, SSAOp::Return { .. }))
         .expect("return op");
+    let return_inst = block
+        .op_id(return_op)
+        .and_then(|op| prepared.graph().inst_for_op(op))
+        .expect("return instruction");
     let return_certificate = prepared
-        .return_certificate_for_op(0x1000, return_op)
+        .return_certificate_for_inst(return_inst)
         .expect("scalar audit fixture must retain an exact return certificate");
-    assert_eq!(return_certificate.block_addr, 0x1000);
-    assert_eq!(return_certificate.op_index, return_op);
+    assert_eq!(return_certificate.at, return_inst);
     let return_value = return_certificate.value;
     let input = source_owned_decompiler_input(
         prepared,
@@ -1347,11 +1302,11 @@ fn native_standard_path_renders_its_internal_build() {
         input
             .function_facts()
             .render()
-            .and_then(|render| render.return_for_op(0x1000, return_op))
+            .and_then(|render| render.return_for_inst(return_inst))
             .map(|fact| fact.value),
         Some(return_value)
     );
-    let config = DecompilerConfig::x86_64();
+    let config = DecompilerConfig::default();
     let public_decompiler = Decompiler::new(config.clone());
     let internal_decompiler =
         Decompiler::new(config.clone()).with_context(input.context_projection());
@@ -1524,7 +1479,7 @@ fn shuffled_block_schedule_keeps_spans_bindings_placement_and_bytes_identical() 
         peers[2].clone(),
     ];
     let (baseline_spans, baseline_input) = exact_diamond_input(&baseline_blocks);
-    let decompiler = Decompiler::new(DecompilerConfig::x86_64());
+    let decompiler = Decompiler::new(DecompilerConfig::default());
     let baseline = audited(&decompiler, &baseline_input);
     let baseline_binding_signature = binding_signature(&baseline_input);
     let baseline_values = baseline_input
@@ -1629,7 +1584,7 @@ fn rendering_adds_no_work_control_decision_after_its_final_poll() {
             None,
         ),
     );
-    let decompiler = Decompiler::new(DecompilerConfig::x86_64());
+    let decompiler = Decompiler::new(DecompilerConfig::default());
     let baseline = CountingControl {
         polls: std::cell::Cell::new(0),
         stop_at: None,
@@ -1693,7 +1648,7 @@ fn audited_partial_retains_the_same_product_without_extra_polls() {
             None,
         ),
     );
-    let decompiler = Decompiler::new(DecompilerConfig::x86_64());
+    let decompiler = Decompiler::new(DecompilerConfig::default());
 
     let baseline_control = CountingControl {
         polls: std::cell::Cell::new(0),
@@ -1865,13 +1820,13 @@ fn a_body_that_rendered_nothing_says_so_rather_than_reading_as_empty() {
 #[test]
 fn normal_residual_comments_hide_debug_ids_and_raw_storage_tokens() {
     let comment = sanitize_comment_text(
-        "uncertified expression value ValueId(125) from ObjectId(9) via eax_1 var_8h var_ch fake_stack_slot t6a80 tmp:2c280_2",
+        "uncertified expression value ValueId(125) from ObjectId(9) via EAX_1 var_8h var_ch fake_stack_slot t6a80 tmp:2c280_2",
     );
 
     for raw in [
         "ValueId",
         "ObjectId",
-        "eax_1",
+        "EAX_1",
         "var_8h",
         "var_ch",
         "fake_stack_slot",

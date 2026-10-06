@@ -37,7 +37,6 @@ pub mod control;
 pub(crate) mod debug;
 mod effect_ledger;
 pub(crate) mod fold;
-pub mod highlight;
 pub mod ledger;
 pub(crate) mod normalize;
 mod observation_journal;
@@ -50,11 +49,12 @@ pub(crate) mod stage_timing;
 pub mod structure;
 mod structured_region;
 pub mod symbol;
+pub mod typed;
 pub(crate) mod unrendered;
 mod variable;
 
+pub use crate::codegen::{CRole, CRoles, Emission, ResidualSite, SourceLine};
 use crate::codegen::{CodeGenerator, EmissionReadyFunction, prepare_function_for_emission};
-pub use crate::codegen::{Emission, ResidualSite, SourceLine};
 use crate::fold::FoldingContext;
 use crate::fold::context::{FoldArchConfig, FoldInputs};
 use crate::observation_journal::{
@@ -65,7 +65,6 @@ pub use ast::{BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp};
 pub use codegen::CodeGenConfig;
 pub use control::{DecompileExecutionStop, DecompileWorkControl, DecompileWorkPhase};
 pub use fold::lower_ssa_ops_to_stmts;
-pub use highlight::highlight_c_ansi;
 use r2ssa::SSAFunction;
 #[cfg(test)]
 use r2ssa::SSAOp;
@@ -80,6 +79,18 @@ use std::rc::Rc;
 #[cfg(test)]
 use std::sync::Arc;
 pub(crate) use structure::ControlFlowStructurer;
+
+/// The instruction a test fixture names by its block and its place among the
+/// block's operations in the sealed function.
+#[cfg(test)]
+pub(crate) fn inst_at(
+    artifact: &r2ssa::SsaArtifact,
+    block_addr: u64,
+    index: usize,
+) -> Option<r2ssa::InstId> {
+    let op = artifact.function().named_block(block_addr)?.op_id(index)?;
+    artifact.graph().inst_for_op(op)
+}
 
 #[cfg(test)]
 pub(crate) fn certified_memory_result_name(access: r2ssa::StructuredAccessId) -> String {
@@ -198,98 +209,14 @@ fn is_ssa_versioned_register_label(name: &str) -> bool {
     let Some((base, suffix)) = name.rsplit_once('_') else {
         return false;
     };
-    let upper_ssa_label = !base.is_empty()
+    // An SSA label: an uppercase register base and a version.
+    !base.is_empty()
         && !suffix.is_empty()
         && suffix.bytes().all(|byte| byte.is_ascii_digit())
         && base.bytes().any(|byte| byte.is_ascii_alphabetic())
         && base
             .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit());
-    upper_ssa_label || is_known_lowercase_register_version_label(base, suffix)
-}
-
-fn is_known_lowercase_register_version_label(base: &str, suffix: &str) -> bool {
-    if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
-        return false;
-    }
-    let lower = base.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "rax"
-            | "eax"
-            | "ax"
-            | "al"
-            | "ah"
-            | "rbx"
-            | "ebx"
-            | "bx"
-            | "bl"
-            | "bh"
-            | "rcx"
-            | "ecx"
-            | "cx"
-            | "cl"
-            | "ch"
-            | "rdx"
-            | "edx"
-            | "dx"
-            | "dl"
-            | "dh"
-            | "rsi"
-            | "esi"
-            | "si"
-            | "sil"
-            | "rdi"
-            | "edi"
-            | "di"
-            | "dil"
-            | "rbp"
-            | "ebp"
-            | "bp"
-            | "bpl"
-            | "rsp"
-            | "esp"
-            | "sp"
-            | "spl"
-            | "rip"
-            | "eip"
-            | "pc"
-            | "x0"
-            | "w0"
-            | "x1"
-            | "w1"
-            | "x2"
-            | "w2"
-            | "x3"
-            | "w3"
-            | "r0"
-            | "r1"
-            | "r2"
-            | "r3"
-            | "a0"
-            | "a1"
-            | "v0"
-            | "v1"
-    ) || x86_extended_register_label(&lower)
-}
-
-fn x86_extended_register_label(lower: &str) -> bool {
-    let Some(rest) = lower.strip_prefix('r') else {
-        return false;
-    };
-    let digit_len = rest
-        .bytes()
-        .take_while(|byte| byte.is_ascii_digit())
-        .count();
-    if digit_len == 0 {
-        return false;
-    }
-    let (digits, suffix) = rest.split_at(digit_len);
-    digits
-        .parse::<u8>()
-        .ok()
-        .is_some_and(|index| (8..=15).contains(&index))
-        && matches!(suffix, "" | "b" | "w" | "d")
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -1189,18 +1116,6 @@ fn residual_function_for_render_boundary(func_name: &str, reason: &str) -> CFunc
         ))
 }
 
-pub fn normalize_sig_arch_name(arch: Option<&r2il::ArchSpec>) -> Option<String> {
-    let arch = arch?;
-    let lower = arch.name.to_ascii_lowercase();
-    if matches!(lower.as_str(), "x86-64" | "x86_64" | "x64" | "amd64") {
-        return Some("x86-64".to_string());
-    }
-    if matches!(lower.as_str(), "x86" | "x86-32" | "i386" | "i686") {
-        return Some("x86".to_string());
-    }
-    Some(arch.name.clone())
-}
-
 /// Decompiler configuration.
 #[derive(Debug, Clone)]
 pub struct DecompilerConfig {
@@ -1208,156 +1123,20 @@ pub struct DecompilerConfig {
     pub codegen: CodeGenConfig,
     /// Pointer size in bits.
     pub ptr_size: u32,
-    /// Stack pointer register name.
-    pub sp_name: String,
-    /// Frame pointer register name.
-    pub fp_name: String,
-    /// Ordered argument registers for the active ABI.
-    pub arg_regs: Vec<String>,
-    /// Return-value registers for the active ABI.
-    pub ret_regs: Vec<String>,
 }
 
 impl Default for DecompilerConfig {
     fn default() -> Self {
-        Self {
-            codegen: CodeGenConfig::default(),
-            ptr_size: 64,
-            sp_name: "rsp".to_string(),
-            fp_name: "rbp".to_string(),
-            arg_regs: vec![
-                "rdi".to_string(),
-                "rsi".to_string(),
-                "rdx".to_string(),
-                "rcx".to_string(),
-                "r8".to_string(),
-                "r9".to_string(),
-            ],
-            ret_regs: vec![
-                "rax".to_string(),
-                "eax".to_string(),
-                "xmm0".to_string(),
-                "xmm0_qa".to_string(),
-                "xmm0_qb".to_string(),
-                "st0".to_string(),
-            ],
-        }
+        Self::for_pointer_bits(64)
     }
 }
 
 impl DecompilerConfig {
-    pub fn for_arch_name(arch_name: &str, ptr_bits: u32) -> Self {
-        match (arch_name, ptr_bits) {
-            ("x86", 32) | ("x86-32", _) => Self::x86(),
-            ("x86-64", _) | ("x86_64", _) | ("x64", _) | ("amd64", _) => Self::x86_64(),
-            ("arm", _) | ("ARM", _) if ptr_bits == 32 => Self::arm(),
-            ("aarch64", _) | ("arm64", _) | ("ARM64", _) => Self::aarch64(),
-            ("riscv32", _) | ("rv32", _) | ("rv32gc", _) => Self::riscv32(),
-            ("riscv64", _) | ("rv64", _) | ("rv64gc", _) => Self::riscv64(),
-            ("riscv", _) if ptr_bits == 32 => Self::riscv32(),
-            ("riscv", _) => Self::riscv64(),
-            _ => Self::unrecognized(ptr_bits),
-        }
-    }
-
-    /// A target whose registers this renderer does not know.
-    ///
-    /// Falling back to the defaults meant falling back to x86-64: an
-    /// unrecognized target was rendered with rsp, rbp and the SysV argument
-    /// registers, naming registers it does not have. Naming none of them is
-    /// the honest answer, and it leaves the residual machinery to say so.
-    fn unrecognized(ptr_bits: u32) -> Self {
+    /// A configuration for a machine whose pointers are this wide.
+    pub fn for_pointer_bits(ptr_size: u32) -> Self {
         Self {
-            ptr_size: ptr_bits,
-            sp_name: String::new(),
-            fp_name: String::new(),
-            arg_regs: Vec::new(),
-            ret_regs: Vec::new(),
-            ..Self::default()
-        }
-    }
-
-    pub fn for_arch(arch: Option<&r2il::ArchSpec>) -> (String, u32, Self) {
-        let arch_name = normalize_sig_arch_name(arch).unwrap_or_else(|| "unknown".to_string());
-        let ptr_bits = arch.map(|spec| spec.addr_size * 8).unwrap_or(64);
-        let config = Self::for_arch_name(&arch_name, ptr_bits);
-        (arch_name, ptr_bits, config)
-    }
-
-    /// Create a configuration for 32-bit x86.
-    pub fn x86() -> Self {
-        Self {
-            ptr_size: 32,
-            sp_name: "esp".to_string(),
-            fp_name: "ebp".to_string(),
-            arg_regs: vec![],
-            ret_regs: vec!["eax".to_string(), "xmm0".to_string(), "st0".to_string()],
-            ..Default::default()
-        }
-    }
-
-    /// Create a configuration for 64-bit x86.
-    pub fn x86_64() -> Self {
-        Self::default()
-    }
-
-    /// Create a configuration for ARM.
-    pub fn arm() -> Self {
-        Self {
-            ptr_size: 32,
-            sp_name: "sp".to_string(),
-            fp_name: "fp".to_string(),
-            arg_regs: ["r0", "r1", "r2", "r3"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            ret_regs: vec!["r0".to_string()],
-            ..Default::default()
-        }
-    }
-
-    /// Create a configuration for AArch64.
-    pub fn aarch64() -> Self {
-        Self {
-            ptr_size: 64,
-            sp_name: "sp".to_string(),
-            fp_name: "x29".to_string(),
-            arg_regs: ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            ret_regs: vec!["x0".to_string(), "w0".to_string()],
-            ..Default::default()
-        }
-    }
-
-    /// Create a configuration for RISC-V RV32.
-    pub fn riscv32() -> Self {
-        Self {
-            ptr_size: 32,
-            sp_name: "sp".to_string(),
-            fp_name: "s0".to_string(),
-            arg_regs: ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            ret_regs: vec!["a0".to_string()],
-            ..Default::default()
-        }
-    }
-
-    /// Create a configuration for RISC-V RV64.
-    pub fn riscv64() -> Self {
-        Self {
-            ptr_size: 64,
-            sp_name: "sp".to_string(),
-            fp_name: "s0".to_string(),
-            arg_regs: ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            ret_regs: vec!["a0".to_string()],
-            ..Default::default()
+            codegen: CodeGenConfig::default(),
+            ptr_size,
         }
     }
 }
@@ -1453,14 +1232,6 @@ impl BindingObservationDomainAudit {
     pub const fn is_complete(self) -> bool {
         self.equations_hold() && self.unaccounted == 0
     }
-
-    pub const fn passes_quality(self) -> bool {
-        self.is_complete() && self.refused == 0
-    }
-
-    pub const fn is_fully_proven(self) -> bool {
-        self.passes_quality() && self.gapped == 0
-    }
 }
 
 impl From<crate::observation_journal::LegacyObservationDomainCoverage>
@@ -1487,16 +1258,8 @@ pub struct BindingObservationAudit {
 }
 
 impl BindingObservationAudit {
-    pub const fn equations_hold(self) -> bool {
-        self.values.equations_hold() && self.uses.equations_hold() && self.writes.equations_hold()
-    }
-
     pub const fn is_complete(self) -> bool {
         self.values.is_complete() && self.uses.is_complete() && self.writes.is_complete()
-    }
-
-    pub const fn passes_quality(self) -> bool {
-        self.values.passes_quality() && self.uses.passes_quality() && self.writes.passes_quality()
     }
 }
 
@@ -2107,12 +1870,13 @@ pub struct EffectObligationAudit {
     pub gapped: usize,
     pub unaccounted: usize,
     pub conflicts: usize,
-    /// First refused obligation in canonical source order, for diagnostics.
-    pub refused_obligation: Option<r2ssa::SemanticObligationId>,
+    /// First refused obligation in the order the spelling reads, for
+    /// diagnostics.
+    pub refused_obligation: Option<r2ssa::SpelledObligation>,
     /// First obligation with no occurrence or certificate, for diagnostics.
-    pub unaccounted_obligation: Option<r2ssa::SemanticObligationId>,
+    pub unaccounted_obligation: Option<r2ssa::SpelledObligation>,
     /// First obligation with incompatible occurrences, for diagnostics.
-    pub conflicting_obligation: Option<r2ssa::SemanticObligationId>,
+    pub conflicting_obligation: Option<r2ssa::SpelledObligation>,
 }
 
 impl EffectObligationAudit {
@@ -2149,11 +1913,10 @@ impl EffectObligationAudit {
             gapped: closure.gapped,
             unaccounted: closure.unattributed,
             conflicts: closure.conflicts,
-            refused_obligation: ledger.entries().find_map(|(id, outcome)| {
-                matches!(outcome, crate::ledger::Outcome::Refused).then_some(*id)
-            }),
-            unaccounted_obligation: ledger.unattributed().next().copied(),
-            conflicting_obligation: ledger.conflicts().next().map(|(id, _)| *id),
+            refused_obligation: ledger
+                .first_spelled(|_, outcome| matches!(outcome, crate::ledger::Outcome::Refused)),
+            unaccounted_obligation: ledger.first_spelled(|_, outcome| !outcome.is_decided()),
+            conflicting_obligation: ledger.first_conflict_spelled(),
         }
     }
 
@@ -2396,12 +2159,6 @@ pub enum PlacementAudit {
     Refused(PlacementAuditRefusal),
     /// The selected route never entered native declaration placement.
     NotRun,
-}
-
-impl PlacementAudit {
-    pub const fn is_applied(self) -> bool {
-        matches!(self, Self::Applied)
-    }
 }
 
 /// Which upstream authority failed when a machine projection was refused.
@@ -2756,10 +2513,6 @@ pub struct DecompileBindingAudit {
 impl DecompileBindingAudit {
     pub fn output(&self) -> &str {
         self.rendered.text()
-    }
-
-    pub fn into_output(self) -> String {
-        self.rendered.into_text()
     }
 
     /// The C and the tree it came from, for a consumer that walks the function.
@@ -3248,7 +3001,7 @@ impl Decompiler {
             let graph = prepared.graph();
             let live = prepared.live_out();
             let dead = prepared.unobserved_merges();
-            let total: usize = func.blocks().iter().map(|b| b.phis.len()).sum();
+            let total: usize = func.named_blocks().iter().map(|b| b.phis().len()).sum();
             eprintln!(
                 "MERGES fn={:#x} phis={} unobserved={} live_out={} unresolved={}",
                 func.entry,
@@ -3261,8 +3014,8 @@ impl Decompiler {
             // gate is one question asked per phi, so printing its answer beside the
             // merge names the value that is lost rather than the layer that lost it.
             let render_facts = self.context.function_facts.render();
-            for block in func.blocks() {
-                for phi in &block.phis {
+            for block in func.named_blocks() {
+                for phi in block.phis() {
                     let value = graph.value_id_for_var(&phi.dst);
                     let carrier = value.is_some_and(|value| {
                         render_facts
@@ -3362,7 +3115,7 @@ impl Decompiler {
                 }
             } else {
                 (
-                    r2ssa::RewrittenFunction::new(func, func.blocks().to_vec()),
+                    r2ssa::RewrittenFunction::new(func, func.named_blocks()),
                     normalize::NormalizationOrigins::for_unchanged(func, prepared),
                 )
             };
@@ -3608,7 +3361,7 @@ impl Decompiler {
             // What materialisation left behind, so a carrier update that renders
             // more than once shows which ops the fold was handed.
             for block in normalized_func.blocks() {
-                for (index, op) in block.ops.iter().enumerate() {
+                for (index, op) in block.ops().iter().enumerate() {
                     let op: &r2ssa::SSAOp = op;
                     let kind = format!("{op:?}");
                     let kind = kind.split([' ', '{']).next().unwrap_or("?");
@@ -3693,7 +3446,7 @@ impl Decompiler {
         let fold_function_return_type = Some(&return_type);
         let fold_arch = FoldArchConfig {
             ptr_size: self.config.ptr_size,
-            arg_regs: self.config.arg_regs.clone(),
+            arg_regs: prepared.machine_context().argument_register_names(),
         };
         let prepared_semantic_view = match analysis::PreparedSemanticView::build_with_bindings(
             symbols,
@@ -3885,6 +3638,7 @@ impl Decompiler {
             let certificate = structure::certify::certify(
                 structured_body.stmt(),
                 func.cfg(),
+                func.domtree(),
                 func.root(),
                 &|id| journal.observation_block(id),
                 &label_block,
@@ -3959,6 +3713,7 @@ impl Decompiler {
             simplify_data_object_loads_in_stmt(stmt, self.config.ptr_size, &used_objects);
         }
         c_function.extern_objects = used_objects.into_inner().into_values().collect();
+        crate::ast::respell_nonconforming_main(&mut c_function, func.entry());
 
         if let Err(error) = single_evaluation::bind_each_call_site_once(
             &mut c_function,
@@ -4070,7 +3825,11 @@ impl Decompiler {
             .callsites()
             .into_iter()
             .flat_map(|facts| facts.by_callsite.values())
-            .filter(|fact| fact.callee_signature_from_source_types)
+            .filter(|fact| {
+                fact.callee_signature_types
+                    .as_ref()
+                    .is_some_and(|types| types.grade() <= r2source::Grade::Declared)
+            })
             .count();
         crate::stage_timing::mark("effect_ledger");
         native.finalize_effect_ledger(
@@ -4131,8 +3890,7 @@ impl Decompiler {
             .map(|slot| slot.storage().location())
             .collect::<std::collections::BTreeSet<_>>();
         let transfer_inputs = graph
-            .inst_id_for_op_site(callsite.block_addr, callsite.op_index)
-            .and_then(|inst| graph.inst(inst))
+            .inst(callsite.at)
             .map(|inst| inst.inputs.to_vec())
             .unwrap_or_default();
         let observable = graph.insts.iter().find(|inst| {
@@ -4184,10 +3942,7 @@ impl Decompiler {
                 .function_facts
                 .callee_resolution()
                 .and_then(|resolution| {
-                    resolution.identity_for_callsite(r2types::CallsiteKey {
-                        block_addr: callsite.block_addr,
-                        op_index: callsite.op_index,
-                    })
+                    resolution.identity_for_callsite(r2types::CallsiteKey { at: callsite.at })
                 })
         else {
             r2il::refusal_evidence!(
@@ -4223,10 +3978,7 @@ impl Decompiler {
         // call renders with: the import's declaration, placed at the slot
         // the stub jumps through. The identity's own is a by-name lookup,
         // which a capture that states no names has nothing in.
-        let key = r2types::CallsiteKey {
-            block_addr: callsite.block_addr,
-            op_index: callsite.op_index,
-        };
+        let key = r2types::CallsiteKey { at: callsite.at };
         let certified = self
             .context
             .function_facts
@@ -4236,9 +3988,8 @@ impl Decompiler {
         let Some(signature) = certified.or(identity.signature.as_ref()) else {
             r2il::refusal_evidence!(
                 "import-stub-declaration",
-                "tail transfer at {:#x}:{} resolves to {name}, which has no prototype",
-                callsite.block_addr,
-                callsite.op_index
+                "tail transfer at {:?} resolves to {name}, which has no prototype",
+                callsite.at
             );
             let reason = format!(
                 "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}`, \
@@ -4250,9 +4001,8 @@ impl Decompiler {
         };
         r2il::refusal_evidence!(
             "import-stub-declaration",
-            "tail transfer at {:#x}:{} resolves to {name}, declared rather than defined",
-            callsite.block_addr,
-            callsite.op_index
+            "tail transfer at {:?} resolves to {name}, declared rather than defined",
+            callsite.at
         );
         let reason = format!(
             "r2sleigh: import stub at {entry:#x}; this symbol is the import `{name}` and \

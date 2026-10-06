@@ -2,7 +2,7 @@ use super::calls::CertifiedCallArgs;
 use super::memory_renderer::CertifiedMemoryAccessExpr;
 use super::projection::project_machine_write;
 use super::*;
-use r2rewrite::CValue;
+use crate::typed::CValue;
 
 /// The instruction a canonical rewrite names by its site, where it names one.
 fn canonical_site_inst(
@@ -10,9 +10,7 @@ fn canonical_site_inst(
     id: &r2ssa::CanonicalInstructionId,
 ) -> Option<r2ssa::InstId> {
     match id.site {
-        r2ssa::CanonicalInstructionSite::Op(ordinal) => usize::try_from(ordinal)
-            .ok()
-            .and_then(|op_idx| prepared.graph().inst_id_for_op_site(id.block_addr, op_idx)),
+        r2ssa::CanonicalInstructionSite::Op(op) => prepared.graph().inst_for_op(op),
         r2ssa::CanonicalInstructionSite::Phi(_)
         | r2ssa::CanonicalInstructionSite::NativeSpan { .. } => None,
     }
@@ -83,15 +81,7 @@ impl<'a> FoldingContext<'a> {
                     .into_iter()
                     .collect::<BTreeSet<_>>();
                 for id in &rewrite.discharges {
-                    let Some(inst) = (match id.site {
-                        r2ssa::CanonicalInstructionSite::Op(ordinal) => {
-                            usize::try_from(ordinal).ok().and_then(|op_idx| {
-                                prepared.graph().inst_id_for_op_site(id.block_addr, op_idx)
-                            })
-                        }
-                        r2ssa::CanonicalInstructionSite::Phi(_)
-                        | r2ssa::CanonicalInstructionSite::NativeSpan { .. } => None,
-                    }) else {
+                    let Some(inst) = canonical_site_inst(prepared, id) else {
                         self.retain_first_observation_error(invalid());
                         return expr;
                     };
@@ -214,10 +204,11 @@ impl<'a> FoldingContext<'a> {
     /// nothing to name it at, and it is a missing projection; a site is never
     /// made up.
     fn unmodelled_user_operation_at(&self, inst: r2ssa::InstId, userop: u32) -> OpLoweringRefusal {
-        match self
-            .prepared_ssa()
-            .and_then(|prepared| prepared.graph().op_site_for_inst(inst))
-        {
+        let place = self.prepared_ssa().and_then(|prepared| {
+            let graph = prepared.graph();
+            Some((graph.block_addr_of(inst)?, graph.op_ordinal(inst)?))
+        });
+        match place {
             Some((block, op)) => OpLoweringRefusal::unmodelled_user_operation(userop, block, op),
             None => OpLoweringRefusal::missing_machine_projection(),
         }
@@ -279,6 +270,19 @@ impl<'a> FoldingContext<'a> {
         block_addr: u64,
         op_idx: usize,
     ) -> std::collections::BTreeSet<r2ssa::SemanticObligationId> {
+        let rendered = |dst: &r2ssa::SSAVar| self.value_id_for_rendered_op(dst);
+        self.exact_op_effects(op, rendered, block_addr, op_idx)
+    }
+
+    /// The obligations an operation discharges where it is rendered;
+    /// `value_of` says which value its destination is.
+    pub(super) fn exact_op_effects<V>(
+        &self,
+        op: &SSAOp<V>,
+        value_of: impl Fn(&V) -> Option<r2ssa::ValueId>,
+        block_addr: u64,
+        op_idx: usize,
+    ) -> std::collections::BTreeSet<r2ssa::SemanticObligationId> {
         // A call has no `dst`. One statement implements two instructions --
         // the call supplies the effect, the `CallDefine` owns the write -- so
         // the value the occurrence names has to come from the site's certified
@@ -286,11 +290,12 @@ impl<'a> FoldingContext<'a> {
         // exist. Without it the call-result obligation matched no occurrence
         // and every function that called anything was refused for a result its
         // rendering did assign.
+        let source_call = self.source_inst_for_normalized_op(block_addr, op_idx);
         let rendered_value = match op {
             SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
-                self.certified_call_result_value((block_addr, op_idx))
+                source_call.and_then(|call| self.certified_call_result_value(call))
             }
-            _ => op.dst().and_then(|dst| self.value_id_for_rendered_op(dst)),
+            _ => op.dst().and_then(value_of),
         };
         let mut obligations = self.exact_effect_obligations_for_normalized_value(
             EffectOccurrenceKind::Expression,
@@ -304,13 +309,15 @@ impl<'a> FoldingContext<'a> {
         // statement precisely because this one already assigned it, and left
         // alone its producer obligation had nothing to name.
         if matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
-            && let Some((define_block, define_idx)) =
-                self.certified_call_result_definition_site((block_addr, op_idx))
+            && let Some(definition) =
+                source_call.and_then(|call| self.certified_call_result_definition_site(call))
+            && let Some(define) = self.normalized_site_of_source(definition)
+            && let Some(define_block) = self.normalized_block_addr(define)
         {
             obligations.extend(self.exact_effect_obligations_for_normalized_value(
                 EffectOccurrenceKind::Expression,
                 define_block,
-                define_idx,
+                define.op_idx,
                 rendered_value,
             ));
         }
@@ -321,15 +328,12 @@ impl<'a> FoldingContext<'a> {
         // A decomposed wide store is one write per member, and each member's
         // access carries its own obligation.
         if let SSAOp::Store { .. } = op
-            && let Some(run) = self
-                .prepared_ssa()
-                .and_then(|prepared| prepared.graph().inst_id_for_op_site(block_addr, op_idx))
-                .and_then(|inst| {
-                    self.prepared_ssa()?
-                        .structured()
-                        .member_run_stores
-                        .get(&inst)
-                })
+            && let Some(run) = source_call.and_then(|inst| {
+                self.prepared_ssa()?
+                    .structured()
+                    .member_run_stores
+                    .get(inst)
+            })
         {
             for member in &run.members {
                 obligations.extend(self.exact_effect_obligations_for_member_access(
@@ -661,7 +665,10 @@ impl<'a> FoldingContext<'a> {
                     rendered.unobserved()
                 );
             }
-            Ok(self.convert_from(rendered, typed.produced(id), required))
+            Ok(match computes_with(machine_expr.kind()) {
+                true => self.convert_number(rendered, typed.produced(id), required),
+                false => self.convert_from(rendered, typed.produced(id), required),
+            })
         };
         Ok(match machine_expr.kind() {
             Kind::Constant {
@@ -871,7 +878,10 @@ impl<'a> FoldingContext<'a> {
                     rendered.unobserved()
                 );
             }
-            Ok(self.convert_from(rendered, typed.term_produced(id), required))
+            Ok(match term_computes_with(&arena.term(term).kind) {
+                true => self.convert_number(rendered, typed.term_produced(id), required),
+                false => self.convert_from(rendered, typed.term_produced(id), required),
+            })
         };
         let literal =
             |bits: r2ssa::MachineBitVector| wide_aware_literal(bits.bits(), bits.width_bits());
@@ -902,7 +912,7 @@ impl<'a> FoldingContext<'a> {
                 let rendered = child(0, input)?;
                 let Some(produced) = typed
                     .term_produced(term)
-                    .and_then(r2rewrite::CValue::as_type)
+                    .and_then(crate::typed::CValue::as_type)
                 else {
                     return Err(invalid());
                 };
@@ -953,7 +963,7 @@ impl<'a> FoldingContext<'a> {
             Kind::Cast { input, .. } => {
                 let Some(produced) = typed
                     .term_produced(term)
-                    .and_then(r2rewrite::CValue::as_type)
+                    .and_then(crate::typed::CValue::as_type)
                 else {
                     return Err(invalid());
                 };
@@ -964,7 +974,7 @@ impl<'a> FoldingContext<'a> {
                 // collapse into one cast that converts nothing.
                 if typed
                     .term_produced(input)
-                    .and_then(r2rewrite::CValue::as_type)
+                    .and_then(crate::typed::CValue::as_type)
                     == Some(produced)
                 {
                     self.materialize_term(names, value, input, depth + 1)?
@@ -973,14 +983,14 @@ impl<'a> FoldingContext<'a> {
                     let from = typed
                         .term_required(term, 0)
                         .cloned()
-                        .map(r2rewrite::CValue::Typed);
+                        .map(crate::typed::CValue::Typed);
                     self.convert_from(rendered, from.as_ref(), produced)
                 }
             }
             Kind::Extract { input, lsb_bits } => {
                 let Some(produced) = typed
                     .term_produced(term)
-                    .and_then(r2rewrite::CValue::as_type)
+                    .and_then(crate::typed::CValue::as_type)
                 else {
                     return Err(invalid());
                 };
@@ -1002,14 +1012,14 @@ impl<'a> FoldingContext<'a> {
                 // identity: a 32-bit object read at 32 bits is the object.
                 let from = typed.term_required(term, 0).cloned();
                 if lsb_bits == 0 {
-                    let from = from.map(r2rewrite::CValue::Typed);
+                    let from = from.map(crate::typed::CValue::Typed);
                     self.convert_from(rendered, from.as_ref(), produced)
                 } else {
                     let shifted =
                         CExpr::binary(BinaryOp::Shr, rendered, CExpr::IntLit(i64::from(lsb_bits)));
                     let from = from
-                        .map(|ty| r2rewrite::promoted(&ty))
-                        .map(r2rewrite::CValue::Typed);
+                        .map(|ty| crate::typed::promoted(&ty))
+                        .map(crate::typed::CValue::Typed);
                     self.convert_from(shifted, from.as_ref(), produced)
                 }
             }
@@ -1019,7 +1029,7 @@ impl<'a> FoldingContext<'a> {
                 if r2rewrite::canon::literal_bits(arena, high) == Some(0) {
                     let Some(produced) = typed
                         .term_produced(term)
-                        .and_then(r2rewrite::CValue::as_type)
+                        .and_then(crate::typed::CValue::as_type)
                         .cloned()
                     else {
                         return Err(invalid());
@@ -1027,12 +1037,12 @@ impl<'a> FoldingContext<'a> {
                     let low_required = typed
                         .term_required(term, 1)
                         .cloned()
-                        .map(r2rewrite::CValue::Typed);
+                        .map(crate::typed::CValue::Typed);
                     return Ok(self.convert_from(child(1, low)?, low_required.as_ref(), &produced));
                 }
                 let Some(produced) = typed
                     .term_produced(term)
-                    .and_then(r2rewrite::CValue::as_type)
+                    .and_then(crate::typed::CValue::as_type)
                     .cloned()
                 else {
                     return Err(invalid());
@@ -1040,11 +1050,11 @@ impl<'a> FoldingContext<'a> {
                 let high_required = typed
                     .term_required(term, 0)
                     .cloned()
-                    .map(r2rewrite::CValue::Typed);
+                    .map(crate::typed::CValue::Typed);
                 let low_required = typed
                     .term_required(term, 1)
                     .cloned()
-                    .map(r2rewrite::CValue::Typed);
+                    .map(crate::typed::CValue::Typed);
                 let high = self.convert_from(child(0, high)?, high_required.as_ref(), &produced);
                 let low = self.convert_from(child(1, low)?, low_required.as_ref(), &produced);
                 CExpr::binary(
@@ -1159,9 +1169,7 @@ impl<'a> FoldingContext<'a> {
             let r2ssa::CanonicalInstructionSite::Op(ordinal) = id.site else {
                 return None;
             };
-            let inst = prepared
-                .graph()
-                .inst_id_for_op_site(id.block_addr, usize::try_from(ordinal).ok()?)?;
+            let inst = prepared.graph().inst_for_op(ordinal)?;
             let produced = prepared.graph().inst(inst).and_then(|inst| inst.output)?;
             if !matches!(
                 names.disposition_for_value(produced),
@@ -1735,22 +1743,20 @@ impl<'a> FoldingContext<'a> {
 
     fn lower_certified_statement_call(
         &self,
-        block_addr: u64,
-        op_idx: usize,
+        source_call: InstId,
         call: CExpr,
         _certified_args: CertifiedCallArgs,
     ) -> LoweredOp {
-        if let Some(owner) =
-            self.materializable_call_result_expr_for_call_expr((block_addr, op_idx), &call)
+        if let Some(owner) = self.materializable_call_result_expr_for_call_expr(source_call, &call)
         {
             // The object the result is assigned to decides the conversion,
             // exactly as it does everywhere else: from what the callee is
             // recorded to return, to what the plan declared the object.
             let returned = self
-                .known_signature_for_site(block_addr, op_idx)
+                .known_signature_for_site(source_call)
                 .map(|signature| CValue::Typed(signature.return_type));
             let call = match self
-                .certified_call_result_value((block_addr, op_idx))
+                .certified_call_result_value(source_call)
                 .and_then(|value| self.value_declaration_type(value))
                 .or_else(|| {
                     self.declared_type_of_name(&owner)
@@ -1817,70 +1823,54 @@ impl<'a> FoldingContext<'a> {
                 if frame.with_call_args {
                     match op {
                         SSAOp::Call { target, .. } => {
-                            let Some((source_block, source_op_idx)) = frame.source_call_site else {
+                            let Some(source_call) = frame.source_call_site else {
                                 return Err(OpLoweringRefusal::missing_machine_projection());
                             };
-                            let (cert, _) = self.admitted_callsite(source_block, source_op_idx)?;
+                            let (cert, _) = self.admitted_callsite(source_call)?;
                             let func_expr =
                                 self.certified_call_target_expr(frame, target, cert, true)?;
-                            let certified_args =
-                                self.certified_call_args_for_site(source_block, source_op_idx)?;
+                            let certified_args = self.certified_call_args_for_site(source_call)?;
                             self.record_callee_declaration(
                                 &func_expr,
-                                source_block,
-                                source_op_idx,
+                                source_call,
                                 &certified_args,
                             )?;
-                            let call = CExpr::call_at(
-                                (source_block, source_op_idx),
-                                func_expr,
-                                certified_args.args.clone(),
-                            );
+                            let call =
+                                CExpr::call_at(source_call, func_expr, certified_args.args.clone());
                             return self.finish_lowering_transaction(
                                 self.lower_certified_statement_call(
-                                    source_block,
-                                    source_op_idx,
+                                    source_call,
                                     call,
                                     certified_args,
                                 ),
                             );
                         }
                         SSAOp::CallInd { target, .. } => {
-                            let Some((source_block, source_op_idx)) = frame.source_call_site else {
+                            let Some(source_call) = frame.source_call_site else {
                                 return Err(OpLoweringRefusal::missing_machine_projection());
                             };
-                            let (cert, _) = self.admitted_callsite(source_block, source_op_idx)?;
+                            let (cert, _) = self.admitted_callsite(source_call)?;
                             // Whether the callee is named is the certificate's
                             // to say. A `call [reloc.X]` is indirect in shape
                             // and direct in fact.
                             let direct = cert.direct_target.is_some();
                             let func_expr =
                                 self.certified_call_target_expr(frame, target, cert, direct)?;
-                            let certified_args =
-                                self.certified_call_args_for_site(source_block, source_op_idx)?;
+                            let certified_args = self.certified_call_args_for_site(source_call)?;
                             if direct {
                                 self.record_callee_declaration(
                                     &func_expr,
-                                    source_block,
-                                    source_op_idx,
+                                    source_call,
                                     &certified_args,
                                 )?;
                             }
-                            let func_expr = self.callable_target_expr(
-                                func_expr,
-                                source_block,
-                                source_op_idx,
-                                &certified_args,
-                            )?;
-                            let call = CExpr::call_at(
-                                (source_block, source_op_idx),
-                                func_expr,
-                                certified_args.args.clone(),
-                            );
+                            let func_expr =
+                                self.callable_target_expr(func_expr, source_call, &certified_args)?;
+                            let call =
+                                CExpr::call_at(source_call, func_expr, certified_args.args.clone());
                             return self.finish_lowering_transaction(
                                 self.lower_certified_statement_call(
-                                    source_block,
-                                    source_op_idx,
+                                    source_call,
                                     call,
                                     certified_args,
                                 ),
@@ -1889,16 +1879,15 @@ impl<'a> FoldingContext<'a> {
                         // A tail call is certified through either branch
                         // shape; the thunk `jmp [reloc.X]` is the indirect one.
                         SSAOp::Branch { target, .. } | SSAOp::BranchInd { target, .. }
-                            if frame.source_call_site.is_some_and(|(block_addr, op_idx)| {
-                                self.certified_call_render_fact_for_op(block_addr, op_idx)
+                            if frame.source_call_site.is_some_and(|call| {
+                                self.certified_call_render_fact_for_op(call)
                                     .is_some_and(|fact| fact.disposition.is_terminal_return())
                             }) =>
                         {
-                            let Some((source_block, source_op_idx)) = frame.source_call_site else {
+                            let Some(source_call) = frame.source_call_site else {
                                 return Err(OpLoweringRefusal::missing_machine_projection());
                             };
-                            let (cert, render_fact) =
-                                self.admitted_callsite(source_block, source_op_idx)?;
+                            let (cert, render_fact) = self.admitted_callsite(source_call)?;
                             if !render_fact.disposition.is_terminal_return() {
                                 return Err(OpLoweringRefusal::missing_machine_projection());
                             }
@@ -1910,25 +1899,15 @@ impl<'a> FoldingContext<'a> {
                             let direct = cert.direct_target.is_some();
                             let func_expr =
                                 self.certified_call_target_expr(frame, target, cert, direct)?;
-                            let certified_args =
-                                self.certified_call_args_for_site(source_block, source_op_idx)?;
+                            let certified_args = self.certified_call_args_for_site(source_call)?;
                             self.record_callee_declaration(
                                 &func_expr,
-                                source_block,
-                                source_op_idx,
+                                source_call,
                                 &certified_args,
                             )?;
-                            let func_expr = self.callable_target_expr(
-                                func_expr,
-                                source_block,
-                                source_op_idx,
-                                &certified_args,
-                            )?;
-                            let call = CExpr::call_at(
-                                (source_block, source_op_idx),
-                                func_expr,
-                                certified_args.args,
-                            );
+                            let func_expr =
+                                self.callable_target_expr(func_expr, source_call, &certified_args)?;
+                            let call = CExpr::call_at(source_call, func_expr, certified_args.args);
                             let stmt = if render_fact.disposition
                                 == r2types::CallsiteRenderDisposition::TerminalVoidReturn
                             {
@@ -1995,11 +1974,11 @@ impl<'a> FoldingContext<'a> {
         if self.is_block_answer_part(op) {
             return Ok(None);
         }
-        let source_site = self.source_op_site_for_normalized_op(block_addr, op_idx);
+        let source_site = self.source_inst_for_normalized_op(block_addr, op_idx);
         let carries_callsite = matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
             || matches!(op, SSAOp::Branch { .. } | SSAOp::BranchInd { .. })
-                && source_site.is_some_and(|(block_addr, op_idx)| {
-                    self.certified_call_render_fact_for_op(block_addr, op_idx)
+                && source_site.is_some_and(|call| {
+                    self.certified_call_render_fact_for_op(call)
                         .is_some_and(|fact| fact.disposition.is_terminal_return())
                 });
         if carries_callsite && source_site.is_none() {
@@ -2008,8 +1987,7 @@ impl<'a> FoldingContext<'a> {
             ))));
         }
         let normalized_site = self.normalized_site(block_addr, op_idx);
-        let source_call_site = source_site.or(Some((block_addr, op_idx)));
-        let mut frame = LowerFrame::for_stmt(normalized_site, source_call_site, true);
+        let mut frame = LowerFrame::for_stmt(normalized_site, source_site, true);
         let (lowered, canonical) =
             match normalized_site.and_then(|site| self.canonical_bound_assignment(site)) {
                 Some(CanonicalBoundAssignment {
@@ -2053,11 +2031,14 @@ impl<'a> FoldingContext<'a> {
             stmt
         } else if rendered
             && matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
-            && self.call_site_assigns_its_own_result((block_addr, op_idx))
-            && let Some((definition_block, definition_idx)) =
-                self.certified_call_result_definition_site((block_addr, op_idx))
+            && let Some(call) = source_site
+            && self.call_site_assigns_its_own_result(call)
+            && let Some(definition) = self
+                .certified_call_result_definition_site(call)
+                .and_then(|definition| self.normalized_site_of_source(definition))
+            && let Some(definition_block) = self.normalized_block_addr(definition)
         {
-            self.observe_normalized_output_stmt(definition_block, definition_idx, stmt)
+            self.observe_normalized_output_stmt(definition_block, definition.op_idx, stmt)
         } else {
             stmt
         };
@@ -2084,15 +2065,13 @@ impl<'a> FoldingContext<'a> {
     fn callable_target_expr(
         &self,
         func_expr: CExpr,
-        block_addr: u64,
-        op_idx: usize,
+        call: InstId,
         args: &CertifiedCallArgs,
     ) -> OpLoweringResult<CExpr> {
         if matches!(func_expr.unobserved(), CExpr::External { .. }) {
             return Ok(func_expr);
         }
-        let (ret_type, params, _variadic) =
-            self.certified_callee_signature(block_addr, op_idx, args)?;
+        let (ret_type, params, _variadic) = self.certified_callee_signature(call, args)?;
         // `CType::Function` is already spelled as a pointer to function,
         // `ret(*)(params)`, so wrapping it in `Pointer` would spell a pointer
         // to that and call the wrong thing.
@@ -2162,4 +2141,31 @@ mod typed_output_contract_tests {
             }
         ));
     }
+}
+
+/// Whether an operation computes with its operands as numbers: arithmetic,
+/// bitwise logic and shifts, whose operands no string literal stands for.
+fn computes_with(kind: &r2ssa::MachineExprKind) -> bool {
+    use r2ssa::MachineExprKind as Kind;
+    matches!(
+        kind,
+        Kind::Arithmetic { .. }
+            | Kind::Bitwise { .. }
+            | Kind::BitwiseNot { .. }
+            | Kind::Negate { .. }
+            | Kind::Shift { .. }
+    )
+}
+
+/// The same question of a term.
+fn term_computes_with(kind: &r2rewrite::TermKind) -> bool {
+    use r2rewrite::TermKind as Kind;
+    matches!(
+        kind,
+        Kind::Arithmetic { .. }
+            | Kind::Bitwise { .. }
+            | Kind::BitwiseNot(_)
+            | Kind::Negate(_)
+            | Kind::Shift { .. }
+    )
 }

@@ -2,12 +2,19 @@
 
 use super::*;
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) fn canonicalize_param_home_stack_slots(
     merged_signature: Option<&FunctionSignatureSpec>,
     register_params: &[crate::context::ExternalRegisterParamSpec],
     stack_slots: &mut BTreeMap<StackSlotKey, ExternalStackVarSpec>,
     ssa_blocks: &[SSABlock],
-    prep_facts: Option<&r2ssa::DecompilePrepFacts>,
+    prep_facts: Option<super::FrameRoots<'_>>,
     registers: &crate::RegisterIdentity,
 ) {
     if register_params.is_empty() || ssa_blocks.is_empty() {
@@ -17,20 +24,16 @@ pub(crate) fn canonicalize_param_home_stack_slots(
     let trivial_value_sources = collect_trivial_value_sources(ssa_blocks);
     let mut slot_addr_by_var = HashMap::<String, StackSlotKey>::new();
     for block in ssa_blocks {
-        for op in &block.ops {
+        for op in block.ops() {
             match op {
                 SSAOp::IntAdd { dst, .. } => {
-                    let slot_key = prep_facts
-                        .and_then(|facts| facts.stack_address_root_of(dst))
-                        .copied();
+                    let slot_key = prep_facts.and_then(|roots| roots(dst));
                     if let Some(slot_key) = slot_key {
                         slot_addr_by_var.insert(dst.display_name(), slot_key);
                     }
                 }
                 SSAOp::IntSub { dst, .. } => {
-                    let slot_key = prep_facts
-                        .and_then(|facts| facts.stack_address_root_of(dst))
-                        .copied();
+                    let slot_key = prep_facts.and_then(|roots| roots(dst));
                     if let Some(slot_key) = slot_key {
                         slot_addr_by_var.insert(dst.display_name(), slot_key);
                     }
@@ -43,11 +46,7 @@ pub(crate) fn canonicalize_param_home_stack_slots(
                     let Some(source_slot_key) = slot_addr_by_var
                         .get(&addr.display_name())
                         .cloned()
-                        .or_else(|| {
-                            prep_facts
-                                .and_then(|facts| facts.stack_address_root_of(addr))
-                                .copied()
-                        })
+                        .or_else(|| prep_facts.and_then(|roots| roots(addr)))
                     else {
                         continue;
                     };
@@ -110,10 +109,17 @@ pub(crate) fn canonicalize_param_home_stack_slots(
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) fn collect_trivial_value_sources(ssa_blocks: &[SSABlock]) -> HashMap<SSAVar, SSAVar> {
     let mut trivial_value_sources = HashMap::new();
     for block in ssa_blocks {
-        for op in &block.ops {
+        for op in block.ops() {
             match op {
                 SSAOp::Copy { dst, src }
                 | SSAOp::IntZExt { dst, src }
@@ -130,6 +136,13 @@ pub(crate) fn collect_trivial_value_sources(ssa_blocks: &[SSABlock]) -> HashMap<
     trivial_value_sources
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) fn resolve_trivial_value_root(
     trivial_value_sources: &HashMap<SSAVar, SSAVar>,
     value: &SSAVar,

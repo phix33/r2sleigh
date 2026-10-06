@@ -9,6 +9,13 @@ use crate::var::SSAVar;
 
 /// Information about where a variable is defined and used.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "keyed by name where there is no value table: renaming builds the names the table interns, the table's own interning index, or a one-instruction block"
+    )
+)]
 pub struct DefUseInfo {
     /// Presentation-only map from displayed variable names to definition sites.
     ///
@@ -76,16 +83,6 @@ impl DefUseInfo {
         self.exact_live.contains(var)
     }
 
-    /// Get all input variable names.
-    pub fn input_vars(&self) -> impl Iterator<Item = &str> {
-        self.inputs.iter().map(|s| s.as_str())
-    }
-
-    /// Get all output variable names.
-    pub fn output_vars(&self) -> impl Iterator<Item = &str> {
-        self.outputs.iter().map(|s| s.as_str())
-    }
-
     fn rebuild_presentation(&mut self) {
         self.definitions.clear();
         self.uses.clear();
@@ -127,14 +124,14 @@ pub fn def_use(block: &SSABlock) -> DefUseInfo {
     let mut info = DefUseInfo::new();
 
     // First pass: record all definitions
-    for (idx, op) in block.ops.iter().enumerate() {
+    for (idx, op) in block.ops().iter().enumerate() {
         if let Some(dst) = op.dst() {
             info.exact_definitions.insert(dst.clone(), Some(idx));
         }
     }
 
     // Second pass: record all uses
-    for (idx, op) in block.ops.iter().enumerate() {
+    for (idx, op) in block.ops().iter().enumerate() {
         for src in op.sources() {
             info.exact_uses.entry(src.clone()).or_default().push(idx);
         }

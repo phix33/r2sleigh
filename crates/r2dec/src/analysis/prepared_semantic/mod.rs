@@ -4,9 +4,9 @@ mod tests;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-use r2ssa::function::DefLocation;
 use r2ssa::{
-    CompareKind, MemoryLocation, ObjectKind, SSAOp, SSAVar, SsaArtifact, ValueId, ValueOwner,
+    CompareKind, InstId, MemoryLocation, ObjectKind, SSAOp, SSAVar, SsaArtifact, ValueId,
+    ValueOwner,
 };
 use r2types::{
     CalleeIdentity, CalleeResolutionFacts, CalleeTargetIdentityRequest, CallsiteKey,
@@ -52,9 +52,9 @@ pub(crate) struct PreparedSemanticView {
     pub(crate) owner_expr_by_value: HashMap<ValueId, CExpr>,
     pub(crate) stack_offset_by_value: HashMap<ValueId, i64>,
     pub(crate) predicate_expr_by_value: HashMap<ValueId, CExpr>,
-    pub(crate) call_view_by_site: BTreeMap<(u64, usize), PreparedCallView>,
+    pub(crate) call_view_by_site: BTreeMap<InstId, PreparedCallView>,
     pub(crate) call_result_facts_by_value: BTreeMap<ValueId, r2types::CallResultFact>,
-    pub(crate) call_result_source_by_value: HashMap<ValueId, (u64, usize)>,
+    pub(crate) call_result_source_by_value: HashMap<ValueId, InstId>,
     /// Byte offset and width of every access the capture projects onto a struct
     /// member rather than an array element. An index must not be invented for
     /// these: the offset reaches a field, and its stride is not an element size.
@@ -214,10 +214,11 @@ impl PreparedSemanticView {
         populate_stack_offsets(&mut view, inputs.prepared);
         #[cfg(test)]
         populate_authorized_stack_owner_names(&mut view, &inputs);
-        populate_owner_exprs(symbols, &mut view, &inputs);
+        let named = NamedBlocks::of(inputs.prepared.function());
+        populate_owner_exprs(symbols, &mut view, &inputs, &named);
         populate_call_result_sources(&mut view, inputs.call_result_facts());
-        populate_calls(symbols, &mut view, &inputs);
-        populate_predicates(symbols, &mut view, &inputs);
+        populate_calls(symbols, &mut view, &inputs, &named);
+        populate_predicates(symbols, &mut view, &inputs, &named);
         view
     }
 
@@ -267,10 +268,7 @@ impl PreparedSemanticView {
         prepared: &SsaArtifact,
         var: &SSAVar,
     ) -> Option<crate::symbol::SymbolId> {
-        let slot = prepared
-            .function()
-            .decompile_prep_facts()?
-            .formal_parameter_of(var)?;
+        let slot = prepared.formal_parameter_of(value_of(prepared, var)?)?;
         let slot = u32::try_from(slot).ok()?;
         let disposition = match self.binding_names.as_ref()?.require_parameter_slot(slot) {
             Ok(disposition) => disposition,
@@ -316,7 +314,7 @@ impl PreparedSemanticView {
             .and_then(|value_id| self.predicate_expr_by_value.get(&value_id))
     }
 
-    pub(crate) fn call_view_for_site(&self, site: (u64, usize)) -> Option<&PreparedCallView> {
+    pub(crate) fn call_view_for_site(&self, site: InstId) -> Option<&PreparedCallView> {
         self.call_view_by_site.get(&site)
     }
 
@@ -324,7 +322,7 @@ impl PreparedSemanticView {
         &self,
         prepared: &SsaArtifact,
         var: &SSAVar,
-    ) -> Option<(u64, usize)> {
+    ) -> Option<InstId> {
         Self::value_id_for_var(prepared, var)
             .and_then(|value_id| self.call_result_source_by_value.get(&value_id).copied())
     }
@@ -377,13 +375,12 @@ fn preflight_rendered_identities(
                 .map(|parameter| parameter.index()),
         );
     }
-    if let Some(prep) = inputs.prepared.function().decompile_prep_facts() {
-        parameter_slots.extend(
-            prep.formal_parameters
-                .values()
-                .filter_map(|slot| u32::try_from(*slot).ok()),
-        );
-    }
+    parameter_slots.extend(
+        inputs
+            .prepared
+            .formal_parameters()
+            .filter_map(|(_, slot)| u32::try_from(slot).ok()),
+    );
     if let Some(render) = inputs.function_facts.render() {
         for entity in render.certified_entities.values() {
             match entity {
@@ -488,13 +485,6 @@ fn exact_prepared_copy_provenance(
         source_var: Some(src.clone()),
         stack_slot,
     }
-}
-
-fn prepared_call_site_tuple(
-    prepared: &SsaArtifact,
-    inst_id: r2ssa::InstId,
-) -> Option<(u64, usize)> {
-    prepared.inst_op_site(inst_id)
 }
 
 pub(crate) fn build_prepared_runtime_facts_with_control(
@@ -676,13 +666,9 @@ fn populate_authorized_stack_owner_names(
 }
 
 fn populate_stack_offsets(view: &mut PreparedSemanticView, prepared: &SsaArtifact) {
-    let Some(prep) = prepared.function().decompile_prep_facts() else {
-        return;
-    };
-    for var in prep.stack_address_roots.keys() {
-        if let Some(offset) = prep.stack_address_root_of(var).map(|root| root.offset) {
-            view.insert_stack_offset(prepared, var, offset);
-        }
+    let prep = prepared.decompile_prep_facts();
+    for (value, root) in &prep.stack_address_roots {
+        view.insert_stack_offset(prepared, prepared.graph().var(value), root.offset);
     }
     for (key, object_id) in &prepared.objects().value_objects {
         if key.space != r2il::SpaceId::Ram {
@@ -701,11 +687,12 @@ fn populate_owner_exprs(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
     view: &mut PreparedSemanticView,
     inputs: &PreparedSemanticViewInputs<'_>,
+    named: &NamedBlocks,
 ) {
     let prepared = inputs.prepared;
     let mut producer_by_dst = HashMap::<SSAVar, &SSAOp>::new();
-    for block in prepared.function().blocks() {
-        for op in &block.ops {
+    for block in &named.blocks {
+        for op in block.ops() {
             if let Some(dst) = op.dst() {
                 producer_by_dst.insert(dst.clone(), op);
             }
@@ -726,8 +713,8 @@ fn populate_owner_exprs(
         view.insert_owner_expr(inputs.prepared, &value, CExpr::AddrOf(Box::new(stack_expr)));
     }
 
-    for block in prepared.function().blocks() {
-        for (op_idx, op) in block.ops.iter().enumerate() {
+    for block in &named.blocks {
+        for (op_idx, (op_id, op)) in block.sited().enumerate() {
             if let SSAOp::Load {
                 dst,
                 space: r2il::SpaceId::Ram,
@@ -747,7 +734,9 @@ fn populate_owner_exprs(
                     })
                     .or_else(|| {
                         prepared
-                            .memory_uses_for_op_site(block.addr, op_idx)
+                            .graph()
+                            .inst_for_op(op_id)
+                            .and_then(|inst| prepared.memory_uses_for_inst(inst))
                             .and_then(|facts| {
                                 let mut ram = facts
                                     .iter()
@@ -787,8 +776,8 @@ fn populate_owner_exprs(
     for _ in 0..4 {
         let mut changed = false;
 
-        for block in prepared.function().blocks() {
-            for op in &block.ops {
+        for block in &named.blocks {
+            for op in block.ops() {
                 match op {
                     SSAOp::Copy { dst, src }
                     | SSAOp::IntZExt { dst, src }
@@ -1083,17 +1072,18 @@ fn populate_owner_exprs(
         }
     }
 
-    refine_load_owner_exprs(symbols, view, inputs);
+    refine_load_owner_exprs(symbols, view, inputs, named);
 }
 
 fn refine_load_owner_exprs(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
     view: &mut PreparedSemanticView,
     inputs: &PreparedSemanticViewInputs<'_>,
+    named: &NamedBlocks,
 ) {
     let prepared = inputs.prepared;
-    for block in prepared.function().blocks() {
-        for (op_idx, op) in block.ops.iter().enumerate() {
+    for block in &named.blocks {
+        for (op_idx, (op_id, op)) in block.sited().enumerate() {
             let SSAOp::Load {
                 dst,
                 space: r2il::SpaceId::Ram,
@@ -1115,7 +1105,9 @@ fn refine_load_owner_exprs(
                 })
                 .or_else(|| {
                     prepared
-                        .memory_uses_for_op_site(block.addr, op_idx)
+                        .graph()
+                        .inst_for_op(op_id)
+                        .and_then(|inst| prepared.memory_uses_for_inst(inst))
                         .and_then(|facts| {
                             let mut ram = facts
                                 .iter()
@@ -1231,10 +1223,8 @@ fn prepared_direct_stack_load_offset(
     let offset = view
         .stack_offset_for_var(prepared, addr)
         .or_else(|| stack_offset_for_value(prepared, addr))?;
-    prepared
-        .function()
-        .decompile_prep_facts()
-        .and_then(|facts| facts.stack_address_root_of(addr))
+    value_of(prepared, addr)
+        .and_then(|addr| prepared.decompile_prep_facts().stack_address_root_of(addr))
         .map(|_| offset)
         .or_else(|| {
             view.owner_expr_for_var(prepared, addr)
@@ -1376,10 +1366,8 @@ fn populate_call_result_sources(
     for cert in call_result_facts.by_value.values() {
         view.call_result_facts_by_value
             .insert(cert.value, cert.clone());
-        view.call_result_source_by_value.insert(
-            cert.value,
-            (cert.callsite.block_addr, cert.callsite.op_index),
-        );
+        view.call_result_source_by_value
+            .insert(cert.value, cert.callsite.at);
     }
 }
 
@@ -1387,6 +1375,7 @@ fn populate_predicates(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
     view: &mut PreparedSemanticView,
     inputs: &PreparedSemanticViewInputs<'_>,
+    named: &NamedBlocks,
 ) {
     view.predicate_expr_by_value.clear();
 
@@ -1430,19 +1419,20 @@ fn populate_predicates(
         view.insert_predicate_expr(inputs.prepared, cond_var, expr.clone());
     }
 
-    populate_derived_predicates(symbols, view, inputs);
+    populate_derived_predicates(symbols, view, inputs, named);
 }
 
 fn populate_derived_predicates(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
     view: &mut PreparedSemanticView,
     inputs: &PreparedSemanticViewInputs<'_>,
+    named: &NamedBlocks,
 ) {
     for _ in 0..4 {
         let mut changed = false;
 
-        for block in inputs.prepared.function().blocks() {
-            for op in &block.ops {
+        for block in &named.blocks {
+            for op in block.ops() {
                 let Some(dst) = op.dst() else {
                     continue;
                 };
@@ -1569,12 +1559,8 @@ fn reconstruct_zero_compare_from_nonzero_def(
         return None;
     }
 
-    let (block_addr, DefLocation::Op(op_idx)) = inputs.prepared.function().find_def(candidate)?
-    else {
-        return None;
-    };
-    let block = inputs.prepared.function().get_block(block_addr)?;
-    let def = block.ops.get(op_idx)?;
+    let graph = inputs.prepared.graph();
+    let def = graph.named_op(graph.defining_op(candidate)?);
 
     match def {
         SSAOp::Copy { src, .. }
@@ -1661,11 +1647,8 @@ fn compare_def_expr_for_predicate_operand(
         return None;
     }
 
-    let (block_addr, DefLocation::Op(op_idx)) = inputs.prepared.function().find_def(var)? else {
-        return None;
-    };
-    let block = inputs.prepared.function().get_block(block_addr)?;
-    let op = block.ops.get(op_idx)?;
+    let graph = inputs.prepared.graph();
+    let op = graph.named_op(graph.defining_op(var)?);
 
     match op {
         SSAOp::Copy { src, .. }
@@ -1707,10 +1690,7 @@ fn compare_def_expr_for_predicate_operand(
         SSAOp::IntLessEqual { a, b, .. } | SSAOp::IntSLessEqual { a, b, .. } => {
             compare_expr_for_sources(symbols, view, inputs, a, b, BinaryOp::Le)
         }
-        _ => {
-            let _ = block;
-            None
-        }
+        _ => None,
     }
 }
 
@@ -1718,11 +1698,10 @@ fn populate_calls(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
     view: &mut PreparedSemanticView,
     inputs: &PreparedSemanticViewInputs<'_>,
+    named: &NamedBlocks,
 ) {
     for call_site in inputs.prepared.call_sites().by_id.values() {
-        let Some(site) = prepared_call_site_tuple(inputs.prepared, call_site.at) else {
-            continue;
-        };
+        let site = call_site.at;
         let direct_target = callsite_direct_target(inputs.callsite_facts(), site);
         let mut callee_identity = lookup_callee_identity_for_site(inputs, site, direct_target);
         if inputs
@@ -1742,12 +1721,7 @@ fn populate_calls(
             result_owner: None,
             render_fact: inputs
                 .call_render_facts()
-                .and_then(|facts| {
-                    facts.fact_for_site(CallsiteKey {
-                        block_addr: site.0,
-                        op_index: site.1,
-                    })
-                })
+                .and_then(|facts| facts.fact_for_site(CallsiteKey { at: site }))
                 .cloned(),
         };
         call_view.result_owner = certified_call_result_owner(
@@ -1769,7 +1743,7 @@ fn populate_calls(
         let authoritative_args = canonical_call_authoritative_args(
             symbols,
             site,
-            inputs.prepared.function(),
+            named,
             inputs.prepared,
             view,
             inputs.callsite_facts(),
@@ -1786,13 +1760,10 @@ fn populate_calls(
 
 fn callsite_direct_target(
     callsite_facts: Option<&FunctionCallsiteFacts>,
-    site: (u64, usize),
+    site: InstId,
 ) -> Option<u64> {
     callsite_facts?
-        .arguments_for_site(CallsiteKey {
-            block_addr: site.0,
-            op_index: site.1,
-        })?
+        .arguments_for_site(CallsiteKey { at: site })?
         .direct_target
 }
 
@@ -1811,8 +1782,8 @@ fn callsite_direct_target(
 /// it yields the prefix before the gap rather than a resequenced list.
 fn canonical_call_authoritative_args(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
-    site: (u64, usize),
-    function: &r2ssa::SSAFunction,
+    site: InstId,
+    named: &NamedBlocks,
     prepared: &SsaArtifact,
     view: &PreparedSemanticView,
     callsite_facts: Option<&FunctionCallsiteFacts>,
@@ -1820,13 +1791,14 @@ fn canonical_call_authoritative_args(
     let Some(callsite_facts) = callsite_facts else {
         return Vec::new();
     };
-    let Some(call_facts) = callsite_facts.arguments_for_site(CallsiteKey {
-        block_addr: site.0,
-        op_index: site.1,
-    }) else {
+    let Some(call_facts) = callsite_facts.arguments_for_site(CallsiteKey { at: site }) else {
         return Vec::new();
     };
-    let Some(block) = function.get_block(site.0) else {
+    let Some(block) = prepared
+        .graph()
+        .block_addr_of(site)
+        .and_then(|addr| named.get(addr))
+    else {
         return Vec::new();
     };
 
@@ -1927,11 +1899,7 @@ fn authoritative_scalar_expr_for_value(
         return Some(expr);
     }
 
-    let (_, op) = block
-        .ops
-        .iter()
-        .enumerate()
-        .find(|(_, op)| op.dst() == Some(var))?;
+    let op = defining_op_in_block(prepared, block, var)?;
 
     match op {
         SSAOp::Copy { src, .. }
@@ -2043,16 +2011,13 @@ fn prepared_result_expr_for_var(
 
 fn certified_call_result_owner(
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
-    site: (u64, usize),
+    site: InstId,
     prepared: &SsaArtifact,
     view: &PreparedSemanticView,
     call_result_facts: Option<&FunctionCallResultFacts>,
 ) -> Option<CExpr> {
     call_result_facts?
-        .results_for_site(CallsiteKey {
-            block_addr: site.0,
-            op_index: site.1,
-        })
+        .results_for_site(CallsiteKey { at: site })
         .filter_map(|cert| certified_call_result_owner_expr(symbols, cert, prepared, view))
         .next()
 }
@@ -2083,7 +2048,7 @@ fn certified_call_result_owner_expr(
 }
 
 fn assign_certified_call_result_owner(
-    site: (u64, usize),
+    site: InstId,
     prepared: &SsaArtifact,
     view: &mut PreparedSemanticView,
     call_result_facts: Option<&FunctionCallResultFacts>,
@@ -2092,10 +2057,7 @@ fn assign_certified_call_result_owner(
     let Some(call_result_facts) = call_result_facts else {
         return;
     };
-    for cert in call_result_facts.results_for_site(CallsiteKey {
-        block_addr: site.0,
-        op_index: site.1,
-    }) {
+    for cert in call_result_facts.results_for_site(CallsiteKey { at: site }) {
         let Some(ValueOwner::StackSlot { object, .. }) = cert.owner.as_ref() else {
             continue;
         };
@@ -2205,14 +2167,7 @@ fn prepared_stack_program_expr_for_object_offset(
 fn prepared_stack_object_for_var(prepared: &SsaArtifact, var: &SSAVar) -> Option<r2ssa::ObjectId> {
     prepared
         .object_for_var(var, r2il::SpaceId::Ram)
-        .or_else(|| {
-            prepared
-                .function()
-                .decompile_prep_facts()
-                .and_then(|facts| {
-                    prepared.object_for_var(facts.canonical_root(var), r2il::SpaceId::Ram)
-                })
-        })
+        .or_else(|| prepared.object_for_var(&canonical_root_var(prepared, var), r2il::SpaceId::Ram))
 }
 
 fn prepared_stack_program_expr_for_var(
@@ -2274,12 +2229,7 @@ fn stack_offset_for_value(prepared: &SsaArtifact, value: &SSAVar) -> Option<i64>
     let object = prepared
         .object_for_var(value, r2il::SpaceId::Ram)
         .or_else(|| {
-            prepared
-                .function()
-                .decompile_prep_facts()
-                .and_then(|facts| {
-                    prepared.object_for_var(facts.canonical_root(value), r2il::SpaceId::Ram)
-                })
+            prepared.object_for_var(&canonical_root_var(prepared, value), r2il::SpaceId::Ram)
         })?;
     let fact = prepared.objects().object(object)?;
     stack_offset_for_object_kind(&fact.kind)
@@ -2321,12 +2271,7 @@ fn expr_for_compare_operand_with_width(
         return Some(expr);
     }
 
-    let root = inputs
-        .prepared
-        .function()
-        .decompile_prep_facts()
-        .map(|facts| facts.canonical_root(&var).clone())
-        .unwrap_or_else(|| var.clone());
+    let root = canonical_root_var(inputs.prepared, &var);
     if let Some(expr) = compare_style_operand_expr(inputs.prepared, &root, compare_width) {
         return Some(expr);
     }
@@ -2428,15 +2373,12 @@ fn binary_op_for_compare(kind: CompareKind) -> BinaryOp {
 
 fn lookup_callee_identity_for_site(
     inputs: &PreparedSemanticViewInputs<'_>,
-    site: (u64, usize),
+    site: InstId,
     direct_target: Option<u64>,
 ) -> Option<CalleeIdentity> {
     CalleeResolutionFacts::resolve_target_identity(CalleeTargetIdentityRequest {
         resolution: inputs.callee_resolution(),
-        callsite: Some(CallsiteKey {
-            block_addr: site.0,
-            op_index: site.1,
-        }),
+        callsite: Some(CallsiteKey { at: site }),
         prepared_identity: None,
         prepared_direct_target: direct_target,
         direct_target_context: None,
@@ -2764,7 +2706,7 @@ fn prepared_signed_dividend_expr(
     dividend: &SSAVar,
 ) -> Option<CExpr> {
     let dividend_value = prepared.graph().value_id_for_var(dividend)?;
-    let certificate = prepared.certificates().expressions.get(&dividend_value)?;
+    let certificate = prepared.certificates().expressions.get(dividend_value)?;
     if certificate.value != dividend_value
         || certificate.width != dividend.size
         || !certificate.renderable
@@ -2869,10 +2811,8 @@ fn prepared_scaled_index_owner_expr(
 }
 
 fn is_prepared_stack_address_carrier(prepared: &SsaArtifact, value: &SSAVar) -> bool {
-    if prepared
-        .function()
-        .decompile_prep_facts()
-        .and_then(|facts| facts.stack_address_root_of(value))
+    if value_of(prepared, value)
+        .and_then(|value| prepared.decompile_prep_facts().stack_address_root_of(value))
         .is_some()
     {
         return true;
@@ -2979,7 +2919,7 @@ fn local_store_owner_expr_for_offset(
         .as_deref()
         .is_some_and(|name| !is_generic_prepared_stack_alias(name));
 
-    for op in block.ops[..before_idx].iter().rev() {
+    for op in block.ops()[..before_idx].iter().rev() {
         let SSAOp::Store {
             space: r2il::SpaceId::Ram,
             addr,
@@ -3082,7 +3022,7 @@ fn collect_prepared_runtime_facts(
     view: &PreparedSemanticView,
 ) {
     for block in blocks {
-        for phi in &block.phis {
+        for phi in block.phis() {
             let _ = bind_prepared_value_id(use_info, prepared, &phi.dst);
             for (_, src) in &phi.sources {
                 // Bind first, then let the one helper write both halves.
@@ -3093,7 +3033,7 @@ fn collect_prepared_runtime_facts(
             let _ = bind_prepared_value_id(use_info, prepared, &phi.dst);
         }
 
-        for op in &block.ops {
+        for op in block.ops() {
             for src in op.sources() {
                 let _ = bind_prepared_value_id(use_info, prepared, src);
             }
@@ -3164,7 +3104,7 @@ fn populate_prepared_call_runtime_facts(
     origins: &crate::normalize::NormalizationOrigins,
 ) {
     for block in blocks {
-        for (op_idx, op) in block.ops.iter().enumerate() {
+        for (op_idx, op) in block.ops().iter().enumerate() {
             if !matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
                 continue;
             }
@@ -3180,9 +3120,7 @@ fn populate_prepared_call_runtime_facts(
             else {
                 continue;
             };
-            let Some(site) = prepared.inst_op_site(*inst) else {
-                continue;
-            };
+            let site = *inst;
             let Some(call_view) = view.call_view_for_site(site) else {
                 continue;
             };
@@ -3198,7 +3136,7 @@ fn populate_prepared_call_runtime_facts(
 }
 
 fn prepared_call_expr(
-    site: (u64, usize),
+    site: InstId,
     symbols: &std::cell::RefCell<crate::symbol::SymbolTable>,
     call_view: &PreparedCallView,
 ) -> Option<CExpr> {
@@ -3341,4 +3279,71 @@ fn normalize_prepared_inline_expr(expr: CExpr, depth: u32) -> CExpr {
         ),
         other => other,
     }
+}
+
+/// The sealed graph's value for a variable the renderer names. The prep
+/// facts are keyed by value (doc/adr-one-ir.md, F2.3 stage 5); the renderer
+/// reads names until it reads values (doc/adr-renderer-printer.md).
+fn value_of(prepared: &SsaArtifact, var: &SSAVar) -> Option<r2ssa::ValueId> {
+    prepared.graph().value_id_for_var(var)
+}
+
+/// The variable every value with `var`'s bits at its width is named by:
+/// the representative value's variable, or the constant a literal class
+/// determines; `var` itself where the graph holds no value for it.
+fn canonical_root_var(prepared: &SsaArtifact, var: &SSAVar) -> SSAVar {
+    let Some(value) = value_of(prepared, var) else {
+        return var.clone();
+    };
+    match prepared.decompile_prep_facts().canonical_root(value) {
+        r2ssa::Representative::Value(root) => prepared.graph().var(root).clone(),
+        r2ssa::Representative::Literal { bits, size } => SSAVar::constant(bits, size),
+    }
+}
+
+/// The function's blocks with every operand spelled as its variable, made
+/// once per view: the readers here still work in names
+/// (doc/adr-renderer-printer.md), and asking `SSAFunction::named_block` per
+/// call site or per round copied a block each time.
+pub(crate) struct NamedBlocks {
+    blocks: Vec<r2ssa::SSABlock>,
+    index: BTreeMap<u64, usize>,
+}
+
+impl NamedBlocks {
+    fn of(function: &r2ssa::SSAFunction) -> Self {
+        let blocks = function.named_blocks();
+        let index = blocks
+            .iter()
+            .enumerate()
+            .map(|(at, block)| (block.addr, at))
+            .collect();
+        Self { blocks, index }
+    }
+
+    fn get(&self, addr: u64) -> Option<&r2ssa::SSABlock> {
+        self.blocks.get(*self.index.get(&addr)?)
+    }
+}
+
+/// The operation of `block` that defines `var`, found through the graph's
+/// definition rather than by reading the block: the definition's ordinal is
+/// its position among the block's phis then operations, so this is `O(1)`
+/// where the walk was the block's length, once per question.
+fn defining_op_in_block<'b>(
+    prepared: &SsaArtifact,
+    block: &'b r2ssa::FunctionSSABlock,
+    var: &SSAVar,
+) -> Option<&'b SSAOp> {
+    let graph = prepared.graph();
+    let inst = graph.inst(graph.def_inst(value_of(prepared, var)?)?)?;
+    if graph.block_addr_of(inst.id)? != block.addr
+        || !matches!(inst.payload, r2ssa::InstPayload::Op(_))
+    {
+        return None;
+    }
+    let op = block
+        .ops()
+        .get(inst.ordinal.checked_sub(block.phis().len())?)?;
+    (op.dst() == Some(var)).then_some(op)
 }

@@ -58,6 +58,9 @@ struct LoadedSpecification {
     sleigh: RefCell<GhidraSleigh>,
     /// Canonical register names by (offset, size)
     reg_name_map: HashMap<(u64, u32), String>,
+    /// Every name the specification gives any register, lower-cased: an
+    /// operand body may spell an alias the canonical map does not keep.
+    register_names: std::collections::BTreeSet<String>,
     /// Exact mapping extracted with the architecture metadata for this session.
     space_map: HashMap<AddressSpaceId, SpaceId>,
     /// Register the processor spec names as the program counter.
@@ -108,6 +111,9 @@ pub struct Disassembler {
 #[derive(Debug)]
 pub struct Decoded {
     pub syntax: syntax::Syntax,
+    /// Where control goes after the instruction, read from its lift; absent
+    /// where it did not lift.
+    pub flow: Option<crate::flow::Flow>,
     /// Refused where Sleigh leaves the constructor `unimpl` or the lifter cannot translate its P-code.
     pub lifted: Result<R2ILBlock>,
     /// Present only where Sleigh built the P-code, which is what commits the context.
@@ -260,6 +266,8 @@ impl TrustedSleighProfile {
             ("arm", "arm", 32, SourceEndianness::Little) => Ok(Self::ArmCortexLe),
             #[cfg(feature = "arm")]
             ("arm", "thumb", 32, SourceEndianness::Little) => Ok(Self::ArmThumbLe),
+            #[cfg(feature = "riscv")]
+            ("riscv", "riscv", 64, SourceEndianness::Little) => Ok(Self::RiscV64Gc),
             _ => Err(LiftError::Unsupported(format!(
                 "no manually verified trusted Sleigh profile for source tuple {}/{}/{}/{:?}",
                 arch_id, cpu_id, bits, endianness
@@ -384,7 +392,6 @@ fn arch_resolved_source(
     let role_names = source.machine_roles().role_register_names();
     let roles = source
         .machine_roles()
-        .with_direction_flag_storage(resolve(role_names.direction_flag()))
         .with_arch_resolved_carriers(
             resolve(role_names.return_address()),
             resolve(role_names.stack_pointer()),
@@ -702,10 +709,6 @@ impl GenuineFunctionLayout {
 
     pub const fn entry_addr(&self) -> u64 {
         self.entry_addr
-    }
-
-    pub fn blocks(&self) -> &[GenuineFunctionBlockRange] {
-        &self.blocks
     }
 
     pub fn external_exits(&self) -> &[u64] {
@@ -1504,6 +1507,11 @@ impl LoadedSpecification {
             .map_err(|e| LiftError::Parse(format!("Failed to load .sla: {}", e)))?;
 
         let reg_name_map = build_register_name_map(&sleigh);
+        let register_names = sleigh
+            .register_name_map()
+            .into_values()
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
         let mut extracted = crate::sleigh::extract_architecture(&sleigh, arch_name)?;
         extracted.arch.tracked_entry_values = crate::sleigh::processor_spec_tracked_values(pspec);
         let arch = Arc::new(extracted.arch);
@@ -1521,6 +1529,7 @@ impl LoadedSpecification {
             program_counter: program_counter_from_pspec(pspec),
             sleigh: RefCell::new(sleigh),
             reg_name_map,
+            register_names,
             space_map: extracted.space_map,
             arch,
             modelled_user_ops,
@@ -1579,8 +1588,15 @@ pub fn embedded_arch_and_disassembler(
 pub struct EmbeddedMachine {
     pub arch: r2il::ArchSpec,
     pub disasm: Disassembler,
-    /// Ghidra's compiler specification, which names the stack pointer.
+    /// The compiler specification of the platform's usual toolchain: the
+    /// stack pointer, the return address and the prototype models.
     pub compiler_spec: &'static str,
+    /// The Windows toolchain's specification, where the language's
+    /// definitions (`.ldefs`, compiler id `windows`) name one: a PE runs
+    /// under its prototypes rather than the usual toolchain's.
+    pub windows_compiler_spec: Option<&'static str>,
+    /// The language's DWARF register numbering.
+    pub dwarf: crate::profile::DwarfRegisters,
     /// The processor context this machine decodes in, as the snapshot's
     /// machine tuple spells it: `arm` and `thumb` share one instruction set
     /// and one architecture name, and only this tells the trusted lift apart.
@@ -1589,21 +1605,30 @@ pub struct EmbeddedMachine {
 
 /// Load the embedded machine an architecture name selects.
 ///
-/// The compiler specification is the one for the platform's usual toolchain.
-/// Today only the stack pointer is read from it, and every specification for
-/// one processor agrees about that; the prototype models, which do differ, are
-/// not read here.
+/// It carries the compiler specification of the platform's usual toolchain
+/// and, where the language has one, the Windows toolchain's.
 pub fn embedded_machine(arch_name: &str) -> Result<EmbeddedMachine> {
-    let (sla, pspec, cspec, name, cpu) = embedded_specification(&arch_name.to_ascii_lowercase())
-        .ok_or_else(|| {
+    machine_of(arch_name, false)
+}
+
+/// The machine a Windows program for this architecture runs on, where its language differs.
+pub fn embedded_windows_machine(arch_name: &str) -> Result<EmbeddedMachine> {
+    machine_of(arch_name, true)
+}
+
+fn machine_of(arch_name: &str, windows: bool) -> Result<EmbeddedMachine> {
+    let spec =
+        embedded_specification(&arch_name.to_ascii_lowercase(), windows).ok_or_else(|| {
             LiftError::Unsupported(format!("no embedded Sleigh specification for {arch_name}"))
         })?;
-    let (arch, disasm) = embedded_arch_and_disassembler(sla, pspec, name)?;
+    let (arch, disasm) = embedded_arch_and_disassembler(spec.sla, spec.pspec, spec.name)?;
     Ok(EmbeddedMachine {
         arch,
         disasm,
-        compiler_spec: cspec,
-        cpu,
+        compiler_spec: spec.cspec,
+        windows_compiler_spec: spec.windows_cspec,
+        dwarf: crate::profile::DwarfRegisters::parse(spec.dwarf),
+        cpu: spec.cpu,
     })
 }
 
@@ -1616,62 +1641,139 @@ pub fn embedded_thumb_machine(arch_name: &str) -> Option<Result<EmbeddedMachine>
     }
 }
 
-/// The embedded data one lower-cased architecture name selects, if any is
-/// compiled in for it.
-type EmbeddedSpecification = (
-    &'static [u8],
-    &'static str,
-    &'static str,
-    &'static str,
-    &'static str,
-);
+/// The embedded data one lower-cased architecture name selects.
+struct EmbeddedSpecification {
+    sla: &'static [u8],
+    pspec: &'static str,
+    cspec: &'static str,
+    windows_cspec: Option<&'static str>,
+    /// The language's DWARF register numbering.
+    dwarf: &'static str,
+    name: &'static str,
+    cpu: &'static str,
+}
 
-fn embedded_specification(arch_name: &str) -> Option<EmbeddedSpecification> {
+/// One processor's embedded files, by the names its language definitions use.
+#[derive(Clone, Copy)]
+struct Bundle {
+    files: &'static [(&'static str, &'static str)],
+    slas: &'static [(&'static str, &'static [u8])],
+}
+
+/// Which language a machine name selects: its `.ldefs` id, and a decoding context where Ghidra ships one.
+struct Selection {
+    bundle: Bundle,
+    language: &'static str,
+    /// A processor specification the language does not list: Thumb's TMode-set context.
+    pspec: Option<&'static str>,
+    name: &'static str,
+    cpu: &'static str,
+}
+
+/// AppleSilicon is the superset decoder; it names no Windows compiler, which v8A does.
+fn selection(
+    arch_name: &str,
+    #[cfg_attr(
+        not(feature = "arm"),
+        expect(unused_variables, reason = "only AArch64 has a Windows language")
+    )]
+    windows: bool,
+) -> Option<Selection> {
+    #[cfg(feature = "x86")]
+    let x86 = Bundle {
+        files: sleigh_config::processor_x86::FILES,
+        slas: sleigh_config::processor_x86::SLAS,
+    };
+    #[cfg(feature = "arm")]
+    let (aarch64, arm) = (
+        Bundle {
+            files: sleigh_config::processor_aarch64::FILES,
+            slas: sleigh_config::processor_aarch64::SLAS,
+        },
+        Bundle {
+            files: sleigh_config::processor_arm::FILES,
+            slas: sleigh_config::processor_arm::SLAS,
+        },
+    );
+    #[cfg(feature = "riscv")]
+    let riscv = Bundle {
+        files: sleigh_config::processor_riscv::FILES,
+        slas: sleigh_config::processor_riscv::SLAS,
+    };
+    #[cfg(any(feature = "x86", feature = "arm", feature = "riscv"))]
+    let select = |bundle, language, pspec, name, cpu| {
+        Some(Selection {
+            bundle,
+            language,
+            pspec,
+            name,
+            cpu,
+        })
+    };
     match arch_name {
         #[cfg(feature = "x86")]
-        "x86-64" | "x86_64" | "x64" | "amd64" => Some((
-            sleigh_config::processor_x86::SLA_X86_64,
-            sleigh_config::processor_x86::PSPEC_X86_64,
-            sleigh_config::processor_x86::CSPEC_X86_64_GCC,
-            "x86-64",
-            "x86",
-        )),
+        "x86-64" | "x86_64" | "x64" | "amd64" => {
+            select(x86, "x86:LE:64:default", None, "x86-64", "x86")
+        }
         #[cfg(feature = "x86")]
-        "x86" | "x86-32" | "i386" | "i686" => Some((
-            sleigh_config::processor_x86::SLA_X86,
-            sleigh_config::processor_x86::PSPEC_X86,
-            sleigh_config::processor_x86::CSPEC_X86GCC,
-            "x86",
-            "x86",
-        )),
+        "x86" | "x86-32" | "i386" | "i686" => select(x86, "x86:LE:32:default", None, "x86", "x86"),
         #[cfg(feature = "arm")]
-        "aarch64" | "arm64" | "arm64e" => Some((
-            sleigh_config::processor_aarch64::SLA_AARCH64_APPLESILICON,
-            sleigh_config::processor_aarch64::PSPEC_AARCH64,
-            sleigh_config::processor_aarch64::CSPEC_AARCH64,
+        "aarch64" | "arm64" | "arm64e" if windows => {
+            select(aarch64, "AARCH64:LE:64:v8A", None, "aarch64", "arm")
+        }
+        #[cfg(feature = "arm")]
+        "aarch64" | "arm64" | "arm64e" => select(
+            aarch64,
+            "AARCH64:LE:64:AppleSilicon",
+            None,
             "aarch64",
             "arm",
-        )),
+        ),
         #[cfg(feature = "arm")]
-        "arm" | "arm32" => Some((
-            sleigh_config::processor_arm::SLA_ARM8_LE,
-            sleigh_config::processor_arm::PSPEC_ARMT,
-            sleigh_config::processor_arm::CSPEC_ARM,
-            "ARM",
-            "arm",
-        )),
-        // The same instruction set with TMode set, which is how Ghidra itself
-        // ships a Thumb decoder: one language, two processor contexts.
+        "arm" | "arm32" => select(arm, "ARM:LE:32:v8", None, "ARM", "arm"),
         #[cfg(feature = "arm")]
-        "arm-thumb" | "thumb" => Some((
-            sleigh_config::processor_arm::SLA_ARM8_LE,
-            sleigh_config::processor_arm::PSPEC_ARMTTHUMB,
-            sleigh_config::processor_arm::CSPEC_ARM,
-            "ARM",
-            "thumb",
-        )),
+        "arm-thumb" | "thumb" => {
+            select(arm, "ARM:LE:32:v8", Some("ARMtTHUMB.pspec"), "ARM", "thumb")
+        }
+        #[cfg(feature = "riscv")]
+        "riscv64" | "riscv" | "rv64" => {
+            select(riscv, "RISCV:LE:64:RV64GC", None, "riscv64", "riscv")
+        }
         _ => None,
     }
+}
+
+/// The embedded data one lower-cased architecture name selects, read through its language definition.
+fn embedded_specification(arch_name: &str, windows: bool) -> Option<EmbeddedSpecification> {
+    let chosen = selection(arch_name, windows)?;
+    let Bundle { files, slas } = chosen.bundle;
+    let file = |name: &str| {
+        files
+            .iter()
+            .find(|(file, _)| *file == name)
+            .map(|(_, text)| *text)
+    };
+    let definition = files
+        .iter()
+        .filter(|(file, _)| file.ends_with(".ldefs"))
+        .flat_map(|(_, text)| crate::profile::LanguageDefinition::parse_all(text))
+        .find(|language| language.id == chosen.language)?;
+    let usual = definition
+        .compiler("gcc")
+        .or_else(|| definition.compiler("default"))?;
+    Some(EmbeddedSpecification {
+        sla: slas.iter().find(|(sla, _)| *sla == definition.sla)?.1,
+        pspec: file(chosen.pspec.unwrap_or(&definition.pspec))?,
+        cspec: file(usual)?,
+        windows_cspec: definition.compiler("windows").and_then(file),
+        dwarf: definition
+            .dwarf
+            .as_deref()
+            .and_then(file)
+            .unwrap_or_default(),
+        name: chosen.name,
+        cpu: chosen.cpu,
+    })
 }
 
 impl Disassembler {
@@ -1950,11 +2052,6 @@ impl Disassembler {
     /// ```
     pub fn from_sla(sla_bytes: &[u8], pspec: &str, arch_name: &str) -> Result<Self> {
         Self::from_sla_parts(sla_bytes, pspec, arch_name, None)
-    }
-
-    /// Get the architecture name.
-    pub fn arch_name(&self) -> &str {
-        &self.arch_name
     }
 
     /// The register this processor uses as its program counter.
@@ -2289,14 +2386,17 @@ impl Disassembler {
     pub fn decode(&self, bytes: &[u8], addr: u64, after: Option<Continuation>) -> Result<Decoded> {
         self.resume(addr, after)?;
         let (mnemonic, body, size) = self.native_parts(bytes, addr)?;
-        let syntax = syntax::radare2(&mnemonic, &body, size, &self.arch_name);
+        let mut syntax = syntax::radare2(&mnemonic, &body, size, &self.arch_name);
+        syntax.registers = syntax::register_spans(&syntax.body, &self.spec.register_names);
         // The P-code is built from the parse just printed, and a finished build is what is known to commit its context.
         let pcode = self.pcode(bytes, addr);
         let end = addr + size as u64;
         let continuation = pcode.is_ok().then(|| self.continuation(end));
+        let lifted = pcode.and_then(|pcode| self.translated(pcode, addr));
         Ok(Decoded {
             syntax,
-            lifted: pcode.and_then(|pcode| self.translated(pcode, addr)),
+            flow: lifted.as_ref().ok().map(crate::flow::of),
+            lifted,
             continuation,
         })
     }

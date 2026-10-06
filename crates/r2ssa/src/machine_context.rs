@@ -12,118 +12,24 @@ use r2il::{
 };
 use serde::Serialize;
 
-use crate::function::SSAFunction;
-use crate::op::SSAOp;
 use crate::origin::BlockOrigins;
 pub use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
     SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceAbiClass,
-    SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceCallArgumentSpec,
-    SourceCallEffect, SourceCallPreservedCarriers, SourceCallResult, SourceCallSiteIdentity,
-    SourceCallSiteInterface, SourceCallSiteInterfaceError, SourceCarrierKind,
-    SourceCarrierProjection, SourceCodeSignature, SourceConventionSlots, SourceFormatParameterRule,
-    SourceFunctionInterface, SourceFunctionInterfaceError, SourceFunctionReturn,
-    SourceLogicalValue, SourceMachineRoles, SourceMachineRolesError, SourceOpaqueTag,
-    SourceParameterLocation, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
-    SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure,
-    SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind, StackAddressBase,
+    SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceBoundaryReads,
+    SourceCallArgumentSpec, SourceCallEffect, SourceCallPreservedCarriers, SourceCallResult,
+    SourceCallSiteIdentity, SourceCallSiteInterface, SourceCallSiteInterfaceError,
+    SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature, SourceConventionSlots,
+    SourceFormatParameterRule, SourceFunctionInterface, SourceFunctionInterfaceError,
+    SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles, SourceMachineRolesError,
+    SourceOpaqueTag, SourceParameterLocation, SourceStackAllocationContract, SourceStackGrowth,
+    SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias,
+    SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
+    StackAddressBase,
 };
 
-pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 26;
+pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 27;
 
-/// Canonical architecture family captured from the exact lifting profile.
-///
-/// This is semantic source identity, unlike calling-convention or register
-/// presentation strings. Unknown families remain explicit so architecture-
-/// specific consumers can fail closed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-pub enum MachineArchitectureFamily {
-    #[default]
-    Unknown,
-    X86,
-    X86_64,
-    Arm,
-    AArch64,
-    RiscV32,
-    RiscV64,
-    Mips32,
-    Mips64,
-    PowerPc32,
-    PowerPc64,
-}
-
-impl MachineArchitectureFamily {
-    /// Project an architecture description into the same typed family used by
-    /// immutable machine-context authority.
-    pub fn from_arch_spec(arch: Option<&ArchSpec>) -> Self {
-        let Some(arch) = arch else {
-            return Self::Unknown;
-        };
-        let name = arch.name.trim().to_ascii_lowercase();
-        let address_size = effective_arch_address_size(arch);
-        if matches!(name.as_str(), "x86-64" | "x86_64" | "x64" | "amd64")
-            || ((name == "x86" || name.starts_with("x86:")) && address_size == 8)
-        {
-            Self::X86_64
-        } else if matches!(name.as_str(), "x86-32" | "i386" | "i686")
-            || ((name == "x86" || name.starts_with("x86:")) && address_size == 4)
-        {
-            Self::X86
-        } else if name == "aarch64"
-            || name == "arm64"
-            || name.starts_with("aarch64:")
-            || name.starts_with("arm64:")
-        {
-            Self::AArch64
-        } else if (name == "arm" || name.starts_with("arm:")) && address_size == 4
-            || name.starts_with("armv")
-        {
-            Self::Arm
-        } else if name == "riscv32"
-            || name == "rv32"
-            || name.starts_with("rv32")
-            || ((name == "riscv" || name.starts_with("riscv:")) && address_size == 4)
-        {
-            Self::RiscV32
-        } else if name == "riscv64"
-            || name == "rv64"
-            || name.starts_with("rv64")
-            || ((name == "riscv" || name.starts_with("riscv:")) && address_size == 8)
-        {
-            Self::RiscV64
-        } else if (name == "mips" || name.starts_with("mips:") || name.starts_with("mips32"))
-            && address_size == 4
-        {
-            Self::Mips32
-        } else if name.starts_with("mips64")
-            || ((name == "mips" || name.starts_with("mips:")) && address_size == 8)
-        {
-            Self::Mips64
-        } else if (name == "ppc" || name.starts_with("ppc:") || name.starts_with("powerpc"))
-            && address_size == 4
-        {
-            Self::PowerPc32
-        } else if name.starts_with("ppc64")
-            || ((name == "ppc" || name.starts_with("ppc:") || name.starts_with("powerpc"))
-                && address_size == 8)
-        {
-            Self::PowerPc64
-        } else {
-            Self::Unknown
-        }
-    }
-
-    /// Resolve a generic source convention only when this exact machine family
-    /// supplies the missing architectural qualifier.
-    pub const fn refine_abi_class(self, abi_class: SourceAbiClass) -> SourceAbiClass {
-        match (self, abi_class) {
-            (Self::X86_64, SourceAbiClass::Microsoft) => SourceAbiClass::MicrosoftX64,
-            (Self::X86_64, SourceAbiClass::SystemV) => SourceAbiClass::SystemVAMD64,
-            (Self::AArch64, SourceAbiClass::Aapcs) => SourceAbiClass::Aapcs64,
-            (_, abi_class) => abi_class,
-        }
-    }
-}
 /// One canonical register carrier in the immutable ABI snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct MachineAbiRegisterSlot {
@@ -374,7 +280,7 @@ impl MachineMemoryModel {
                 endianness: default_endianness,
             });
         }
-        spaces.sort_by_key(|space| space_sort_key(space.space));
+        spaces.sort_by_key(|space| crate::semantic::memory_space_order(space.space));
 
         Self {
             schema_version: MACHINE_CONTEXT_SCHEMA_VERSION,
@@ -401,10 +307,6 @@ impl MachineMemoryModel {
 
     pub const fn default_address_bits(&self) -> u32 {
         self.default_address_bits
-    }
-
-    pub const fn alignment_bytes(&self) -> u32 {
-        self.alignment_bytes
     }
 
     pub const fn default_endianness(&self) -> MachineMemoryEndianness {
@@ -548,7 +450,8 @@ pub enum MachineRegisterGeometryState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceMachineContext {
     schema_version: u32,
-    architecture_family: MachineArchitectureFamily,
+    /// The lifted machine's identity: the architecture name the lift was made under.
+    architecture: Box<str>,
     memory_model: MachineMemoryModel,
     function_interface: Option<SourceFunctionInterface>,
     machine_roles: SourceMachineRoles,
@@ -564,6 +467,16 @@ pub struct SourceMachineContext {
     call_effect: Option<SourceCallEffect>,
     /// What a call in this body may leave changed: the set construction defines after every call.
     call_clobbered_carriers: Box<[CanonicalStorageId]>,
+    /// Every register a call may change: each register of the file no wider
+    /// one contains, that the call effect neither preserves nor reserves.
+    /// What a callee's body is asked to prove it leaves alone.
+    call_universe: Box<[CanonicalStorageId]>,
+    /// What each direct callee's own body proves it leaves alone, by entry.
+    callee_preserved: crate::function::CalleePreservedCarriers,
+    /// Where the recovered result is unproven, the direct callees whose unstated result owns it.
+    result_owners: BTreeSet<u64>,
+    /// How many arguments each callee whose result is unproven reads at least.
+    callee_statements: BTreeMap<u64, CalleeStatement>,
     /// Exact source-owned register geometry; no write policy is stored here.
     register_geometry_state: MachineRegisterGeometryState,
     register_projections: Box<[RegisterProjection]>,
@@ -581,6 +494,8 @@ pub struct SourceMachineContext {
     /// before the interprocedural solve exists, so the fact arrives with the
     /// bodies the capture took rather than from that solve.
     callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
+    /// The library models of the imports this body calls, by entry.
+    callee_library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
     /// The register saves the container's call-frame information states.
     frame_saves: Vec<r2source::SourceFrameSave>,
     /// The function each captured code pointer table entry names, by the
@@ -593,7 +508,6 @@ pub struct SourceMachineContext {
     /// callsite interfaces. Unlike display strings, these are semantic
     /// evidence, because a variadic format literal is count evidence.
     source_string_literals: BTreeMap<u64, String>,
-    memory_spaces_by_op: BTreeMap<(u64, usize), SpaceId>,
     /// What the processor specification says registers hold on entry to every function.
     tracked_entry_values: Box<[(CanonicalStorageId, u64)]>,
 }
@@ -614,6 +528,43 @@ fn observed_register_storages(blocks: &[R2ILBlock]) -> BTreeSet<RegisterStorage>
             size: varnode.size,
         })
         .collect()
+}
+
+/// Every register a call may change: each register of the file that no
+/// wider one contains, less what the call effect preserves or reserves.
+///
+/// The effect is exhaustive -- every register it neither preserves nor
+/// reserves may come back changed -- so this is the set a callee's summary
+/// has to answer for, whatever list of clobbers the convention spells.
+/// `O(r log r)` in the register file.
+fn call_universe(effect: &SourceCallEffect, arch: &ArchSpec) -> Box<[CanonicalStorageId]> {
+    let mut registers = arch
+        .registers
+        .iter()
+        .filter(|register| register.size != 0)
+        .map(|register| (register.offset, register.size))
+        .collect::<Vec<_>>();
+    // Widest first at each offset, so a register is kept only when nothing
+    // kept before it already reaches past its end.
+    registers.sort_by(|left, right| left.0.cmp(&right.0).then(right.1.cmp(&left.1)));
+    let mut universe = Vec::new();
+    let mut covered_to = 0u64;
+    for (offset, size) in registers {
+        let end = offset.saturating_add(u64::from(size));
+        if end <= covered_to {
+            continue;
+        }
+        covered_to = covered_to.max(end);
+        let storage = CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size,
+        };
+        if effect.clobbers(storage) {
+            universe.push(storage);
+        }
+    }
+    universe.into_boxed_slice()
 }
 
 /// What a call in this body may leave changed: the clobber list, and every
@@ -729,7 +680,7 @@ impl SourceMachineContext {
                 size: reg.size,
             })
         });
-        let architecture_family = MachineArchitectureFamily::from_arch_spec(arch);
+        let architecture = arch.map_or_else(Box::default, |arch| arch.name.as_str().into());
         let mut register_declarations_by_name = BTreeMap::<String, Vec<CanonicalStorageId>>::new();
         for register in arch.into_iter().flat_map(|arch| &arch.registers) {
             let storage = CanonicalStorageId {
@@ -993,21 +944,9 @@ impl SourceMachineContext {
                 call_site_interfaces_by_identity.remove(&identity);
             }
         }
-        let memory_spaces_by_op = blocks
-            .iter()
-            .flat_map(|block| {
-                block
-                    .ops
-                    .iter()
-                    .enumerate()
-                    .filter_map(move |(op_index, op)| {
-                        memory_space(op).map(|space| ((block.addr, op_index), space))
-                    })
-            })
-            .collect();
         Self {
             schema_version: MACHINE_CONTEXT_SCHEMA_VERSION,
-            architecture_family,
+            architecture,
             memory_model,
             function_interface,
             machine_roles,
@@ -1019,6 +958,14 @@ impl SourceMachineContext {
                 .as_ref()
                 .map(|effect| clobbered_by_a_call(effect, &observed))
                 .unwrap_or_default(),
+            call_universe: call_effect
+                .as_ref()
+                .zip(arch)
+                .map(|(effect, arch)| call_universe(effect, arch))
+                .unwrap_or_default(),
+            callee_preserved: BTreeMap::new(),
+            result_owners: BTreeSet::new(),
+            callee_statements: BTreeMap::new(),
             call_effect,
             register_geometry_state,
             register_projections,
@@ -1027,11 +974,11 @@ impl SourceMachineContext {
             callee_linkages: BTreeMap::new(),
             callee_names: BTreeMap::new(),
             callee_argument_reach: BTreeMap::new(),
+            callee_library: BTreeMap::new(),
             frame_saves: Vec::new(),
             code_pointer_entries: BTreeMap::new(),
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
-            memory_spaces_by_op,
             tracked_entry_values,
         }
     }
@@ -1040,8 +987,9 @@ impl SourceMachineContext {
         self.schema_version
     }
 
-    pub const fn architecture_family(&self) -> MachineArchitectureFamily {
-        self.architecture_family
+    /// The lifted machine's identity; empty when no architecture was given.
+    pub fn architecture(&self) -> &str {
+        &self.architecture
     }
 
     pub const fn memory_model(&self) -> &MachineMemoryModel {
@@ -1065,29 +1013,6 @@ impl SourceMachineContext {
     /// Exact source-owned convention slots, including their typed ABI class.
     pub const fn convention_slots(&self) -> Option<&SourceConventionSlots> {
         self.convention_slots.as_ref()
-    }
-
-    /// Decisive function ABI after combining the source convention with the
-    /// exact lifted architecture family. Conflicting source contracts refuse
-    /// to choose one ABI.
-    pub fn effective_abi_class(&self) -> SourceAbiClass {
-        let function_class = self
-            .function_interface
-            .as_ref()
-            .map(SourceFunctionInterface::abi_class)
-            .unwrap_or(SourceAbiClass::Unknown);
-        let slot_class = self
-            .convention_slots
-            .as_ref()
-            .map(SourceConventionSlots::abi_class)
-            .unwrap_or(SourceAbiClass::Unknown);
-        let function_class = self.architecture_family.refine_abi_class(function_class);
-        let slot_class = self.architecture_family.refine_abi_class(slot_class);
-        match (function_class, slot_class) {
-            (SourceAbiClass::Unknown, other) | (other, SourceAbiClass::Unknown) => other,
-            (left, right) if left == right => left,
-            _ => SourceAbiClass::Unknown,
-        }
     }
 
     /// Borrow the machine carriers the source resolved from its register
@@ -1148,20 +1073,15 @@ impl SourceMachineContext {
             .or_else(|| self.machine_roles.stack_pointer_storage())
     }
 
-    /// Whether a call transfer moves the stack pointer by itself: it does
-    /// where the call pushes its return address, and not where a register
-    /// carries it. The interface's return mechanism states it where one was
-    /// recovered; the architecture answers otherwise, and an unknown one keeps
-    /// the cautious answer.
+    /// Whether a call pushes its return address, moving the stack pointer;
+    /// unstated, the cautious answer is yes.
     pub fn call_moves_stack_pointer(&self) -> bool {
         match self.return_mechanism() {
             Some(r2source::SourceReturnMechanism::Stacked { .. }) => true,
-            None => matches!(
-                self.architecture_family(),
-                MachineArchitectureFamily::X86
-                    | MachineArchitectureFamily::X86_64
-                    | MachineArchitectureFamily::Unknown
-            ),
+            None => self
+                .machine_roles
+                .call_pushes_return_address()
+                .unwrap_or(true),
         }
     }
 
@@ -1194,30 +1114,6 @@ impl SourceMachineContext {
             .collect()
     }
 
-    /// The registers that are condition codes rather than storage.
-    ///
-    /// A flag is a one-byte register no wider register contains: nothing can be
-    /// written through it and nothing read out of it at another width. That is a
-    /// fact about the register file, so it holds for any architecture, unlike
-    /// the list of spellings this replaces.
-    pub fn flag_register_names(&self) -> Vec<String> {
-        self.register_storages_by_name
-            .iter()
-            .filter(|(_, storage)| {
-                storage.space == CanonicalStorageSpace::Register && storage.size == 1
-            })
-            .filter(|(_, storage)| {
-                !self.register_storages_by_name.values().any(|other| {
-                    other.space == CanonicalStorageSpace::Register
-                        && other.size > 1
-                        && other.offset <= storage.offset
-                        && storage.offset < other.offset + u64::from(other.size)
-                })
-            })
-            .map(|(name, _)| name.clone())
-            .collect()
-    }
-
     /// The name the architecture gives this storage, when it names it exactly.
     pub fn register_name(&self, storage: CanonicalStorageId) -> Option<String> {
         self.register_storages_by_name
@@ -1229,6 +1125,42 @@ impl SourceMachineContext {
     /// The registers a call in this body may leave changed; empty without a call effect.
     pub const fn call_clobbered_carriers(&self) -> &[CanonicalStorageId] {
         &self.call_clobbered_carriers
+    }
+
+    /// Every register a call may change; see the field.
+    pub(crate) const fn call_universe(&self) -> &[CanonicalStorageId] {
+        &self.call_universe
+    }
+
+    /// What the direct callee at `target` proves it leaves alone, where its
+    /// body was read.
+    pub(crate) fn callee_preserved(&self, target: u64) -> Option<&BTreeSet<CanonicalStorageId>> {
+        self.callee_preserved.get(&target)
+    }
+
+    pub(crate) fn set_callee_preserved(
+        &mut self,
+        preserved: crate::function::CalleePreservedCarriers,
+    ) {
+        self.callee_preserved = preserved;
+    }
+
+    /// The direct callees whose stated result could prove this function's, where recovery left it unproven.
+    pub const fn result_owners(&self) -> &BTreeSet<u64> {
+        &self.result_owners
+    }
+
+    pub(crate) fn set_result_owners(&mut self, owners: BTreeSet<u64>) {
+        self.result_owners = owners;
+    }
+
+    /// What the callee at `target` states, where its unproven result mints no call contract.
+    pub(crate) fn callee_statement(&self, target: u64) -> Option<&CalleeStatement> {
+        self.callee_statements.get(&target)
+    }
+
+    pub(crate) fn set_callee_statements(&mut self, statements: &BTreeMap<u64, CalleeStatement>) {
+        self.callee_statements.clone_from(statements);
     }
 
     /// What the convention says a call does to the registers.
@@ -1292,6 +1224,24 @@ impl SourceMachineContext {
             .and_then(|index| self.register_projections.get(index))
     }
 
+    /// Whether `lane` is the least significant bytes of `root` by the register
+    /// geometry, so a slot naming the lane is a slot of the root's low bytes.
+    pub(crate) fn is_low_lane_of(
+        &self,
+        lane: CanonicalStorageId,
+        root: CanonicalStorageId,
+    ) -> bool {
+        let bound = |storage| match self.register_projection(storage)?.disposition {
+            r2il::RegisterProjectionDisposition::Bound { carrier, slice } => Some((carrier, slice)),
+            r2il::RegisterProjectionDisposition::Refused { .. } => None,
+        };
+        lane.size <= root.size
+            && matches!(
+                (bound(lane), bound(root)),
+                (Some((a, lane)), Some((b, root))) if a == b && lane.lsb_bit_offset == root.lsb_bit_offset
+            )
+    }
+
     /// Every call site of the raw lifted input, by instruction.
     pub const fn raw_call_sites(&self) -> &BTreeMap<u64, SourceCallSiteIdentity> {
         &self.raw_call_sites
@@ -1318,6 +1268,28 @@ impl SourceMachineContext {
         callee_names: BTreeMap<SourceCallSiteIdentity, String>,
     ) {
         self.callee_names = callee_names;
+    }
+
+    pub(crate) fn set_callee_library(
+        &mut self,
+        library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
+    ) {
+        self.callee_library = library;
+    }
+
+    /// The library model of the import at `target`, where the engine named one.
+    pub(crate) fn callee_library(
+        &self,
+        target: u64,
+    ) -> Option<&crate::interproc::FunctionSemanticSummary> {
+        self.callee_library.get(&target)
+    }
+
+    /// Every import this body calls that has a library model, by entry.
+    pub(crate) const fn callee_libraries(
+        &self,
+    ) -> &BTreeMap<u64, crate::interproc::FunctionSemanticSummary> {
+        &self.callee_library
     }
 
     pub(crate) fn set_callee_argument_reach(
@@ -1420,91 +1392,6 @@ impl SourceMachineContext {
     /// means something different when the table is empty than when it is full.
     pub fn source_string_literal_count(&self) -> usize {
         self.source_string_literals.len()
-    }
-
-    pub fn memory_space_at(&self, block_addr: u64, op_index: usize) -> Option<SpaceId> {
-        self.memory_spaces_by_op
-            .get(&(block_addr, op_index))
-            .copied()
-    }
-
-    pub const fn memory_spaces_by_op(&self) -> &BTreeMap<(u64, usize), SpaceId> {
-        &self.memory_spaces_by_op
-    }
-
-    /// Rebind raw lifted memory-space identities to the completed SSA operation
-    /// sites. SSA preparation may insert non-memory register-alias operations
-    /// and may promote a private frame slot out of memory, but otherwise it
-    /// must retain the order, count, and exact space identity of memory
-    /// operations in each block. Any violation clears the map so certification
-    /// fails closed.
-    pub(crate) fn remap_memory_sites_to_prepared(&mut self, function: &SSAFunction) -> bool {
-        let promoted = function.promoted_slot_sites();
-        self.memory_spaces_by_op
-            .retain(|site, _| !promoted.contains(site));
-        let mut raw_by_block = BTreeMap::<u64, Vec<SpaceId>>::new();
-        for ((block_addr, _), space) in &self.memory_spaces_by_op {
-            raw_by_block.entry(*block_addr).or_default().push(*space);
-        }
-
-        let mut prepared_by_block = BTreeMap::<u64, Vec<(usize, SpaceId)>>::new();
-        for block in function.blocks() {
-            let sites = block
-                .ops
-                .iter()
-                .enumerate()
-                .filter_map(|(op_index, op)| ssa_memory_space(op).map(|space| (op_index, space)))
-                .collect::<Vec<_>>();
-            if !sites.is_empty() {
-                prepared_by_block.insert(block.addr, sites);
-            }
-        }
-
-        if raw_by_block.len() != prepared_by_block.len()
-            || raw_by_block.iter().any(|(block_addr, raw)| {
-                prepared_by_block.get(block_addr).is_none_or(|prepared| {
-                    prepared.len() != raw.len()
-                        || prepared
-                            .iter()
-                            .map(|(_, space)| *space)
-                            .ne(raw.iter().copied())
-                })
-            })
-        {
-            self.memory_spaces_by_op.clear();
-            return false;
-        }
-
-        let mut remapped = BTreeMap::new();
-        for (block_addr, spaces) in raw_by_block {
-            let Some(sites) = prepared_by_block.get(&block_addr) else {
-                self.memory_spaces_by_op.clear();
-                return false;
-            };
-            for ((op_index, space), _) in sites.iter().copied().zip(spaces) {
-                remapped.insert((block_addr, op_index), space);
-            }
-        }
-        self.memory_spaces_by_op = remapped;
-        true
-    }
-}
-
-#[cfg(test)]
-fn is_memory_op(op: &SSAOp) -> bool {
-    ssa_memory_space(op).is_some()
-}
-
-fn ssa_memory_space(op: &SSAOp) -> Option<SpaceId> {
-    match op {
-        SSAOp::Load { space, .. }
-        | SSAOp::Store { space, .. }
-        | SSAOp::LoadLinked { space, .. }
-        | SSAOp::StoreConditional { space, .. }
-        | SSAOp::LoadGuarded { space, .. }
-        | SSAOp::StoreGuarded { space, .. } => Some(*space),
-        SSAOp::AtomicCAS(swap) => Some(swap.space),
-        _ => None,
     }
 }
 
@@ -1653,29 +1540,6 @@ pub fn terminal_indirect_loaded_slot(
     BlockOrigins::upto(block, branch_op_index)
         .of(target)?
         .loaded_slot()
-}
-
-fn memory_space(op: &R2ILOp) -> Option<SpaceId> {
-    match op {
-        R2ILOp::Load { space, .. }
-        | R2ILOp::Store { space, .. }
-        | R2ILOp::LoadLinked { space, .. }
-        | R2ILOp::StoreConditional { space, .. }
-        | R2ILOp::AtomicCAS { space, .. }
-        | R2ILOp::LoadGuarded { space, .. }
-        | R2ILOp::StoreGuarded { space, .. } => Some(*space),
-        _ => None,
-    }
-}
-
-fn space_sort_key(space: SpaceId) -> (u8, u32) {
-    match space {
-        SpaceId::Ram => (0, 0),
-        SpaceId::Register => (1, 0),
-        SpaceId::Unique => (2, 0),
-        SpaceId::Const => (3, 0),
-        SpaceId::Custom(id) => (4, id),
-    }
 }
 
 #[cfg(test)]
@@ -1931,62 +1795,6 @@ mod tests {
         let arch = ArchSpec::new("AARCH64:LE:64:v8A");
         let context = SourceMachineContext::from_blocks(&[], Some(&arch));
         assert!(context.argument_register_names().is_empty());
-    }
-
-    #[test]
-    fn architecture_family_is_typed_and_schema_bound() {
-        let x86 = ArchSpec::new("x86:LE:64:default");
-        let arm = ArchSpec::new("AARCH64:LE:64:v8A");
-        let x86_context = SourceMachineContext::from_blocks(&[], Some(&x86));
-        let arm_context = SourceMachineContext::from_blocks(&[], Some(&arm));
-
-        assert_eq!(MACHINE_CONTEXT_SCHEMA_VERSION, 26);
-        assert_eq!(x86_context.schema_version(), 26);
-        assert_eq!(
-            x86_context.architecture_family(),
-            MachineArchitectureFamily::X86_64
-        );
-        assert_eq!(
-            arm_context.architecture_family(),
-            MachineArchitectureFamily::AArch64
-        );
-    }
-
-    #[test]
-    fn effective_abi_class_resolves_exact_radare2_conventions_with_architecture() {
-        let mut arch = ArchSpec::new("x86-64");
-        arch.addr_size = 8;
-        arch.alignment = 1;
-        arch.add_space(AddressSpace::ram(8));
-
-        let context = |spelling| {
-            SourceMachineContext::from_blocks_with_interfaces(
-                &[],
-                Some(&arch),
-                None,
-                SourceMachineRoles::default(),
-                Some(SourceConventionSlots::new(spelling, [], None).expect("convention slots")),
-                None,
-                Vec::new(),
-            )
-        };
-        let microsoft = context("ms");
-        let system_v = context("amd64");
-        let microsoft_synonym = context("windows-x64");
-
-        assert_eq!(
-            microsoft.convention_slots().unwrap().calling_convention(),
-            "ms"
-        );
-        assert_eq!(
-            microsoft.effective_abi_class(),
-            SourceAbiClass::MicrosoftX64
-        );
-        assert_eq!(system_v.effective_abi_class(), SourceAbiClass::SystemVAMD64);
-        assert_eq!(
-            microsoft_synonym.effective_abi_class(),
-            SourceAbiClass::MicrosoftX64
-        );
     }
 
     #[test]
@@ -3092,81 +2900,6 @@ mod tests {
     }
 
     #[test]
-    fn prepared_memory_sites_follow_inserted_register_alias_operations() {
-        let mut arch = ArchSpec::new("prepared-memory-site-test");
-        arch.addr_size = 8;
-        arch.add_register(RegisterDef::new("rdi", 0, 8));
-        arch.add_register(RegisterDef::new("edi", 0, 4));
-        arch.add_register(RegisterDef::new("rax", 8, 8));
-        arch.add_register(RegisterDef::new("eax", 8, 4));
-
-        let mut block = R2ILBlock::new(0x2400, 4);
-        block.push(R2ILOp::Copy {
-            dst: Varnode::register(8, 8),
-            src: Varnode::register(0, 8),
-        });
-        block.push(R2ILOp::Load {
-            dst: Varnode::unique(0x100, 4),
-            space: SpaceId::Custom(7),
-            addr: Varnode::register(8, 4),
-        });
-        block.push(R2ILOp::Return {
-            target: Varnode::register(8, 8),
-        });
-
-        let function = SSAFunction::from_blocks_for_decompile(&[block.clone()], Some(&arch))
-            .expect("prepared SSA");
-        let prepared_index = function
-            .get_block(0x2400)
-            .expect("prepared block")
-            .ops
-            .iter()
-            .position(is_memory_op)
-            .expect("prepared memory operation");
-        assert!(prepared_index > 1, "alias extraction must precede the load");
-
-        let mut context = SourceMachineContext::from_blocks(&[block], Some(&arch));
-        assert_eq!(context.memory_space_at(0x2400, 1), Some(SpaceId::Custom(7)));
-        assert!(context.remap_memory_sites_to_prepared(&function));
-        assert_eq!(
-            context.memory_space_at(0x2400, prepared_index),
-            Some(SpaceId::Custom(7))
-        );
-        assert_eq!(context.memory_spaces_by_op().len(), 1);
-    }
-
-    #[test]
-    fn prepared_memory_sites_reject_swapped_space_identities() {
-        let mut block = R2ILBlock::new(0x2500, 4);
-        block.push(R2ILOp::Load {
-            dst: Varnode::unique(0x100, 4),
-            space: SpaceId::Ram,
-            addr: Varnode::register(0, 8),
-        });
-        block.push(R2ILOp::Store {
-            space: SpaceId::Custom(7),
-            addr: Varnode::register(8, 8),
-            val: Varnode::unique(0x100, 4),
-        });
-
-        let mut function =
-            SSAFunction::from_blocks_raw(&[block.clone()], None).expect("raw SSA function");
-        let prepared = &mut function.get_block_mut(0x2500).expect("prepared block").ops;
-        match &mut prepared[0] {
-            SSAOp::Load { space, .. } => *space = SpaceId::Custom(7),
-            op => panic!("expected load, got {op:?}"),
-        }
-        match &mut prepared[1] {
-            SSAOp::Store { space, .. } => *space = SpaceId::Ram,
-            op => panic!("expected store, got {op:?}"),
-        }
-
-        let mut context = SourceMachineContext::from_blocks(&[block], None);
-        assert!(!context.remap_memory_sites_to_prepared(&function));
-        assert!(context.memory_spaces_by_op().is_empty());
-    }
-
-    #[test]
     fn interface_registers_missing_from_architecture_are_incoherent() {
         let interface = SourceFunctionInterface::new(
             b"missing-register-interface".to_vec(),
@@ -3233,7 +2966,6 @@ mod tests {
 
         assert!(!context.memory_model().is_available());
         assert!(!context.memory_model().is_coherent());
-        assert_eq!(context.memory_space_at(0x1000, 0), Some(SpaceId::Custom(7)));
     }
 
     #[test]
@@ -3266,11 +2998,12 @@ mod tests {
     }
 
     #[test]
-    fn architecture_snapshot_uses_r2il_effective_address_size_fallback() {
+    fn architecture_snapshot_takes_its_width_from_the_default_space() {
         let mut arch = ArchSpec::new("fallback-address-size");
         arch.addr_size = 1;
         arch.add_register(RegisterDef::new("pc", 0, 8));
         arch.add_space(AddressSpace::new(SpaceId::Custom(9), "fallback", 1));
+        arch.add_space(AddressSpace::ram(8));
         let context = SourceMachineContext::from_blocks(&[], Some(&arch));
         let model = context.memory_model();
 
@@ -3287,5 +3020,38 @@ mod tests {
                 .map(MachineMemorySpace::address_bits),
             Some(64)
         );
+    }
+}
+
+/// What a callee's body states when its unproven result mints no call contract (doc/adr-resolved-bodies.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct CalleeStatement {
+    /// The register parameters its body itself proves it reads.
+    pub(crate) at_least: usize,
+}
+
+impl CalleeStatement {
+    /// Each callee interface whose result is unproven, which mints no call contract, as a statement.
+    pub(crate) fn of(
+        interfaces: &BTreeMap<u64, crate::SourceFunctionInterface>,
+    ) -> BTreeMap<u64, Self> {
+        let unproven = interfaces.iter().filter(|(_, interface)| {
+            interface.return_kind() == crate::SourceFunctionReturn::Unproven
+        });
+        let registers = |interface: &crate::SourceFunctionInterface| {
+            let parameters = interface.parameters().iter();
+            parameters
+                .filter(|parameter| parameter.register_storage().is_some())
+                .count()
+        };
+        let statements = unproven.map(|(address, interface)| {
+            (
+                *address,
+                Self {
+                    at_least: registers(interface),
+                },
+            )
+        });
+        statements.collect()
     }
 }

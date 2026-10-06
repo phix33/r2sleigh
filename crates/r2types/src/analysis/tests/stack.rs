@@ -7,10 +7,10 @@ use super::*;
 fn stack_width_evidence_requires_exact_ram_space() {
     let ram_addr = SSAVar::new("ram_addr", 1, 8);
     let custom_addr = SSAVar::new("custom_addr", 1, 8);
-    let blocks = [SSABlock {
-        addr: 0x1000,
-        size: 8,
-        ops: vec![
+    let blocks = [SSABlock::from_parts(
+        0x1000,
+        8,
+        vec![
             SSAOp::Load {
                 dst: SSAVar::new("ram_value", 1, 4),
                 space: r2il::SpaceId::Ram,
@@ -22,8 +22,8 @@ fn stack_width_evidence_requires_exact_ram_space() {
                 addr: custom_addr.clone(),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
     let ram_slot = StackSlotKey {
         base: ExternalStackBase::StackPointer,
         offset: -8,
@@ -32,29 +32,27 @@ fn stack_width_evidence_requires_exact_ram_space() {
         base: ExternalStackBase::StackPointer,
         offset: -16,
     };
-    let prep_facts = r2ssa::DecompilePrepFacts {
-        stack_address_roots: [
-            (
-                ram_addr,
-                r2ssa::StackAddressRoot {
-                    base: r2ssa::StackAddressBase::StackPointer,
-                    offset: ram_slot.offset,
-                },
-            ),
-            (
-                custom_addr,
-                r2ssa::StackAddressRoot {
-                    base: r2ssa::StackAddressBase::StackPointer,
-                    offset: custom_slot.offset,
-                },
-            ),
-        ]
-        .into_iter()
-        .collect(),
-        ..r2ssa::DecompilePrepFacts::default()
-    };
+    let prep_facts = [
+        (
+            ram_addr,
+            r2ssa::StackAddressRoot {
+                base: r2ssa::StackAddressBase::StackPointer,
+                offset: ram_slot.offset,
+            },
+        ),
+        (
+            custom_addr,
+            r2ssa::StackAddressRoot {
+                base: r2ssa::StackAddressBase::StackPointer,
+                offset: custom_slot.offset,
+            },
+        ),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>();
 
-    let widths = canonical_stack_access_widths(&blocks, Some(&prep_facts));
+    let widths =
+        canonical_stack_access_widths(&blocks, Some(&|var: &SSAVar| prep_facts.get(var).copied()));
     assert_eq!(widths.get(&ram_slot), Some(&BTreeSet::from([4])));
     assert!(!widths.contains_key(&custom_slot));
 }
@@ -62,28 +60,25 @@ fn stack_width_evidence_requires_exact_ram_space() {
 #[test]
 fn canonical_stack_access_width_overrides_generic_host_integer_width() {
     let addr = SSAVar::new("tmp:sum", 1, 8);
-    let blocks = [SSABlock {
-        addr: 0x1000,
-        size: 4,
-        ops: vec![SSAOp::Store {
+    let blocks = [SSABlock::from_parts(
+        0x1000,
+        4,
+        vec![SSAOp::Store {
             space: r2il::SpaceId::Ram,
             addr: addr.clone(),
             val: SSAVar::new("w8", 1, 4),
         }],
-        phis: Vec::new(),
-    }];
-    let prep_facts = r2ssa::DecompilePrepFacts {
-        stack_address_roots: [(
-            addr,
-            r2ssa::StackAddressRoot {
-                base: r2ssa::StackAddressBase::StackPointer,
-                offset: -16,
-            },
-        )]
-        .into_iter()
-        .collect(),
-        ..r2ssa::DecompilePrepFacts::default()
-    };
+        Vec::new(),
+    )];
+    let prep_facts = [(
+        addr,
+        r2ssa::StackAddressRoot {
+            base: r2ssa::StackAddressBase::StackPointer,
+            offset: -16,
+        },
+    )]
+    .into_iter()
+    .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>();
     let mut parsed_context = ParsedExternalContext::default();
     parsed_context.stack_slots.insert(
         StackSlotKey {
@@ -125,6 +120,7 @@ fn canonical_stack_access_width_overrides_generic_host_integer_width() {
             },
             recovered_vars: &vars,
             ssa_blocks: &blocks,
+            conventional_extension: &|_| false,
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
@@ -171,10 +167,10 @@ fn canonical_stack_access_width_overrides_generic_host_integer_width() {
 fn canonical_stack_zero_extension_recovers_unsigned_local() {
     let addr = SSAVar::new("tmp:byte", 1, 8);
     let loaded = SSAVar::new("tmp:loaded", 1, 1);
-    let blocks = [SSABlock {
-        addr: 0x1000,
-        size: 4,
-        ops: vec![
+    let blocks = [SSABlock::from_parts(
+        0x1000,
+        4,
+        vec![
             SSAOp::Load {
                 dst: loaded.clone(),
                 space: r2il::SpaceId::Ram,
@@ -185,20 +181,17 @@ fn canonical_stack_zero_extension_recovers_unsigned_local() {
                 src: loaded,
             },
         ],
-        phis: Vec::new(),
-    }];
-    let prep_facts = r2ssa::DecompilePrepFacts {
-        stack_address_roots: [(
-            addr,
-            r2ssa::StackAddressRoot {
-                base: r2ssa::StackAddressBase::StackPointer,
-                offset: -15,
-            },
-        )]
-        .into_iter()
-        .collect(),
-        ..r2ssa::DecompilePrepFacts::default()
-    };
+        Vec::new(),
+    )];
+    let prep_facts = [(
+        addr,
+        r2ssa::StackAddressRoot {
+            base: r2ssa::StackAddressBase::StackPointer,
+            offset: -15,
+        },
+    )]
+    .into_iter()
+    .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>();
     let slot_key = StackSlotKey {
         base: ExternalStackBase::StackPointer,
         offset: -15,
@@ -241,6 +234,7 @@ fn canonical_stack_zero_extension_recovers_unsigned_local() {
             },
             recovered_vars: &vars,
             ssa_blocks: &blocks,
+            conventional_extension: &|_| false,
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
@@ -273,10 +267,10 @@ fn canonical_stack_zero_extension_recovers_unsigned_local() {
 fn prepared_direct_stack_base_store_is_a_parameter_home() {
     let stack_addr = SSAVar::new("sp", 1, 8);
     let custom_stack_addr = SSAVar::new("custom_spill", 1, 8);
-    let blocks = [SSABlock {
-        addr: 0x1000,
-        size: 8,
-        ops: vec![
+    let blocks = [SSABlock::from_parts(
+        0x1000,
+        8,
+        vec![
             SSAOp::Store {
                 space: r2il::SpaceId::Ram,
                 addr: stack_addr.clone(),
@@ -288,29 +282,26 @@ fn prepared_direct_stack_base_store_is_a_parameter_home() {
                 val: SSAVar::new("w1", 0, 4),
             },
         ],
-        phis: Vec::new(),
-    }];
-    let prep_facts = r2ssa::DecompilePrepFacts {
-        stack_address_roots: [
-            (
-                stack_addr,
-                r2ssa::StackAddressRoot {
-                    base: r2ssa::StackAddressBase::StackPointer,
-                    offset: -16,
-                },
-            ),
-            (
-                custom_stack_addr,
-                r2ssa::StackAddressRoot {
-                    base: r2ssa::StackAddressBase::StackPointer,
-                    offset: -24,
-                },
-            ),
-        ]
-        .into_iter()
-        .collect(),
-        ..r2ssa::DecompilePrepFacts::default()
-    };
+        Vec::new(),
+    )];
+    let prep_facts = [
+        (
+            stack_addr,
+            r2ssa::StackAddressRoot {
+                base: r2ssa::StackAddressBase::StackPointer,
+                offset: -16,
+            },
+        ),
+        (
+            custom_stack_addr,
+            r2ssa::StackAddressRoot {
+                base: r2ssa::StackAddressBase::StackPointer,
+                offset: -24,
+            },
+        ),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>();
     let signature = FunctionSignatureSpec {
         ret_type: Some(CTypeLike::Int {
             bits: 32,
@@ -340,7 +331,7 @@ fn prepared_direct_stack_base_store_is_a_parameter_home() {
         &register_params,
         &mut stack_slots,
         &blocks,
-        Some(&prep_facts),
+        Some(&|var: &SSAVar| prep_facts.get(var).copied()),
         &aarch64_register_identity(),
     );
 
@@ -403,6 +394,7 @@ fn stack_var_preference_renames_and_types_generic_stack_slots() {
         },
         recovered_vars: &vars,
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,
@@ -482,6 +474,7 @@ fn param_home_slots_do_not_surface_as_visible_local_candidates() {
         },
         recovered_vars: &vars,
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,
@@ -579,6 +572,7 @@ fn unproven_stack_pointer_zero_slot_is_hidden_saved_frame_state() {
         },
         recovered_vars: &vars,
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,
@@ -671,6 +665,7 @@ fn frame_slots_do_not_cross_apply_to_stack_pointer_temps() {
         },
         recovered_vars: &vars,
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,
@@ -717,6 +712,7 @@ fn interproc_summary_name_does_not_prune_generated_surplus_slots() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts {
             slot_type_overrides: HashMap::from([(
@@ -819,17 +815,16 @@ fn prepared_local_inference_certifies_cross_block_spill_reload() {
     .expect("prepared SSA");
     let mut diagnostics = TypeAnalysisDiagnostics::default();
 
-    let artifacts = infer_local_struct_artifacts_from_prepared_ssa(
-        &prepared,
-        Some("x86-64"),
-        64,
-        &mut diagnostics,
-    );
+    let artifacts = infer_local_struct_artifacts_from_prepared_ssa(&prepared, 64, &mut diagnostics);
 
     assert!(
         artifacts.indexed_accesses.iter().any(|candidate| {
             candidate.slot == 0
-                && candidate.block_addr == 0x401020
+                && prepared
+                    .graph()
+                    .inst_for_op(candidate.op)
+                    .and_then(|inst| prepared.graph().block_addr_of(inst))
+                    == Some(0x401020)
                 && !candidate.is_write
                 && candidate.field_offset == 0
                 && candidate.element_stride == 4
@@ -919,10 +914,10 @@ fn legacy_same_block_spill_reload_requires_memory_ssa() {
         }),
         ..ParsedExternalContext::default()
     };
-    let ssa_blocks = [SSABlock {
-        addr: 0x100001000,
-        size: 40,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x100001000,
+        40,
+        vec![
             SSAOp::IntSub {
                 dst: SSAVar::new("sp", 1, 8),
                 a: SSAVar::new("sp", 0, 8),
@@ -959,8 +954,8 @@ fn legacy_same_block_spill_reload_requires_memory_ssa() {
                 addr: SSAVar::new("arg_addr", 1, 8),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
 
     let analysis = build_type_analysis(TypeAnalysisInput {
         function_name: "sym._main",
@@ -984,6 +979,7 @@ fn legacy_same_block_spill_reload_requires_memory_ssa() {
         },
         recovered_vars: &[],
         ssa_blocks: &ssa_blocks,
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,
@@ -1048,10 +1044,10 @@ fn legacy_cross_block_spill_reload_requires_memory_ssa() {
         ..ParsedExternalContext::default()
     };
     let ssa_blocks = [
-        SSABlock {
-            addr: 0x401000,
-            size: 16,
-            ops: vec![
+        SSABlock::from_parts(
+            0x401000,
+            16,
+            vec![
                 SSAOp::IntAdd {
                     dst: SSAVar::new("slot", 1, 8),
                     a: SSAVar::new("RBP", 0, 8),
@@ -1063,12 +1059,12 @@ fn legacy_cross_block_spill_reload_requires_memory_ssa() {
                     val: SSAVar::new("RDI", 0, 8),
                 },
             ],
-            phis: Vec::new(),
-        },
-        SSABlock {
-            addr: 0x401020,
-            size: 24,
-            ops: vec![
+            Vec::new(),
+        ),
+        SSABlock::from_parts(
+            0x401020,
+            24,
+            vec![
                 SSAOp::IntAdd {
                     dst: SSAVar::new("slot", 2, 8),
                     a: SSAVar::new("RBP", 0, 8),
@@ -1095,8 +1091,8 @@ fn legacy_cross_block_spill_reload_requires_memory_ssa() {
                     addr: SSAVar::new("elem", 1, 8),
                 },
             ],
-            phis: Vec::new(),
-        },
+            Vec::new(),
+        ),
     ];
 
     let analysis = build_type_analysis(TypeAnalysisInput {
@@ -1121,6 +1117,7 @@ fn legacy_cross_block_spill_reload_requires_memory_ssa() {
         },
         recovered_vars: &[],
         ssa_blocks: &ssa_blocks,
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,

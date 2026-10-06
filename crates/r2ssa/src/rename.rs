@@ -105,9 +105,9 @@ pub struct CallBoundaryConfig {
     /// that register back changed, which outranks the list.
     pub result_by_target: BTreeMap<u64, CallBoundaryDef>,
     /// The carriers a call reads without naming them in an operand.
-    pub argument_regs: Vec<CallBoundaryDef>,
+    pub argument_regs: Vec<CanonicalStorageId>,
     /// The carriers a return reads without naming them in an operand.
-    pub return_regs: Vec<CallBoundaryDef>,
+    pub return_regs: Vec<CanonicalStorageId>,
 }
 
 impl CallBoundaryConfig {
@@ -406,25 +406,27 @@ impl Default for RenameContext {
 
 /// Result of renaming a function.
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "keyed by name where there is no value table: renaming builds the names the table interns, the table's own interning index, or a one-instruction block"
+    )
+)]
 pub struct RenamedFunction {
     /// SSA operations for each block (block addr -> ops).
     pub blocks: HashMap<u64, Vec<SSAOp>>,
-    /// Which machine instruction each of those operations came from, one entry
-    /// per operation and in the same order.
+    /// Where each of those operations came from, one entry per operation
+    /// and in the same order.
     ///
     /// Renaming is the only place both index spaces are known at once. It
     /// inserts operations the lift never had -- a lane projection before a
     /// read, a lane insert after a write, the carrier reads and clobbers
     /// around a call -- so an index into these operations stops agreeing with
-    /// an index into the lifted ones at the first insertion in a block.
-    /// Anything asking which instruction an operation came from had been
-    /// looking that up in the lifted index space and silently falling back to
-    /// the block address; on one pinned binary 118 of 134 cross-references
-    /// named an instruction that does not mention their target.
-    ///
-    /// `None` for a phi, which is a merge of edges rather than anything the
-    /// machine executes.
-    pub instruction_addrs: HashMap<u64, Vec<Option<u64>>>,
+    /// an index into the lifted ones at the first insertion in a block. The
+    /// function mints each operation's id from this
+    /// (doc/adr-stable-identity.md).
+    pub origins: HashMap<u64, Vec<RenamedOrigin>>,
     /// Block addresses in order.
     pub block_order: Vec<u64>,
     /// Lifted storage provenance for SSA values.
@@ -437,12 +439,27 @@ pub struct RenamedFunction {
     ambiguous_storage_vars: BTreeSet<SSAVar>,
 }
 
+/// Where one renamed operation came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenamedOrigin {
+    /// A merge of edges rather than anything the machine executes.
+    Phi,
+    /// The renaming of lifted operation `index` of the block, executed for
+    /// the machine instruction at `instruction`.
+    Lifted {
+        index: usize,
+        instruction: Option<u64>,
+    },
+    /// An operation renaming added around lifted operation `index`.
+    Derived { index: usize },
+}
+
 impl RenamedFunction {
     /// Create a new empty renamed function.
     pub fn new() -> Self {
         Self {
             blocks: HashMap::new(),
-            instruction_addrs: HashMap::new(),
+            origins: HashMap::new(),
             block_order: Vec::new(),
             canonical_storage_by_var: BTreeMap::new(),
             ambiguous_storage_vars: BTreeSet::new(),
@@ -513,7 +530,7 @@ pub fn rename_function<C: SsaWorkControl + ?Sized>(
     for &addr in &result.block_order {
         control.poll()?;
         result.blocks.insert(addr, Vec::new());
-        result.instruction_addrs.insert(addr, Vec::new());
+        result.origins.insert(addr, Vec::new());
     }
 
     // Prepopulate phi placeholders so predecessor-edge source propagation can update them
@@ -521,10 +538,7 @@ pub fn rename_function<C: SsaWorkControl + ?Sized>(
     for &addr in &result.block_order {
         control.poll()?;
         let block_ops = result.blocks.get_mut(&addr).expect("preinitialized block");
-        let block_addrs = result
-            .instruction_addrs
-            .get_mut(&addr)
-            .expect("preinitialized block");
+        let block_origins = result.origins.get_mut(&addr).expect("preinitialized block");
         for phi in phi_placement.get_phis(addr) {
             control.poll()?;
             let sources: Vec<SSAVar> = phi
@@ -532,7 +546,7 @@ pub fn rename_function<C: SsaWorkControl + ?Sized>(
                 .iter()
                 .map(|_| ctx.var_at(&phi.identity, 0))
                 .collect();
-            block_addrs.push(None);
+            block_origins.push(RenamedOrigin::Phi);
             block_ops.push(SSAOp::Phi {
                 dst: ctx.var_at(&phi.identity, 0),
                 sources,
@@ -646,10 +660,10 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                         .collect();
                     block_ops.insert(phi_idx, SSAOp::Phi { dst, sources });
                     result
-                        .instruction_addrs
+                        .origins
                         .get_mut(&block_addr)
                         .expect("preinitialized block")
-                        .insert(phi_idx, None);
+                        .insert(phi_idx, RenamedOrigin::Phi);
                 }
             }
         }
@@ -715,6 +729,7 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                     );
                 }
                 let block_ops = result.blocks.get_mut(&block_addr).unwrap();
+                let lifted_at = block_ops.len();
                 block_ops.push(renamed_op);
                 block_ops.append(&mut ctx.lanes.suffix);
                 for (var, storage) in ctx.lanes.storage.drain(..) {
@@ -793,16 +808,20 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                         storage,
                     );
                 }
-                // Everything this iteration appended -- the lane projections,
-                // the carrier reads and clobbers around a call, the renamed op
-                // itself -- was emitted for this instruction, so one alignment
-                // at the end of the iteration covers them all.
+                // Everything else this iteration appended -- the lane
+                // projections, the carrier reads and clobbers around a call --
+                // was emitted for the lifted operation, so one alignment at the
+                // end of the iteration covers them all.
                 let renamed = result.blocks[&block_addr].len();
-                let addrs = result
-                    .instruction_addrs
+                let origins = result
+                    .origins
                     .get_mut(&block_addr)
                     .expect("preinitialized block");
-                addrs.resize(renamed, op_addr);
+                origins.resize(renamed, RenamedOrigin::Derived { index: op_idx });
+                origins[lifted_at] = RenamedOrigin::Lifted {
+                    index: op_idx,
+                    instruction: op_addr,
+                };
             }
         }
 
@@ -947,6 +966,13 @@ fn record_renamed_op_storage(
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "keyed by name where there is no value table: renaming builds the names the table interns, the table's own interning index, or a one-instruction block"
+    )
+)]
 fn record_canonical_storage(
     storage_by_var: &mut BTreeMap<SSAVar, CanonicalStorageId>,
     ambiguous_vars: &mut BTreeSet<SSAVar>,
@@ -993,9 +1019,10 @@ fn append_call_boundary_defs(
     });
     for identity in clobbered.union(&results) {
         let storage = identity.storage;
+        // The callee's proof names whole registers; a lane of one it keeps is kept.
         if callee
             .preserved
-            .is_some_and(|preserved| preserved.contains(&storage))
+            .is_some_and(|preserved| crate::semantic::covers(preserved, storage))
         {
             continue;
         }
@@ -1025,7 +1052,7 @@ fn callee_result_identities(
     let mut identities: BTreeSet<RenameIdentity> = match ctx
         .families
         .as_deref()
-        .and_then(|families| families.widest_slot_for_name(&reg.name))
+        .and_then(|families| families.root_slot_for_name(&reg.name))
     {
         Some(root) => BTreeSet::from([RenameIdentity::for_root_slot(root, reg_names)]),
         None => ctx
@@ -1136,19 +1163,10 @@ fn append_call_boundary_reads(
     reg_names: Option<&RegisterNameMap>,
 ) -> Vec<(SSAVar, CanonicalStorageId)> {
     let mut read: BTreeSet<RenameIdentity> = BTreeSet::new();
-    for reg in &call_boundaries.argument_regs {
-        match ctx
-            .families
-            .as_deref()
-            .and_then(|families| families.widest_slot_for_name(&reg.name))
-        {
-            Some(root) => {
-                let identity = RenameIdentity::for_root_slot(root, reg_names);
-                if ctx.knows_identity(&identity) {
-                    read.insert(identity);
-                }
-            }
-            None => read.extend(ctx.matching_identities_ci(&reg.name, reg.size)),
+    for storage in &call_boundaries.argument_regs {
+        let identity = crate::phi::clobber_identity(*storage, reg_names, ctx.families.as_deref());
+        if ctx.knows_identity(&identity) {
+            read.insert(identity);
         }
     }
     let mut retained = Vec::new();
@@ -2192,7 +2210,11 @@ mod tests {
 
         let function = crate::function::SSAFunction::from_blocks_raw(&blocks, Some(&arch))
             .expect("raw SSA with colliding register spellings");
-        let ops = &function.get_block(0x2000).expect("entry block").ops;
+        let ops = function
+            .named_block(0x2000)
+            .expect("entry block")
+            .ops()
+            .to_vec();
         let (
             SSAOp::Copy {
                 src: first_live_in, ..

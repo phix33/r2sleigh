@@ -18,10 +18,15 @@ fn every_tier_of_one_function_is_rendered_from_one_analysis() {
         let rendering = program.rendered(ONE, tier).expect("it renders");
         assert!(!rendering.response.output.into_text().is_empty());
     }
-    let stats = program.memo_stats();
+    let stats = program.analysis_stats();
     assert_eq!(
-        (stats.misses, stats.hits, stats.replacements),
-        (1, 2, 0),
+        (
+            stats.analysed.computed,
+            stats.analysed.reused,
+            stats.analysed.recomputed
+        ),
+        // Two tiers and the one sealing reuse the analysis the first tier computed.
+        (1, 3, 0),
         "three tiers walked and prepared the same body more than once"
     );
 }
@@ -37,20 +42,17 @@ fn afi_afv_and_pdd_read_one_type_analysis() {
         .rendered(ONE, r2engine::RenderTier::C)
         .expect("it renders");
     assert!(!rendering.response.output.into_text().is_empty());
-    let stats = program.memo_stats();
+    let stats = program.analysis_stats();
     assert_eq!(
-        (stats.misses, stats.hits, stats.sealed),
-        (1, 2, 1),
+        (
+            stats.analysed.computed,
+            stats.analysed.reused,
+            stats.sealed.computed
+        ),
+        // Two commands and the one sealing reuse the analysis the first computed.
+        (1, 3, 1),
         "each command ran its own type analysis of one prepared function"
     );
-}
-
-#[test]
-fn deriving_the_tables_the_first_time_is_not_a_change() {
-    let mut program = opened();
-    program.prepared(ONE).expect("it prepares");
-    let revision = program.revision();
-    assert_eq!((revision.names, revision.entries), (0, 0));
 }
 
 #[test]
@@ -60,7 +62,7 @@ fn a_patch_makes_the_held_analysis_stale() {
     // `mov eax, 1` becomes `mov eax, 3`: a byte this analysis read.
     program.source_mut().write(ONE + 1, &[0x03]);
     program.prepared(ONE).expect("it prepares");
-    assert_eq!(program.memo_stats().replacements, 1);
+    assert_eq!(program.analysis_stats().analysed.recomputed, 1);
 }
 
 #[test]
@@ -72,9 +74,13 @@ fn a_patch_after_a_hit_still_makes_the_held_analysis_stale() {
     program.prepared(ONE).expect("it is served");
     program.source_mut().write(ONE + 1, &[0x03]);
     program.prepared(ONE).expect("it prepares");
-    let stats = program.memo_stats();
+    let stats = program.analysis_stats();
     assert_eq!(
-        (stats.misses, stats.hits, stats.replacements),
+        (
+            stats.analysed.computed,
+            stats.analysed.reused,
+            stats.analysed.recomputed
+        ),
         (2, 1, 1),
         "a write to bytes this analysis read was served the old analysis"
     );
@@ -89,9 +95,13 @@ fn a_patch_to_another_function_leaves_this_one_standing() {
     program.prepared(ONE).expect("it prepares");
     program.source_mut().write(TWO + 1, &[0x05]);
     program.prepared(ONE).expect("it prepares");
-    let stats = program.memo_stats();
+    let stats = program.analysis_stats();
     assert_eq!(
-        (stats.misses, stats.hits, stats.replacements),
+        (
+            stats.analysed.computed,
+            stats.analysed.reused,
+            stats.analysed.recomputed
+        ),
         (1, 1, 0),
         "a patch to another function threw this analysis away"
     );
@@ -111,8 +121,8 @@ fn a_listing_prepares_no_function_and_builds_no_binding_plan() {
         .expect("it lists");
     assert_eq!(answer.value.len(), 6);
     assert_eq!(
-        program.memo_stats(),
-        r2engine::query::MemoStats::default(),
+        program.analysis_stats(),
+        r2engine::query::AnalysisStats::default(),
         "a listing asked the engine to analyse a function"
     );
 }
@@ -123,16 +133,10 @@ fn a_patch_that_names_a_string_makes_every_held_analysis_stale() {
     // name anywhere is a new program to it even though no byte it read moved.
     let mut program = OpenProgram::of(Literal::new().with_data());
     program.prepared(ONE).expect("it prepares");
-    let before = program.revision();
     program.source_mut().write(TEXT, b"hello\0");
     program.prepared(ONE).expect("it prepares");
     assert_eq!(program.names().text_at(TEXT), Some("hello"));
-    let after = program.revision();
-    assert_eq!(
-        (after.names, after.entries),
-        (before.names + 1, before.entries)
-    );
-    assert_eq!(program.memo_stats().replacements, 1);
+    assert_eq!(program.analysis_stats().analysed.recomputed, 1);
 }
 
 #[test]
@@ -148,14 +152,19 @@ fn a_patch_that_moves_an_import_stub_makes_every_held_analysis_stale() {
             .map(|stub| stub.symbol.as_str()),
         Some("puts")
     );
-    let before = program.revision().entries;
     // `jmp [rip + 2]` becomes `jmp [rip + 0x10]`, which reads no slot.
     program.source_mut().write(STUB + 2, &[0x10]);
     program.prepared(ONE).expect("it prepares");
     assert!(program.imports().is_empty());
-    assert_eq!(program.revision().entries, before + 1);
-    let stats = program.memo_stats();
-    assert_eq!((stats.misses, stats.hits, stats.replacements), (2, 0, 1));
+    let stats = program.analysis_stats();
+    assert_eq!(
+        (
+            stats.analysed.computed,
+            stats.analysed.reused,
+            stats.analysed.recomputed
+        ),
+        (2, 0, 1)
+    );
 }
 
 #[test]
@@ -164,13 +173,10 @@ fn a_patch_that_changes_a_callee_s_instruction_set_makes_its_analysis_stale() {
     // bytes are untouched, but the instruction set it is read in moved.
     let mut program = OpenProgram::of(Literal::arm_thumb());
     program.prepared(THUMB_LEAF).expect("it prepares");
-    let before = program.revision().entries;
-    // Discovering the instruction sets the first time is no change.
-    assert_eq!(before, 0);
     program.source_mut().write(ARM_ENTRY + 3, &[0xeb]);
     let _ = program.prepared(THUMB_LEAF);
-    assert_eq!(program.revision().entries, before + 1);
-    assert_eq!(program.memo_stats().replacements, 1);
+    // The leaf is read in another instruction set, a new key: the old analysis is never served.
+    assert_eq!(program.analysis_stats().analysed.computed, 2);
     let called = program
         .functions()
         .expect("discovery runs")
@@ -178,10 +184,10 @@ fn a_patch_that_changes_a_callee_s_instruction_set_makes_its_analysis_stale() {
         .find(|one| one.address == THUMB_CALLED)
         .map(|one| one.thumb);
     assert_eq!(called, Some(false));
-    // A write that moves no function's instruction set moves nothing.
+    // A write that moves no function's instruction set leaves the leaf's analysis standing.
     program.source_mut().write(ARM_ENTRY + 3, &[0xeb]);
-    program.functions().expect("discovery runs");
-    assert_eq!(program.revision().entries, before + 1);
+    let _ = program.prepared(THUMB_LEAF);
+    assert_eq!(program.analysis_stats().analysed.computed, 2);
 }
 
 /// `mov eax, [rip + 0xffa]; ret` at 0x1000: the value of the object at 0x2000.
@@ -316,8 +322,15 @@ fn a_patch_that_stops_a_callee_s_callee_returning_makes_the_caller_stale() {
     // `one` becomes `jmp one`, a byte the caller's analysis never read.
     program.source_mut().write(ONE, &[0xeb, 0xfe]);
     assert_eq!(ends(&mut program), Some(CALLER + 5));
-    let stats = program.memo_stats();
-    assert_eq!((stats.misses, stats.hits, stats.replacements), (2, 0, 1));
+    let stats = program.analysis_stats();
+    assert_eq!(
+        (
+            stats.analysed.computed,
+            stats.analysed.reused,
+            stats.analysed.recomputed
+        ),
+        (2, 0, 1)
+    );
 }
 
 #[test]
@@ -329,18 +342,18 @@ fn two_callers_of_one_callee_prepare_it_once_and_both_see_a_write_to_it() {
     let mut program = opened();
     program.prepared(CALLER).expect("it prepares");
     program.prepared(PASSES).expect("it prepares");
-    let stats = program.memo_stats();
+    let stats = program.analysis_stats();
     assert_eq!(
-        (stats.callees_read, stats.callee_hits),
+        (stats.callee_reads.computed, stats.resolved.reused),
         (1, 1),
         "the second caller prepared the shared callee again"
     );
     // `mov eax, 1` becomes `mov eax, 3` in the callee alone.
     program.source_mut().write(ONE + 1, &[0x03]);
     program.prepared(PASSES).expect("it prepares");
-    let stats = program.memo_stats();
+    let stats = program.analysis_stats();
     assert_eq!(
-        (stats.replacements, stats.callees_read),
+        (stats.analysed.recomputed, stats.callee_reads.computed),
         (1, 2),
         "a root that read a held callee did not see a write to that callee"
     );
@@ -361,13 +374,175 @@ fn a_listing_asks_a_held_callee_what_its_parameters_take_without_preparing_it() 
     let mut program =
         OpenProgram::of(Literal::of_code(code.leak(), &functions).with_data_after(common::HANDED));
     program.prepared(common::HANDS).expect("it prepares");
-    let before = program.memo_stats();
-    assert_eq!((before.callees_read, before.callee_hits), (1, 0));
-    program.function_listing(common::HANDS).expect("it lists");
-    let after = program.memo_stats();
+    let before = program.analysis_stats();
     assert_eq!(
-        (after.callees_read, after.callee_hits),
+        (before.callee_reads.computed, before.callee_reads.reused),
+        (1, 0)
+    );
+    program.function_listing(common::HANDS).expect("it lists");
+    let after = program.analysis_stats();
+    assert_eq!(
+        (after.callee_reads.computed, after.callee_reads.reused),
         (1, 1),
         "the listing prepared a callee whose summary was held"
+    );
+}
+
+#[test]
+fn a_rendering_is_redrawn_without_analysing_again() {
+    // `pdd` on one function, another, then the first: the session redraws what it rendered.
+    let mut program = opened();
+    let text = |program: &mut OpenProgram<Literal>, entry| {
+        let rendering = program.rendered(entry, r2engine::RenderTier::C);
+        rendering.expect("it renders").response.output.into_text()
+    };
+    let first = text(&mut program, ONE);
+    text(&mut program, TWO);
+    assert_eq!(text(&mut program, ONE), first);
+    let stats = program.analysis_stats();
+    assert_eq!(
+        (stats.rendered.computed, stats.rendered.reused),
+        (2, 1),
+        "the first function was rendered again"
+    );
+    // `mov eax, 1` becomes `mov eax, 3`: the rendering read it.
+    program.source_mut().write(ONE + 1, &[0x03]);
+    assert_ne!(text(&mut program, ONE), first);
+}
+
+#[test]
+fn a_rendering_the_request_stopped_is_not_held() {
+    let mut program = opened();
+    let cancellation = r2engine::EngineCancellationToken::default();
+    program.begin_request(r2engine::EngineExecutionControl::with_cancellation(
+        cancellation.clone(),
+    ));
+    cancellation.cancel();
+    let _ = program.rendered(ONE, r2engine::RenderTier::C);
+    let rendering = program
+        .rendered(ONE, r2engine::RenderTier::C)
+        .expect("a fresh request renders");
+    assert!(!rendering.response.output.into_text().is_empty());
+    assert_eq!(
+        program.analysis_stats().analysed.computed,
+        2,
+        "the stopped analysis was served"
+    );
+}
+
+/// One question the property test asks of a program and of a fresh open of its bytes.
+#[derive(Debug, Clone)]
+enum Step {
+    Write(u64, u8),
+    Render(u64),
+    List(u64),
+    Index,
+    Discover,
+}
+
+fn step() -> impl proptest::strategy::Strategy<Value = Step> {
+    use proptest::prelude::*;
+    let entry = proptest::sample::select(vec![ONE, CALLER, TWO, PASSES, common::FORKED]);
+    prop_oneof![
+        3 => (common::BASE..TEXT, any::<u8>()).prop_map(|(at, byte)| Step::Write(at, byte)),
+        2 => entry.clone().prop_map(Step::Render),
+        1 => entry.prop_map(Step::List),
+        1 => Just(Step::Index),
+        1 => Just(Step::Discover),
+    ]
+}
+
+/// What one question answers, spelled so two programs' answers compare.
+fn asked(program: &mut OpenProgram<Literal>, step: &Step) -> String {
+    match *step {
+        Step::Write(..) => String::new(),
+        Step::Render(entry) => format!(
+            "{:?}",
+            program
+                .rendered(entry, r2engine::RenderTier::C)
+                .map(|rendering| (rendering.response.output.into_text(), rendering.unread))
+        ),
+        Step::List(entry) => format!(
+            "{:?}",
+            program
+                .function_listing(entry)
+                .map(|listing| (listing.lines.value, listing.refused.is_some()))
+        ),
+        Step::Index => format!("{:?}", program.references().map(|index| index.value)),
+        Step::Discover => format!("{:?}", program.functions()),
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+
+    /// The exit the query ADR sets for Q: any interleaving of writes and
+    /// questions over the real program inputs answers as a fresh open does.
+    #[test]
+    fn a_session_answers_as_a_fresh_open_of_its_bytes(
+        steps in proptest::collection::vec(step(), 1..16),
+    ) {
+        let mut program = opened();
+        let mut written = Vec::new();
+        for step in &steps {
+            if let Step::Write(at, byte) = *step {
+                program.source_mut().write(at, &[byte]);
+                written.push((at, byte));
+                continue;
+            }
+            let mut fresh = Literal::new();
+            for (at, byte) in &written {
+                fresh.write(*at, &[*byte]);
+            }
+            let mut fresh = OpenProgram::of(fresh);
+            proptest::prop_assert_eq!(asked(&mut program, step), asked(&mut fresh, step));
+        }
+    }
+}
+
+#[test]
+fn a_tail_thunk_returns_what_its_target_returns_once_the_target_is_resolved() {
+    // `bump` returns its argument plus one; `thunk` sets an unrelated register and tail-jumps to
+    // it; `root` calls the thunk. Alone, the thunk proves no result: its target owns it. Resolved
+    // against `bump`, it returns `bump`'s result and passes its own first argument through.
+    let mut code = [0xcc_u8; 0x40];
+    code[0x00..0x04].copy_from_slice(&[0x8d, 0x47, 0x01, 0xc3]); // lea eax, [rdi + 1]; ret
+    code[0x10..0x1a].copy_from_slice(&[0xba, 0xff, 0xff, 0xff, 0xff, 0xe9, 0xe6, 0xff, 0xff, 0xff]); // mov edx, -1; jmp bump
+    code[0x20..0x2b].copy_from_slice(&[0xbf, 0x05, 0, 0, 0, 0xe8, 0xe6, 0xff, 0xff, 0xff, 0xc3]); // mov edi, 5; call thunk; ret
+    let base = common::BASE;
+    let functions = [
+        ("bump", base, 4),
+        ("thunk", base + 0x10, 10),
+        ("root", base + 0x20, 11),
+    ];
+    let mut program = OpenProgram::of(Literal::of_code(code.to_vec().leak(), &functions));
+    let rendering = program
+        .rendered(base + 0x20, r2engine::RenderTier::C)
+        .expect("it renders");
+    let text = rendering.response.output.into_text();
+    assert!(text.contains("uint64_t thunk(uint64_t);"), "{text}");
+    assert!(text.contains("= thunk(5);"), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+}
+
+#[test]
+fn a_return_one_arm_leaves_untouched_proves_no_result() {
+    // `maybe` calls `bump` only when its argument is nonzero and returns either way. On the other
+    // arm the result register still holds what the caller left, so no result is proven.
+    let mut code = [0xcc_u8; 0x50];
+    code[0x00..0x04].copy_from_slice(&[0x8d, 0x47, 0x01, 0xc3]); // lea eax, [rdi + 1]; ret
+    code[0x30..0x3a].copy_from_slice(&[0x85, 0xff, 0x74, 0x05, 0xe8, 0xc7, 0xff, 0xff, 0xff, 0xc3]); // test edi, edi; je ret; call bump; ret
+    let base = common::BASE;
+    let functions = [("bump", base, 4), ("maybe", base + 0x30, 10)];
+    let mut program = OpenProgram::of(Literal::of_code(code.to_vec().leak(), &functions));
+    let rendering = program
+        .rendered(base + 0x30, r2engine::RenderTier::C)
+        .expect("it renders");
+    let text = rendering.response.output.into_text();
+    assert!(!text.contains("r2sleigh refused"), "{text}");
+    assert!(text.contains("return r2sleigh_residual"), "{text}");
+    assert!(
+        !text.contains("uint64_t RAX"),
+        "a value only one arm produces is no result: {text}"
     );
 }

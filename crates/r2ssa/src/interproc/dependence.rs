@@ -71,7 +71,7 @@ pub(crate) struct FormalDependence {
     unseen: u64,
     /// What each argument register holds before each instruction, for the
     /// calls no callee states the arity of: only computed where one exists.
-    carriers: BTreeMap<CanonicalStorageId, BTreeMap<InstId, ReachingStorageState>>,
+    carriers: BTreeMap<CanonicalStorageId, crate::dense::IdMap<InstId, ReachingStorageState>>,
     /// What the frame carries from the stores into it to the loads out of it.
     frame: FrameTraffic,
     /// The formals stored at an exposed frame place, as of the last pass.
@@ -109,7 +109,10 @@ impl FormalDependence {
             frame: FrameTraffic::of(prepared),
             exposed: 0,
         };
-        while dependence.pass(prepared) {}
+        // Named once, not once a pass: the pass reads names until this
+        // module reads values (doc/adr-one-ir.md, F2.3 stage 5).
+        let named = prepared.function().named_blocks();
+        while dependence.pass(prepared, &named) {}
         dependence
     }
 
@@ -175,7 +178,7 @@ impl FormalDependence {
         self.carriers
             .iter()
             .filter(|(storage, _)| !named.contains(storage))
-            .map(|(storage, states)| match states.get(&boundary.at) {
+            .map(|(storage, states)| match states.get(boundary.at) {
                 Some(ReachingStorageState::Value(value)) => self.handed(prepared, *value),
                 Some(ReachingStorageState::PreservedEntry) => self.entry_bits(prepared, *storage),
                 Some(ReachingStorageState::Unknown | ReachingStorageState::Conflict) | None => {
@@ -219,7 +222,7 @@ impl FormalDependence {
     }
 
     /// One pass over the blocks in order; whether any value gained a bit.
-    fn pass(&mut self, prepared: &SsaArtifact) -> bool {
+    fn pass(&mut self, prepared: &SsaArtifact, named: &[crate::block::SSABlock]) -> bool {
         let exposed = self
             .frame
             .exposed
@@ -228,8 +231,8 @@ impl FormalDependence {
             .fold(0, |left, right| left | right);
         let mut changed = exposed != self.exposed;
         self.exposed = exposed;
-        for block in prepared.function().blocks() {
-            for phi in &block.phis {
+        for block in named {
+            for phi in block.phis() {
                 let inputs = phi
                     .sources
                     .iter()
@@ -248,12 +251,12 @@ impl FormalDependence {
         // What the last call in this block was handed: the definitions that
         // follow it are what it left, and may be any of it.
         let mut last_call = 0u64;
-        for (index, op) in block.ops.iter().enumerate() {
+        for (id, op) in block.sited() {
             if matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
                 last_call = prepared
                     .graph()
-                    .inst_id_for_op_site(block.addr, index)
-                    .and_then(|inst| prepared.call_sites().by_inst.get(&inst))
+                    .inst_for_op(id)
+                    .and_then(|inst| prepared.call_sites().by_inst.get(inst))
                     .map_or(u64::MAX, |call| self.passed_to_call(prepared, *call));
                 let unseen = self.unseen | last_call;
                 changed |= unseen != self.unseen;
@@ -302,7 +305,7 @@ impl FormalDependence {
             .map_or(0, |reload| self.bits_of(reload.source));
         self.frame
             .sources
-            .get(&value)
+            .get(value)
             .into_iter()
             .flatten()
             .map(|stored| self.bits_of(*stored))
@@ -335,7 +338,7 @@ impl FormalDependence {
 #[derive(Default)]
 struct FrameTraffic {
     /// Each load of the frame, and the values stored where it may read.
-    sources: BTreeMap<ValueId, Vec<ValueId>>,
+    sources: crate::dense::IdMap<ValueId, Vec<ValueId>>,
     /// Every value written to the frame where an escaping address can reach
     /// it: stored to it, or written to a slot promotion took out of it.
     exposed: Vec<ValueId>,
@@ -354,9 +357,9 @@ impl FrameTraffic {
         let objects = prepared.objects();
         let mut loads = Vec::<(ValueId, FramePlace)>::new();
         let mut stores = Vec::<(InstId, ValueId, FramePlace)>::new();
-        for block in prepared.function().blocks() {
-            for (index, op) in block.ops.iter().enumerate() {
-                let Some(inst) = graph.inst_id_for_op_site(block.addr, index) else {
+        for block in prepared.function().named_blocks() {
+            for (id, op) in block.sited() {
+                let Some(inst) = graph.inst_for_op(id) else {
                     continue;
                 };
                 let (addr, space, loaded, stored) = match op {
@@ -404,7 +407,7 @@ impl FrameTraffic {
                     Some(location)
                 };
                 if let Some(value) = loaded.and_then(|dst| graph.value_id_for_var(dst)) {
-                    let uses = prepared.memory().uses_by_inst.get(&inst).map(|uses| {
+                    let uses = prepared.memory().uses_by_inst.get(inst).map(|uses| {
                         uses.iter()
                             .map(|fact| fact.location.clone())
                             .collect::<Vec<_>>()
@@ -412,7 +415,7 @@ impl FrameTraffic {
                     loads.push((value, place(uses.as_deref())));
                 }
                 if let Some(value) = stored.and_then(|val| graph.value_id_for_var(val)) {
-                    let defs = prepared.memory().defs_by_inst.get(&inst).map(|defs| {
+                    let defs = prepared.memory().defs_by_inst.get(inst).map(|defs| {
                         defs.iter()
                             .map(|fact| fact.location.clone())
                             .collect::<Vec<_>>()
@@ -430,7 +433,7 @@ impl FrameTraffic {
         for (value, place) in &loads {
             read_at.entry(place).or_default().push(*value);
         }
-        let mut sources = BTreeMap::<ValueId, Vec<ValueId>>::new();
+        let mut sources = crate::dense::IdMap::<ValueId, Vec<ValueId>>::default();
         for (read, readers) in &read_at {
             let reached = stored_at
                 .iter()
@@ -475,10 +478,10 @@ fn promoted_slot_writes(prepared: &SsaArtifact) -> impl Iterator<Item = ValueId>
         .function()
         .blocks()
         .iter()
-        .flat_map(|block| block.ops.iter())
+        .flat_map(|block| block.ops().iter())
         .filter_map(SSAOp::dst)
         .filter_map(move |dst| {
-            let value = graph.value_id_for_var(dst)?;
+            let value = graph.value_of(*dst)?;
             graph
                 .value(value)?
                 .canonical_storage
@@ -512,9 +515,7 @@ fn is_frame_object(objects: &ObjectModel, object: ObjectId) -> bool {
 /// argument slot for the formal's storage, and by the preparation's own index
 /// where the storage is a lane of a slot rather than the slot.
 fn formal_values(prepared: &SsaArtifact, abi: &AbiProfile) -> Vec<(ValueId, usize)> {
-    let Some(prep) = prepared.function().decompile_prep_facts() else {
-        return Vec::new();
-    };
+    let prep = prepared.decompile_prep_facts();
     let graph = prepared.graph();
     // Only the values a formal arrives as: an entry register, or the lane
     // projection minted from one. A copy or a reload of a formal is also a
@@ -524,8 +525,7 @@ fn formal_values(prepared: &SsaArtifact, abi: &AbiProfile) -> Vec<(ValueId, usiz
     prep.formal_parameter_bases
         .iter()
         .chain(prep.formal_parameters.iter())
-        .filter_map(|(var, index)| {
-            let value = graph.value_id_for_var(var)?;
+        .filter_map(|(value, index)| {
             let entry = graph.def_inst(value).is_none();
             if !entry && graph.formal_projection_storage(value).is_none() {
                 return None;

@@ -14,15 +14,15 @@ use serde::{Deserialize, Serialize};
 use crate::callee::{CalleeIdentityContext, CalleeResolutionFacts, CallsiteKey};
 use crate::context::{ExternalStackSlotRole, ExternalStackSlotSpec, StackSlotKey};
 use crate::facts::{
-    CalleeFact, CalleeLinkage, FunctionSignatureProjection, FunctionSignatureSpec,
-    FunctionTypeFacts, OutParamCertificateEvidence, OutParamCertificateSource,
-    SignatureCertificateSource, SignatureProjectionResult, VisibleBindingKind,
+    CalleeFact, CalleeLinkage, FunctionSignatureSpec, FunctionTypeFacts,
+    OutParamCertificateEvidence, OutParamCertificateSource, SignatureCertificateSource,
+    VisibleBindingKind,
 };
 use crate::{CTypeLike, normalize_external_type_name, parse_c_type_like};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ParamSlotResolver {
-    slots_by_value: BTreeMap<r2ssa::ValueId, usize>,
+    slots_by_value: r2ssa::dense::IdMap<r2ssa::ValueId, usize>,
 }
 
 impl ParamSlotResolver {
@@ -32,7 +32,7 @@ impl ParamSlotResolver {
     }
 
     fn slot_for_value(&self, value: r2ssa::ValueId) -> Option<usize> {
-        self.slots_by_value.get(&value).copied()
+        self.slots_by_value.get(value).copied()
     }
 }
 
@@ -53,7 +53,7 @@ impl FunctionCallsiteFacts {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FunctionCallResultFacts {
-    pub by_value: BTreeMap<r2ssa::ValueId, CallResultFact>,
+    pub by_value: r2ssa::dense::IdMap<r2ssa::ValueId, CallResultFact>,
     pub by_callsite: BTreeMap<CallsiteKey, Vec<r2ssa::ValueId>>,
 }
 
@@ -63,7 +63,7 @@ impl FunctionCallResultFacts {
     }
 
     pub fn result_for_value(&self, value: r2ssa::ValueId) -> Option<&CallResultFact> {
-        self.by_value.get(&value)
+        self.by_value.get(value)
     }
 
     pub fn results_for_site(&self, callsite: CallsiteKey) -> impl Iterator<Item = &CallResultFact> {
@@ -71,7 +71,7 @@ impl FunctionCallResultFacts {
             .get(&callsite)
             .into_iter()
             .flatten()
-            .filter_map(|value| self.by_value.get(value))
+            .filter_map(|value| self.by_value.get(*value))
     }
 
     /// The value the call boundary itself defines.
@@ -154,11 +154,6 @@ impl FunctionCallResultFacts {
         .flatten()
     }
 
-    pub fn owner_for_value(&self, value: r2ssa::ValueId) -> Option<&r2ssa::ValueOwner> {
-        self.result_for_value(value)
-            .and_then(|result| result.owner.as_ref())
-    }
-
     fn unique_owner_for_site_matching(
         &self,
         callsite: CallsiteKey,
@@ -219,10 +214,6 @@ impl FunctionControlFacts {
         self.switches.get(&block_addr)
     }
 
-    pub fn control_domain_for_block(&self, block_addr: u64) -> Option<&r2ssa::ControlDomain> {
-        self.control_domains.for_block(block_addr)
-    }
-
     pub fn loops_for_header(&self, header: u64) -> impl Iterator<Item = &LoopStructureFact> + '_ {
         self.loops
             .values()
@@ -248,15 +239,15 @@ pub struct FunctionRenderFacts {
     pub certified_entities: BTreeMap<r2ssa::SemanticId, CertifiedEntity>,
     /// Canonical certified observable-effect graph keyed by stable semantic identity.
     pub certified_effects: BTreeMap<r2ssa::SemanticId, CertifiedEffect>,
-    /// Stable return-effect identity for each canonical SSA op site.
-    pub return_effects_by_op: BTreeMap<OpSiteKey, r2ssa::SemanticId>,
-    /// Stable memory-effect identities for each canonical SSA op site.
-    pub memory_effects_by_op: BTreeMap<MemoryOpSiteKey, Vec<r2ssa::SemanticId>>,
+    /// Stable return-effect identity for each returning instruction.
+    pub return_effects_by_inst: r2ssa::dense::IdMap<r2ssa::InstId, r2ssa::SemanticId>,
+    /// Stable memory-effect identities for each instruction, by direction.
+    pub memory_effects_by_inst: BTreeMap<MemoryEffectKey, Vec<r2ssa::SemanticId>>,
     /// Value annotations that supplement, rather than duplicate, certified expressions.
-    pub string_literals_by_value: BTreeMap<r2ssa::ValueId, StringLiteralRenderFact>,
+    pub string_literals_by_value: r2ssa::dense::IdMap<r2ssa::ValueId, StringLiteralRenderFact>,
     /// Type-owner render projections tied back to canonical memory-effect identities.
-    pub member_accesses_by_op: BTreeMap<MemoryOpSiteKey, Vec<MemberAccessRenderFact>>,
-    pub array_accesses_by_op: BTreeMap<MemoryOpSiteKey, Vec<ArrayAccessRenderFact>>,
+    pub member_accesses_by_inst: BTreeMap<MemoryEffectKey, Vec<MemberAccessRenderFact>>,
+    pub array_accesses_by_inst: BTreeMap<MemoryEffectKey, Vec<ArrayAccessRenderFact>>,
 }
 
 impl FunctionRenderFacts {
@@ -272,11 +263,11 @@ impl FunctionRenderFacts {
         self.certified_exprs.is_empty()
             && self.certified_entities.is_empty()
             && self.certified_effects.is_empty()
-            && self.return_effects_by_op.is_empty()
-            && self.memory_effects_by_op.is_empty()
+            && self.return_effects_by_inst.is_empty()
+            && self.memory_effects_by_inst.is_empty()
             && self.string_literals_by_value.is_empty()
-            && self.member_accesses_by_op.is_empty()
-            && self.array_accesses_by_op.is_empty()
+            && self.member_accesses_by_inst.is_empty()
+            && self.array_accesses_by_inst.is_empty()
     }
 
     pub fn expression_for_value(&self, value: r2ssa::ValueId) -> Option<&ExpressionRenderFact> {
@@ -309,19 +300,6 @@ impl FunctionRenderFacts {
             })
             .flatten()
             .copied()
-    }
-
-    pub fn has_certified_parameter(&self, slot: usize) -> bool {
-        let Some(id) = r2ssa::SemanticId::parameter(slot) else {
-            return false;
-        };
-        matches!(
-            self.certified_entities.get(&id),
-            Some(CertifiedEntity::Parameter {
-                slot: entity_slot,
-                ..
-            }) if usize::try_from(*entity_slot).ok() == Some(slot)
-        )
     }
 
     /// Resolve a value carrying a direct parameter binding to one ABI slot.
@@ -375,39 +353,8 @@ impl FunctionRenderFacts {
         slots.is_empty().then_some(slot)
     }
 
-    pub fn return_effect_id_for_op(
-        &self,
-        block_addr: u64,
-        op_index: usize,
-    ) -> Option<r2ssa::SemanticId> {
-        self.return_effects_by_op
-            .get(&(block_addr, op_index))
-            .copied()
-    }
-
-    pub fn memory_effect_id_for_op(
-        &self,
-        block_addr: u64,
-        op_index: usize,
-        is_write: bool,
-        space: r2il::SpaceId,
-        address: r2ssa::ValueId,
-        value: Option<r2ssa::ValueId>,
-    ) -> Option<r2ssa::SemanticId> {
-        let mut matching = self
-            .memory_effects_by_op
-            .get(&(block_addr, op_index, is_write))?
-            .iter()
-            .filter_map(|id| match self.certified_effects.get(id) {
-                Some(CertifiedEffect::Memory { fact, .. })
-                    if fact.space == space && fact.address == address && fact.value == value =>
-                {
-                    Some(*id)
-                }
-                _ => None,
-            });
-        let first = matching.next()?;
-        matching.next().is_none().then_some(first)
+    pub fn return_effect_id_for_inst(&self, inst: r2ssa::InstId) -> Option<r2ssa::SemanticId> {
+        self.return_effects_by_inst.get(inst).copied()
     }
 
     pub fn expression_is_renderable(&self, value: r2ssa::ValueId) -> bool {
@@ -419,7 +366,7 @@ impl FunctionRenderFacts {
         &self,
         value: r2ssa::ValueId,
     ) -> Option<&StringLiteralRenderFact> {
-        self.string_literals_by_value.get(&value)
+        self.string_literals_by_value.get(value)
     }
 
     /// The memory fact for one exact structured access at an op site.
@@ -428,14 +375,12 @@ impl FunctionRenderFacts {
     /// identity rather than uniqueness is what selects the fact.
     pub fn memory_access_for_access(
         &self,
-        block_addr: u64,
-        op_index: usize,
         is_write: bool,
         access: r2ssa::StructuredAccessId,
     ) -> Option<&MemoryAccessRenderFact> {
         let mut matching = self
-            .memory_effects_by_op
-            .get(&(block_addr, op_index, is_write))?
+            .memory_effects_by_inst
+            .get(&(access.inst, is_write))?
             .iter()
             .filter_map(|id| {
                 self.certified_effects
@@ -447,16 +392,15 @@ impl FunctionRenderFacts {
         matching.next().is_none().then_some(first)
     }
 
-    pub fn memory_access_for_op(
+    pub fn memory_access_for_inst(
         &self,
-        block_addr: u64,
-        op_index: usize,
+        inst: r2ssa::InstId,
         is_write: bool,
         space: r2il::SpaceId,
     ) -> Option<&MemoryAccessRenderFact> {
         let mut matching = self
-            .memory_effects_by_op
-            .get(&(block_addr, op_index, is_write))?
+            .memory_effects_by_inst
+            .get(&(inst, is_write))?
             .iter()
             .filter_map(|id| {
                 self.certified_effects
@@ -488,11 +432,9 @@ impl FunctionRenderFacts {
         access: r2ssa::StructuredAccessId,
     ) -> Option<&MemberAccessRenderFact> {
         let memory = self.memory_access(access)?;
-        let facts = self.member_accesses_by_op.get(&(
-            memory.block_addr,
-            memory.op_index,
-            memory.is_write,
-        ))?;
+        let facts = self
+            .member_accesses_by_inst
+            .get(&(memory.access.inst, memory.is_write))?;
         let mut matching = facts.iter().filter(|fact| {
             fact.access == memory.access
                 && fact.object == memory.object
@@ -570,87 +512,34 @@ impl FunctionRenderFacts {
         carriers.next().is_none().then_some(carrier)
     }
 
-    pub fn loop_carrier_update_for_value_at_latch(
-        &self,
-        value: r2ssa::ValueId,
-        latch: u64,
-    ) -> Option<&CertifiedEntity> {
-        let expr = self.certified_expr_for_value(value)?;
-        let mut carriers = expr.bindings.iter().filter_map(|binding| {
-            let r2ssa::SemanticId::LoopCarrier(_) = binding else {
-                return None;
-            };
-            match self.certified_entities.get(binding) {
-                Some(entity @ CertifiedEntity::LoopCarrier { updates, .. })
-                    if updates.iter().any(|update| {
-                        update.predecessor == latch
-                            && (update.value == value || update.identity_values.contains(&value))
-                    }) =>
-                {
-                    Some(entity)
-                }
-                _ => None,
-            }
-        });
-        let carrier = carriers.next()?;
-        carriers.next().is_none().then_some(carrier)
-    }
-
-    pub fn loop_carrier_update_for_value(&self, value: r2ssa::ValueId) -> Option<&CertifiedEntity> {
-        let expr = self.certified_expr_for_value(value)?;
-        let mut carriers = expr.bindings.iter().filter_map(|binding| {
-            let r2ssa::SemanticId::LoopCarrier(_) = binding else {
-                return None;
-            };
-            match self.certified_entities.get(binding) {
-                Some(entity @ CertifiedEntity::LoopCarrier { updates, .. })
-                    if updates.iter().any(|update| {
-                        update.value == value || update.identity_values.contains(&value)
-                    }) =>
-                {
-                    Some(entity)
-                }
-                _ => None,
-            }
-        });
-        let carrier = carriers.next()?;
-        carriers.next().is_none().then_some(carrier)
-    }
-
     pub fn loop_carriers(&self) -> impl Iterator<Item = &CertifiedEntity> {
         self.certified_entities
             .values()
             .filter(|entity| matches!(entity, CertifiedEntity::LoopCarrier { .. }))
     }
 
-    pub fn return_for_op(
-        &self,
-        block_addr: u64,
-        op_index: usize,
-    ) -> Option<&ReturnValueRenderFact> {
-        self.return_effect_id_for_op(block_addr, op_index)
+    pub fn return_for_inst(&self, inst: r2ssa::InstId) -> Option<&ReturnValueRenderFact> {
+        self.return_effect_id_for_inst(inst)
             .and_then(|id| self.certified_effects.get(&id))
             .and_then(CertifiedEffect::return_fact)
     }
 
-    pub fn member_access_for_op(
+    pub fn member_access_for_inst(
         &self,
-        block_addr: u64,
-        op_index: usize,
+        inst: r2ssa::InstId,
         is_write: bool,
         field_name: &str,
         field_offset: u64,
         access_width: Option<u32>,
     ) -> Option<&MemberAccessRenderFact> {
-        self.member_accesses_by_op
-            .get(&(block_addr, op_index, is_write))?
+        self.member_accesses_by_inst
+            .get(&(inst, is_write))?
             .iter()
             .find(|fact| {
                 let Some(memory) = self.memory_access(fact.access) else {
                     return false;
                 };
-                memory.block_addr == block_addr
-                    && memory.op_index == op_index
+                memory.access.inst == inst
                     && memory.is_write == is_write
                     && memory.object == fact.object
                     && memory.width == fact.access_width
@@ -660,52 +549,22 @@ impl FunctionRenderFacts {
             })
     }
 
-    pub fn member_access_for_op_any_direction(
+    pub fn array_access_for_inst(
         &self,
-        block_addr: u64,
-        op_index: usize,
-        field_name: &str,
-        field_offset: u64,
-        access_width: Option<u32>,
-    ) -> Option<&MemberAccessRenderFact> {
-        self.member_access_for_op(
-            block_addr,
-            op_index,
-            false,
-            field_name,
-            field_offset,
-            access_width,
-        )
-        .or_else(|| {
-            self.member_access_for_op(
-                block_addr,
-                op_index,
-                true,
-                field_name,
-                field_offset,
-                access_width,
-            )
-        })
-    }
-
-    pub fn array_access_for_op(
-        &self,
-        block_addr: u64,
-        op_index: usize,
+        inst: r2ssa::InstId,
         is_write: bool,
         field_offset: u64,
         element_stride: u64,
         access_width: Option<u32>,
     ) -> Option<&ArrayAccessRenderFact> {
-        self.array_accesses_by_op
-            .get(&(block_addr, op_index, is_write))?
+        self.array_accesses_by_inst
+            .get(&(inst, is_write))?
             .iter()
             .find(|fact| {
                 let Some(memory) = self.memory_access(fact.access) else {
                     return false;
                 };
-                memory.block_addr == block_addr
-                    && memory.op_index == op_index
+                memory.access.inst == inst
                     && memory.is_write == is_write
                     && memory.object == fact.object
                     && memory.width == fact.access_width
@@ -713,34 +572,6 @@ impl FunctionRenderFacts {
                     && fact.element_stride == element_stride
                     && access_width.is_none_or(|width| fact.access_width == width)
             })
-    }
-
-    pub fn array_access_for_op_any_direction(
-        &self,
-        block_addr: u64,
-        op_index: usize,
-        field_offset: u64,
-        element_stride: u64,
-        access_width: Option<u32>,
-    ) -> Option<&ArrayAccessRenderFact> {
-        self.array_access_for_op(
-            block_addr,
-            op_index,
-            false,
-            field_offset,
-            element_stride,
-            access_width,
-        )
-        .or_else(|| {
-            self.array_access_for_op(
-                block_addr,
-                op_index,
-                true,
-                field_offset,
-                element_stride,
-                access_width,
-            )
-        })
     }
 
     pub fn has_stack_slot_offset(&self, offset: i64) -> bool {
@@ -1362,7 +1193,7 @@ fn exact_source_param_slot_resolver(source: &r2ssa::SsaArtifact) -> Option<Param
             .find(|candidate| candidate.index() == *index)?;
         let graph_value = source.graph().value(parameter.value)?;
         // The formal's value is the carrier's entry value, or the projection
-        // minted for a lane of it (doc/adr-register-identity.md §8, 6).
+        // minted for a lane of it (doc/adr-register-identity.md §6).
         let entry_value = graph_value.canonical_storage == Some(parameter.graph_storage)
             && graph_value.var.size == parameter.graph_storage.size
             && graph_value.var.version == 0
@@ -1446,10 +1277,6 @@ impl FunctionFacts {
         self
     }
 
-    pub fn merge_assumption_usage(&mut self, usage: &r2ssa::AssumptionUsageReport) {
-        self.assumption_usage.extend(usage);
-    }
-
     pub fn with_decompile_route(mut self, route: DecompileRouteFacts) -> Self {
         self.decompile_route = Some(route);
         self
@@ -1514,8 +1341,7 @@ impl FunctionFacts {
                 let mut logical_signature = signature.signature.clone();
                 logical_signature.variadic = arguments.variadic;
                 arguments.callee_signature = Some(logical_signature);
-                arguments.callee_signature_from_source_types =
-                    signature.interface.prototype_from_source_types();
+                arguments.callee_signature_types = Some(signature.interface.types().clone());
             } else {
                 let site = source
                     .call_site_interface(arguments.call_site_id)
@@ -1561,10 +1387,6 @@ impl FunctionFacts {
         self
     }
 
-    pub fn set_call_results(&mut self, call_results: FunctionCallResultFacts) {
-        self.call_results = call_results;
-    }
-
     pub fn call_results(&self) -> Option<&FunctionCallResultFacts> {
         (!self.call_results.is_empty()).then_some(&self.call_results)
     }
@@ -1572,10 +1394,6 @@ impl FunctionFacts {
     pub fn with_call_render(mut self, call_render: FunctionCallRenderFacts) -> Self {
         self.call_render = call_render;
         self
-    }
-
-    pub fn set_call_render(&mut self, call_render: FunctionCallRenderFacts) {
-        self.call_render = call_render;
     }
 
     pub fn call_render(&self) -> Option<&FunctionCallRenderFacts> {
@@ -1634,10 +1452,6 @@ impl FunctionFacts {
             .as_ref()?
             .get(userop as usize)
             .map(String::as_str)
-    }
-
-    pub fn control_facts(&self) -> &FunctionControlFacts {
-        &self.control
     }
 
     pub fn authorized_stack_slot_owner_render(
@@ -1838,10 +1652,6 @@ impl FunctionFacts {
             })
     }
 
-    pub fn summary_rollup(&self) -> Option<&SummaryEffectRollup> {
-        self.summary_view.rollup.as_ref()
-    }
-
     #[cfg(test)]
     pub fn __test_set_summary_rollup(&mut self, rollup: SummaryEffectRollup) {
         self.summary_view.rollup = Some(rollup);
@@ -1916,8 +1726,8 @@ impl FunctionFacts {
             // layout's `f_8`.
             let indexed = self
                 .render
-                .array_accesses_by_op
-                .get(&(memory.block_addr, memory.op_index, memory.is_write))
+                .array_accesses_by_inst
+                .get(&(memory.access.inst, memory.is_write))
                 .and_then(|facts| {
                     facts.iter().find(|fact| {
                         fact.access == memory.access
@@ -2013,8 +1823,6 @@ impl FunctionFacts {
             );
             member_facts.push(MemberAccessRenderFact {
                 access: memory.access,
-                block_addr: memory.block_addr,
-                op_index: memory.op_index,
                 object: memory.object,
                 is_write: memory.is_write,
                 field_offset: offset_bits / 8,
@@ -2030,8 +1838,8 @@ impl FunctionFacts {
             });
         }
         for fact in member_facts {
-            let key = (fact.block_addr, fact.op_index, fact.is_write);
-            let facts = self.render.member_accesses_by_op.entry(key).or_default();
+            let key = (fact.access.inst, fact.is_write);
+            let facts = self.render.member_accesses_by_inst.entry(key).or_default();
             // The declared name replaces one an external layout guessed: two facts for one
             // access are no fact at all, because the lookup requires exactly one.
             facts.retain(|existing| {
@@ -2077,8 +1885,11 @@ impl FunctionFacts {
             {
                 continue;
             }
-            let key = (candidate.block_addr, candidate.op_index, candidate.is_write);
-            let Some(effect_ids) = self.render.memory_effects_by_op.get(&key) else {
+            let Some(inst) = prepared.graph().inst_for_op(candidate.op) else {
+                continue;
+            };
+            let key = (inst, candidate.is_write);
+            let Some(effect_ids) = self.render.memory_effects_by_inst.get(&key) else {
                 continue;
             };
             for effect_id in effect_ids {
@@ -2089,8 +1900,7 @@ impl FunctionFacts {
                 else {
                     continue;
                 };
-                if memory.block_addr != candidate.block_addr
-                    || memory.op_index != candidate.op_index
+                if memory.access.inst != inst
                     || memory.is_write != candidate.is_write
                     || memory.width == 0
                     || memory.width != candidate.access_width
@@ -2114,18 +1924,16 @@ impl FunctionFacts {
         }
 
         for fact in member_facts {
-            let key = (fact.block_addr, fact.op_index, fact.is_write);
-            let facts = self.render.member_accesses_by_op.entry(key).or_default();
+            let key = (fact.access.inst, fact.is_write);
+            let facts = self.render.member_accesses_by_inst.entry(key).or_default();
             if !facts.contains(&fact) {
                 facts.push(fact);
             }
         }
 
-        for facts in self.render.member_accesses_by_op.values_mut() {
+        for facts in self.render.member_accesses_by_inst.values_mut() {
             facts.sort_by(|a, b| {
                 (
-                    a.block_addr,
-                    a.op_index,
                     a.is_write,
                     a.field_offset,
                     a.access_width,
@@ -2133,8 +1941,6 @@ impl FunctionFacts {
                     a.access,
                 )
                     .cmp(&(
-                        b.block_addr,
-                        b.op_index,
                         b.is_write,
                         b.field_offset,
                         b.access_width,
@@ -2162,8 +1968,6 @@ impl FunctionFacts {
             })
             .map(|cert| MemberAccessRenderFact {
                 access: memory.access,
-                block_addr: memory.block_addr,
-                op_index: memory.op_index,
                 object: memory.object,
                 is_write: memory.is_write,
                 field_offset,
@@ -2197,8 +2001,11 @@ impl FunctionFacts {
             {
                 continue;
             }
-            let key = (candidate.block_addr, candidate.op_index, candidate.is_write);
-            let Some(effect_ids) = self.render.memory_effects_by_op.get(&key) else {
+            let Some(inst) = prepared.graph().inst_for_op(candidate.op) else {
+                continue;
+            };
+            let key = (inst, candidate.is_write);
+            let Some(effect_ids) = self.render.memory_effects_by_inst.get(&key) else {
                 continue;
             };
             let effect_ids = effect_ids.clone();
@@ -2210,8 +2017,7 @@ impl FunctionFacts {
                 else {
                     continue;
                 };
-                if memory.block_addr != candidate.block_addr
-                    || memory.op_index != candidate.op_index
+                if memory.access.inst != inst
                     || memory.is_write != candidate.is_write
                     || memory.width == 0
                     || memory.width != candidate.access_width
@@ -2225,8 +2031,6 @@ impl FunctionFacts {
                 };
                 let fact = ArrayAccessRenderFact {
                     access: memory.access,
-                    block_addr: memory.block_addr,
-                    op_index: memory.op_index,
                     object: memory.object,
                     is_write: memory.is_write,
                     field_offset: candidate.field_offset,
@@ -2235,18 +2039,16 @@ impl FunctionFacts {
                     base: Some(base),
                     index: Some(index),
                 };
-                let facts = self.render.array_accesses_by_op.entry(key).or_default();
+                let facts = self.render.array_accesses_by_inst.entry(key).or_default();
                 if !facts.contains(&fact) {
                     facts.push(fact);
                 }
             }
         }
 
-        for facts in self.render.array_accesses_by_op.values_mut() {
+        for facts in self.render.array_accesses_by_inst.values_mut() {
             facts.sort_by_key(|fact| {
                 (
-                    fact.block_addr,
-                    fact.op_index,
                     fact.is_write,
                     fact.field_offset,
                     fact.element_stride,
@@ -2330,22 +2132,8 @@ impl FunctionFacts {
         &self.summary_view
     }
 
-    pub fn diagnostics(&self) -> &[String] {
-        &self.diagnostics
-    }
-
     pub fn assumption_usage(&self) -> &r2ssa::AssumptionUsageReport {
         &self.assumption_usage
-    }
-
-    pub fn apply_signature_projection(
-        &mut self,
-        function_name: &str,
-        projection: FunctionSignatureProjection,
-        ptr_bits: u32,
-    ) -> SignatureProjectionResult {
-        self.types
-            .apply_signature_projection(function_name, projection, ptr_bits)
     }
 
     pub fn apply_decompile_type_override(&mut self, override_facts: FunctionTypeFacts) -> bool {
@@ -2414,7 +2202,7 @@ impl FunctionFacts {
                         r2ssa::SourceCallArgumentValue::PreservedEntry => None,
                     }),
             )
-            .collect::<BTreeSet<_>>();
+            .collect::<r2ssa::dense::IdSet<_>>();
         // The resolver names each formal's one value -- the carrier's entry
         // value or the lane projection minted for it -- and its width is the
         // formal's (doc/adr-register-identity.md).
@@ -2422,7 +2210,7 @@ impl FunctionFacts {
         let mut resolved = param_slots
             .slots_by_value
             .iter()
-            .map(|(value, slot)| (*value, *slot))
+            .map(|(value, slot)| (value, *slot))
             .collect::<Vec<_>>();
         resolved.sort_unstable();
         for (value_id, slot) in resolved {
@@ -2455,7 +2243,7 @@ impl FunctionFacts {
         let mut parameter_slot_by_value = entry_value_by_slot
             .iter()
             .map(|(slot, (value, _))| (*value, *slot))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<r2ssa::dense::IdMap<_, _>>();
         // Only a reload that is the stored bits is the parameter; a value
         // computed from it -- the sign word a `cqo` makes of it -- is not.
         for reload in prepared
@@ -2466,7 +2254,7 @@ impl FunctionFacts {
         {
             let mut slots = [reload.canonical_source, reload.source]
                 .into_iter()
-                .filter_map(|value| parameter_slot_by_value.get(&value).copied())
+                .filter_map(|value| parameter_slot_by_value.get(value).copied())
                 .collect::<BTreeSet<_>>();
             let Some(slot) = slots.pop_first() else {
                 continue;
@@ -2492,7 +2280,7 @@ impl FunctionFacts {
         while changed {
             changed = false;
             for value in &prepared.graph().values {
-                if parameter_slot_by_value.contains_key(&value.id) {
+                if parameter_slot_by_value.contains(value.id) {
                     continue;
                 }
                 let Some(inst) = prepared
@@ -2505,13 +2293,12 @@ impl FunctionFacts {
                 let r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { dst, src }) = &inst.payload else {
                     continue;
                 };
-                if dst.size != src.size {
+                let graph = prepared.graph();
+                if graph.var(*dst).size != graph.var(*src).size {
                     continue;
                 }
-                let Some(source) = prepared.graph().value_id_for_var(src) else {
-                    continue;
-                };
-                let Some(slot) = parameter_slot_by_value.get(&source).copied() else {
+                let source = *src;
+                let Some(slot) = parameter_slot_by_value.get(source).copied() else {
                     continue;
                 };
                 let Some(expr) = self
@@ -2644,10 +2431,17 @@ impl FunctionFacts {
     /// an exact parameter or return binding already authorized by the function
     /// signature, or from an exact typed memory-access certificate. Conflicting
     /// projections leave the carrier untyped.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     fn populate_certified_loop_carrier_types(&mut self) {
         let signature = self.types.render_authorized_signature().cloned();
-        let mut memory_value_types = BTreeMap::<r2ssa::ValueId, CTypeLike>::new();
-        let mut conflicting_memory_values = BTreeSet::new();
+        let mut memory_value_types = r2ssa::dense::IdMap::<r2ssa::ValueId, CTypeLike>::default();
+        let mut conflicting_memory_values = r2ssa::dense::IdSet::default();
         for memory in self.render.memory_accesses() {
             let Some(value) = memory.value.filter(|_| !memory.is_write) else {
                 continue;
@@ -2655,7 +2449,7 @@ impl FunctionFacts {
             let Some(ty) = self.render.memory_value_type(memory.access).cloned() else {
                 continue;
             };
-            match memory_value_types.get(&value) {
+            match memory_value_types.get(value) {
                 None => {
                     memory_value_types.insert(value, ty);
                 }
@@ -2666,13 +2460,13 @@ impl FunctionFacts {
             }
         }
         for value in conflicting_memory_values {
-            memory_value_types.remove(&value);
+            memory_value_types.remove(value);
         }
         let return_values = self
             .render
             .return_effects()
             .map(|fact| fact.value)
-            .collect::<BTreeSet<_>>();
+            .collect::<r2ssa::dense::IdSet<_>>();
         let carriers = self
             .render
             .loop_carriers()
@@ -2698,7 +2492,7 @@ impl FunctionFacts {
                 {
                     candidates.push(ty);
                 }
-                if let Some(ty) = memory_value_types.get(value).cloned()
+                if let Some(ty) = memory_value_types.get(*value).cloned()
                     && !candidates.contains(&ty)
                 {
                     candidates.push(ty);
@@ -2706,7 +2500,7 @@ impl FunctionFacts {
             }
             if carrier_values
                 .iter()
-                .any(|value| return_values.contains(value))
+                .any(|value| return_values.contains(*value))
                 && let Some(ty) = signature
                     .as_ref()
                     .and_then(|signature| signature.ret_type.clone())
@@ -2859,8 +2653,7 @@ impl FunctionFacts {
         // signature, the width alone declared every such parameter an integer.
         // Nothing weaker than that certificate upgrades a width: the evidence
         // solver's own guesses at pointers and signedness are not proof.
-        let certified_pointers = interface
-            .types_are_carrier_widths()
+        let certified_pointers = (interface.types().basis == r2source::Basis::CarrierWidth)
             .then(|| crate::signature_infer::certified_parameter_pointers(source));
         let logical = interface.parameter_logical_values();
         if logical.len() != interface.parameters().len() {
@@ -3167,24 +2960,6 @@ impl FunctionFacts {
                 }
             }
         }
-    }
-
-    pub fn interproc_summary_set(&self) -> Option<&r2ssa::InterprocSummarySet> {
-        self.interproc_summary
-            .as_ref()
-            .map(r2ssa::PreparedInterprocSummarySet::report)
-    }
-
-    /// Borrow the advisory report used by pure projection and rendering.
-    ///
-    /// Unlike [`Self::prepared_interproc_summary`], this report does not prove
-    /// ownership of the prepared SSA source and must not authorize mutation or
-    /// certification.
-    pub fn interproc_summary_report(&self) -> Option<&r2ssa::InterprocSummarySet> {
-        self.interproc_summary
-            .as_ref()
-            .map(r2ssa::PreparedInterprocSummarySet::report)
-            .or_else(|| self.summary_view.as_set())
     }
 
     pub fn prepared_interproc_summary(&self) -> Option<&r2ssa::PreparedInterprocSummarySet> {

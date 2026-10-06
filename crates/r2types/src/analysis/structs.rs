@@ -24,9 +24,16 @@ pub(crate) struct LocalAffineValue {
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) struct LocalMemoryVersionFacts {
-    pub(crate) stores_by_site: HashMap<(u64, usize), Vec<MemoryVersion>>,
-    pub(crate) loads_by_site: HashMap<(u64, usize), Vec<MemoryVersion>>,
+    pub(crate) stores_by_op: HashMap<r2ssa::OpId, Vec<MemoryVersion>>,
+    pub(crate) loads_by_op: HashMap<r2ssa::OpId, Vec<MemoryVersion>>,
     pub(crate) phi_inputs: HashMap<MemoryVersion, Vec<MemoryVersion>>,
     pub(crate) value_ids: HashMap<SSAVar, r2ssa::ValueId>,
 }
@@ -59,7 +66,7 @@ impl LocalMemoryVersionFacts {
                 .map(|value| (value.var.clone(), value.id)),
         );
         for block in prepared.function().blocks() {
-            for (op_index, op) in block.ops.iter().enumerate() {
+            for (op_id, op) in block.sited() {
                 if !matches!(
                     op,
                     SSAOp::Load {
@@ -72,29 +79,26 @@ impl LocalMemoryVersionFacts {
                 ) {
                     continue;
                 }
-                let store_versions = prepared
-                    .memory_defs_for_op_site(block.addr, op_index)
+                let inst = prepared.graph().inst_for_op(op_id);
+                let store_versions = inst
+                    .and_then(|inst| prepared.memory_defs_for_inst(inst))
                     .into_iter()
                     .flatten()
                     .map(|fact| fact.next_version)
                     .filter(|version| is_stack(*version))
                     .collect::<Vec<_>>();
                 if !store_versions.is_empty() {
-                    facts
-                        .stores_by_site
-                        .insert((block.addr, op_index), store_versions);
+                    facts.stores_by_op.insert(op_id, store_versions);
                 }
-                let load_versions = prepared
-                    .memory_uses_for_op_site(block.addr, op_index)
+                let load_versions = inst
+                    .and_then(|inst| prepared.memory_uses_for_inst(inst))
                     .into_iter()
                     .flatten()
                     .map(|fact| fact.version)
                     .filter(|version| is_stack(*version))
                     .collect::<Vec<_>>();
                 if !load_versions.is_empty() {
-                    facts
-                        .loads_by_site
-                        .insert((block.addr, op_index), load_versions);
+                    facts.loads_by_op.insert(op_id, load_versions);
                 }
             }
         }
@@ -113,6 +117,13 @@ impl LocalMemoryVersionFacts {
 }
 
 #[derive(Default)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) struct LocalTypeEquivalence {
     pub(crate) ids: HashMap<SSAVar, usize>,
     pub(crate) vars: Vec<SSAVar>,
@@ -225,6 +236,13 @@ pub(crate) fn collect_prepared_pointer_arg_slot_map(
     out
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) fn local_struct_type_slots(
     blocks: &[SSABlock],
     pointer_arg_slot_map: &HashMap<String, usize>,
@@ -251,14 +269,14 @@ pub(crate) fn local_struct_type_slots(
         };
 
     for block in blocks {
-        for phi in &block.phis {
+        for phi in block.phis() {
             remember_seed(&mut classes, &mut seeds, &phi.dst);
             for (_, source) in &phi.sources {
                 remember_seed(&mut classes, &mut seeds, source);
                 classes.union_vars(&phi.dst, source, ptr_bytes);
             }
         }
-        for op in &block.ops {
+        for op in block.ops() {
             if let Some(dst) = op.dst() {
                 remember_seed(&mut classes, &mut seeds, dst);
             }
@@ -303,10 +321,17 @@ pub(crate) fn local_struct_type_slots(
 /// memory address operand lets dereference types flow through transparent
 /// aliases, phis, and constant pointer arithmetic without rescanning the
 /// function once per candidate field.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) fn local_pointer_pointee_types(
     blocks: &[SSABlock],
     ptr_bits: u32,
-    scalar_signedness: &HashMap<SSAVar, BTreeSet<ScalarSignednessEvidence>>,
+    scalar_signedness: &crate::signedness::NamedSignedness,
 ) -> HashMap<SSAVar, BTreeSet<String>> {
     let ptr_bytes = (ptr_bits / 8).max(1);
     let mut reverse_edges = HashMap::<SSAVar, BTreeSet<SSAVar>>::new();
@@ -321,12 +346,12 @@ pub(crate) fn local_pointer_pointee_types(
     };
 
     for block in blocks {
-        for phi in &block.phis {
+        for phi in block.phis() {
             for (_, source) in &phi.sources {
                 link(source, &phi.dst);
             }
         }
-        for op in &block.ops {
+        for op in block.ops() {
             match op {
                 SSAOp::Copy { dst, src }
                 | SSAOp::Cast { dst, src }
@@ -399,7 +424,7 @@ pub(crate) fn local_pointer_pointee_types(
 
 pub(crate) fn local_scalar_type_names(
     var: &SSAVar,
-    signedness: &HashMap<SSAVar, BTreeSet<ScalarSignednessEvidence>>,
+    signedness: &crate::signedness::NamedSignedness,
 ) -> BTreeSet<String> {
     let observed = signedness.get(var);
     if observed.is_none_or(BTreeSet::is_empty) {
@@ -417,7 +442,7 @@ pub(crate) fn local_scalar_type_names(
 pub(crate) fn add_local_scalar_type_votes(
     votes: &mut BTreeMap<String, u32>,
     var: &SSAVar,
-    signedness: &HashMap<SSAVar, BTreeSet<ScalarSignednessEvidence>>,
+    signedness: &crate::signedness::NamedSignedness,
 ) {
     for ty in local_scalar_type_names(var, signedness) {
         *votes.entry(ty).or_insert(0) += 1;
@@ -460,6 +485,13 @@ pub(crate) fn multiply_local_affine_value(
     })
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) fn local_affine_value(
     var: &SSAVar,
     definitions: &HashMap<SSAVar, SSAOp>,
@@ -639,19 +671,26 @@ pub(crate) fn local_expr_for_memory_versions(
 
 pub(crate) fn infer_local_struct_artifacts_from_prepared_ssa(
     prepared: &SsaArtifact,
-    arch_name: Option<&str>,
     ptr_bits: u32,
     diagnostics: &mut TypeAnalysisDiagnostics,
 ) -> LocalStructArtifacts {
-    let blocks = prepared.function().blocks();
+    let named_blocks = prepared.function().named_blocks();
+    let blocks = named_blocks.as_slice();
     let memory_versions = LocalMemoryVersionFacts::from_prepared(prepared);
-    let architecture = prepared.machine_context().architecture_family();
     let pointer_arg_slots = collect_prepared_pointer_arg_slot_map(prepared);
+    let stack_roots = |var: &SSAVar| {
+        prepared
+            .graph()
+            .value_id_for_var(var)
+            .and_then(|value| prepared.decompile_prep_facts().stack_address_root_of(value))
+            .copied()
+    };
+    let written = prepared.function().written();
     let mut artifacts = infer_local_struct_artifacts_from_blocks(
         blocks,
         Some(&memory_versions),
-        arch_name,
-        architecture,
+        &|op| written.is_conventional_extension(op),
+        Some(&stack_roots),
         &pointer_arg_slots,
         ptr_bits,
         diagnostics,
@@ -686,15 +725,17 @@ pub(crate) fn prepared_parameter_indexed_accesses(
             || !prepared
                 .certificates()
                 .expressions
-                .get(&index.value)
+                .get(index.value)
                 .is_some_and(|certificate| certificate.renderable)
         {
             continue;
         }
+        let Some(op) = prepared.graph().op_for_inst(access.access.inst) else {
+            continue;
+        };
         candidates.push(ScalarArrayRenderCandidate {
             slot: address.parameter,
-            block_addr: access.block_addr,
-            op_index: access.op_index,
+            op,
             is_write: access.is_write,
             field_offset,
             element_stride,
@@ -707,32 +748,30 @@ pub(crate) fn prepared_parameter_indexed_accesses(
     candidates
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "transitional: the local struct and stack-slot type analyses read the function's blocks by name; they move onto graph values with P9 (doc/adr-one-ir.md)"
+    )
+)]
 pub(crate) fn infer_local_struct_artifacts_from_blocks(
     ssa_blocks: &[SSABlock],
     memory_versions: Option<&LocalMemoryVersionFacts>,
-    arch_name: Option<&str>,
-    architecture: r2ssa::MachineArchitectureFamily,
+    conventional_extension: &dyn Fn(r2ssa::OpId) -> bool,
+    stack_roots: Option<FrameRoots<'_>>,
     pointer_arg_slot_map: &HashMap<String, usize>,
     ptr_bits: u32,
     diagnostics: &mut TypeAnalysisDiagnostics,
 ) -> LocalStructArtifacts {
     let type_slots = local_struct_type_slots(ssa_blocks, pointer_arg_slot_map, ptr_bits);
-    let scalar_signedness = infer_scalar_signedness(
-        ssa_blocks.iter().flat_map(|block| block.ops.iter()),
-        ssa_blocks.iter().flat_map(|block| {
-            block
-                .phis
-                .iter()
-                .flat_map(|phi| phi.sources.iter().map(|(_, source)| (source, &phi.dst)))
-        }),
-        arch_name,
-    );
+    let scalar_signedness =
+        crate::signedness::NamedSignedness::of(ssa_blocks, true, conventional_extension);
     let pointer_pointee_types =
         local_pointer_pointee_types(ssa_blocks, ptr_bits, &scalar_signedness);
-    let (_, stack_bases, frame_bases) = recover_vars_arch_profile(architecture);
+    let stack_root = |var: &SSAVar| stack_roots.and_then(|roots| roots(var));
     let mut addr_exprs: HashMap<SSAVar, LocalAddrExpr> = HashMap::new();
-    let mut stack_addr_offsets: HashMap<SSAVar, i64> = HashMap::new();
-    let mut stack_slot_values: HashMap<(u64, i64), LocalAddrExpr> = HashMap::new();
+    let mut stack_slot_values: HashMap<(u64, StackSlotKey), LocalAddrExpr> = HashMap::new();
     let mut memory_version_values = HashMap::<MemoryVersion, LocalAddrExpr>::new();
     let mut slot_field_evidence: LocalFieldEvidenceMap = HashMap::new();
     let mut slot_stride_evidence = HashMap::<usize, BTreeSet<u64>>::new();
@@ -740,7 +779,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
     let offset_bound = 0x4000i64;
     let definitions = ssa_blocks
         .iter()
-        .flat_map(|block| block.ops.iter())
+        .flat_map(|block| block.ops().iter())
         .filter_map(|op| op.dst().map(|dst| (dst.clone(), op.clone())))
         .collect::<HashMap<_, _>>();
     let mut affine_memo = HashMap::<SSAVar, Option<LocalAffineValue>>::new();
@@ -756,13 +795,13 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                 });
             }
         };
-        for phi in &block.phis {
+        for phi in block.phis() {
             seed_var(&phi.dst);
             for (_, source) in &phi.sources {
                 seed_var(source);
             }
         }
-        for op in &block.ops {
+        for op in block.ops() {
             if let Some(dst) = op.dst() {
                 seed_var(dst);
             }
@@ -770,12 +809,10 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
         }
     }
 
-    let is_stack_base = |name: &str| stack_bases.contains(&name) || frame_bases.contains(&name);
-
     loop {
         let mut changed = false;
         for block in ssa_blocks {
-            for (op_index, op) in block.ops.iter().enumerate() {
+            for (op_id, op) in block.sited() {
                 let addr_of = |var: &SSAVar, map: &HashMap<SSAVar, LocalAddrExpr>| {
                     if var.version == 0 {
                         let key = var.name().to_ascii_lowercase();
@@ -790,8 +827,6 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                     }
                     map.get(var).cloned()
                 };
-                let stack_slot_of =
-                    |var: &SSAVar, stack_map: &HashMap<SSAVar, i64>| stack_map.get(var).copied();
                 let set_expr =
                     |dst: &SSAVar,
                      expr: LocalAddrExpr,
@@ -804,18 +839,6 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                             }
                         }
                     };
-                let set_stack_slot =
-                    |dst: &SSAVar, offset: i64, map: &mut HashMap<SSAVar, i64>| match map
-                        .get(dst)
-                        .copied()
-                    {
-                        Some(prev) if prev == offset => false,
-                        _ => {
-                            map.insert(dst.clone(), offset);
-                            true
-                        }
-                    };
-
                 match op {
                     SSAOp::Copy { dst, src }
                     | SSAOp::Cast { dst, src }
@@ -826,13 +849,9 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                             expr.confidence = expr.confidence.saturating_sub(2);
                             changed |= set_expr(dst, expr, &mut addr_exprs);
                         }
-                        if let Some(offset) = stack_slot_of(src, &stack_addr_offsets) {
-                            changed |= set_stack_slot(dst, offset, &mut stack_addr_offsets);
-                        }
                     }
                     SSAOp::Phi { dst, sources } => {
                         let mut selected = None;
-                        let mut selected_slot = None;
                         for src in sources {
                             let Some(expr) = addr_of(src, &addr_exprs) else {
                                 selected = None;
@@ -854,15 +873,6 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                                 }
                                 _ => None,
                             };
-                            let Some(slot) = stack_slot_of(src, &stack_addr_offsets) else {
-                                selected_slot = None;
-                                break;
-                            };
-                            selected_slot = match selected_slot {
-                                None => Some(slot),
-                                Some(prev) if prev == slot => Some(prev),
-                                _ => None,
-                            };
                             if selected.is_none() {
                                 break;
                             }
@@ -871,23 +881,8 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                             expr.confidence = expr.confidence.saturating_sub(3);
                             changed |= set_expr(dst, expr, &mut addr_exprs);
                         }
-                        if let Some(slot) = selected_slot {
-                            changed |= set_stack_slot(dst, slot, &mut stack_addr_offsets);
-                        }
                     }
                     SSAOp::IntAdd { dst, a, b } => {
-                        if let Some(off) = exact_ssa_const_offset(b, ptr_bits) {
-                            let a_lower = a.name().to_ascii_lowercase();
-                            if is_stack_base(a_lower.as_str()) {
-                                changed |= set_stack_slot(dst, off, &mut stack_addr_offsets);
-                            }
-                        }
-                        if let Some(off) = exact_ssa_const_offset(a, ptr_bits) {
-                            let b_lower = b.name().to_ascii_lowercase();
-                            if is_stack_base(b_lower.as_str()) {
-                                changed |= set_stack_slot(dst, off, &mut stack_addr_offsets);
-                            }
-                        }
                         if let Some(base) = addr_of(a, &addr_exprs)
                             && let Some(delta) = exact_ssa_const_offset(b, ptr_bits)
                         {
@@ -983,16 +978,6 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                         }
                     }
                     SSAOp::IntSub { dst, a, b } => {
-                        if let Some(delta) = exact_ssa_const_offset(b, ptr_bits) {
-                            let a_lower = a.name().to_ascii_lowercase();
-                            if is_stack_base(a_lower.as_str()) {
-                                changed |= set_stack_slot(
-                                    dst,
-                                    delta.saturating_neg(),
-                                    &mut stack_addr_offsets,
-                                );
-                            }
-                        }
                         if let Some(base) = addr_of(a, &addr_exprs)
                             && let Some(delta) = exact_ssa_const_offset(b, ptr_bits)
                         {
@@ -1048,12 +1033,12 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                         addr,
                         val,
                     } => {
-                        if let Some(offset) = stack_slot_of(addr, &stack_addr_offsets)
+                        if let Some(root) = stack_root(addr)
                             && let Some(mut expr) = addr_of(val, &addr_exprs)
                         {
                             expr.confidence = expr.confidence.saturating_sub(2);
-                            if let Some(versions) = memory_versions
-                                .and_then(|facts| facts.stores_by_site.get(&(block.addr, op_index)))
+                            if let Some(versions) =
+                                memory_versions.and_then(|facts| facts.stores_by_op.get(&op_id))
                             {
                                 for version in versions {
                                     match memory_version_values.get(version) {
@@ -1066,7 +1051,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                                     }
                                 }
                             } else if memory_versions.is_none() {
-                                let key = (block.addr, offset);
+                                let key = (block.addr, root);
                                 match stack_slot_values.get(&key) {
                                     Some(previous) if previous.confidence >= expr.confidence => {}
                                     _ => {
@@ -1083,7 +1068,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                         addr,
                     } => {
                         let exact_expr = memory_versions
-                            .and_then(|facts| facts.loads_by_site.get(&(block.addr, op_index)))
+                            .and_then(|facts| facts.loads_by_op.get(&op_id))
                             .and_then(|versions| {
                                 let facts = memory_versions?;
                                 local_expr_for_memory_versions(
@@ -1093,11 +1078,9 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                                 )
                             });
                         let fallback_expr = (memory_versions.is_none())
-                            .then(|| stack_slot_of(addr, &stack_addr_offsets))
+                            .then(|| stack_root(addr))
                             .flatten()
-                            .and_then(|offset| {
-                                stack_slot_values.get(&(block.addr, offset)).cloned()
-                            });
+                            .and_then(|root| stack_slot_values.get(&(block.addr, root)).cloned());
                         if let Some(mut expr) = exact_expr.or(fallback_expr) {
                             expr.confidence = expr.confidence.saturating_sub(3);
                             changed |= set_expr(dst, expr, &mut addr_exprs);
@@ -1113,7 +1096,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
     }
 
     for block in ssa_blocks {
-        for (op_index, op) in block.ops.iter().enumerate() {
+        for (op_id, op) in block.sited() {
             let resolve_addr = |addr: &SSAVar| -> Option<LocalAddrExpr> {
                 if addr.version == 0 {
                     let key = addr.name().to_ascii_lowercase();
@@ -1153,8 +1136,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                         {
                             indexed_accesses.push(ScalarArrayRenderCandidate {
                                 slot: expr.slot,
-                                block_addr: block.addr,
-                                op_index,
+                                op: op_id,
                                 is_write: false,
                                 field_offset: expr.offset as u64,
                                 element_stride,
@@ -1205,8 +1187,7 @@ pub(crate) fn infer_local_struct_artifacts_from_blocks(
                         {
                             indexed_accesses.push(ScalarArrayRenderCandidate {
                                 slot: expr.slot,
-                                block_addr: block.addr,
-                                op_index,
+                                op: op_id,
                                 is_write: true,
                                 field_offset: expr.offset as u64,
                                 element_stride,

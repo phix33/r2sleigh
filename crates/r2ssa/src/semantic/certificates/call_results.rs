@@ -6,8 +6,6 @@ use super::super::*;
 pub struct CallResultCertificate {
     pub call_site: CallSiteId,
     pub at: InstId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub value: ValueId,
     pub width: u32,
     pub relation: CallResultValueRelation,
@@ -34,8 +32,8 @@ pub enum ValueOwner {
 }
 
 pub(crate) type CallResultCertificateIndexes = (
-    BTreeMap<ValueId, CallResultCertificate>,
-    BTreeMap<InstId, ValueId>,
+    crate::dense::IdMap<ValueId, CallResultCertificate>,
+    crate::dense::IdMap<InstId, ValueId>,
     BTreeMap<CallSiteId, Vec<ValueId>>,
 );
 
@@ -43,55 +41,67 @@ pub(crate) fn collect_call_result_certificates(
     body: Body<'_>,
     derived: Derived<'_>,
 ) -> CallResultCertificateIndexes {
-    let (function, graph) = (body.function, body.graph);
+    let function = body.function;
     let call_sites = derived.call_sites;
-    let mut call_results = BTreeMap::new();
-    let mut call_results_by_inst = BTreeMap::new();
+    let mut call_results = crate::dense::IdMap::default();
+    let mut call_results_by_inst = crate::dense::IdMap::default();
     let mut call_results_by_callsite = BTreeMap::<CallSiteId, Vec<ValueId>>::new();
-    let callsites_by_op = call_sites
-        .by_id
-        .iter()
-        .filter_map(|(id, fact)| graph.op_site_for_inst(fact.at).map(|site| (site, *id)))
-        .collect::<BTreeMap<_, _>>();
-    let mut out_states = BTreeMap::<u64, CallResultFlowState>::new();
-    let mut worklist = function
-        .blocks()
-        .iter()
-        .map(|block| block.addr)
-        .collect::<VecDeque<_>>();
-    let mut queued = function
-        .blocks()
-        .iter()
-        .map(|block| block.addr)
-        .collect::<BTreeSet<_>>();
-
-    while let Some(block_addr) = worklist.pop_front() {
-        queued.remove(&block_addr);
-        let Some(block) = function.get_block(block_addr) else {
+    let callsites_by_inst = &call_sites.by_inst;
+    // Settle the tracked results on the fixpoint driver first, writing no
+    // certificate: a state seen before the merges settle may claim an owner
+    // the settled state does not, and a certificate written from it would
+    // outlive it. Each tracked value or owner can only be dropped, once.
+    let height = body.graph.values.len().saturating_add(1);
+    let solved = crate::fixpoint::forward(
+        function,
+        "call-results",
+        height,
+        CallResultFlowState::default(),
+        |block_addr, input| {
+            let Some(block) = function.get_block(block_addr) else {
+                return input.clone();
+            };
+            process_call_result_flow_block(
+                body,
+                derived,
+                block,
+                callsites_by_inst,
+                input.clone(),
+                CallResultSink {
+                    call_results: &mut crate::dense::IdMap::default(),
+                    call_results_by_inst: &mut crate::dense::IdMap::default(),
+                    call_results_by_callsite: &mut BTreeMap::new(),
+                },
+            )
+        },
+    );
+    let solved = match solved {
+        Ok(solved) => solved,
+        Err(exhausted) => {
+            r2il::refusal_evidence!("call-results", "{exhausted}");
+            return Default::default();
+        }
+    };
+    // Then the certificates, once, from each block's settled entry state.
+    for &block_addr in function.block_addrs() {
+        let (Some(block), Some(input)) = (
+            function.get_block(block_addr),
+            solved.entry.get(&block_addr),
+        ) else {
             continue;
         };
-        let input = merge_call_result_flow_predecessors(function, &out_states, block_addr);
-        let output = process_call_result_flow_block(
+        process_call_result_flow_block(
             body,
             derived,
             block,
-            &callsites_by_op,
-            input,
+            callsites_by_inst,
+            input.clone(),
             CallResultSink {
                 call_results: &mut call_results,
                 call_results_by_inst: &mut call_results_by_inst,
                 call_results_by_callsite: &mut call_results_by_callsite,
             },
         );
-        if out_states.get(&block_addr) == Some(&output) {
-            continue;
-        }
-        out_states.insert(block_addr, output);
-        for succ in function.successors(block_addr) {
-            if queued.insert(succ) {
-                worklist.push_back(succ);
-            }
-        }
     }
 
     for values in call_results_by_callsite.values_mut() {
@@ -104,48 +114,42 @@ pub(crate) fn collect_call_result_certificates(
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CallResultFlowState {
-    pub(crate) tracked: BTreeMap<ValueId, CallResultCertificate>,
+    pub(crate) tracked: crate::dense::IdMap<ValueId, CallResultCertificate>,
     pub(crate) stack_owners: BTreeMap<(ObjectId, i64), CallResultCertificate>,
 }
 
-pub(crate) fn merge_call_result_flow_predecessors(
-    function: &SSAFunction,
-    out_states: &BTreeMap<u64, CallResultFlowState>,
-    block_addr: u64,
-) -> CallResultFlowState {
-    let preds = function.predecessors(block_addr);
-    let Some((first, rest)) = preds.split_first() else {
-        return CallResultFlowState::default();
-    };
-    let mut merged = out_states.get(first).cloned().unwrap_or_default();
-    for pred in rest {
-        let pred_state = out_states.get(pred).cloned().unwrap_or_default();
-        merged
-            .tracked
-            .retain(|value, cert| pred_state.tracked.get(value) == Some(cert));
-        merged
-            .stack_owners
-            .retain(|slot, cert| pred_state.stack_owners.get(slot) == Some(cert));
+impl crate::fixpoint::Join for CallResultFlowState {
+    /// What every path that reaches the merge agrees on: a tracked result
+    /// or owner survives only where both sides hold the same certificate.
+    /// The driver never joins an unreached predecessor, so a loop's back edge
+    /// does not empty the header before it has been walked.
+    fn join(&mut self, other: &Self) -> bool {
+        let before = (self.tracked.len(), self.stack_owners.len());
+        self.tracked
+            .retain(|value, cert| other.tracked.get(value) == Some(cert));
+        self.stack_owners
+            .retain(|slot, cert| other.stack_owners.get(slot) == Some(cert));
+        before != (self.tracked.len(), self.stack_owners.len())
     }
-    merged
 }
 
 /// The three indexes a call-result certificate is recorded in at once.
 pub(crate) struct CallResultSink<'a> {
-    pub(crate) call_results: &'a mut BTreeMap<ValueId, CallResultCertificate>,
-    pub(crate) call_results_by_inst: &'a mut BTreeMap<InstId, ValueId>,
+    pub(crate) call_results: &'a mut crate::dense::IdMap<ValueId, CallResultCertificate>,
+    pub(crate) call_results_by_inst: &'a mut crate::dense::IdMap<InstId, ValueId>,
     pub(crate) call_results_by_callsite: &'a mut BTreeMap<CallSiteId, Vec<ValueId>>,
 }
 
 pub(crate) fn process_call_result_flow_block(
     body: Body<'_>,
     derived: Derived<'_>,
-    block: &crate::FunctionSSABlock,
-    callsites_by_op: &BTreeMap<(u64, usize), CallSiteId>,
+    block: &crate::SSABlock<crate::VarId>,
+    callsites_by_inst: &crate::dense::IdMap<InstId, CallSiteId>,
     mut state: CallResultFlowState,
     sink: CallResultSink<'_>,
 ) -> CallResultFlowState {
-    let (function, graph) = (body.function, body.graph);
+    let graph = body.graph;
+    let width = |id: &crate::VarId| body.function.var(*id).size;
     let (boundaries, objects, call_sites, structured) = (
         derived.boundaries,
         derived.objects,
@@ -158,20 +162,23 @@ pub(crate) fn process_call_result_flow_block(
         call_results_by_callsite,
     } = sink;
     let mut active_call = None;
-    for (op_index, op) in block.ops.iter().enumerate() {
+    for (id, op) in block.sited() {
+        let Some(inst) = graph.inst_for_op(id) else {
+            continue;
+        };
         match op {
             SSAOp::Call { .. } | SSAOp::CallInd { .. } => {
                 kill_return_register_flow_values(&mut state);
-                active_call = callsites_by_op.get(&(block.addr, op_index)).copied();
+                active_call = callsites_by_inst.get(inst).copied();
             }
             SSAOp::CallDefine { dst } => {
                 let Some(call_site_id) = active_call else {
                     continue;
                 };
-                let Some(call_site) = call_sites.by_id.get(&call_site_id) else {
+                if !call_sites.by_id.contains_key(&call_site_id) {
                     continue;
-                };
-                let Some(value) = graph.value_id_for_var(dst) else {
+                }
+                let Some(value) = graph.value_of(*dst) else {
                     continue;
                 };
                 let Some(boundary) = boundaries
@@ -249,13 +256,9 @@ pub(crate) fn process_call_result_flow_block(
                 };
                 let cert = CallResultCertificate {
                     call_site: call_site_id,
-                    at: graph
-                        .inst_id_for_op_site(block.addr, op_index)
-                        .unwrap_or(call_site.at),
-                    block_addr: block.addr,
-                    op_index,
+                    at: inst,
                     value,
-                    width: dst.size,
+                    width: width(dst),
                     relation,
                     carrier,
                     owner: Some(ValueOwner::Value(value)),
@@ -269,24 +272,20 @@ pub(crate) fn process_call_result_flow_block(
                 );
             }
             SSAOp::Copy { dst, src } => {
-                let Some(src_value) = graph.value_id_for_var(src) else {
+                let Some(src_value) = graph.value_of(*src) else {
                     continue;
                 };
-                let Some(source) = state.tracked.get(&src_value) else {
+                let Some(source) = state.tracked.get(src_value) else {
                     continue;
                 };
-                let Some(dst_value) = graph.value_id_for_var(dst) else {
+                let Some(dst_value) = graph.value_of(*dst) else {
                     continue;
                 };
                 let cert = CallResultCertificate {
                     call_site: source.call_site,
-                    at: graph
-                        .inst_id_for_op_site(block.addr, op_index)
-                        .unwrap_or(source.at),
-                    block_addr: block.addr,
-                    op_index,
+                    at: inst,
                     value: dst_value,
-                    width: dst.size,
+                    width: width(dst),
                     relation: source.relation,
                     carrier: source.carrier.clone(),
                     owner: source.owner.clone().or(Some(ValueOwner::Value(src_value))),
@@ -304,24 +303,20 @@ pub(crate) fn process_call_result_flow_block(
             | SSAOp::Trunc { dst, src }
             | SSAOp::Cast { dst, src, .. }
             | SSAOp::Subpiece { dst, src, .. } => {
-                let Some(src_value) = graph.value_id_for_var(src) else {
+                let Some(src_value) = graph.value_of(*src) else {
                     continue;
                 };
-                let Some(source) = state.tracked.get(&src_value) else {
+                let Some(source) = state.tracked.get(src_value) else {
                     continue;
                 };
-                let Some(dst_value) = graph.value_id_for_var(dst) else {
+                let Some(dst_value) = graph.value_of(*dst) else {
                     continue;
                 };
                 let cert = CallResultCertificate {
                     call_site: source.call_site,
-                    at: graph
-                        .inst_id_for_op_site(block.addr, op_index)
-                        .unwrap_or(source.at),
-                    block_addr: block.addr,
-                    op_index,
+                    at: inst,
                     value: dst_value,
-                    width: dst.size,
+                    width: width(dst),
                     relation: CallResultValueRelation::Derived,
                     carrier: source.carrier.clone(),
                     owner: source.owner.clone().or(Some(ValueOwner::Value(src_value))),
@@ -339,28 +334,24 @@ pub(crate) fn process_call_result_flow_block(
                 val,
                 ..
             } => {
-                let value = graph.value_id_for_var(val);
+                let value = graph.value_of(*val);
                 let stack_access = value
                     .and_then(|value| {
                         stack_memory_access_at(StackMemoryAccessInput {
-                            function,
                             graph,
                             structured,
                             objects,
-                            block_addr: block.addr,
-                            op_index,
+                            inst,
                             is_write: true,
                             value: Some(value),
                         })
                     })
                     .or_else(|| {
                         stack_memory_access_at(StackMemoryAccessInput {
-                            function,
                             graph,
                             structured,
                             objects,
-                            block_addr: block.addr,
-                            op_index,
+                            inst,
                             is_write: true,
                             value: None,
                         })
@@ -372,7 +363,7 @@ pub(crate) fn process_call_result_flow_block(
                     state.stack_owners.remove(&(object, offset));
                     continue;
                 };
-                let Some(source) = state.tracked.get(&value).cloned() else {
+                let Some(source) = state.tracked.get(value).cloned() else {
                     state.stack_owners.remove(&(object, offset));
                     continue;
                 };
@@ -383,29 +374,27 @@ pub(crate) fn process_call_result_flow_block(
                         ..source.clone()
                     },
                 );
-                call_results.entry(value).and_modify(|cert| {
+                if let Some(cert) = call_results.get_mut(value) {
                     cert.owner = Some(ValueOwner::StackSlot { object, offset });
-                });
-                state.tracked.entry(value).and_modify(|cert| {
+                }
+                if let Some(cert) = state.tracked.get_mut(value) {
                     cert.owner = Some(ValueOwner::StackSlot { object, offset });
-                });
+                }
             }
             SSAOp::Load {
                 space: SpaceId::Ram,
                 dst,
                 ..
             } => {
-                let Some(dst_value) = graph.value_id_for_var(dst) else {
+                let Some(dst_value) = graph.value_of(*dst) else {
                     continue;
                 };
                 let Some((object, offset, access)) =
                     stack_memory_access_at(StackMemoryAccessInput {
-                        function,
                         graph,
                         structured,
                         objects,
-                        block_addr: block.addr,
-                        op_index,
+                        inst,
                         is_write: false,
                         value: Some(dst_value),
                     })
@@ -417,13 +406,9 @@ pub(crate) fn process_call_result_flow_block(
                 };
                 let cert = CallResultCertificate {
                     call_site: source.call_site,
-                    at: graph
-                        .inst_id_for_op_site(block.addr, op_index)
-                        .unwrap_or(source.at),
-                    block_addr: block.addr,
-                    op_index,
+                    at: inst,
                     value: dst_value,
-                    width: dst.size,
+                    width: width(dst),
                     relation: source.relation,
                     carrier: ReturnCarrier::StackSlot {
                         object,
@@ -453,10 +438,10 @@ pub(crate) fn kill_return_register_flow_values(state: &mut CallResultFlowState) 
 }
 
 pub(crate) fn insert_call_result_certificate(
-    call_results: &mut BTreeMap<ValueId, CallResultCertificate>,
-    call_results_by_inst: &mut BTreeMap<InstId, ValueId>,
+    call_results: &mut crate::dense::IdMap<ValueId, CallResultCertificate>,
+    call_results_by_inst: &mut crate::dense::IdMap<InstId, ValueId>,
     call_results_by_callsite: &mut BTreeMap<CallSiteId, Vec<ValueId>>,
-    tracked: &mut BTreeMap<ValueId, CallResultCertificate>,
+    tracked: &mut crate::dense::IdMap<ValueId, CallResultCertificate>,
     cert: CallResultCertificate,
 ) {
     call_results_by_inst.insert(cert.at, cert.value);
@@ -469,12 +454,10 @@ pub(crate) fn insert_call_result_certificate(
 }
 
 pub(crate) struct StackMemoryAccessInput<'a> {
-    pub(crate) function: &'a SSAFunction,
     pub(crate) graph: &'a SsaGraph,
     pub(crate) structured: &'a StructuredDataflowFacts,
     pub(crate) objects: &'a ObjectModel,
-    pub(crate) block_addr: u64,
-    pub(crate) op_index: usize,
+    pub(crate) inst: InstId,
     pub(crate) is_write: bool,
     pub(crate) value: Option<ValueId>,
 }
@@ -483,9 +466,7 @@ pub(crate) fn stack_memory_access_at(
     input: StackMemoryAccessInput<'_>,
 ) -> Option<(ObjectId, i64, StructuredAccessId)> {
     // Only this operation's instruction can own a match, so search its accesses alone.
-    let inst = input
-        .graph
-        .inst_id_for_op_site(input.block_addr, input.op_index)?;
+    let inst = input.inst;
     let first = StructuredAccessId { inst, ordinal: 0 };
     let last = StructuredAccessId {
         inst,
@@ -496,16 +477,9 @@ pub(crate) fn stack_memory_access_at(
         .memory_accesses
         .range(first..=last)
         .filter(|(_, access)| {
-            access.block_addr == input.block_addr
-                && access.op_index == input.op_index
-                && access.is_write == input.is_write
+            access.is_write == input.is_write
                 && input.value.is_none_or(|value| access.value == Some(value))
-                && ram_memory_access_matches_source(
-                    input.function,
-                    input.graph,
-                    input.objects,
-                    access,
-                )
+                && ram_memory_access_matches_source(input.graph, input.objects, access)
         })
         .filter_map(|(access_id, access)| {
             stack_object_offset(input.objects, access.object)

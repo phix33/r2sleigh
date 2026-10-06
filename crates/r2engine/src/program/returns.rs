@@ -2,19 +2,13 @@
 
 use std::collections::BTreeMap;
 
+use crate::body::{Body, BodyError, Trace};
 use r2sleigh_lift::EmbeddedMachine;
-use r2ssa::body::{Body, BodyError, Trace};
 
-use super::{OpenProgram, Source};
+use super::{ProgramInputs, Source, View};
 use crate::discovery::{Transfers, Walker};
 use crate::native::{NativeRefusal, NativeTarget};
-
-/// Each function's answer, for the bytes it was derived from.
-#[derive(Default)]
-pub(super) struct Returns {
-    at: Option<(u64, u64)>,
-    by_entry: BTreeMap<u64, bool>,
-}
+use crate::query::db::{Db, Query};
 
 /// One body being walked, and whether it is walked as Thumb.
 pub(super) struct BodyWalk {
@@ -25,7 +19,7 @@ pub(super) struct BodyWalk {
 
 impl BodyWalk {
     /// The blocks the walk traced, and their bytes.
-    pub(super) fn extent(&self) -> r2ssa::body::TraceExtent {
+    pub(super) fn extent(&self) -> crate::body::TraceExtent {
         self.trace.extent()
     }
 
@@ -33,11 +27,16 @@ impl BodyWalk {
     pub(super) fn supervisor_calls(&self) -> &std::collections::BTreeSet<u64> {
         self.trace.supervisor_calls()
     }
+
+    /// The bytes the walk decoded as this body's instructions.
+    pub(super) fn spans(&self) -> Vec<std::ops::Range<u64>> {
+        self.trace.spans()
+    }
 }
 
 /// Discovery's walker over one open program.
-pub(super) struct Walking<'p, S: Source> {
-    program: &'p OpenProgram<S>,
+pub(super) struct Walking<'p, S: Source + 'static> {
+    program: View<'p, S>,
     primary: NativeTarget<'p>,
     thumb: Option<NativeTarget<'p>>,
     /// Whether a body is walked in the instruction set its callers enter it in, rather than the one the program places there.
@@ -46,16 +45,16 @@ pub(super) struct Walking<'p, S: Source> {
 
 /// The program as one walk reads it, told which callees are known to come back.
 struct Knowing<'a> {
-    program: &'a dyn r2ssa::body::Program,
+    program: &'a dyn crate::body::Program,
     returns: &'a dyn Fn(u64) -> bool,
 }
 
-impl r2ssa::body::Program for Knowing<'_> {
+impl crate::body::Program for Knowing<'_> {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         self.program.read(vaddr, max)
     }
 
-    fn region(&self, vaddr: u64) -> Option<r2ssa::body::Region> {
+    fn region(&self, vaddr: u64) -> Option<crate::body::Region> {
         self.program.region(vaddr)
     }
 
@@ -80,14 +79,16 @@ impl r2ssa::body::Program for Knowing<'_> {
     }
 }
 
-impl<'p, S: Source> Walking<'p, S> {
+impl<'p, S: Source + 'static> Walking<'p, S> {
     /// A walker over both instruction sets, entering each body in the set `entered` chooses.
-    pub(super) fn new(program: &'p OpenProgram<S>, entered: bool) -> Result<Self, String> {
+    pub(super) fn new(program: View<'p, S>, entered: bool) -> Result<Self, String> {
         let decoder = |machine: Option<&'p EmbeddedMachine>| machine.map(|m| program.target_of(m));
+        let primary = decoder(program.machine_in(false)).ok_or("no machine")??;
+        let thumb = decoder(program.machine_in(true)).transpose()?;
         Ok(Self {
             program,
-            primary: decoder(program.machine_in(false)).ok_or("no machine")??,
-            thumb: decoder(program.machine_in(true)).transpose()?,
+            primary,
+            thumb,
             entered,
         })
     }
@@ -112,11 +113,11 @@ impl<'p, S: Source> Walking<'p, S> {
         returns: &dyn Fn(u64) -> bool,
     ) -> Result<Body, BodyError> {
         let knowing = Knowing {
-            program: self.program,
+            program: &self.program,
             returns,
         };
         let disasm = self.target(thumb).disasm;
-        r2ssa::body::lift_body(entry, disasm, &knowing, &BTreeMap::new())
+        crate::body::lift_body(entry, disasm, &knowing, &BTreeMap::new())
     }
 
     fn step(trace: &mut Trace) -> Transfers {
@@ -139,7 +140,7 @@ impl<'p, S: Source> Walking<'p, S> {
     }
 }
 
-impl<S: Source> Walker for Walking<'_, S> {
+impl<S: Source + 'static> Walker for Walking<'_, S> {
     type Walk = BodyWalk;
     type Refusal = NativeRefusal;
 
@@ -154,7 +155,7 @@ impl<S: Source> Walker for Walking<'_, S> {
             false => self.program.thumb_at(address),
         };
         let knowing = Knowing {
-            program: self.program,
+            program: &self.program,
             returns,
         };
         let disasm = self.target(thumb).disasm;
@@ -170,7 +171,7 @@ impl<S: Source> Walker for Walking<'_, S> {
 
     fn open(&self, walk: &mut BodyWalk, callee: u64, returns: &dyn Fn(u64) -> bool) -> Transfers {
         let knowing = Knowing {
-            program: self.program,
+            program: &self.program,
             returns,
         };
         let disasm = self.target(walk.thumb).disasm;
@@ -183,13 +184,13 @@ impl<S: Source> Walker for Walking<'_, S> {
         let callees = walk.trace.calls().iter().chain(walk.trace.tail_calls());
         let loads = walk.trace.loads();
         // Preparing costs far more than walking, so only a body that calls something declared to take a function is lifted and prepared.
-        if !crate::native::hands_a_function(target, self.program, callees.copied(), loads) {
+        if !crate::native::hands_a_function(target, &self.program, callees.copied(), loads) {
             return Vec::new();
         }
         let Ok(body) = self.lifted(walk.entry, walk.thumb, returns) else {
             return Vec::new();
         };
-        crate::native::handed(target, self.program, body)
+        crate::native::handed(target, &self.program, body)
             .into_iter()
             .map(|pointer| match self.thumb.is_some() {
                 // A handed pointer states its instruction set in its low bit, as `bx` reads it.
@@ -198,66 +199,39 @@ impl<S: Source> Walker for Walking<'_, S> {
             })
             // A handed constant is a function only where it decodes, in the instruction set it is entered in.
             .filter(|(address, thumb)| {
-                crate::native::decodes(self.target(*thumb).disasm, self.program, *address)
+                crate::native::decodes(self.target(*thumb).disasm, &self.program, *address)
             })
             .collect()
     }
 
     fn declared(&self, address: u64) -> Option<bool> {
-        crate::native::declared_return(&self.primary, self.program, address)
+        crate::native::declared_return(&self.primary, &self.program, address)
     }
 }
 
-impl<S: Source> OpenProgram<S> {
-    /// Whether control comes back from a call to `callee`: false only where the program proves it never does.
-    pub(super) fn comes_back(&self, callee: u64) -> bool {
-        let Ok(walker) = Walking::new(self, false) else {
+/// Whether control comes back from a call to a function; the lazy least fixpoint, sharing answers (doc/adr-query-database.md, Q3).
+pub(crate) struct ComesBack;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for ComesBack {
+    type Key = u64;
+    type Value = bool;
+    const NAME: &'static str = "comes-back";
+
+    fn compute(db: &Db<ProgramInputs<S>>, &callee: &u64) -> bool {
+        let Ok(walker) = Walking::new(View::new(db, true), false) else {
             return true;
         };
         if let Some(declared) = walker.declared(callee) {
             return declared;
         }
-        let at = (self.source.identity(), self.source.byte_revision());
-        if let Some(known) = self.returns_held(at, callee) {
-            return known;
-        }
-        let known = |address| self.returns_held(at, address);
+        let known = |address| {
+            db.held::<ComesBack>(&address)
+                .expect("a held lookup never computes")
+                .map(|answer| *answer)
+        };
         let found = crate::discovery::returns(callee, &known, &walker);
-        let answer = found.get(&callee).copied().unwrap_or(true);
-        self.hold_returns(at, found);
-        answer
-    }
-
-    /// Whether a call through `slot` comes back: false only where the import
-    /// the loader binds there is declared never to return.
-    pub(super) fn returns_through_slot(&self, slot: u64) -> bool {
-        Walking::new(self, false)
-            .ok()
-            .and_then(|walker| walker.declared(slot))
-            .unwrap_or(true)
-    }
-
-    /// The answer held for these bytes, the table dropped where they have moved.
-    fn returns_held(&self, at: (u64, u64), address: u64) -> Option<bool> {
-        let mut held = self.returns.lock().unwrap_or_else(|held| held.into_inner());
-        if held.at != Some(at) {
-            *held = Returns {
-                at: Some(at),
-                by_entry: BTreeMap::new(),
-            };
-        }
-        held.by_entry.get(&address).copied()
-    }
-
-    /// Hold answers derived for these bytes; the least fixpoint is one, so no two derivations disagree.
-    pub(super) fn hold_returns(&self, at: (u64, u64), found: BTreeMap<u64, bool>) {
-        let mut held = self.returns.lock().unwrap_or_else(|held| held.into_inner());
-        if held.at != Some(at) {
-            *held = Returns {
-                at: Some(at),
-                by_entry: BTreeMap::new(),
-            };
-        }
-        held.by_entry.extend(found);
+        let others = found.iter().filter(|(address, _)| **address != callee);
+        db.deposit::<ComesBack>(others.map(|(address, answer)| (*address, *answer)));
+        found.get(&callee).copied().unwrap_or(true)
     }
 }

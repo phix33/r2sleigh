@@ -2,9 +2,9 @@
 
 use super::*;
 
-pub type OpSiteKey = (u64, usize);
-
-pub type MemoryOpSiteKey = (u64, usize, bool);
+/// One instruction's memory effects in one direction: a read and a write
+/// performed by one instruction are different effects.
+pub type MemoryEffectKey = (r2ssa::InstId, bool);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallsiteRenderFact {
@@ -289,6 +289,13 @@ pub struct GuardedPhiArmRenderFact {
 /// A certified addressable resource. Resources have identity and layout but do
 /// not execute, so they must never be counted as observable effects.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub enum CertifiedEntity {
     Parameter {
         id: r2ssa::SemanticId,
@@ -359,6 +366,13 @@ impl CertifiedEntity {
     /// not authorize globally substituting any member's expression with the
     /// binding. Stack-slot entities return `None` because object identity alone
     /// is not a certificate of `ValueId` membership.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     pub fn coalescing_values(&self) -> Option<BTreeSet<r2ssa::ValueId>> {
         match self {
             Self::Parameter {
@@ -436,24 +450,11 @@ pub enum CertifiedEffect {
 }
 
 impl CertifiedEffect {
-    pub const fn id(&self) -> r2ssa::SemanticId {
-        match self {
-            Self::Memory { id, .. } | Self::Return { id, .. } => *id,
-        }
-    }
-
     pub const fn kind(&self) -> CertifiedEffectKind {
         match self {
             Self::Memory { fact, .. } if fact.is_write => CertifiedEffectKind::MemoryWrite,
             Self::Memory { .. } => CertifiedEffectKind::MemoryRead,
             Self::Return { .. } => CertifiedEffectKind::Return,
-        }
-    }
-
-    pub const fn control_domain(&self) -> &r2ssa::ControlDomain {
-        match self {
-            Self::Memory { fact, .. } => &fact.control_domain,
-            Self::Return { fact, .. } => &fact.control_domain,
         }
     }
 
@@ -475,8 +476,6 @@ impl CertifiedEffect {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryAccessRenderFact {
     pub access: r2ssa::StructuredAccessId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub space: r2il::SpaceId,
     pub object: r2ssa::ObjectId,
     pub address: r2ssa::ValueId,
@@ -502,14 +501,11 @@ pub struct StringLiteralRenderFact {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StringLiteralRenderSource {
     TypedFunctionFacts,
-    Radare2TypedCollector,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberAccessRenderFact {
     pub access: r2ssa::StructuredAccessId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub object: r2ssa::ObjectId,
     pub is_write: bool,
     pub field_offset: u64,
@@ -536,8 +532,6 @@ pub enum MemberAccessSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArrayAccessRenderFact {
     pub access: r2ssa::StructuredAccessId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub object: r2ssa::ObjectId,
     pub is_write: bool,
     pub field_offset: u64,
@@ -549,8 +543,7 @@ pub struct ArrayAccessRenderFact {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnValueRenderFact {
-    pub block_addr: u64,
-    pub op_index: usize,
+    pub at: r2ssa::InstId,
     pub value: r2ssa::ValueId,
     pub width: u32,
     pub control_domain: r2ssa::ControlDomain,
@@ -638,8 +631,9 @@ pub struct CallsiteArgumentFacts {
     /// source-owned capture. Its carrier contract has already been checked
     /// against this call site by `r2ssa`.
     pub callee_signature: Option<crate::FunctionType>,
-    /// Whether that signature is radare2's by-name prototype for an import.
-    pub callee_signature_from_source_types: bool,
+    /// What that signature's types are read from: a declaration, or a
+    /// recovery of the callee's body.
+    pub callee_signature_types: Option<r2source::Confidence>,
     /// Per-callsite argument-count proof for a variadic call. This is absent
     /// for fixed calls and never inferred from live argument registers.
     pub variadic_argument_count_evidence: Option<r2ssa::VariadicCallsiteArgumentCountEvidence>,
@@ -796,16 +790,6 @@ impl InterprocSummaryView {
         self.set.as_ref().map(|set| &set.diagnostics)
     }
 
-    pub fn helper_summary_for_name(&self, name: &str) -> Option<&r2ssa::FunctionSemanticSummary> {
-        let normalized = name.trim().to_ascii_lowercase();
-        self.set.as_ref()?.summaries.values().find(|summary| {
-            summary
-                .name
-                .as_deref()
-                .is_some_and(|summary_name| summary_name.trim().to_ascii_lowercase() == normalized)
-        })
-    }
-
     pub fn helper_view_for_name(&self, name: &str) -> Option<&SummaryHelperView> {
         let normalized = name.trim().to_ascii_lowercase();
         self.helpers.iter().find(|summary| {
@@ -880,7 +864,9 @@ pub fn exact_source_return_type(source: &r2ssa::SsaArtifact) -> Option<CTypeLike
             if projection.size_bits() < storage_bits
                 && matches!(
                     source_type.kind(),
-                    r2ssa::SourceTypeKind::SignedInteger | r2ssa::SourceTypeKind::UnsignedInteger
+                    r2ssa::SourceTypeKind::SignedInteger
+                        | r2ssa::SourceTypeKind::UnsignedInteger
+                        | r2ssa::SourceTypeKind::Char { .. }
                 ) =>
         {
             u32::try_from(projection.size_bits() / 8).ok()?
@@ -891,12 +877,13 @@ pub fn exact_source_return_type(source: &r2ssa::SsaArtifact) -> Option<CTypeLike
     let mut return_count = 0usize;
     for &block_addr in source.function().block_addrs() {
         let block = source.function().get_block(block_addr)?;
-        for (op_index, op) in block.ops.iter().enumerate() {
-            if !matches!(op, r2ssa::SSAOp::Return { .. }) {
+        for (op, ssa_op) in block.sited() {
+            if !matches!(ssa_op, r2ssa::SSAOp::Return { .. }) {
                 continue;
             }
             return_count = return_count.checked_add(1)?;
-            let certificate = source.return_certificate_for_op(block_addr, op_index)?;
+            let certificate =
+                source.return_certificate_for_inst(source.graph().inst_for_op(op)?)?;
             if !exact_return_certificate_matches(
                 certificate,
                 logical,
@@ -1012,6 +999,7 @@ pub(crate) fn member_is_scalar_leaf(
             ty.kind(),
             r2ssa::SourceTypeKind::SignedInteger
                 | r2ssa::SourceTypeKind::UnsignedInteger
+                | r2ssa::SourceTypeKind::Char { .. }
                 | r2ssa::SourceTypeKind::Float
                 | r2ssa::SourceTypeKind::Pointer { .. }
         )
@@ -1033,10 +1021,17 @@ pub(crate) fn aggregate_layout_for_type(
         .filter(|aggregate| aggregate.id() == aggregate_id && aggregate.type_id() == type_id)
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn parameter_entry_value_has_live_use(
     prepared: &r2ssa::SsaArtifact,
     root: r2ssa::ValueId,
-    implicit_call_arguments: &BTreeSet<r2ssa::ValueId>,
+    implicit_call_arguments: &r2ssa::dense::IdSet<r2ssa::ValueId>,
 ) -> bool {
     let graph = prepared.graph();
     let mut pending = vec![root];
@@ -1045,7 +1040,7 @@ pub(crate) fn parameter_entry_value_has_live_use(
         if !visited.insert(value) {
             continue;
         }
-        if implicit_call_arguments.contains(&value) {
+        if implicit_call_arguments.contains(value) {
             return true;
         }
         for use_site in graph.use_sites(value) {
@@ -1198,14 +1193,7 @@ pub(crate) fn prepared_callee_resolution_facts(
             .values()
             .filter_map(|call_site| {
                 let direct_target = prepared.resolved_call_target(call_site)?;
-                let (block_addr, op_index) = prepared.inst_op_site(call_site.at)?;
-                Some((
-                    CallsiteKey {
-                        block_addr,
-                        op_index,
-                    },
-                    direct_target,
-                ))
+                Some((CallsiteKey { at: call_site.at }, direct_target))
             }),
         &ctx,
     )
@@ -1218,12 +1206,8 @@ pub(crate) fn prepared_callsite_argument_facts(
         .certificates()
         .callsites
         .values()
-        .filter_map(|cert| {
-            let (block_addr, op_index) = prepared.inst_op_site(cert.at)?;
-            let callsite = CallsiteKey {
-                block_addr,
-                op_index,
-            };
+        .map(|cert| {
+            let callsite = CallsiteKey { at: cert.at };
             let argument_values = cert
                 .argument_values
                 .iter()
@@ -1269,7 +1253,7 @@ pub(crate) fn prepared_callsite_argument_facts(
                     })
                 })
                 .collect();
-            Some((
+            (
                 callsite,
                 CallsiteArgumentFacts {
                     callsite,
@@ -1284,7 +1268,7 @@ pub(crate) fn prepared_callsite_argument_facts(
                     // source-owned callee analysis fills this only after its
                     // exact retained interface matches this call site.
                     callee_signature: None,
-                    callee_signature_from_source_types: false,
+                    callee_signature_types: None,
                     variadic_argument_count_evidence: cert.variadic_argument_count_evidence,
                     variadic_argument_count_refusal: cert.variadic_argument_count_refusal,
                     register_argument_locations,
@@ -1292,22 +1276,21 @@ pub(crate) fn prepared_callsite_argument_facts(
                     arguments_complete: cert.arguments_complete,
                     results_complete: cert.results_complete,
                 },
-            ))
+            )
         })
         .collect();
     FunctionCallsiteFacts { by_callsite }
 }
 
 pub(crate) fn prepared_call_result_facts(prepared: &r2ssa::SsaArtifact) -> FunctionCallResultFacts {
-    let mut by_value = BTreeMap::new();
+    let mut by_value = r2ssa::dense::IdMap::default();
     let mut by_callsite = BTreeMap::<CallsiteKey, Vec<r2ssa::ValueId>>::new();
     for cert in prepared.certificates().call_results.values() {
         let Some(callsite_cert) = prepared.certificates().callsites.get(&cert.call_site) else {
             continue;
         };
         let callsite = CallsiteKey {
-            block_addr: callsite_cert.block_addr,
-            op_index: callsite_cert.op_index,
+            at: callsite_cert.at,
         };
         by_callsite.entry(callsite).or_default().push(cert.value);
         by_value.insert(
@@ -1336,10 +1319,7 @@ pub(crate) fn prepared_call_render_facts(prepared: &r2ssa::SsaArtifact) -> Funct
         .callsites
         .values()
         .map(|cert| {
-            let callsite = CallsiteKey {
-                block_addr: cert.block_addr,
-                op_index: cert.op_index,
-            };
+            let callsite = CallsiteKey { at: cert.at };
             // This fact says how control leaves the site, not what the
             // statement assigns; the plan owns that, from the value it defines.
             let count_refusal = if cert.variadic {
@@ -1434,11 +1414,18 @@ pub(crate) fn prepared_call_render_facts(prepared: &r2ssa::SsaArtifact) -> Funct
 /// resolved has no single base yet.
 pub(crate) struct AddressBases<'a> {
     prepared: &'a r2ssa::SsaArtifact,
-    resolved: BTreeMap<r2ssa::ValueId, Option<(r2ssa::ValueId, i64)>>,
+    resolved: r2ssa::dense::IdMap<r2ssa::ValueId, Option<(r2ssa::ValueId, i64)>>,
 }
 
 /// The values waiting on others while one address is resolved, and the merges
 /// being resolved, which a cycle must not re-enter.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 struct AddressWalk {
     pending: Vec<(r2ssa::ValueId, bool)>,
     visiting: BTreeSet<r2ssa::ValueId>,
@@ -1458,7 +1445,7 @@ impl<'a> AddressBases<'a> {
     pub(crate) fn new(prepared: &'a r2ssa::SsaArtifact) -> Self {
         Self {
             prepared,
-            resolved: BTreeMap::new(),
+            resolved: r2ssa::dense::IdMap::default(),
         }
     }
 
@@ -1485,14 +1472,14 @@ impl<'a> AddressBases<'a> {
             visiting: BTreeSet::new(),
         };
         while let Some((current, expanded)) = walk.pending.pop() {
-            if self.resolved.contains_key(&current) {
+            if self.resolved.contains(current) {
                 continue;
             }
             if let Some(result) = self.resolve(current, expanded, &mut walk) {
                 self.resolved.insert(current, result);
             }
         }
-        self.resolved.get(&value).copied().flatten()
+        self.resolved.get(value).copied().flatten()
     }
 
     /// `current`'s base, where every input it needs is resolved; otherwise it
@@ -1508,7 +1495,7 @@ impl<'a> AddressBases<'a> {
             AddressStep::Merge(inputs) => return self.merged(current, &inputs, expanded, walk),
             AddressStep::Displaced(input, delta) => (input, delta),
         };
-        if !expanded && !self.resolved.contains_key(&input) {
+        if !expanded && !self.resolved.contains(input) {
             // A cycle back into a merge being resolved has no base yet.
             if walk.visiting.contains(&input) {
                 return Some(None);
@@ -1519,7 +1506,7 @@ impl<'a> AddressBases<'a> {
         }
         Some(
             self.resolved
-                .get(&input)
+                .get(input)
                 .copied()
                 .flatten()
                 .and_then(|(base, offset)| Some((base, offset.checked_add(delta)?))),
@@ -1540,7 +1527,7 @@ impl<'a> AddressBases<'a> {
             walk.pending.extend(
                 inputs
                     .iter()
-                    .filter(|input| !self.resolved.contains_key(input) && !visiting.contains(input))
+                    .filter(|input| !self.resolved.contains(**input) && !visiting.contains(input))
                     .map(|input| (*input, false)),
             );
             return None;
@@ -1549,7 +1536,7 @@ impl<'a> AddressBases<'a> {
         // Every input known, at one base and one displacement.
         let mut bases = inputs
             .iter()
-            .map(|input| self.resolved.get(input).copied().flatten());
+            .map(|input| self.resolved.get(*input).copied().flatten());
         let common = bases.next().flatten();
         Some(common.filter(|common| bases.all(|base| base == Some(*common))))
     }
@@ -1565,14 +1552,9 @@ impl<'a> AddressBases<'a> {
         }
         // The same address under another name: a copy, a zero extension, a
         // merge of copies.
-        if let Some(facts) = prepared.function().decompile_prep_facts() {
-            let root = facts.same_integer_root(var);
-            if root != var {
-                return match graph.value_id_for_var(root) {
-                    Some(root) => AddressStep::Displaced(root, 0),
-                    None => AddressStep::Settled(None),
-                };
-            }
+        let root = prepared.decompile_prep_facts().same_integer_root(value);
+        if root != value {
+            return AddressStep::Displaced(root, 0);
         }
         if let Some(reload) = prepared
             .stack_reload_certificate_for_value(value)
@@ -1590,20 +1572,18 @@ impl<'a> AddressBases<'a> {
             r2ssa::InstPayload::Phi { .. } => return AddressStep::Merge(inst.inputs.clone()),
             r2ssa::InstPayload::Op(op) => op,
         };
-        let displaced = |base: &r2ssa::SSAVar, delta: Option<i64>| match (
-            graph.value_id_for_var(base),
-            delta,
-        ) {
-            (Some(base), Some(delta)) => AddressStep::Displaced(base, delta),
-            _ => AddressStep::Settled(None),
+        let displaced = |base: &r2ssa::ValueId, delta: Option<i64>| match delta {
+            Some(delta) => AddressStep::Displaced(*base, delta),
+            None => AddressStep::Settled(None),
         };
+        let constant = |value: &r2ssa::ValueId| const_var_i64(graph.var(*value));
         match op {
-            r2ssa::SSAOp::IntAdd { a, b, .. } => match (const_var_i64(a), const_var_i64(b)) {
+            r2ssa::SSAOp::IntAdd { a, b, .. } => match (constant(a), constant(b)) {
                 (None, Some(delta)) => displaced(a, Some(delta)),
                 (Some(delta), None) => displaced(b, Some(delta)),
                 _ => AddressStep::Settled(None),
             },
-            r2ssa::SSAOp::IntSub { a, b, .. } => match (const_var_i64(a), const_var_i64(b)) {
+            r2ssa::SSAOp::IntSub { a, b, .. } => match (constant(a), constant(b)) {
                 (None, Some(delta)) => displaced(a, delta.checked_neg()),
                 _ => AddressStep::Settled(None),
             },
@@ -1614,7 +1594,7 @@ impl<'a> AddressBases<'a> {
                 ..
             } => displaced(
                 base,
-                const_var_i64(index).and_then(|index| index.checked_mul(i64::from(*element_size))),
+                constant(index).and_then(|index| index.checked_mul(i64::from(*element_size))),
             ),
             r2ssa::SSAOp::PtrSub {
                 base,
@@ -1623,7 +1603,7 @@ impl<'a> AddressBases<'a> {
                 ..
             } => displaced(
                 base,
-                const_var_i64(index)
+                constant(index)
                     .and_then(|index| index.checked_mul(i64::from(*element_size)))
                     .and_then(i64::checked_neg),
             ),
@@ -1859,9 +1839,9 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                 renderable: cert.renderable || call_result.is_some(),
             };
             (
-                r2ssa::SemanticId::expression(*value),
+                r2ssa::SemanticId::expression(value),
                 CertifiedExpr {
-                    id: r2ssa::SemanticId::expression(*value),
+                    id: r2ssa::SemanticId::expression(value),
                     fact,
                     inputs: cert
                         .inputs
@@ -1870,7 +1850,7 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                         .map(r2ssa::SemanticId::expression)
                         .collect(),
                     bindings,
-                    guarded_phi: prepared_guarded_phi_render_fact(prepared, *value),
+                    guarded_phi: prepared_guarded_phi_render_fact(prepared, value),
                 },
             )
         })
@@ -1882,7 +1862,12 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
             let id = r2ssa::SemanticId::memory_access(*access);
             let control_domain = prepared
                 .control_domains()
-                .for_block(cert.block_addr)
+                .for_block(
+                    prepared
+                        .graph()
+                        .block_addr_of(access.inst)
+                        .expect("memory certificate instruction stands in a block"),
+                )
                 .expect("memory certificate block has a control domain")
                 .clone();
             (
@@ -1891,8 +1876,6 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                     id,
                     fact: MemoryAccessRenderFact {
                         access: cert.access,
-                        block_addr: cert.block_addr,
-                        op_index: cert.op_index,
                         space: cert.space,
                         object: cert.object,
                         address: cert.address,
@@ -1907,8 +1890,8 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let memory_effects_by_op = certificates
-        .memory_accesses_by_op
+    let memory_effects_by_inst = certificates
+        .memory_accesses_by_inst
         .iter()
         .map(|(op, accesses)| {
             (
@@ -1928,7 +1911,12 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
             let id = r2ssa::SemanticId::return_value(cert.at);
             let control_domain = prepared
                 .control_domains()
-                .for_block(cert.block_addr)
+                .for_block(
+                    prepared
+                        .graph()
+                        .block_addr_of(cert.at)
+                        .expect("return certificate instruction stands in a block"),
+                )
                 .expect("return certificate block has a control domain")
                 .clone();
             (
@@ -1937,8 +1925,7 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                     id,
                     at: cert.at,
                     fact: ReturnValueRenderFact {
-                        block_addr: cert.block_addr,
-                        op_index: cert.op_index,
+                        at: cert.at,
                         value: cert.value,
                         width: cert.width,
                         control_domain,
@@ -1947,13 +1934,9 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let return_effects_by_op = certified_return_effects
+    let return_effects_by_inst = certified_return_effects
         .iter()
-        .filter_map(|(id, effect)| {
-            effect
-                .return_fact()
-                .map(|fact| ((fact.block_addr, fact.op_index), *id))
-        })
+        .filter_map(|(id, effect)| effect.return_fact().map(|fact| (fact.at, *id)))
         .collect();
     let mut certified_entities = certificates
         .stack_slots
@@ -1970,8 +1953,8 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                     size: cert.size,
                     array_layout: cert.array_layout.clone(),
                     source_slot: cert.source_slot,
-                    reload_values: cert.reload_values.clone(),
-                    stored_values: cert.stored_values.clone(),
+                    reload_values: cert.reload_values.iter().collect(),
+                    stored_values: cert.stored_values.iter().collect(),
                     callee_allocation: cert.callee_allocation.clone(),
                     ty: cert
                         .source_slot
@@ -2027,9 +2010,9 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                 .values()
                 .filter_map(|switch| switch.selector),
         )
-        .collect::<BTreeSet<_>>();
+        .collect::<r2ssa::dense::IdSet<_>>();
     let mut observable_values = observable_roots;
-    let mut pending = observable_values.iter().copied().collect::<Vec<_>>();
+    let mut pending = observable_values.iter().collect::<Vec<_>>();
     while let Some(value) = pending.pop() {
         let Some(inst) = prepared
             .graph()
@@ -2051,7 +2034,7 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
     // function's own result vanished whenever the return went uncertified.
     let unobserved = prepared.unobserved_merges();
     let mut carrier_edge_roots = Vec::new();
-    let mut carrier_identity_values = BTreeSet::new();
+    let mut carrier_identity_values = r2ssa::dense::IdSet::default();
     for carrier in prepared
         .structured()
         .loops
@@ -2099,7 +2082,7 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
         if certificates.stack_slots.contains_key(&fact.object) {
             continue;
         }
-        fact.materialize_result = inline_multiplicity.get(&value).copied().unwrap_or(0) > 1;
+        fact.materialize_result = inline_multiplicity.get(value).copied().unwrap_or(0) > 1;
     }
     let mut certified_effects = certified_memory_effects;
     certified_effects.extend(certified_return_effects);
@@ -2107,11 +2090,11 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
         certified_exprs,
         certified_entities,
         certified_effects,
-        return_effects_by_op,
-        memory_effects_by_op,
-        string_literals_by_value: BTreeMap::new(),
-        member_accesses_by_op: BTreeMap::new(),
-        array_accesses_by_op: BTreeMap::new(),
+        return_effects_by_inst,
+        memory_effects_by_inst,
+        string_literals_by_value: r2ssa::dense::IdMap::default(),
+        member_accesses_by_inst: BTreeMap::new(),
+        array_accesses_by_inst: BTreeMap::new(),
     }
 }
 
@@ -2179,15 +2162,15 @@ pub(crate) fn prepared_render_consumer_occurrences(
 pub(crate) fn expression_inline_multiplicity(
     graph: &r2ssa::SsaGraph,
     roots: &[r2ssa::ValueId],
-    carrier_identities: &BTreeSet<r2ssa::ValueId>,
-) -> BTreeMap<r2ssa::ValueId, u8> {
-    let mut multiplicity = BTreeMap::<r2ssa::ValueId, u8>::new();
+    carrier_identities: &r2ssa::dense::IdSet<r2ssa::ValueId>,
+) -> r2ssa::dense::IdMap<r2ssa::ValueId, u8> {
+    let mut multiplicity = r2ssa::dense::IdMap::<r2ssa::ValueId, u8>::default();
     let mut worklist = Vec::new();
     for root in roots {
-        if carrier_identities.contains(root) {
+        if carrier_identities.contains(*root) {
             continue;
         }
-        let slot = multiplicity.entry(*root).or_insert(0);
+        let slot = multiplicity.get_or_insert_with(*root, || 0);
         let raised = slot.saturating_add(1).min(2);
         if raised != *slot {
             *slot = raised;
@@ -2195,17 +2178,17 @@ pub(crate) fn expression_inline_multiplicity(
         }
     }
     while let Some(value) = worklist.pop() {
-        let Some(share) = multiplicity.get(&value).copied() else {
+        let Some(share) = multiplicity.get(value).copied() else {
             continue;
         };
         let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
             continue;
         };
         for input in &inst.inputs {
-            if carrier_identities.contains(input) {
+            if carrier_identities.contains(*input) {
                 continue;
             }
-            let slot = multiplicity.entry(*input).or_insert(0);
+            let slot = multiplicity.get_or_insert_with(*input, || 0);
             let raised = slot.saturating_add(share).min(2);
             if raised != *slot {
                 *slot = raised;

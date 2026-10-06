@@ -35,8 +35,6 @@ use crate::convert::{CTypeLike, parse_c_type_like, render_c_type_like};
 use crate::external::{
     ExternalField, ExternalStruct, ExternalTypeDb, ExternalUnion, normalize_external_type_name,
 };
-#[cfg(test)]
-use crate::facts::FunctionSignatureProjection;
 use crate::facts::{
     ArrayIndexBase, ArrayIndexCertificate, CalleeAllocationEffect, CalleeArgEffect,
     CalleeAtomicEffect, CalleeAtomicOp, CalleeAtomicOrdering, CalleeFact, CalleeLifetimeEffect,
@@ -51,9 +49,8 @@ use crate::facts::{
 use crate::function_facts::{FunctionFacts, InterprocSummaryView, SourceOwnedFunctionFacts};
 use crate::inferred_signature_from_signature_spec;
 use crate::model::Signedness;
-use crate::prepare::recover_vars_arch_profile;
 use crate::prepare::ssa_var_block_key;
-use crate::signedness::{ScalarSignednessEvidence, infer_scalar_signedness};
+use crate::signedness::ScalarSignednessEvidence;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TypePlan {
@@ -94,10 +91,6 @@ impl TypeAnalysis {
 
     pub fn shared_source(&self) -> Arc<SsaArtifact> {
         Arc::clone(&self.source)
-    }
-
-    pub fn matches_source(&self, source: &Arc<SsaArtifact>) -> bool {
-        Arc::ptr_eq(&self.source, source)
     }
 
     pub fn function_facts(&self) -> &FunctionFacts {
@@ -145,8 +138,7 @@ impl TypeAnalysis {
         // An import's prototype is radare2's: its parameters are what the
         // interface declares, and no body reads them for an entity to certify.
         let interface = self.source.machine_context().function_interface();
-        let prototype =
-            interface.is_some_and(r2ssa::SourceFunctionInterface::prototype_from_source_types);
+        let prototype = interface.is_some_and(r2ssa::SourceFunctionInterface::types_are_declared);
         let params = signature
             .params
             .iter()
@@ -470,10 +462,6 @@ impl TypeAnalysisRequest {
     pub fn source(&self) -> &Arc<SsaArtifact> {
         &self.source
     }
-
-    pub fn parsed_context(&self) -> &ParsedExternalContext {
-        &self.parsed_context
-    }
 }
 
 struct DerivedTypeAnalysis {
@@ -489,6 +477,9 @@ struct DerivedTypeAnalysisInput<'a> {
     inferred_signature: InferredSignature,
     recovered_vars: &'a [RecoveredVariable],
     ssa_blocks: &'a [SSABlock],
+    /// Which operations, by id, are zero extensions the architecture
+    /// performs (r2ssa's `Written::is_conventional_extension`).
+    conventional_extension: &'a dyn Fn(r2ssa::OpId) -> bool,
     parsed_context: ParsedExternalContext,
     local_structs: LocalStructArtifacts,
     interproc_summary_set: Option<InterprocSummarySet>,
@@ -500,7 +491,6 @@ struct DerivedTypeAnalysisSemanticInputs<'a> {
 }
 
 struct PreparedMachineVarProfile {
-    architecture: r2ssa::MachineArchitectureFamily,
     pointer_arg_slots: HashMap<String, usize>,
 }
 
@@ -842,10 +832,16 @@ fn merged_context_and_summary_callee_facts(
     facts
 }
 
+/// Where in the frame a variable of the analysed blocks points, as the prep
+/// facts prove it. The type analysis still reads its blocks by name; this
+/// is the one question it asks of the prep facts, which are keyed by the
+/// sealed graph's values (doc/adr-one-ir.md, F2.3 stage 5).
+pub(crate) type FrameRoots<'a> = &'a dyn Fn(&SSAVar) -> Option<r2ssa::StackAddressRoot>;
+
 fn build_type_analysis_inner(
     mut input: DerivedTypeAnalysisInput<'_>,
     semantic_inputs: Option<DerivedTypeAnalysisSemanticInputs<'_>>,
-    prep_facts: Option<&r2ssa::DecompilePrepFacts>,
+    prep_facts: Option<FrameRoots<'_>>,
     machine_profile: Option<&PreparedMachineVarProfile>,
     registers: &crate::RegisterIdentity,
 ) -> DerivedTypeAnalysis {
@@ -907,8 +903,11 @@ fn build_type_analysis_inner(
         input.parsed_context.merged_signature.clone(),
         inferred_signature_spec,
     );
-    let inferred_register_params =
-        inferred_signature_abi_register_params(&input.inferred_signature, input.ptr_bits);
+    let inferred_register_params = inferred_signature_abi_register_params(
+        &input.inferred_signature,
+        registers.argument_registers(),
+        input.ptr_bits,
+    );
     let mut canonicalize_register_params = input.parsed_context.register_params.clone();
     if inferred_register_params.len() > canonicalize_register_params.len() {
         canonicalize_register_params
@@ -1056,9 +1055,7 @@ fn build_type_analysis_inner(
         merged_signature.as_ref(),
         &local_structs.slot_element_strides,
         ScalarArrayMachineProfile {
-            architecture: machine_profile
-                .map(|profile| profile.architecture)
-                .unwrap_or(r2ssa::MachineArchitectureFamily::Unknown),
+            stack_roots: prep_facts,
             pointer_arg_slots: machine_profile.map(|profile| &profile.pointer_arg_slots),
             ptr_bits: input.ptr_bits,
         },
@@ -1103,13 +1100,11 @@ fn build_type_analysis_inner(
     let existing_types =
         parse_existing_var_types_from_specs(&input.parsed_context.stack_slots, input.ptr_bits);
     let stack_access_widths = canonical_stack_access_widths(input.ssa_blocks, prep_facts);
-    let arch_name = if input.inferred_signature.arch.is_empty() {
-        input.parsed_context.callconv.as_deref()
-    } else {
-        Some(input.inferred_signature.arch.as_str())
-    };
-    let stack_access_signedness =
-        canonical_stack_access_signedness(input.ssa_blocks, prep_facts, arch_name);
+    let stack_access_signedness = canonical_stack_access_signedness(
+        input.ssa_blocks,
+        prep_facts,
+        input.conventional_extension,
+    );
     let is_main_signature = merged_signature
         .as_ref()
         .is_some_and(is_canonical_main_signature_spec);
@@ -1255,6 +1250,7 @@ fn x86_64_register_identity() -> crate::RegisterIdentity {
         ("rcx", 0x08, 8),
         ("ecx", 0x08, 4),
     ])
+    .with_argument_registers(tests::system_v_argument_registers())
 }
 
 #[cfg(test)]
@@ -1297,8 +1293,9 @@ fn build_type_analysis(input: DerivedTypeAnalysisInput<'_>) -> DerivedTypeAnalys
 #[cfg(test)]
 fn build_type_analysis_with_prep_facts(
     input: DerivedTypeAnalysisInput<'_>,
-    prep_facts: &r2ssa::DecompilePrepFacts,
+    frame_roots: &BTreeMap<SSAVar, r2ssa::StackAddressRoot>,
 ) -> DerivedTypeAnalysis {
+    let prep_facts = &|var: &SSAVar| frame_roots.get(var).copied();
     let machine = detached_x86_64_test_machine_profile();
     build_type_analysis_inner(
         input,
@@ -1311,10 +1308,8 @@ fn build_type_analysis_with_prep_facts(
 
 #[cfg(test)]
 fn detached_x86_64_test_machine_profile() -> PreparedMachineVarProfile {
-    let architecture = r2ssa::MachineArchitectureFamily::X86_64;
     PreparedMachineVarProfile {
-        architecture,
-        pointer_arg_slots: collect_pointer_arg_slot_map(architecture, 64),
+        pointer_arg_slots: tests::system_v_argument_slots(),
     }
 }
 
@@ -1356,21 +1351,16 @@ pub fn build_source_owned_type_analysis(
         .name
         .clone()
         .unwrap_or_else(|| r2source::unnamed_function(source.function().entry));
-    let ssa_blocks = source.local_ssa_blocks();
+    let named_blocks = source.function().named_blocks();
+    let ssa_blocks = named_blocks.as_slice();
     let inferred_signature = crate::infer_signature_from_prepared_ssa(source.as_ref());
     let recovered_vars = crate::prepare::recover_vars_from_prepared_ssa(source.as_ref(), ptr_bits);
     let mut diagnostics = TypeAnalysisDiagnostics::default();
-    let arch_name = crate::prepare::prepared_arch_display_name(source.as_ref());
     let machine_profile = PreparedMachineVarProfile {
-        architecture: source.machine_context().architecture_family(),
         pointer_arg_slots: collect_prepared_pointer_arg_slot_map(source.as_ref()),
     };
-    let local_structs = infer_local_struct_artifacts_from_prepared_ssa(
-        source.as_ref(),
-        arch_name,
-        ptr_bits,
-        &mut diagnostics,
-    );
+    let local_structs =
+        infer_local_struct_artifacts_from_prepared_ssa(source.as_ref(), ptr_bits, &mut diagnostics);
     // The exact certificates own member naming: one name per (parameter, offset) they certify.
     let exact_source_fields = field_access_certificates_from_source_aggregate_accesses(&source);
     let source_field_names = exact_source_fields
@@ -1385,12 +1375,15 @@ pub fn build_source_owned_type_analysis(
         .as_ref()
         .map(|summary| summary.report().clone());
     require_current_interproc_report_for_source_owned(interproc_report.as_ref())?;
+    let written = source.function().written();
+    let conventional_extension = |op| written.is_conventional_extension(op);
     let derived_input = DerivedTypeAnalysisInput {
         function_name: &function_name,
         ptr_bits,
         inferred_signature,
         recovered_vars: &recovered_vars,
         ssa_blocks,
+        conventional_extension: &conventional_extension,
         parsed_context,
         local_structs,
         interproc_summary_set: interproc_report,
@@ -1399,10 +1392,17 @@ pub fn build_source_owned_type_analysis(
     let semantic_inputs = Some(DerivedTypeAnalysisSemanticInputs {
         local_field_accesses: &local_field_accesses,
     });
+    let frame_roots = |var: &SSAVar| {
+        source
+            .graph()
+            .value_id_for_var(var)
+            .and_then(|value| source.decompile_prep_facts().stack_address_root_of(value))
+            .copied()
+    };
     let derived = build_type_analysis_inner(
         derived_input,
         semantic_inputs,
-        source.decompile_prep_facts(),
+        Some(&frame_roots),
         Some(&machine_profile),
         &crate::RegisterIdentity::from_prepared(source.as_ref()),
     );
@@ -1588,6 +1588,7 @@ pub fn source_type_like(
             bits,
             signedness: Signedness::Unsigned,
         },
+        r2ssa::SourceTypeKind::Char { signed } => CTypeLike::plain_char(signed),
         r2ssa::SourceTypeKind::Pointer { target_type_id } => {
             let target = source_type_like(graph, target_type_id, visiting)?;
             // `CTypeLike::Function` already spells a pointer to function,
@@ -1934,13 +1935,13 @@ fn profile_minimum_stride(fields: &BTreeMap<u64, String>, ptr_bits: u32) -> Opti
 
 fn canonical_stack_access_widths(
     ssa_blocks: &[SSABlock],
-    prep_facts: Option<&r2ssa::DecompilePrepFacts>,
+    prep_facts: Option<FrameRoots<'_>>,
 ) -> BTreeMap<StackSlotKey, BTreeSet<u32>> {
     let Some(prep_facts) = prep_facts else {
         return BTreeMap::new();
     };
     let mut widths = BTreeMap::<StackSlotKey, BTreeSet<u32>>::new();
-    for op in ssa_blocks.iter().flat_map(|block| &block.ops) {
+    for op in ssa_blocks.iter().flat_map(|block| block.ops()) {
         let (addr, size) = match op {
             SSAOp::Load {
                 dst,
@@ -1957,7 +1958,7 @@ fn canonical_stack_access_widths(
         if size == 0 {
             continue;
         }
-        let Some(root) = prep_facts.stack_address_root_of(addr).copied() else {
+        let Some(root) = prep_facts(addr) else {
             continue;
         };
         widths.entry(root).or_default().insert(size);
@@ -1967,19 +1968,16 @@ fn canonical_stack_access_widths(
 
 fn canonical_stack_access_signedness(
     ssa_blocks: &[SSABlock],
-    prep_facts: Option<&r2ssa::DecompilePrepFacts>,
-    arch_name: Option<&str>,
+    prep_facts: Option<FrameRoots<'_>>,
+    conventional_extension: &dyn Fn(r2ssa::OpId) -> bool,
 ) -> BTreeMap<StackSlotKey, BTreeSet<ScalarSignednessEvidence>> {
     let Some(prep_facts) = prep_facts else {
         return BTreeMap::new();
     };
-    let scalar_signedness = infer_scalar_signedness(
-        ssa_blocks.iter().flat_map(|block| block.ops.iter()),
-        std::iter::empty(),
-        arch_name,
-    );
+    let scalar_signedness =
+        crate::signedness::NamedSignedness::of(ssa_blocks, false, conventional_extension);
     let mut signedness = BTreeMap::<StackSlotKey, BTreeSet<ScalarSignednessEvidence>>::new();
-    for op in ssa_blocks.iter().flat_map(|block| &block.ops) {
+    for op in ssa_blocks.iter().flat_map(|block| block.ops()) {
         let (addr, value) = match op {
             SSAOp::Load {
                 dst,
@@ -1996,7 +1994,7 @@ fn canonical_stack_access_signedness(
         let Some(observed) = scalar_signedness.get(value) else {
             continue;
         };
-        let Some(root) = prep_facts.stack_address_root_of(addr).copied() else {
+        let Some(root) = prep_facts(addr) else {
             continue;
         };
         signedness

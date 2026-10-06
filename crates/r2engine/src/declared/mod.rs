@@ -22,11 +22,20 @@ use r2source::{CanonicalStorageId, SourceFunctionReturn, SourceLogicalValue};
 
 use crate::native::{NativeTarget, storage};
 
+/// Whether a declared scalar is plain `char`, a type distinct from signed and
+/// unsigned char; its kind says whether this ABI makes it signed.
+fn is_plain_char(scalar: &r2abi::Scalar, bits: impl Into<u64>) -> bool {
+    bits.into() == 8 && scalar.name.as_deref() == Some("char")
+}
+
 /// One declaration and the graph its types are nodes of.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Declared<'a> {
     pub(crate) prototype: &'a Prototype,
     pub(crate) graph: &'a TypeGraph,
+    /// Which declaration it is: the binary's debug information, or a
+    /// library's prototype found by a name.
+    pub(crate) basis: r2source::Basis,
 }
 
 impl<'a> Declared<'a> {
@@ -42,6 +51,7 @@ impl<'a> Declared<'a> {
         Some(Self {
             prototype: declarations.function_at(entry)?,
             graph: declarations.graph(),
+            basis: r2source::Basis::DebugInfo,
         })
     }
 
@@ -50,6 +60,7 @@ impl<'a> Declared<'a> {
         Some(Self {
             prototype: target.prototypes.get(name)?,
             graph: target.prototypes.graph(),
+            basis: r2source::Basis::Declared,
         })
     }
 }
@@ -70,7 +81,8 @@ pub(crate) struct Restatement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Class {
     Integer,
-    Float,
+    /// A float of this many bytes.
+    Float(u32),
 }
 
 /// The machine one declaration is placed in.
@@ -107,7 +119,7 @@ impl<'a> Placement<'a> {
         };
         match (resolved, scalar_bits) {
             (Some(Type::Scalar(scalar)), bits) if scalar.kind == ScalarKind::Float => match bits {
-                Some(32 | 64) => Ok(Class::Float),
+                Some(bits @ (32 | 64)) => Ok(Class::Float(bits / 8)),
                 bits => Err(format!("a {bits:?}-bit float's class is the convention's")),
             },
             (Some(Type::Pointer { .. }), _) => Ok(Class::Integer),
@@ -115,6 +127,17 @@ impl<'a> Placement<'a> {
             // integer takes two, which is the convention's to place.
             (_, Some(bits)) if bits <= self.model.pointer_bits => Ok(Class::Integer),
             (other, _) => Err(format!("no register class for {other:?}")),
+        }
+    }
+
+    /// A value narrower than its register takes its low bytes, as a Sleigh pentry places it.
+    fn low_lane(&self, slot: CanonicalStorageId, bytes: u32) -> CanonicalStorageId {
+        match self.target.arch.memory_endianness {
+            r2il::Endianness::Little if bytes < slot.size => CanonicalStorageId {
+                size: bytes,
+                ..slot
+            },
+            _ => slot,
         }
     }
 
@@ -133,13 +156,10 @@ impl<'a> Placement<'a> {
         let mut placed = Vec::with_capacity(declared.prototype.parameters.len());
         for parameter in &declared.prototype.parameters {
             let slot = match self.class(declared.graph, parameter.ty) {
-                Ok(Class::Float) => {
+                Ok(Class::Float(bytes)) => {
                     floats += 1;
-                    self.target
-                        .convention
-                        .float_args
-                        .get(floats - 1)
-                        .and_then(|slot| storage(self.target.arch, slot.name()).ok())
+                    let slot = self.machine.slots.float_argument_slots().get(floats - 1);
+                    slot.map(|slot| self.low_lane(*slot, bytes))
                 }
                 Ok(Class::Integer) => {
                     integers += 1;
@@ -179,12 +199,11 @@ impl<'a> Placement<'a> {
             return (SourceFunctionReturn::Void, None);
         }
         let storage = match self.class(declared.graph, returns) {
-            Ok(Class::Float) => self
-                .target
-                .convention
-                .float_return
-                .as_ref()
-                .and_then(|slot| storage(self.target.arch, slot.name()).ok()),
+            Ok(Class::Float(bytes)) => self
+                .machine
+                .slots
+                .float_result_slot()
+                .map(|slot| self.low_lane(slot, bytes)),
             Ok(Class::Integer) => self.machine.slots.result_slot(),
             Err(reason) => {
                 r2il::refusal_evidence!(
@@ -211,18 +230,15 @@ impl<'a> Placement<'a> {
     /// another register at the first instruction, or passed nowhere, the
     /// prototype is not this body's interface.
     fn arrivals_hold(&self, declared: Declared<'_>, placed: &[CanonicalStorageId]) -> bool {
-        let bits = crate::engine_effective_ptr_bits(self.target.arch);
         for (index, (parameter, slot)) in
             declared.prototype.parameters.iter().zip(placed).enumerate()
         {
             let held = match parameter.arrival {
                 None => true,
                 Some(Arrival::Unpassed) => false,
-                Some(Arrival::Register(number)) => {
-                    r2abi::dwarf_register(&self.target.arch.name, bits, number)
-                        .and_then(|name| storage(self.target.arch, name).ok())
-                        .is_none_or(|arrived| arrived.offset == slot.offset)
-                }
+                Some(Arrival::Register(number)) => (self.target.dwarf.name_of(number))
+                    .and_then(|name| storage(self.target.arch, name).ok())
+                    .is_none_or(|arrived| arrived.offset == slot.offset),
             };
             if !held {
                 r2il::refusal_evidence!(
@@ -354,7 +370,12 @@ impl Placement<'_> {
             );
         })
         .ok()?;
-        let interface = variadic(declared.prototype, interface)?;
+        // Typed first: a declared format parameter is believed on what the
+        // declaration's types are.
+        let interface = variadic(
+            declared.prototype,
+            interface.with_types(r2source::Confidence::of(declared.basis)),
+        )?;
         self.carriers(name, interface, frame.frame_pointer)
     }
 
@@ -384,9 +405,7 @@ impl Placement<'_> {
                 Some(storage) => interface.with_frame_pointer_storage(storage),
             });
         match placed {
-            // The prototype was read rather than recovered, which is what this
-            // flag says.
-            Ok(interface) => Some(interface.with_prototype_from_source_types()),
+            Ok(interface) => Some(interface),
             Err(error) => {
                 r2il::refusal_evidence!(
                     "declared-interface",

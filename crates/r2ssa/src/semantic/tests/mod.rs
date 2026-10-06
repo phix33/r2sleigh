@@ -94,22 +94,24 @@ fn dual_space_exact_parameter_artifact(arch: &ArchSpec) -> SsaArtifact {
 }
 
 fn dual_space_locations(artifact: &SsaArtifact) -> (MemoryLocation, MemoryLocation) {
-    let block = artifact.get_block(0x1000).expect("dual-space block");
+    let block = artifact.named_block(0x1000).expect("dual-space block");
     let mut loads = block
-        .ops
+        .ops()
         .iter()
         .enumerate()
         .filter(|(_, op)| matches!(op, crate::SSAOp::Load { .. }));
     let ram_index = loads.next().expect("RAM load").0;
     let custom_index = loads.next().expect("Custom load").0;
     let ram = artifact
-        .memory_uses_for_op_site(0x1000, ram_index)
+        .inst_at(0x1000, ram_index)
+        .and_then(|inst| artifact.memory_uses_for_inst(inst))
         .and_then(|uses| uses.first())
         .expect("RAM location")
         .location
         .clone();
     let custom = artifact
-        .memory_uses_for_op_site(0x1000, custom_index)
+        .inst_at(0x1000, custom_index)
+        .and_then(|inst| artifact.memory_uses_for_inst(inst))
         .and_then(|uses| uses.first())
         .expect("Custom location")
         .location
@@ -156,14 +158,15 @@ fn calls_clobber_every_present_typed_memory_space() {
     });
     let artifact = SsaArtifact::for_symbolic(&[block], None).expect("call artifact");
     let call_index = artifact
-        .get_block(0x1000)
+        .named_block(0x1000)
         .expect("call block")
-        .ops
+        .ops()
         .iter()
         .position(|op| matches!(op, crate::SSAOp::Call { .. }))
         .expect("call op");
     let spaces = artifact
-        .memory_defs_for_op_site(0x1000, call_index)
+        .inst_at(0x1000, call_index)
+        .and_then(|inst| artifact.memory_defs_for_inst(inst))
         .expect("call memory defs")
         .iter()
         .map(|fact| fact.location.space)
@@ -488,11 +491,7 @@ fn raw_memory_access(
         },
         &memory,
         &objects,
-        super::AccessSite {
-            inst,
-            block_addr: 0x1000,
-            op_index: 0,
-        },
+        inst,
         super::RawAccess {
             address: ValueId(0),
             space,
@@ -553,12 +552,10 @@ fn memory_access_provenance_rejects_distinct_location_ambiguity() {
 
 #[test]
 fn display_names_do_not_resolve_constants_or_stack_roots() {
+    // The resolvers take graph values, so a name cannot reach them at all;
+    // what is left to say is that a name supplies no constant bits.
     let named_constant = SSAVar::new("ram:0x401000", 0, 8);
     assert_eq!(super::const_value(&named_constant), None);
-    assert_eq!(super::resolve_const_value(None, &named_constant), None);
-
-    let named_stack_pointer = SSAVar::new("rsp", 0, 8);
-    assert_eq!(super::resolve_stack_root(None, &named_stack_pointer), None);
 
     let canonical_constant = SSAVar::constant(0x401000, 8).renamed("unrelated-display-name");
     assert_eq!(super::const_value(&canonical_constant), Some(0x401000));
@@ -1183,6 +1180,7 @@ fn return_boundary_recovery_accepts_identical_fanin_and_phi_free_cycles() {
     .expect("fanin boundary artifact");
     let converged = super::reaching_abi_value_in_block(
         fanin.function(),
+        Some(fanin.decompile_prep_facts()),
         fanin.graph(),
         fanin.machine_context(),
         0x3030,
@@ -1215,6 +1213,7 @@ fn return_boundary_recovery_accepts_identical_fanin_and_phi_free_cycles() {
     // unchanged; the back edge adds no definition and no merge.
     let round_the_loop = super::reaching_abi_value_in_block(
         cycle.function(),
+        Some(cycle.decompile_prep_facts()),
         cycle.graph(),
         cycle.machine_context(),
         0x4000,
@@ -1259,6 +1258,7 @@ fn reaching_abi_value_crosses_a_loop_that_defines_nothing_of_it() {
     .expect("loop artifact");
     let reaching = super::reaching_abi_value_in_block(
         artifact.function(),
+        Some(artifact.decompile_prep_facts()),
         artifact.graph(),
         artifact.machine_context(),
         0x5008,
@@ -1279,6 +1279,7 @@ fn reaching_abi_value_crosses_a_loop_that_defines_nothing_of_it() {
     // reaches the exit.
     let written = super::reaching_abi_value_in_block(
         artifact.function(),
+        Some(artifact.decompile_prep_facts()),
         artifact.graph(),
         artifact.machine_context(),
         0x5008,
@@ -1341,6 +1342,7 @@ fn reaching_abi_value_walks_a_diamond_chain_once() {
     .expect("diamond chain artifact");
     let reaching = super::reaching_abi_value_in_block(
         artifact.function(),
+        Some(artifact.decompile_prep_facts()),
         artifact.graph(),
         artifact.machine_context(),
         0x8010 + diamonds * 0x40,
@@ -1762,7 +1764,7 @@ fn every_recovered_induction_proves_itself_against_its_graph() {
     let inductions = &artifact.facts().structured.inductions;
     assert!(!inductions.is_empty(), "the fixture has an induction");
     for (phi, fact) in inductions {
-        assert_eq!(*phi, fact.phi, "keyed by the merge it describes");
+        assert_eq!(phi, fact.phi, "keyed by the merge it describes");
         assert!(fact.validate(graph), "{fact:?} must prove itself");
     }
 }
@@ -1891,7 +1893,7 @@ fn rewrites_while_to_for_with_two_step_alias_update_chain() {
         .facts()
         .structured
         .inductions
-        .get(&certificate.induction_phi)
+        .get(certificate.induction_phi)
         .expect("aliased induction fact");
     assert_eq!(induction.step, InductionStep::AddConst(1));
     assert!(induction.validate(artifact.graph()));
@@ -2558,9 +2560,9 @@ fn a_convention_result_read_only_by_the_return_is_the_call_result() {
     let (function, graph) = (artifact.function(), artifact.graph());
     let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &[eax]);
     let call_index = function
-        .get_block(0x1000)
+        .named_block(0x1000)
         .expect("entry block")
-        .ops
+        .ops()
         .iter()
         .position(|op| matches!(op, SSAOp::Call { .. }))
         .expect("the call survives");

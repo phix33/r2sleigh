@@ -3,48 +3,38 @@
 use super::super::*;
 use super::*;
 
+/// Parameters take the convention's argument registers in order, whatever the architecture.
 #[test]
-fn abi_register_params_cover_aarch64_as_well_as_sysv64() {
-    // radare2 reports `arch="aarch64"` with the calling-convention field
-    // left empty. Requiring a named convention meant arm64 functions got no
-    // register parameters at all, which switched off the whole parameter
-    // home machinery: no ParamHome slots, so no hidden-home bindings, so an
-    // empty stack alias map, so frame accesses rendered as raw pointer
-    // arithmetic instead of named locals.
-    let signature = |arch: &str, callconv: &str| super::InferredSignature {
+fn abi_register_params_are_the_stated_argument_registers() {
+    let signature = super::InferredSignature {
         function_name: "f".to_string(),
         signature: "int f(long a, long b, long c)".to_string(),
         ret_type: "int".to_string(),
-        params: vec![
-            super::InferredSignatureParam {
-                name: "a".to_string(),
+        params: ["a", "b", "c"]
+            .map(|name| super::InferredSignatureParam {
+                name: name.to_string(),
                 param_type: "int64_t".to_string(),
-            },
-            super::InferredSignatureParam {
-                name: "b".to_string(),
-                param_type: "int64_t".to_string(),
-            },
-            super::InferredSignatureParam {
-                name: "c".to_string(),
-                param_type: "int64_t".to_string(),
-            },
-        ],
-        callconv: callconv.to_string(),
-        arch: arch.to_string(),
+            })
+            .to_vec(),
+        callconv: String::new(),
+        arch: String::new(),
     };
-    let regs = |arch: &str, callconv: &str| {
-        super::inferred_signature_abi_register_params(&signature(arch, callconv), 64)
+    let regs = |stated: &[&str]| {
+        let stated = stated
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+        super::inferred_signature_abi_register_params(&signature, &stated, 64)
             .into_iter()
             .map(|param| param.reg)
             .collect::<Vec<_>>()
     };
 
-    assert_eq!(regs("aarch64", ""), vec!["x0", "x1", "x2"]);
-    assert_eq!(regs("arm64", "aapcs"), vec!["x0", "x1", "x2"]);
-    assert_eq!(regs("x86-64", "amd64"), vec!["rdi", "rsi", "rdx"]);
+    assert_eq!(regs(&["x0", "x1", "x2", "x3"]), vec!["x0", "x1", "x2"]);
+    assert_eq!(regs(&["rdi", "rsi"]), vec!["rdi", "rsi"]);
     assert!(
-        regs("mips", "").is_empty(),
-        "an architecture with no table here still yields nothing"
+        regs(&[]).is_empty(),
+        "a convention that states none binds none"
     );
 }
 
@@ -126,10 +116,10 @@ fn same_parameter_storage_needs_no_per_architecture_table() {
 fn prepared_stack_roots_separate_arm64_param_homes_from_return_locals() {
     let home_addr = SSAVar::new("tmp:home", 1, 8);
     let return_addr = SSAVar::new("tmp:return", 1, 8);
-    let ssa_blocks = [SSABlock {
-        addr: 0x1000,
-        size: 16,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x1000,
+        16,
+        vec![
             SSAOp::IntAdd {
                 dst: home_addr.clone(),
                 a: SSAVar::new("sp", 1, 8),
@@ -151,29 +141,26 @@ fn prepared_stack_roots_separate_arm64_param_homes_from_return_locals() {
                 val: SSAVar::new("w8", 0, 4),
             },
         ],
-        phis: Vec::new(),
-    }];
-    let prep_facts = r2ssa::DecompilePrepFacts {
-        stack_address_roots: [
-            (
-                home_addr,
-                r2ssa::StackAddressRoot {
-                    base: r2ssa::StackAddressBase::StackPointer,
-                    offset: -8,
-                },
-            ),
-            (
-                return_addr,
-                r2ssa::StackAddressRoot {
-                    base: r2ssa::StackAddressBase::StackPointer,
-                    offset: -4,
-                },
-            ),
-        ]
-        .into_iter()
-        .collect(),
-        ..r2ssa::DecompilePrepFacts::default()
-    };
+        Vec::new(),
+    )];
+    let prep_facts = [
+        (
+            home_addr,
+            r2ssa::StackAddressRoot {
+                base: r2ssa::StackAddressBase::StackPointer,
+                offset: -8,
+            },
+        ),
+        (
+            return_addr,
+            r2ssa::StackAddressRoot {
+                base: r2ssa::StackAddressBase::StackPointer,
+                offset: -4,
+            },
+        ),
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeMap<SSAVar, r2ssa::StackAddressRoot>>();
     let mut stack_slots = [(-8, "var_8h"), (-4, "var_ch")]
         .into_iter()
         .map(|(offset, name)| {
@@ -208,7 +195,7 @@ fn prepared_stack_roots_separate_arm64_param_homes_from_return_locals() {
         &register_params,
         &mut stack_slots,
         &ssa_blocks,
-        Some(&prep_facts),
+        Some(&|var: &SSAVar| prep_facts.get(var).copied()),
         &aarch64_register_identity(),
     );
 
@@ -262,6 +249,7 @@ fn main_name_without_signature_evidence_does_not_fabricate_signature_output() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: Some(summary_set),
@@ -390,6 +378,7 @@ fn interproc_heap_alloc_summary_upgrades_pointer_sized_scalar_return() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: Some(summary_set),
@@ -490,6 +479,7 @@ fn interproc_returned_arg_summary_propagates_param_type_and_callee_facts() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: Some(summary_set),
@@ -553,6 +543,7 @@ fn local_inferred_scalar_param_narrows_external_wide_signature() {
         },
         recovered_vars: &vars,
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,
@@ -636,6 +627,7 @@ fn recovered_stack_arg_binds_to_canonical_signature_slot() {
         },
         recovered_vars: &vars,
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,
@@ -757,6 +749,7 @@ fn exact_named_external_size_signature_blocks_local_byte_narrowing() {
         },
         recovered_vars: &vars,
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,
@@ -837,6 +830,7 @@ fn authoritative_external_signature_keeps_param_count_over_longer_local_signatur
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,
@@ -1033,10 +1027,10 @@ fn prepared_entry_store_roots_classify_unknown_param_homes() {
         );
     }
 
-    let ssa_blocks = [SSABlock {
-        addr: 0x1000,
-        size: 4,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x1000,
+        4,
+        vec![
             SSAOp::IntAdd {
                 dst: SSAVar::new("tmp:slot", 1, 8),
                 a: SSAVar::new("RBP", 1, 8),
@@ -1068,8 +1062,8 @@ fn prepared_entry_store_roots_classify_unknown_param_homes() {
                 val: SSAVar::new("EDX", 0, 4),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
 
     let prep_facts = three_prepared_frame_slot_roots();
     let analysis = build_type_analysis_with_prep_facts(
@@ -1101,6 +1095,7 @@ fn prepared_entry_store_roots_classify_unknown_param_homes() {
             },
             recovered_vars: &[],
             ssa_blocks: &ssa_blocks,
+            conventional_extension: &|_| false,
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
@@ -1176,10 +1171,10 @@ fn prepared_roots_complete_partial_register_param_homes() {
         );
     }
 
-    let ssa_blocks = [SSABlock {
-        addr: 0x1000,
-        size: 4,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x1000,
+        4,
+        vec![
             SSAOp::IntAdd {
                 dst: SSAVar::new("tmp:slot", 1, 8),
                 a: SSAVar::new("RBP", 1, 8),
@@ -1211,8 +1206,8 @@ fn prepared_roots_complete_partial_register_param_homes() {
                 val: SSAVar::new("EDX", 0, 4),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
     let recovered_vars = [
         RecoveredVariable {
             name: "var_8h".to_string(),
@@ -1270,6 +1265,7 @@ fn prepared_roots_complete_partial_register_param_homes() {
             },
             recovered_vars: &recovered_vars,
             ssa_blocks: &ssa_blocks,
+            conventional_extension: &|_| false,
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
@@ -1376,10 +1372,10 @@ fn prepared_entry_store_copy_roots_classify_unknown_param_homes() {
         );
     }
 
-    let ssa_blocks = [SSABlock {
-        addr: 0x1000,
-        size: 4,
-        ops: vec![
+    let ssa_blocks = [SSABlock::from_parts(
+        0x1000,
+        4,
+        vec![
             SSAOp::IntAdd {
                 dst: SSAVar::new("tmp:slot", 1, 8),
                 a: SSAVar::new("RBP", 1, 8),
@@ -1423,8 +1419,8 @@ fn prepared_entry_store_copy_roots_classify_unknown_param_homes() {
                 val: SSAVar::new("tmp:spill_v", 1, 4),
             },
         ],
-        phis: Vec::new(),
-    }];
+        Vec::new(),
+    )];
 
     let prep_facts = three_prepared_frame_slot_roots();
     let analysis = build_type_analysis_with_prep_facts(
@@ -1456,6 +1452,7 @@ fn prepared_entry_store_copy_roots_classify_unknown_param_homes() {
             },
             recovered_vars: &[],
             ssa_blocks: &ssa_blocks,
+            conventional_extension: &|_| false,
             parsed_context,
             local_structs: LocalStructArtifacts::default(),
             interproc_summary_set: None,
@@ -1499,6 +1496,7 @@ fn inferred_signature_certificate_records_local_source() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: None,
@@ -1610,6 +1608,7 @@ fn interproc_heap_alloc_summary_upgrades_generic_return_type() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: Some(summary_set),
@@ -1673,6 +1672,7 @@ fn interproc_void_return_summary_replaces_weak_scalar_return_type() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: Some(summary_set),
@@ -1784,6 +1784,7 @@ fn interproc_escape_only_does_not_certify_out_param() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: Some(summary_set),
@@ -1832,6 +1833,7 @@ fn interproc_arg_write_out_param_certificate_records_write_evidence() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: Some(summary_set),
@@ -1899,6 +1901,7 @@ fn interproc_memory_write_out_param_certificate_records_memory_write_evidence() 
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: Some(summary_set),
@@ -1945,6 +1948,7 @@ fn interproc_summary_name_does_not_project_role_signature() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: Some(semantic_role_summary_set("limfield", Some(3))),
@@ -1987,6 +1991,7 @@ fn semantic_role_signature_hint_does_not_truncate_named_authoritative_signature(
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext {
             merged_signature: Some(FunctionSignatureSpec {
                 ret_type: Some(CTypeLike::Int {
@@ -2046,6 +2051,7 @@ fn interproc_summary_name_does_not_truncate_weak_entry_signature() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: Some(semantic_role_summary_set("entry.init0", Some(1))),
@@ -2119,6 +2125,7 @@ fn interproc_summary_name_does_not_replace_weak_scalar_return() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: Some(semantic_role_summary_set("dbg.verror_at_line", Some(6))),
@@ -2137,58 +2144,6 @@ fn interproc_summary_name_does_not_replace_weak_scalar_return() {
             bits: 64,
             signedness: Signedness::Signed,
         })
-    );
-}
-
-#[test]
-fn weak_summary_kind_projection_does_not_widen_authoritative_anonymous_signature() {
-    let mut facts = FunctionTypeFacts {
-        merged_signature: Some(FunctionSignatureSpec {
-            ret_type: Some(CTypeLike::Void),
-            params: vec![
-                FunctionParamSpec {
-                    name: "dst".to_string(),
-                    ty: Some(void_pointer_type()),
-                },
-                FunctionParamSpec {
-                    name: "src".to_string(),
-                    ty: Some(void_pointer_type()),
-                },
-            ],
-        }),
-        ..FunctionTypeFacts::default()
-    };
-    let projected = FunctionSignatureSpec {
-        ret_type: Some(CTypeLike::Void),
-        params: vec![
-            FunctionParamSpec {
-                name: "dst".to_string(),
-                ty: Some(void_pointer_type()),
-            },
-            FunctionParamSpec {
-                name: "src".to_string(),
-                ty: Some(void_pointer_type()),
-            },
-            FunctionParamSpec {
-                name: "len".to_string(),
-                ty: Some(typedef_type("size_t")),
-            },
-        ],
-    };
-
-    let result = facts.apply_signature_projection(
-        "fcn.0000a200",
-        FunctionSignatureProjection::weak_summary_kind(projected),
-        64,
-    );
-
-    assert!(result.rejected.is_some());
-    assert_eq!(
-        facts
-            .merged_signature
-            .as_ref()
-            .map(|signature| signature.params.len()),
-        Some(2)
     );
 }
 
@@ -2373,6 +2328,7 @@ fn interproc_returned_arg_summary_exports_callee_facts() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: Some(summary_set),
@@ -2474,6 +2430,7 @@ fn interproc_summary_name_does_not_export_role_callee_type_facts() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: Some(summary_set),
@@ -2595,6 +2552,7 @@ fn interproc_memory_effect_summary_upgrades_generic_pointer_like_params() {
         },
         recovered_vars: &[],
         ssa_blocks: &[],
+        conventional_extension: &|_| false,
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
         interproc_summary_set: Some(summary_set),
@@ -2616,17 +2574,10 @@ fn interproc_memory_effect_summary_upgrades_generic_pointer_like_params() {
 #[test]
 fn prepared_phi_refuses_conflicting_parameter_type_classes() {
     let merged = SSAVar::new("X0", 1, 8);
-    let blocks = [SSABlock {
-        addr: 0x1000,
-        phis: vec![PhiNode {
-            dst: merged.clone(),
-            sources: vec![
-                (0xff0, SSAVar::new("X0", 0, 8)),
-                (0xff4, SSAVar::new("X1", 0, 8)),
-            ],
-            canonical_storage: None,
-        }],
-        ops: vec![
+    let blocks = [SSABlock::from_parts(
+        0x1000,
+        0,
+        vec![
             SSAOp::IntAdd {
                 dst: SSAVar::new("field0", 1, 8),
                 a: merged.clone(),
@@ -2639,7 +2590,7 @@ fn prepared_phi_refuses_conflicting_parameter_type_classes() {
             },
             SSAOp::IntAdd {
                 dst: SSAVar::new("field8", 1, 8),
-                a: merged,
+                a: merged.clone(),
                 b: SSAVar::constant(8, 8),
             },
             SSAOp::Load {
@@ -2648,16 +2599,23 @@ fn prepared_phi_refuses_conflicting_parameter_type_classes() {
                 addr: SSAVar::new("field8", 1, 8),
             },
         ],
-        size: 0,
-    }];
+        vec![PhiNode {
+            dst: merged,
+            sources: vec![
+                (0xff0, SSAVar::new("X0", 0, 8)),
+                (0xff4, SSAVar::new("X1", 0, 8)),
+            ],
+            canonical_storage: None,
+        }],
+    )];
     let mut diagnostics = TypeAnalysisDiagnostics::default();
 
     let artifacts = infer_local_struct_artifacts_from_blocks(
         &blocks,
         None,
-        Some("aarch64"),
-        r2ssa::MachineArchitectureFamily::AArch64,
-        &collect_pointer_arg_slot_map(r2ssa::MachineArchitectureFamily::AArch64, 64),
+        &|_| false,
+        None,
+        &super::aapcs64_argument_slots(),
         64,
         &mut diagnostics,
     );

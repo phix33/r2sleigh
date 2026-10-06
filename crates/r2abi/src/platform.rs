@@ -114,6 +114,141 @@ const AARCH64_DARWIN: [PlatformRegister; 1] = [PlatformRegister {
                register x18. Don't use this register.\"",
 }];
 
+/// What a platform's ABI says of its default calling convention that no
+/// compiler specification in the Sleigh bundle states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallingConvention {
+    /// The convention's name as radare2 spells it, which is what `afi`
+    /// prints and what radare2's output is diffed against.
+    pub name: &'static str,
+    /// How many bytes past the stack pointer a function may use without
+    /// moving it.
+    pub red_zone_bytes: u32,
+    /// Whether every variadic argument travels on the stack from the first
+    /// slot, whatever registers the fixed arguments leave free.
+    pub variadic_tail_on_stack: bool,
+    /// The register a call passes a variadic callee's count of vector
+    /// arguments in, which every call may therefore read.
+    pub variadic_count_register: Option<&'static str>,
+    /// The register a frame-keeping function holds its frame base in.
+    pub frame_pointer: Option<&'static str>,
+    /// The documents that state these.
+    pub citation: &'static str,
+}
+
+const SYSTEM_V_AMD64: CallingConvention = CallingConvention {
+    name: "amd64",
+    red_zone_bytes: 128,
+    variadic_tail_on_stack: false,
+    frame_pointer: Some("rbp"),
+    variadic_count_register: Some("al"),
+    citation: "System V AMD64 psABI 1.0, section 3.2.2: \"The 128-byte area beyond the \
+               location pointed to by %rsp is considered to be reserved and shall not be \
+               modified by signal or interrupt handlers\"; section 3.5.7: \"%al is used as \
+               hidden argument to specify the number of vector registers used\"; Figure 3.4: %rbp \"callee-saved register; optionally used as frame pointer\"",
+};
+
+const MICROSOFT_X64: CallingConvention = CallingConvention {
+    name: "ms",
+    red_zone_bytes: 0,
+    variadic_tail_on_stack: false,
+    frame_pointer: Some("rbp"),
+    variadic_count_register: None,
+    citation: "Microsoft x64 software conventions, \"Stack usage\": the convention \
+               defines no red zone; its register usage table lists RBP as nonvolatile and usable as a frame pointer",
+};
+
+const I386_CDECL: CallingConvention = CallingConvention {
+    name: "cdecl",
+    red_zone_bytes: 0,
+    variadic_tail_on_stack: false,
+    frame_pointer: Some("ebp"),
+    variadic_count_register: None,
+    citation: "System V i386 ABI 1.1, \"Function Calling Sequence\": the convention \
+               defines no red zone; its register table gives %ebp the frame pointer role",
+};
+
+const AAPCS64: CallingConvention = CallingConvention {
+    name: "arm64",
+    red_zone_bytes: 0,
+    variadic_tail_on_stack: false,
+    frame_pointer: Some("x29"),
+    variadic_count_register: None,
+    citation: "AAPCS64, \"Universal stack constraints\": \"A process may only access \
+               (for reading or writing) the closed interval of the entire stack delimited \
+               by [SP, stack-base - 1]\"; its general-purpose register table names r29 FP, the frame pointer",
+};
+
+const AAPCS64_DARWIN: CallingConvention = CallingConvention {
+    variadic_tail_on_stack: true,
+    variadic_count_register: None,
+    citation: "Apple, \"Writing ARM64 code for Apple platforms\": \"the caller places \
+               the arguments for the variadic portion of a function on the stack\"",
+    ..AAPCS64
+};
+
+const AAPCS32: CallingConvention = CallingConvention {
+    name: "arm32",
+    red_zone_bytes: 0,
+    variadic_tail_on_stack: false,
+    frame_pointer: Some("r11"),
+    variadic_count_register: None,
+    citation: "AAPCS32, \"Universal stack constraints\": \"A process may only access \
+               (for reading or writing) the closed interval of the entire stack delimited \
+               by [SP, stack-base - 1]\"; AAPCS32 leaves the frame pointer to the platform, and GCC in ARM state keeps it in r11, the APCS fp",
+};
+
+const RISCV_LP64: CallingConvention = CallingConvention {
+    name: "rvg",
+    red_zone_bytes: 0,
+    variadic_tail_on_stack: false,
+    frame_pointer: Some("s0"),
+    variadic_count_register: None,
+    citation: "RISC-V ELF psABI, \"Integer Calling Convention\": the convention defines \
+               no red zone; \"Register Convention\": x8 \"s0/fp Saved register/frame pointer\"",
+};
+
+/// The default calling convention a program for this architecture and
+/// platform runs under.
+pub fn calling_convention(
+    arch: &str,
+    bits: u32,
+    platform: Platform,
+) -> Option<&'static CallingConvention> {
+    match (crate::family(arch), bits, platform) {
+        (Some("x86"), 64, Platform::Windows) => Some(&MICROSOFT_X64),
+        (Some("x86"), 64, _) => Some(&SYSTEM_V_AMD64),
+        (Some("x86"), 32, _) => Some(&I386_CDECL),
+        (Some("arm"), 64, Platform::Darwin) => Some(&AAPCS64_DARWIN),
+        (Some("arm"), 64, _) => Some(&AAPCS64),
+        (Some("arm"), 32, _) => Some(&AAPCS32),
+        (Some("riscv"), 64, _) => Some(&RISCV_LP64),
+        _ => None,
+    }
+}
+
+/// The direction flag, which every x86 psABI requires clear on entry to and
+/// return from a function: a conforming callee hands it back as it found it.
+const X86_DIRECTION_FLAG: [PlatformRegister; 1] = [PlatformRegister {
+    register: "df",
+    duty: RegisterDuty::CalleeSaved,
+    bits: None,
+    citation: "System V AMD64 psABI 1.0, section 3.2.1: \"The direction flag DF in the \
+               %rFLAGS register must be clear (set to \u{201c}forward\u{201d} direction) on \
+               function entry and return\"; System V i386 ABI 1.1, section 2.2.1, the same of \
+               %eflags; Microsoft x64 software conventions: \"On function exit and on \
+               function entry ... the direction flag in the CPU flags register is expected \
+               to be cleared\"",
+}];
+
+/// The duties an architecture's ABIs assign on every platform alike.
+pub fn architecture_registers(arch: &str) -> &'static [PlatformRegister] {
+    match crate::family(arch) {
+        Some("x86") => &X86_DIRECTION_FLAG,
+        _ => &[],
+    }
+}
+
 /// The duties a platform's ABI assigns beyond its calling convention's lists.
 ///
 /// The architecture is named as the engine names it; `bits` is the width the
@@ -146,6 +281,24 @@ mod tests {
             .iter()
             .find(|row| row.register == register)
             .map(|row| row.duty)
+    }
+
+    /// What no compiler specification states is the platform's: the red
+    /// zone is System V's alone among x86-64 ABIs, and only Apple's arm64 ABI
+    /// passes a variadic tail on the stack from its first argument.
+    #[test]
+    fn each_platform_states_its_own_convention() {
+        let x64 = |platform| calling_convention("x86-64", 64, platform).expect("a convention");
+        assert_eq!(x64(Platform::Linux).name, "amd64");
+        assert_eq!(x64(Platform::Linux).red_zone_bytes, 128);
+        assert_eq!(x64(Platform::Darwin).red_zone_bytes, 128);
+        assert_eq!(x64(Platform::Windows).name, "ms");
+        assert_eq!(x64(Platform::Windows).red_zone_bytes, 0);
+        let arm64 = |platform| calling_convention("aarch64", 64, platform).expect("a convention");
+        assert!(arm64(Platform::Darwin).variadic_tail_on_stack);
+        assert!(!arm64(Platform::Linux).variadic_tail_on_stack);
+        assert_eq!(arm64(Platform::Darwin).name, "arm64");
+        assert!(calling_convention("mips", 32, Platform::Linux).is_none());
     }
 
     /// Each platform names the register its thread pointer lives in, and no other platform's.

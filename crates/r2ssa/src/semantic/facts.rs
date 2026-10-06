@@ -66,14 +66,6 @@ impl SemanticId {
     pub const fn predicate(predicate: PredicateId) -> Self {
         Self::Predicate(predicate)
     }
-
-    pub const fn control_domain(domain: ControlDomainId) -> Self {
-        Self::ControlDomain(domain)
-    }
-
-    pub const fn effect(at: InstId) -> Self {
-        Self::Effect(at)
-    }
 }
 
 impl std::fmt::Display for SemanticId {
@@ -285,17 +277,17 @@ pub struct ObjectModel {
     /// it is not known, which is the difference between an array element and a
     /// scalar slot. Every stage that would otherwise assume an access sits at
     /// its object's own offset has to ask this first.
-    pub indexed_addresses: BTreeMap<ValueId, ValueId>,
+    pub indexed_addresses: crate::dense::IdMap<ValueId, ValueId>,
     /// How far into its object an address sits, for a member of a declared
     /// aggregate or an address displaced from an object's base. Absent means
     /// the address is the object's own base.
-    pub interior_offsets: BTreeMap<ValueId, i64>,
+    pub interior_offsets: crate::dense::IdMap<ValueId, i64>,
     /// Indexed addresses whose base is displaced from the object's base, so
     /// the index alone does not say where in the object the element is.
-    pub displaced_indexed_addresses: BTreeSet<ValueId>,
+    pub displaced_indexed_addresses: crate::dense::IdSet<ValueId>,
     /// How far each of those starts from the object's base: `table[i].high`
     /// is the table's base plus four, indexed.
-    pub indexed_displacements: BTreeMap<ValueId, i64>,
+    pub indexed_displacements: crate::dense::IdMap<ValueId, i64>,
     /// How many bytes a callee is proven to write into each object from its base.
     pub callee_write_reach: BTreeMap<ObjectId, u32>,
     /// Stack objects whose address leaves this body as a value.
@@ -318,28 +310,28 @@ pub struct ObjectModel {
 impl ObjectModel {
     /// Whether this indexed address starts from a displaced base.
     pub fn indexed_base_is_displaced(&self, value: ValueId) -> bool {
-        self.displaced_indexed_addresses.contains(&value)
+        self.displaced_indexed_addresses.contains(value)
     }
 
     /// Whether this address reaches its object at a computed offset.
     pub fn address_is_indexed(&self, value: ValueId) -> bool {
-        self.indexed_addresses.contains_key(&value)
+        self.indexed_addresses.contains(value)
     }
 
     /// How far into its object this address sits, for a declared aggregate's
     /// member. Absent means the address is the object's own base.
     pub fn interior_offset(&self, value: ValueId) -> Option<i64> {
-        self.interior_offsets.get(&value).copied()
+        self.interior_offsets.get(value).copied()
     }
 
     /// The value that supplies a computed offset into an object.
     pub fn index_for_address(&self, value: ValueId) -> Option<ValueId> {
-        self.indexed_addresses.get(&value).copied()
+        self.indexed_addresses.get(value).copied()
     }
 
     /// How far an indexed address starts from its object's base.
     pub fn indexed_displacement(&self, value: ValueId) -> i64 {
-        self.indexed_displacements.get(&value).copied().unwrap_or(0)
+        self.indexed_displacements.get(value).copied().unwrap_or(0)
     }
 
     pub fn object_for_value(&self, value: ValueId, space: SpaceId) -> Option<ObjectId> {
@@ -435,13 +427,6 @@ impl RelativeMemoryAddress {
             Self::Affine { .. } | Self::Unknown => None,
         }
     }
-
-    pub fn constant_offset(&self) -> Option<i64> {
-        match self {
-            Self::Exact(offset) | Self::Affine { offset, .. } => Some(*offset),
-            Self::Unknown => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -491,8 +476,8 @@ pub struct MemoryPhiFact {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemorySSAFacts {
-    pub uses_by_inst: BTreeMap<InstId, Vec<MemoryUseFact>>,
-    pub defs_by_inst: BTreeMap<InstId, Vec<MemoryDefFact>>,
+    pub uses_by_inst: crate::dense::IdMap<InstId, Vec<MemoryUseFact>>,
+    pub defs_by_inst: crate::dense::IdMap<InstId, Vec<MemoryDefFact>>,
     pub phis_by_block: BTreeMap<u64, Vec<MemoryPhiFact>>,
 }
 
@@ -587,7 +572,7 @@ pub struct CallSiteFact {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CallSiteFacts {
     pub by_id: BTreeMap<CallSiteId, CallSiteFact>,
-    pub by_inst: BTreeMap<InstId, CallSiteId>,
+    pub by_inst: crate::dense::IdMap<InstId, CallSiteId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -792,7 +777,7 @@ pub struct SourceFormalParameterFact {
 pub struct SourceBoundaryFacts {
     pub parameters: BTreeMap<u32, SourceFormalParameterFact>,
     pub calls: BTreeMap<CallSiteId, SourceCallBoundaryFact>,
-    pub returns: BTreeMap<InstId, SourceReturnBoundaryFact>,
+    pub returns: crate::dense::IdMap<InstId, SourceReturnBoundaryFact>,
     /// Convention-clobbered registers this body leaves exactly as it found
     /// them at every exit. A caller that reads one of these after calling
     /// here is reading its own value, not a clobber; see
@@ -857,6 +842,13 @@ impl LoopCarrierEdgeValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub struct LoopCarrierUpdateFact {
     pub predecessor: u64,
     pub value: ValueId,
@@ -997,6 +989,13 @@ impl InductionFact {
 /// remain expressions; consumers must not globally replace them with the
 /// carrier because their meaning depends on the edge program point.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub struct LoopCarrierFact {
     pub id: SemanticId,
     pub loop_id: LoopId,
@@ -1019,6 +1018,13 @@ impl LoopCarrierFact {
     ///
     /// The rows are sealed in [`StructuredLoopFact::validate_carrier_members`];
     /// this projection deliberately contains no second membership algorithm.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     pub fn coalescing_values(&self) -> BTreeSet<ValueId> {
         // A member whose only role is sharing a run with a real member is not
         // the carrier's claim: the run is the span's, and the span offers it to
@@ -1044,6 +1050,13 @@ impl LoopCarrierFact {
     /// Entry and update sites must be inputs of this carrier's header phi.
     /// Dominating initializer sites must be inputs of a phi whose output is
     /// one of this carrier's certified identity values.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     pub fn validate(&self, graph: &SsaGraph) -> bool {
         let Some(phi_inst) = graph.def_inst(self.phi) else {
             return false;
@@ -1136,6 +1149,13 @@ pub struct TripGuard {
 
 /// `Σ coefficient·value + constant` modulo `2^width_bits`, over values the function is entered with.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a sparse affine form: a few terms each, where a dense index would cost O(values) per form"
+    )
+)]
 pub struct EntryAffineForm {
     pub width_bits: u32,
     /// Nonzero coefficients by entry value.
@@ -1220,8 +1240,6 @@ pub struct StructuredAccessId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredMemoryAccessFact {
     pub id: StructuredAccessId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub space: SpaceId,
     pub object: ObjectId,
     pub address: ValueId,
@@ -1239,8 +1257,7 @@ pub struct StructuredMemoryAccessFact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredRecursiveCallFact {
     pub call_site: CallSiteId,
-    pub block_addr: u64,
-    pub op_index: usize,
+    pub at: InstId,
     pub target: u64,
 }
 
@@ -1261,9 +1278,6 @@ pub struct MemoryRoundTripCertificate {
     pub write: StructuredAccessId,
     pub read: StructuredAccessId,
     pub object: ObjectId,
-    pub block_addr: u64,
-    pub write_op_index: usize,
-    pub read_op_index: usize,
     /// Later loads of the same location, in the same block, with no write to
     /// the object between the certified read and them beyond the round trip's
     /// own. The location holds what it held, so each of these reads the value
@@ -1271,8 +1285,6 @@ pub struct MemoryRoundTripCertificate {
     /// The machine spells the flags of a read-modify-write this way: Sleigh
     /// re-loads the address once per flag it sets.
     pub redundant_reads: Vec<StructuredAccessId>,
-    /// The op indexes of those reads, for the ledgers that ask per site.
-    pub redundant_read_op_indexes: Vec<usize>,
 }
 
 /// One store of a proven constant whose bytes tile a run of declared members.
@@ -1282,8 +1294,6 @@ pub struct MemoryRoundTripCertificate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberRunStoreCertificate {
     pub inst: InstId,
-    pub block_addr: u64,
-    pub op_index: usize,
     pub object: ObjectId,
     pub address: ValueId,
     pub value: ValueId,
@@ -1339,12 +1349,12 @@ pub struct StructuredDataflowFacts {
     pub loops: BTreeMap<LoopId, StructuredLoopFact>,
     /// Loop-carried values whose motion round the latch is known exactly,
     /// keyed by the header merge that carries them.
-    pub inductions: BTreeMap<ValueId, InductionFact>,
+    pub inductions: crate::dense::IdMap<ValueId, InductionFact>,
     /// Cyclic CFG blocks not represented by a structured loop fact.
     pub unstructured_cycle_blocks: BTreeSet<u64>,
     pub memory_accesses: BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
     /// Wide constant stores written out one declared member at a time.
-    pub member_run_stores: BTreeMap<InstId, MemberRunStoreCertificate>,
+    pub member_run_stores: crate::dense::IdMap<InstId, MemberRunStoreCertificate>,
     pub recursive_calls: BTreeMap<CallSiteId, StructuredRecursiveCallFact>,
 }
 
@@ -1388,12 +1398,12 @@ pub(crate) struct ObjectModelBuilder<'a> {
     pub(crate) declared_slots: &'a DeclaredStackSlots,
     pub(crate) objects: BTreeMap<ObjectId, ObjectFact>,
     pub(crate) value_objects: BTreeMap<MemoryObjectKey, ObjectId>,
-    pub(crate) indexed_addresses: BTreeMap<ValueId, ValueId>,
+    pub(crate) indexed_addresses: crate::dense::IdMap<ValueId, ValueId>,
     /// How far into its object an address sits, for a member of a declared
     /// aggregate or an address displaced from an object's base.
-    pub(crate) interior_offsets: BTreeMap<ValueId, i64>,
-    pub(crate) displaced_indexed_addresses: BTreeSet<ValueId>,
-    pub(crate) indexed_displacements: BTreeMap<ValueId, i64>,
+    pub(crate) interior_offsets: crate::dense::IdMap<ValueId, i64>,
+    pub(crate) displaced_indexed_addresses: crate::dense::IdSet<ValueId>,
+    pub(crate) indexed_displacements: crate::dense::IdMap<ValueId, i64>,
     /// Frame positions something proves an object starts at: a declared slot,
     /// a direct access, or an address that leaves as a value.
     pub(crate) evidenced_roots: BTreeSet<StackAddressRoot>,
@@ -1410,7 +1420,7 @@ pub(crate) struct ObjectModelBuilder<'a> {
     /// What every value can be, for an index's lower bound.
     pub(crate) values: &'a crate::values::ValueRanges,
     /// Addresses whose displaced parent is being resolved, against a cycle.
-    pub(crate) resolving: BTreeSet<ValueId>,
+    pub(crate) resolving: crate::dense::IdSet<ValueId>,
     pub(crate) stack_pointer_carrier: Option<CanonicalStorageId>,
     pub(crate) machine_context: Option<&'a SourceMachineContext>,
     pub(crate) stack_objects: BTreeMap<StackObjectKey, ObjectId>,
@@ -1462,10 +1472,10 @@ impl<'a> ObjectModelBuilder<'a> {
             declared_slots,
             objects,
             value_objects: BTreeMap::new(),
-            indexed_addresses: BTreeMap::new(),
-            interior_offsets: BTreeMap::new(),
-            displaced_indexed_addresses: BTreeSet::new(),
-            indexed_displacements: BTreeMap::new(),
+            indexed_addresses: crate::dense::IdMap::default(),
+            interior_offsets: crate::dense::IdMap::default(),
+            displaced_indexed_addresses: crate::dense::IdSet::default(),
+            indexed_displacements: crate::dense::IdMap::default(),
             evidenced_roots: BTreeSet::new(),
             evidenced_spans: BTreeMap::new(),
             escaping_roots: BTreeSet::new(),
@@ -1473,7 +1483,7 @@ impl<'a> ObjectModelBuilder<'a> {
             frame_boundaries: FrameBoundaries::default(),
             callee_handed_roots: BTreeSet::new(),
             values: empty_value_ranges(),
-            resolving: BTreeSet::new(),
+            resolving: crate::dense::IdSet::default(),
             stack_pointer_carrier: machine_context
                 .and_then(SourceMachineContext::stack_pointer_carrier),
             machine_context,
@@ -1491,7 +1501,7 @@ impl<'a> ObjectModelBuilder<'a> {
 
     /// The displacement already recorded for an indexed address.
     fn indexed_displacement_of(&self, value: ValueId) -> i64 {
-        self.indexed_displacements.get(&value).copied().unwrap_or(0)
+        self.indexed_displacements.get(value).copied().unwrap_or(0)
     }
 
     pub(crate) fn build(
@@ -1510,7 +1520,7 @@ impl<'a> ObjectModelBuilder<'a> {
                 .map(|(start, _)| *start)
                 .chain(callee_spans.unbounded.iter().copied())
                 .collect();
-            let boundaries = FrameBoundaries::of(facts, function, graph, self.machine_context);
+            let boundaries = FrameBoundaries::of(facts, graph, self.machine_context);
             for (start, end) in callee_spans.spans {
                 self.callee_write_spans
                     .entry(start)
@@ -1520,7 +1530,6 @@ impl<'a> ObjectModelBuilder<'a> {
             let evidenced = evidenced_stack_roots(
                 facts,
                 self.declared_slots,
-                function,
                 graph,
                 self.stack_pointer_carrier,
                 values,
@@ -1541,8 +1550,8 @@ impl<'a> ObjectModelBuilder<'a> {
                     self.ensure_stack_object(root);
                 }
             }
-            for var in facts.stack_address_roots.keys() {
-                let _ = self.object_for_address_value(graph, var, SpaceId::Ram);
+            for value in facts.stack_address_roots.keys() {
+                let _ = self.object_for_address_value(graph, value, SpaceId::Ram);
             }
         }
         let parameter_indices = self
@@ -1572,22 +1581,23 @@ impl<'a> ObjectModelBuilder<'a> {
             self.ensure_pointee_chain(root, &path);
         }
 
-        for block in function.blocks() {
-            for op in &block.ops {
-                match op {
-                    SSAOp::Load { addr, space, .. }
-                    | SSAOp::Store { addr, space, .. }
-                    | SSAOp::LoadLinked { addr, space, .. }
-                    | SSAOp::StoreConditional { addr, space, .. }
-                    | SSAOp::LoadGuarded { addr, space, .. }
-                    | SSAOp::StoreGuarded { addr, space, .. } => {
-                        let _ = self.object_for_address_value(graph, addr, *space);
-                    }
-                    SSAOp::AtomicCAS(swap) => {
-                        let _ = self.object_for_address_value(graph, &swap.addr, swap.space);
-                    }
-                    _ => {}
+        for inst in &graph.insts {
+            let crate::InstPayload::Op(op) = &inst.payload else {
+                continue;
+            };
+            match *op {
+                SSAOp::Load { addr, space, .. }
+                | SSAOp::Store { addr, space, .. }
+                | SSAOp::LoadLinked { addr, space, .. }
+                | SSAOp::StoreConditional { addr, space, .. }
+                | SSAOp::LoadGuarded { addr, space, .. }
+                | SSAOp::StoreGuarded { addr, space, .. } => {
+                    let _ = self.object_for_address_value(graph, addr, space);
                 }
+                SSAOp::AtomicCAS(ref swap) => {
+                    let _ = self.object_for_address_value(graph, swap.addr, swap.space);
+                }
+                _ => {}
             }
         }
 
@@ -1656,12 +1666,13 @@ impl<'a> ObjectModelBuilder<'a> {
     fn object_for_address_value(
         &mut self,
         graph: &SsaGraph,
-        value: &SSAVar,
+        value_id: ValueId,
         space: SpaceId,
     ) -> ObjectId {
-        let Some(value_id) = graph.value_id_for_var(value) else {
+        if graph.value(value_id).is_none() {
             return self.ensure_escaped_unknown(space);
-        };
+        }
+        let value = value_id;
         let key = MemoryObjectKey {
             value: value_id,
             space,
@@ -1735,12 +1746,12 @@ impl<'a> ObjectModelBuilder<'a> {
                 self.ensure_parameter_object(expression.parameter)
             } else if let Some(expression) = self.addresses.pointee_expression(value_id) {
                 self.ensure_pointee_chain(expression.root, &expression.path)
-            } else if let Some(address) = resolve_const_value(self.facts, value) {
+            } else if let Some(address) = resolve_const_value(graph, self.facts, value) {
                 self.ensure_global_object(GlobalObjectKey { space, address })
             } else {
                 self.ensure_escaped_unknown(space)
             }
-        } else if let Some(address) = resolve_const_value(self.facts, value) {
+        } else if let Some(address) = resolve_const_value(graph, self.facts, value) {
             self.ensure_global_object(GlobalObjectKey { space, address })
         } else {
             self.ensure_escaped_unknown(space)
@@ -1759,51 +1770,56 @@ impl<'a> ObjectModelBuilder<'a> {
         let result = self
             .displaced_parent(graph, value_id)
             .and_then(|(parent, delta)| {
-                let parent_var = graph.value(parent)?.var.clone();
-                let object = self.object_for_address_value(graph, &parent_var, SpaceId::Ram);
+                graph.value(parent)?;
+                let object = self.object_for_address_value(graph, parent, SpaceId::Ram);
                 if !matches!(
                     self.objects.get(&object).map(|fact| &fact.kind),
                     Some(ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. })
                 ) {
                     return None;
                 }
-                let offset = self.interior_offsets.get(&parent).copied().unwrap_or(0) + delta;
+                let offset = self.interior_offsets.get(parent).copied().unwrap_or(0) + delta;
                 if offset != 0 {
                     self.interior_offsets.insert(value_id, offset);
                 }
                 Some(object)
             });
-        self.resolving.remove(&value_id);
+        self.resolving.remove(value_id);
         result
     }
 
     /// The stack address this one is computed from, and by how much.
     fn displaced_parent(&self, graph: &SsaGraph, value_id: ValueId) -> Option<(ValueId, i64)> {
         let inst = graph.inst(graph.def_inst(value_id)?)?;
-        let rooted = |var: &SSAVar| resolve_stack_root(self.facts, var).is_some();
-        let id = |var: &SSAVar| graph.value_id_for_var(var);
+        let rooted = |id: &ValueId| resolve_stack_root(self.facts, *id).is_some();
+        let var = |id: &ValueId| graph.var(*id);
         match &inst.payload {
             crate::InstPayload::Op(crate::SSAOp::IntAdd { a, b, .. }) => {
-                match (rooted(a), b.constant_bits(), rooted(b), a.constant_bits()) {
-                    (true, Some(delta), _, _) => Some((id(a)?, delta as i64)),
-                    (_, _, true, Some(delta)) => Some((id(b)?, delta as i64)),
+                match (
+                    rooted(a),
+                    var(b).constant_bits(),
+                    rooted(b),
+                    var(a).constant_bits(),
+                ) {
+                    (true, Some(delta), _, _) => Some((*a, delta as i64)),
+                    (_, _, true, Some(delta)) => Some((*b, delta as i64)),
                     _ => None,
                 }
             }
             crate::InstPayload::Op(crate::SSAOp::IntSub { a, b, .. }) => {
-                let delta = b.constant_bits()?;
-                rooted(a).then(|| id(a).map(|a| (a, (delta as i64).wrapping_neg())))?
+                let delta = var(b).constant_bits()?;
+                rooted(a).then(|| (*a, (delta as i64).wrapping_neg()))
             }
             crate::InstPayload::Op(
                 crate::SSAOp::Copy { src, .. }
                 | crate::SSAOp::Cast { src, .. }
                 | crate::SSAOp::CallRestore { src, .. },
-            ) => rooted(src).then(|| id(src).map(|src| (src, 0)))?,
+            ) => rooted(src).then_some((*src, 0)),
             crate::InstPayload::Phi { .. } => inst
                 .inputs
                 .iter()
                 .copied()
-                .find(|input| graph.value(*input).is_some_and(|value| rooted(&value.var)))
+                .find(|input| graph.value(*input).is_some() && rooted(input))
                 .map(|input| (input, 0)),
             _ => None,
         }
@@ -1821,31 +1837,29 @@ impl<'a> ObjectModelBuilder<'a> {
             let (base, index) = match &inst.payload {
                 crate::InstPayload::Op(crate::SSAOp::IntAdd { a, b, .. }) => {
                     let index = self.index_operand_for_indexed_address(graph, value_id)?;
-                    let a_id = graph.value_id_for_var(a)?;
-                    let b_id = graph.value_id_for_var(b)?;
-                    (if index == a_id { b_id } else { a_id }, Some(index))
+                    (if index == *a { *b } else { *a }, Some(index))
                 }
                 crate::InstPayload::Op(
                     crate::SSAOp::Copy { src, .. }
                     | crate::SSAOp::Cast { src, .. }
                     | crate::SSAOp::CallRestore { src, .. },
-                ) => (graph.value_id_for_var(src)?, None),
+                ) => (*src, None),
                 // Taken back by a constant from an address already inside the
                 // object: the same object, at an offset nothing states.
                 crate::InstPayload::Op(crate::SSAOp::IntSub { a, b, .. })
-                    if b.constant_bits().is_some() =>
+                    if graph.var(*b).constant_bits().is_some() =>
                 {
-                    (graph.value_id_for_var(a)?, None)
+                    (*a, None)
                 }
                 crate::InstPayload::Phi { .. } => (*inst.inputs.first()?, None),
                 _ => return None,
             };
-            let base_var = graph.value(base)?.var.clone();
+            graph.value(base)?;
             // A base nothing proves an object starts at reaches its object
             // at the first byte its index takes, and is that object at a
             // negative displacement: `buf[i - 1]` is `buf` from one below.
             let contained = index.and_then(|index| {
-                let position = resolve_stack_root(self.facts, &base_var)?;
+                let position = resolve_stack_root(self.facts, base)?;
                 if self.evidenced_roots.contains(&position) {
                     return None;
                 }
@@ -1884,7 +1898,7 @@ impl<'a> ObjectModelBuilder<'a> {
                     );
                     object
                 }
-                None => self.object_for_address_value(graph, &base_var, SpaceId::Ram),
+                None => self.object_for_address_value(graph, base, SpaceId::Ram),
             };
             if !matches!(
                 self.objects.get(&object).map(|fact| &fact.kind),
@@ -1899,18 +1913,18 @@ impl<'a> ObjectModelBuilder<'a> {
             // into its addressing mode spells the second half of a pair.
             let folded_constant = index
                 .and_then(|index| crate::constant::signed_value_of(graph, index))
-                .filter(|_| self.indexed_addresses.contains_key(&base));
+                .filter(|_| self.indexed_addresses.contains(base));
             let inherited = index.is_none() || folded_constant.is_some();
             let index = folded_constant
-                .and(self.indexed_addresses.get(&base).copied())
+                .and(self.indexed_addresses.get(base).copied())
                 .or(index)
-                .or_else(|| self.indexed_addresses.get(&base).copied())?;
+                .or_else(|| self.indexed_addresses.get(base).copied())?;
             self.indexed_addresses.insert(value_id, index);
             // Where the address starts, when it is not the object's own base:
             // the index measures from there, so the reach does too.
             let displacement = self
                 .interior_offsets
-                .get(&base)
+                .get(base)
                 .copied()
                 .unwrap_or_else(|| self.indexed_displacement_of(base))
                 .saturating_add(folded_constant.unwrap_or(0));
@@ -1922,15 +1936,15 @@ impl<'a> ObjectModelBuilder<'a> {
             if inherited
                 || self
                     .interior_offsets
-                    .get(&base)
+                    .get(base)
                     .is_some_and(|offset| *offset != 0)
-                || self.displaced_indexed_addresses.contains(&base)
+                || self.displaced_indexed_addresses.contains(base)
             {
                 self.displaced_indexed_addresses.insert(value_id);
             }
             Some(object)
         })();
-        self.resolving.remove(&value_id);
+        self.resolving.remove(value_id);
         result
     }
 
@@ -1949,15 +1963,13 @@ impl<'a> ObjectModelBuilder<'a> {
         let crate::InstPayload::Op(crate::SSAOp::IntAdd { a, b, .. }) = &inst.payload else {
             return None;
         };
-        let a_id = graph.value_id_for_var(a)?;
-        let b_id = graph.value_id_for_var(b)?;
-        let a_rooted = resolve_stack_root(self.facts, a).is_some()
-            || resolve_indexed_stack_root(self.facts, a).is_some();
-        let b_rooted = resolve_stack_root(self.facts, b).is_some()
-            || resolve_indexed_stack_root(self.facts, b).is_some();
-        match (a_rooted, b_rooted) {
-            (true, false) => Some(b_id),
-            (false, true) => Some(a_id),
+        let rooted = |id: &ValueId| {
+            resolve_stack_root(self.facts, *id).is_some()
+                || resolve_indexed_stack_root(self.facts, *id).is_some()
+        };
+        match (rooted(a), rooted(b)) {
+            (true, false) => Some(*b),
+            (false, true) => Some(*a),
             _ => None,
         }
     }
@@ -2148,6 +2160,10 @@ pub(crate) struct ReachingAbiPolicy {
 #[derive(Clone, Copy)]
 pub(crate) struct ReachingAbi<'a> {
     pub(crate) function: &'a SSAFunction,
+    /// The register geometry, which says when the storage wanted is the low
+    /// lane of a root a call defines; `None` answers only exact storage.
+    pub(crate) machine_context: Option<&'a crate::SourceMachineContext>,
+    pub(crate) prep: Option<&'a crate::DecompilePrepFacts>,
     pub(crate) graph: &'a SsaGraph,
     pub(crate) storage: CanonicalStorageId,
     pub(crate) policy: ReachingAbiPolicy,
@@ -2209,6 +2225,7 @@ impl DeclaredStackSlots {
 #[derive(Clone, Copy)]
 pub(crate) struct Body<'a> {
     pub(crate) function: &'a SSAFunction,
+    pub(crate) prep: Option<&'a crate::DecompilePrepFacts>,
     pub(crate) graph: &'a SsaGraph,
     pub(crate) machine_context: Option<&'a SourceMachineContext>,
 }
@@ -2221,6 +2238,13 @@ pub(crate) struct LoopCarrierPeerCandidate {
     pub(crate) updates: Vec<LoopCarrierUpdateFact>,
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub(crate) type LoopCarrierMemberRoles = BTreeMap<ValueId, BTreeSet<LoopCarrierMemberRole>>;
 
 /// What the memory annotations say one raw sub-effect touches.
@@ -2228,17 +2252,6 @@ pub(crate) struct RawMemoryProvenance {
     pub(crate) object: ObjectId,
     pub(crate) object_offset: Option<i64>,
     pub(crate) complete: bool,
-}
-
-/// Where an access sits in the program.
-///
-/// The instruction, the block it is in and its index there travel together
-/// through every rule that records a memory effect, so they are one thing.
-#[derive(Clone, Copy)]
-pub(crate) struct AccessSite {
-    pub(crate) inst: InstId,
-    pub(crate) block_addr: u64,
-    pub(crate) op_index: usize,
 }
 
 /// Where a recorded effect goes, and the counter that orders the effects one

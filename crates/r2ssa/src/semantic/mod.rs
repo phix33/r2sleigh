@@ -48,6 +48,7 @@ use r2il::SpaceId;
 use serde::{Deserialize, Serialize};
 
 use crate::address::{AddressProvenanceFacts, collect_address_provenance};
+use crate::arena::OpId;
 use crate::assumption::{AssumptionSet, AssumptionSubject, AssumptionUsageReport, AssumptionValue};
 use crate::cfg::BlockTerminator;
 use crate::function::{DecompilePrepFacts, SSAFunction, StackAddressBase, StackAddressRoot};
@@ -90,8 +91,10 @@ pub struct PreparedFunctionFacts {
 /// What one collection reads, so the phases take one name rather than six.
 pub(crate) struct CollectionOver<'a> {
     pub(crate) function: &'a SSAFunction,
+    /// The prep facts of `function`, where it was prepared: the sealed
+    /// function's, or a provisional function's own.
+    pub(crate) prep: Option<&'a crate::function::DecompilePrepFacts>,
     pub(crate) graph: &'a SsaGraph,
-    pub(crate) storage_spans: &'a StorageSpans,
     pub(crate) assumptions: &'a AssumptionSet,
     pub(crate) machine_context: Option<&'a SourceMachineContext>,
     /// Which caller asked, so a trace says which of the three collections it is.
@@ -161,17 +164,11 @@ impl PhaseRecorder {
 
 impl PreparedFunctionFacts {
     pub fn collect(function: &SSAFunction, graph: &SsaGraph) -> Self {
-        let liveness = crate::liveness::ValueLiveness::compute(
-            graph,
-            &crate::liveout::FunctionLiveOut::default(),
-            crate::liveness::ValueContent::of(graph, None),
-        );
-        let storage_spans = StorageSpans::compute(graph, &liveness);
         Self::collect_inner(
             CollectionOver {
                 function,
+                prep: None,
                 graph,
-                storage_spans: &storage_spans,
                 assumptions: &AssumptionSet::default(),
                 machine_context: None,
                 site: "collect",
@@ -179,37 +176,13 @@ impl PreparedFunctionFacts {
             &crate::control::UncheckedSsaWorkControl,
         )
         .expect("an unchecked control never stops")
-    }
-
-    pub fn collect_with_assumptions(
-        function: &SSAFunction,
-        graph: &SsaGraph,
-        assumptions: &AssumptionSet,
-    ) -> Self {
-        let liveness = crate::liveness::ValueLiveness::compute(
-            graph,
-            &crate::liveout::FunctionLiveOut::default(),
-            crate::liveness::ValueContent::of(graph, None),
-        );
-        let storage_spans = StorageSpans::compute(graph, &liveness);
-        Self::collect_inner(
-            CollectionOver {
-                function,
-                graph,
-                storage_spans: &storage_spans,
-                assumptions,
-                machine_context: None,
-                site: "assume",
-            },
-            &crate::control::UncheckedSsaWorkControl,
-        )
-        .expect("an unchecked control never stops")
+        .0
     }
 
     pub(crate) fn collect_with_context(
         function: &SSAFunction,
+        prep: Option<&crate::function::DecompilePrepFacts>,
         graph: &SsaGraph,
-        storage_spans: &StorageSpans,
         assumptions: &AssumptionSet,
         machine_context: &SourceMachineContext,
         site: &'static str,
@@ -217,8 +190,8 @@ impl PreparedFunctionFacts {
         Self::collect_inner(
             CollectionOver {
                 function,
+                prep,
                 graph,
-                storage_spans,
                 assumptions,
                 machine_context: Some(machine_context),
                 site,
@@ -226,6 +199,7 @@ impl PreparedFunctionFacts {
             &crate::control::UncheckedSsaWorkControl,
         )
         .expect("an unchecked control never stops")
+        .0
     }
 
     /// The same collection, stopping between phases when the run is cancelled.
@@ -236,18 +210,18 @@ impl PreparedFunctionFacts {
     pub(crate) fn collect_with_context_and_control<C: crate::SsaWorkControl + ?Sized>(
         over: CollectionOver<'_>,
         control: &C,
-    ) -> Result<Self, crate::SsaExecutionStopReason> {
+    ) -> Result<(Self, CollectedLiveness), crate::SsaExecutionStopReason> {
         Self::collect_inner(over, control)
     }
 
     fn collect_inner<C: crate::SsaWorkControl + ?Sized>(
         over: CollectionOver<'_>,
         control: &C,
-    ) -> Result<Self, crate::SsaExecutionStopReason> {
+    ) -> Result<(Self, CollectedLiveness), crate::SsaExecutionStopReason> {
         let CollectionOver {
             function,
+            prep,
             graph,
-            storage_spans,
             assumptions,
             machine_context,
             site,
@@ -258,13 +232,21 @@ impl PreparedFunctionFacts {
             call_sites,
             declared_slots,
             predicates,
-            latches_by_header,
             values,
             objects,
             memory,
             memory_accesses,
             member_run_stores,
-        } = MemoryPrefix::collect(function, graph, machine_context, &mut phases, control)?;
+        } = MemoryPrefix::collect(
+            Body {
+                function,
+                prep,
+                graph,
+                machine_context,
+            },
+            &mut phases,
+            control,
+        )?;
         macro_rules! phase {
             ($name:literal, $size:expr) => {{
                 phases.mark($name, $size);
@@ -277,31 +259,63 @@ impl PreparedFunctionFacts {
             .map(|slot| slot.storage())
             .collect::<Vec<_>>();
         let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages);
+        let boundaries = collect_source_boundary_facts(
+            Body {
+                function,
+                prep,
+                graph,
+                machine_context,
+            },
+            &call_sites,
+            &live_out,
+        );
+        phase!("boundaries", boundaries.calls.len());
+        // The one liveness of this function. A call's conventional read of a
+        // register its certified boundary does not pass is no read the text
+        // performs, and two reads of the same bytes the same memory versions
+        // reach hold one content; both are known here, before anything reads
+        // a span, so liveness is computed once, with them.
+        let ignored_reads = crate::function::uncertified_call_reads(
+            graph,
+            prep.map(|facts| &facts.views),
+            &boundaries,
+        );
+        let mut content = crate::liveness::ValueContent::of(graph, machine_context);
+        content.declare_same_content(&crate::function::same_content_reads(
+            &memory_accesses,
+            &memory,
+        ));
+        let live_values = crate::liveness::ValueLiveness::compute_with_relocations(
+            graph,
+            &live_out,
+            &crate::dense::IdMap::default(),
+            content,
+            &ignored_reads,
+        );
+        let storage_spans = StorageSpans::compute(graph, &live_values);
+        phase!("liveness", 0);
         let (loops, inductions) = collect_structured_loop_facts(
             Body {
                 function,
+                prep,
                 graph,
                 machine_context,
             },
             LoopEvidence {
                 predicates: &predicates,
                 values: &values,
-                latches_by_header: &latches_by_header,
             },
             &live_out,
-            storage_spans,
+            &storage_spans,
         );
         phase!("loops", loops.len());
-        let boundaries =
-            collect_source_boundary_facts(function, graph, &call_sites, machine_context, &live_out);
-        phase!("boundaries", boundaries.calls.len());
         let structured = StructuredDataflowFacts {
             unstructured_cycle_blocks: collect_unstructured_cycle_blocks(graph, &loops),
             inductions,
             loops,
             memory_accesses,
             member_run_stores,
-            recursive_calls: collect_structured_recursive_call_facts(function, graph, &call_sites),
+            recursive_calls: collect_structured_recursive_call_facts(function, &call_sites),
         };
         phase!("structured", structured.memory_accesses.len());
         let control_domains = collect_control_domain_facts(function, &predicates, &structured);
@@ -330,6 +344,7 @@ impl PreparedFunctionFacts {
             crate::deadphi::DeadPhis::find_from(graph, &live_out, &obligations, &boundaries);
         let body = Body {
             function,
+            prep,
             graph,
             machine_context,
         };
@@ -360,7 +375,7 @@ impl PreparedFunctionFacts {
             machine_context,
         );
         phase!("assumptions", 0);
-        Ok(Self {
+        let facts = Self {
             addresses,
             values,
             objects,
@@ -376,8 +391,28 @@ impl PreparedFunctionFacts {
             assumptions: assumptions.clone(),
             applied_assumption_bindings,
             assumption_usage,
-        })
+        };
+        Ok((
+            facts,
+            CollectedLiveness {
+                live_out,
+                values: live_values,
+                storage_spans,
+                ignored_reads,
+            },
+        ))
     }
+}
+
+/// The liveness a collection computed and read: one model, which the sealed
+/// artifact keeps.
+pub(crate) struct CollectedLiveness {
+    pub(crate) live_out: crate::liveout::FunctionLiveOut,
+    pub(crate) values: crate::liveness::ValueLiveness,
+    pub(crate) storage_spans: StorageSpans,
+    /// Reads the text never performs: a call's conventional read of a
+    /// register the certified call does not pass.
+    pub(crate) ignored_reads: std::collections::BTreeSet<crate::graph::UseSite>,
 }
 
 /// Add the entry carriers that implicit call reads alone expose.
@@ -444,12 +479,15 @@ pub(crate) fn ensure_source_formal_parameter_values(
 /// to one question.
 pub fn value_reaching(
     artifact: &crate::SsaArtifact,
-    block_addr: u64,
-    op_index: usize,
+    op: crate::OpId,
     storage: CanonicalStorageId,
 ) -> Option<ValueId> {
+    let (block_addr, op_index) = artifact
+        .graph()
+        .walk_start(artifact.graph().inst_for_op(op)?)?;
     match reaching_abi_value_in_block_with_policy(
         artifact.function(),
+        Some(artifact.decompile_prep_facts()),
         artifact.graph(),
         artifact.machine_context(),
         block_addr,
@@ -471,5 +509,5 @@ pub(crate) fn collect_predicate_facts_for_test(
     function: &SSAFunction,
     graph: &SsaGraph,
 ) -> PredicateFacts {
-    collect_predicate_facts(function, graph)
+    collect_predicate_facts(function, None, graph)
 }

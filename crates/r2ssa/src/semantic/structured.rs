@@ -150,6 +150,13 @@ pub(crate) fn member_run_slices(
     (members.len() > 1).then_some(members)
 }
 
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
+    )
+)]
 pub(crate) fn collect_unstructured_cycle_blocks(
     graph: &SsaGraph,
     loops: &BTreeMap<LoopId, StructuredLoopFact>,
@@ -191,19 +198,14 @@ pub(crate) fn collect_structured_memory_access_facts(
     declared_slots: &DeclaredStackSlots,
 ) -> (
     BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
-    BTreeMap<InstId, MemberRunStoreCertificate>,
+    crate::dense::IdMap<InstId, MemberRunStoreCertificate>,
 ) {
     let mut access_facts = BTreeMap::new();
-    let mut member_run_stores = BTreeMap::new();
-    for block in function.blocks() {
-        for (op_index, op) in block.ops.iter().enumerate() {
-            let Some(inst) = graph.inst_id_for_op_site(block.addr, op_index) else {
+    let mut member_run_stores = crate::dense::IdMap::default();
+    for block in function.named_blocks() {
+        for (id, op) in block.sited() {
+            let Some(inst) = graph.inst_for_op(id) else {
                 continue;
-            };
-            let site = AccessSite {
-                inst,
-                block_addr: block.addr,
-                op_index,
             };
             let mut ordinal = 0u32;
             match op {
@@ -222,7 +224,7 @@ pub(crate) fn collect_structured_memory_access_facts(
                             },
                             memory,
                             objects,
-                            site,
+                            inst,
                             RawAccess {
                                 address,
                                 space: *space,
@@ -250,7 +252,7 @@ pub(crate) fn collect_structured_memory_access_facts(
                                     memory,
                                     machine_context,
                                     declared_slots,
-                                    site,
+                                    inst,
                                     RawAccess {
                                         address,
                                         space: *space,
@@ -271,7 +273,7 @@ pub(crate) fn collect_structured_memory_access_facts(
                                         },
                                         memory,
                                         objects,
-                                        site,
+                                        inst,
                                         RawAccess {
                                             address,
                                             space: *space,
@@ -292,7 +294,7 @@ pub(crate) fn collect_structured_memory_access_facts(
                                 },
                                 memory,
                                 objects,
-                                site,
+                                inst,
                                 RawAccess {
                                     address,
                                     space: *space,
@@ -315,7 +317,7 @@ pub(crate) fn collect_structured_memory_access_facts(
                             },
                             memory,
                             objects,
-                            site,
+                            inst,
                             RawAccess {
                                 address,
                                 space: *space,
@@ -331,7 +333,7 @@ pub(crate) fn collect_structured_memory_access_facts(
                             },
                             memory,
                             objects,
-                            site,
+                            inst,
                             RawAccess {
                                 address,
                                 space: *space,
@@ -353,7 +355,7 @@ pub(crate) fn collect_structured_memory_access_facts(
                             },
                             memory,
                             objects,
-                            site,
+                            inst,
                             RawAccess {
                                 address,
                                 space,
@@ -369,7 +371,7 @@ pub(crate) fn collect_structured_memory_access_facts(
                             },
                             memory,
                             objects,
-                            site,
+                            inst,
                             RawAccess {
                                 address,
                                 space,
@@ -397,15 +399,10 @@ pub(crate) fn member_run_store(
     memory: &MemorySSAFacts,
     machine_context: Option<&SourceMachineContext>,
     declared_slots: &DeclaredStackSlots,
-    site: AccessSite,
+    inst: InstId,
     store: RawAccess,
 ) -> Option<MemberRunStoreCertificate> {
     let value = store.value?;
-    let AccessSite {
-        inst,
-        block_addr,
-        op_index,
-    } = site;
     let (address, space, width) = (store.address, store.space, store.width);
     if space != SpaceId::Ram || width == 0 {
         return None;
@@ -464,8 +461,6 @@ pub(crate) fn member_run_store(
         .position(|input| *input == value)?;
     Some(MemberRunStoreCertificate {
         inst,
-        block_addr,
-        op_index,
         object: provenance.object,
         address,
         value,
@@ -479,16 +474,16 @@ pub(crate) fn insert_raw_member_subeffect(
     sink: EffectSink<'_>,
     memory: &MemorySSAFacts,
     objects: &ObjectModel,
-    site: AccessSite,
+    inst: InstId,
     store: RawAccess,
     object: ObjectId,
     member: &MemberRunStoreMember,
 ) {
     let (address, space) = (store.address, store.space);
-    let provenance = raw_memory_subeffect_provenance(memory, objects, site.inst, store);
+    let provenance = raw_memory_subeffect_provenance(memory, objects, inst, store);
     insert_structured_memory_access(
         sink,
-        site,
+        inst,
         RawAccess {
             address,
             space,
@@ -507,7 +502,6 @@ pub(crate) fn insert_raw_member_subeffect(
 
 pub(crate) fn collect_structured_recursive_call_facts(
     function: &SSAFunction,
-    graph: &SsaGraph,
     call_sites: &CallSiteFacts,
 ) -> BTreeMap<CallSiteId, StructuredRecursiveCallFact> {
     let mut recursive_calls = BTreeMap::new();
@@ -518,15 +512,11 @@ pub(crate) fn collect_structured_recursive_call_facts(
         if target != function.entry {
             continue;
         }
-        let Some((block_addr, op_index)) = graph.op_site_for_inst(fact.at) else {
-            continue;
-        };
         recursive_calls.insert(
             *call_site,
             StructuredRecursiveCallFact {
                 call_site: *call_site,
-                block_addr,
-                op_index,
+                at: fact.at,
                 target,
             },
         );

@@ -126,9 +126,9 @@ fn a_switch_on_a_field_selects_the_loaded_value_not_the_pointer() {
     let function = SSAFunction::from_blocks_raw_no_arch(&[block]).expect("raw SSA should build");
     let selector = test_switch_selector(&function, 0x1000);
     let read_state = function
-        .get_block(0x1000)
+        .named_block(0x1000)
         .expect("the fixture block")
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             SSAOp::Load { dst, .. } if dst.size == state.size => Some(dst.name().to_string()),
@@ -201,7 +201,12 @@ fn prepared_function_does_not_infer_memory_backed_return_phi() {
     let prepared =
         SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
     assert!(prepared.certificates().returns.is_empty());
-    assert!(prepared.return_certificate_for_op(0x1214, 0).is_none());
+    assert!(
+        prepared
+            .inst_at(0x1214, 0)
+            .and_then(|inst| prepared.return_certificate_for_inst(inst))
+            .is_none()
+    );
 }
 
 #[test]
@@ -245,12 +250,12 @@ fn prepared_function_ssa_collects_call_sites_and_memory_effects() {
     let uses = prepared
         .memory()
         .uses_by_inst
-        .get(&call_ref)
+        .get(call_ref)
         .expect("call memory use fact");
     let defs = prepared
         .memory()
         .defs_by_inst
-        .get(&call_ref)
+        .get(call_ref)
         .expect("call memory def fact");
     assert_eq!(uses.len(), 1);
     assert_eq!(defs.len(), 1);
@@ -335,15 +340,91 @@ fn prepared_function_ssa_builds_memory_phis_per_object() {
 
     let load_inst = prepared
         .graph()
-        .inst_id_for_op_site(0x130c, 0)
+        .inst_spelled_at(0x130c, 0)
         .expect("load inst");
     let load_use = prepared
         .memory()
         .uses_by_inst
-        .get(&load_inst)
+        .get(load_inst)
         .and_then(|facts| facts.first())
         .expect("load use");
     assert_eq!(load_use.version, phis[0].output_version);
+}
+
+/// A loop that stores nothing to a location merges nothing for it: the
+/// back edge carries the version that entered the loop, and the header's
+/// load reads that store. A loop that does store merges the two.
+#[test]
+fn a_loop_merges_a_location_only_where_it_stores_to_it() {
+    let looping = |store_in_loop: bool| {
+        let mut body = vec![R2ILOp::Load {
+            dst: make_reg(0, 8),
+            space: SpaceId::Ram,
+            addr: make_const(0x5000, 8),
+        }];
+        if store_in_loop {
+            body.push(R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: make_const(0x5000, 8),
+                val: make_const(2, 8),
+            });
+        }
+        body.push(R2ILOp::CBranch {
+            target: make_const(0x1404, 8),
+            cond: make_reg(8, 1),
+        });
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1400,
+                size: 4,
+                ops: vec![R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr: make_const(0x5000, 8),
+                    val: make_const(1, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1404,
+                size: 4,
+                ops: body,
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1408,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_reg(0, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+        let prepared = SsaArtifact::raw(&blocks, None).expect("prepared SSA should build");
+        let entry_store = prepared.graph().inst_spelled_at(0x1400, 0).expect("store");
+        let stored = prepared.memory().defs_by_inst[entry_store][0].next_version;
+        let load = prepared.graph().inst_spelled_at(0x1404, 0).expect("load");
+        let loaded = prepared.memory().uses_by_inst[load][0].version;
+        let merged = prepared.memory().phis_by_block.get(&0x1404).cloned();
+        (stored, loaded, merged)
+    };
+
+    let (stored, loaded, merged) = looping(false);
+    assert_eq!(merged, None, "nothing in the loop stores");
+    assert_eq!(loaded, stored);
+
+    let (stored, loaded, merged) = looping(true);
+    let merged = merged.expect("the loop's store merges with the entry's");
+    assert_eq!(merged.len(), 1);
+    assert_eq!(loaded, merged[0].output_version);
+    assert!(
+        merged[0]
+            .inputs
+            .iter()
+            .any(|(_, version)| *version == stored)
+    );
 }
 
 #[test]
@@ -398,9 +479,9 @@ fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
         .expect("prepared SSA should build");
     let alias_var = prepared
         .function()
-        .get_block(0x1780)
+        .named_block(0x1780)
         .and_then(|block| {
-            block.ops.iter().find_map(|op| match op {
+            block.ops().iter().find_map(|op| match op {
                 SSAOp::Copy { dst, .. } if dst.name() == "tmp:1798" => Some(dst.clone()),
                 _ => None,
             })
@@ -417,10 +498,10 @@ fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
     );
     let truncated_var = prepared
         .function()
-        .get_block(0x1780)
+        .named_block(0x1780)
         .and_then(|block| {
-            block.ops.iter().find_map(|op| match op {
-                SSAOp::Subpiece { dst, .. } if dst.name() == "tmp:17a0" => Some(dst),
+            block.ops().iter().find_map(|op| match op {
+                SSAOp::Subpiece { dst, .. } if dst.name() == "tmp:17a0" => Some(dst.clone()),
                 _ => None,
             })
         })
@@ -428,7 +509,7 @@ fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
     assert!(
         prepared
             .graph()
-            .value_id_for_var(truncated_var)
+            .value_id_for_var(&truncated_var)
             .and_then(|value| prepared.call_result_certificate_for_value(value))
             .is_none()
     );

@@ -7,7 +7,6 @@ members = [
     "crates/r2s",
     "crates/r2s-tui",
     "crates/r2sleigh-lift",
-    "crates/r2sleigh-export",
     "crates/r2sleigh-cli",
     "crates/r2source",
     "crates/r2ssa",
@@ -16,6 +15,7 @@ members = [
     "crates/r2dec",
     "crates/r2rewrite",
 ]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -38,6 +38,9 @@ z3 = "0.21.0"
 insta = "1"
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 crossterm = "0.28"
+# 0.43 is the last on crossterm 0.28, which ratatui 0.29 is built on: one
+# terminal library in the shell, not two.
+reedline = "0.43"
 
 [profile.dev]
 # Line tables rather than full debug info. A backtrace still names the file and
@@ -90,29 +93,12 @@ strip = false
 debug = "full"
 opt-level = 1
 
-# Consuming two upstream changes that are raised and under review, so that the
-# work that depends on them is not blocked behind someone else's merge queue:
-#
-#   mnemonikr/libsla-sys#8  exposes the language's user-defined p-code operation
-#                           names, which `SleighBase` already keeps and nothing
-#                           reached.
-#   mnemonikr/libsla#18     the safe passthrough over it.
-#   mnemonikr/libsla-sys#9  resets the address-keyed parser cache while keeping
-#                           the decoded Sleigh specification.
-#   mnemonikr/libsla#19     the safe passthrough over that reset.
-#
-# A `CALLOTHER` carries only the index of the operation it invokes, and that
-# index is assigned by the compiled specification and moves with it, so nothing
-# here can identify an operation without those names. A parsed instruction is
-# cached only by address, so sharing one loaded specification is correct only
-# when that cache is reset before another byte source can be observed. Both
-# branches combine the exact diffs on those pull requests. Drop this block for
-# the released crates once they land.
+# The Sleigh crates are vendored (vendor/README.md): owned code, built from
+# this tree, with the upstream commit each was taken from recorded there.
 [patch.crates-io]
-# The Sleigh dependencies are owned forks; every fix lands on their main branch.
-sleigh-config = { git = "https://github.com/0verflowme/sleigh-config.git", branch = "main" }
-libsla = { git = "https://github.com/0verflowme/libsla.git", branch = "main" }
-libsla-sys = { git = "https://github.com/0verflowme/libsla-sys.git", branch = "main" }
+sleigh-config = { path = "vendor/sleigh-config" }
+libsla = { path = "vendor/libsla" }
+libsla-sys = { path = "vendor/libsla-sys" }
 
 # The structural lints are measured rather than denied.
 #
@@ -121,7 +107,7 @@ libsla-sys = { git = "https://github.com/0verflowme/libsla-sys.git", branch = "m
 # allowed here and re-enabled by `scripts/structure-report.sh`, which holds the
 # counts and fails when one rises. `clippy.toml` sets the thresholds.
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(dylint_lib, values(any()))"] }
 
 [workspace.lints.clippy]
 excessive_nesting = "allow"

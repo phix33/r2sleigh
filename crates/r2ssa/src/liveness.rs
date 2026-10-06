@@ -171,14 +171,12 @@ impl ValueContent {
                         width: width(&value.var),
                     };
                     views
-                        .derived_view(&value.var)
-                        .and_then(|view| {
-                            Some(ContentView {
-                                root: graph.value_id_for_var(&view.root)?.0,
-                                prefix: view.prefix_bits,
-                                extension: view.extension,
-                                width: own.width,
-                            })
+                        .derived_view(value.id)
+                        .map(|view| ContentView {
+                            root: view.root.0,
+                            prefix: view.prefix_bits,
+                            extension: view.extension,
+                            width: own.width,
                         })
                         .unwrap_or(own)
                 })
@@ -375,7 +373,13 @@ struct BlockScratch {
 
 impl ValueLiveness {
     pub fn compute(graph: &SsaGraph, live_out: &FunctionLiveOut, content: ValueContent) -> Self {
-        Self::compute_with_relocations(graph, live_out, &BTreeMap::new(), content, &BTreeSet::new())
+        Self::compute_with_relocations(
+            graph,
+            live_out,
+            &crate::dense::IdMap::default(),
+            content,
+            &BTreeSet::new(),
+        )
     }
 
     /// Which values hold one content, as this liveness judges it.
@@ -394,16 +398,22 @@ impl ValueLiveness {
     pub fn compute_with_relocations(
         graph: &SsaGraph,
         live_out: &FunctionLiveOut,
-        relocations: &BTreeMap<InstId, InstId>,
+        relocations: &crate::dense::IdMap<InstId, InstId>,
         content: ValueContent,
         ignored_reads: &BTreeSet<UseSite>,
     ) -> Self {
+        // Each fold moves a read to a later reader, so a chain has at most one step per fold.
         let relocate = |mut inst: InstId| {
             let mut steps = 0;
-            while let Some(next) = relocations.get(&inst) {
+            while let Some(next) = relocations.get(inst) {
                 inst = *next;
                 steps += 1;
                 if steps > relocations.len() {
+                    debug_assert!(false, "relocations form a cycle through {inst:?}");
+                    r2il::refusal_evidence!(
+                        "liveness",
+                        "relocations form a cycle through {inst:?}"
+                    );
                     break;
                 }
             }
@@ -733,6 +743,13 @@ fn order_touched_blocks(touched: &mut Vec<BlockId>, scratch: &[BlockScratch], st
 /// one sweep over the two components' segments in that block rather than every
 /// pair of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+    )
+)]
 pub struct ComponentLiveness {
     /// Per block, the segments sorted by where they start.
     by_block: BTreeMap<BlockId, Vec<(LiveSegment, ValueId)>>,
@@ -741,6 +758,13 @@ pub struct ComponentLiveness {
 }
 
 impl ComponentLiveness {
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(
+            entity_keyed_map,
+            reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
+        )
+    )]
     pub fn of(liveness: &ValueLiveness, value: ValueId) -> Self {
         let mut by_block = BTreeMap::<BlockId, Vec<(LiveSegment, ValueId)>>::new();
         let segments = liveness.segments(value);
@@ -899,7 +923,7 @@ mod tests {
 
     fn defined_at(graph: &SsaGraph, addr: u64, op_idx: usize) -> ValueId {
         graph
-            .inst_id_for_op_site(addr, op_idx)
+            .inst_spelled_at(addr, op_idx)
             .and_then(|inst| graph.inst(inst))
             .and_then(|inst| inst.output)
             .unwrap_or_else(|| panic!("no definition at {addr:#x}:{op_idx}"))
@@ -1362,14 +1386,17 @@ mod tests {
             target: Varnode::constant(0, 8),
         });
         let mut func = SSAFunction::from_blocks_raw_no_arch(&[block]).expect("ssa");
-        func.get_block_mut(0x1000).expect("block").ops = entries
-            .iter()
-            .enumerate()
-            .map(|(index, (entry, _))| crate::op::SSAOp::Copy {
-                dst: crate::SSAVar::new(format!("tmp:{index}"), 1, entry.size),
-                src: entry.clone(),
-            })
-            .collect();
+        func.edit_block(0x1000).expect("block").replace_ops(
+            crate::Pass::Fixture,
+            entries
+                .iter()
+                .enumerate()
+                .map(|(index, (entry, _))| crate::op::SSAOp::Copy {
+                    dst: crate::SSAVar::new(format!("tmp:{index}"), 1, entry.size),
+                    src: entry.clone(),
+                })
+                .collect(),
+        );
         let mut graph = SsaGraph::from_function(&func);
         for value in &mut graph.values {
             if let Some((_, at)) = entries.iter().find(|(entry, _)| *entry == value.var) {

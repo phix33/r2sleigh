@@ -1,321 +1,194 @@
 r2sleigh Roadmap
 ================
 
-> The one ordered execution list. Why the project exists and what it is
-> becoming is in [doc/engine-vision.md](doc/engine-vision.md); the working
-> rules are in [AGENTS.md](AGENTS.md). The detailed specification of each
-> phase below is in [doc/handoff/review-fixes/plan.md](doc/handoff/review-fixes/plan.md)
-> and [plan-extension.md](doc/handoff/review-fixes/plan-extension.md); this file
-> owns the order, the status and the decisions, and those own the detail.
-> Where they disagree, this file wins and the disagreement is a defect.
+The one ordered list: what is done, what is left, in what order. Design lives
+in the ADRs linked from each row; the why in [doc/engine-vision.md](doc/engine-vision.md);
+the working rules in [AGENTS.md](AGENTS.md). Where this file and an ADR
+disagree, this file wins and the disagreement is a defect.
 
-What r2s is
------------
+`r2s` is the tool: one engine (discovery, lifting, SSA, memory, types, a
+certifying decompiler) under radare2's command language, a visual mode, and an
+agent surface. It prints C only where checked facts justify it; otherwise a
+counted residual or a refusal that says why.
 
-The radare2 plugin is deleted. `r2s` is the tool, with three surfaces over one
-engine that owns its facts:
+Gates
+-----
 
-1. **The engine**: discovery, lifting, SSA, memory, types and a certifying
-   decompiler, answering typed queries. C is printed only where checked facts
-   justify it; otherwise a counted residual or a refusal that says why.
-2. **The shell and the visual mode**: radare2's command language and keys, so a
-   radare2 user moves without relearning, with what radare2 never had —
-   completion, discoverability, linked views, a graph you can read, and a UI
-   that never blocks.
-3. **The agent surface**: stateless addressed queries, confidence on every
-   field, explain and verify.
+In order of authority. A benchmark score is never proof; output is read by
+hand before a quality claim.
 
-How we measure, in order of authority:
-
-| Gate | Question it answers |
-|------|---------------------|
-| Equivalence (`tests/equiv`) | Does the rendered C compute what the machine code computes? The north-star number. |
+| Gate | Question |
+|------|----------|
+| Equivalence (`tests/equiv`) | Does the C compute what the machine code computes? The north star. |
+| Census (`pdd` of every coverage, pinned and stripped function) | Did any rendering move? A structural change is byte-identical or names each moved line. |
 | Certification (`scripts/certify_render.py`) | Does every rendering read only what it assigns, and never panic? |
-| Source-gold (`scripts/differential_truth.py`) | Are recovered signatures what the source declared, or marked when not? |
-| Coverage (`tests/coverage`) | How much of a whole binary renders, and does any of it regress? |
-| Differential (`scripts/diff_r2.py`) | Where discovery, naming and decoding disagree with radare2, and who is right. |
+| Source-gold (`scripts/differential_truth.py`) | Are signatures what the source declared, or marked? |
+| Coverage (`tests/coverage`) | How much of a binary renders; does any regress? |
+| Differential (`scripts/diff_r2.py`) | Where discovery, naming, decoding disagree with radare2, and who is right. |
+| Structure (`scripts/structure-report.sh`) | Did nesting, length, arguments or clones rise? |
 
-A benchmark score is never proof of quality; output is read by hand before a
-quality claim (AGENTS.md, Manual Verification).
-
-Where this stands
------------------
-
-Measured on `engine/review-fixes-vfmgfv` at `fe7698e8`, 2026-10-03.
+Where this stands (2026-10-05, `engine/roadmap`, PR #67)
+--------------------------------------------------------
 
 | Measure | Value |
 |---------|-------|
-| Equivalence | 582 of 756 `equal` (x86-64, gcc 13 and clang 18, -O0..-O2). The rest: residual-trap 75, ub 37, refused 27, unsupported 20, differs 13, compile-error 1, slow 1 |
-| Hash corpus (issue #61) | 85 of 98 `equal`, from 1 of 36 in August |
-| Certification | 21 rendered, 4 refused, 0 undefined reads, 0 panics |
-| Coverage | 554 of 562 rendered locally; 0 regressions against HEAD at one compiler |
-| Workspace tests | 2072 passed; 2 fail only under Apple clang 21 (strict `main` and unused-helper diagnostics) |
+| Equivalence | x86-64 604/756 equal; aarch64 553/756 |
+| Census | 665 functions, 8 refused |
+| Certification | 113 rendered, 17 refused, 0 undefined reads, 0 panics |
+| Coverage | 554/562 rendered |
+| Tests | all pass (2096, Apple clang 21) |
 
-Landed since the plugin was deleted (each gated, detail in the program docs):
-
-- **P0**: dispatch soundness, per-function isolation, `pddj`, the equivalence
-  gate, the plugin-era retirement.
-- **P1 identity and reads**: one bit-identity fact (`ValueView`); a rendered read
-  names a version some statement assigned, or it is a residual; the
-  `SystemReserved` register class.
-- **P2 container statements** and **P3 declarations**: one definition of every
-  container statement, per-libc prototype tables, DWARF read once by address
-  into one type graph.
-- **H** (unused analyses wired or deleted), **K** immediate caps, the **core**
-  tracks (INSERT mask, SSA entry edge, BSF/BSR/TZCNT and PSHUFLW lifting).
-- **P4.1, P7 and P10, in part** (commits marked WIP): frame objects reached by
-  callees, the variadic call contract, byte copies for byte-declared objects.
-- **2026-10-03** (`fe7698e8`): the released wide INSERT base renders; a return
-  register only partly filled is unproven, not a result; `__bzero` declared;
-  pointer parameters from certified accesses; `ParamArray`/`PtrMember` only
-  where the address is exactly the subscript or the field; the source-gold gate
-  refuses a debug build whose truth is the engine's own guess.
-- A visual mode (`V`, `VV`, `agf`) and radare2's layouts for `afl`, `afb`, `afi`.
-
-What the last month taught
---------------------------
-
-Leaf bugs get fixed fast: nine of the sixteen issues open in August are fixed
-without structural change. What remains is structural, and it is concentrated.
-
-1. **Facts are keyed by position and kept in sync by hand.** About eight r2ssa
-   maps are keyed by `(block, op index)`; `get_block_mut` drops prepared facts;
-   a revision assert catches staleness at run time; the graph is rebuilt after
-   the demand pass; the memory-site remap is safe to run once only because a
-   comment says so (`function/mod.rs:447`).
-2. **A fact does not carry where it came from.** A recovered interface whose
-   types are only carrier widths was read as the source's exact signature, which
-   declared every dereferenced pointer an integer on every stripped binary.
-   Fixed today with a flag; the class is open until provenance is a type.
-3. **The renderer runs a second proof system.** r2dec's binding plan and
-   observation journal are ~22k lines beside r2ssa's ~20k of certificates, with
-   their own fixpoint (`binding_plan/rules.rs:1202`), ~15 refusal enums,
-   first-writer-wins use claims, and spelling rules written three times. Correct
-   pointer types today exposed three renderer defects at once, one of them fake
-   C (`v->beta` for `v[i].beta`) already shipping on DWARF builds.
-4. **One function lives in seven representations**, five rebuilt: SSA blocks,
-   graph (up to twice), value views (three times), the machine projection (per
-   plan build), the term arena (per inlining round), the binding plan (per
-   render-loop iteration).
-5. **The gates were dead for three weeks** (a self-hosted runner nobody
-   watched), so ~185 commits merged unchecked and two baselines were blessed on
-   one laptop, one of them vacuously.
-6. **The visual mode blocks**: the engine is called from inside `draw`; one pane
-   at a time; no completion, colour roles, mouse, or discoverability.
-
-Decision: **restructure, not rewrite.** The lifter, r2image, r2abi, the
-certificates, r2rewrite's proved rules, Kani and the gates are kept. Three parts
-are replaced outright rather than ported, each running beside the old path until
-the gates agree, then the old path is deleted in the same change:
-
-- the mutable SSA core, by a staged, ID-keyed artifact (F1, F2);
-- r2dec's accounting layer, by a render plan with one by-construction checker (R);
-- `r2s-tui`, by a message-driven visual mode on a worker thread (V).
-
-Tripwire: if F1 takes more than about four weeks, or touches most of r2ssa,
-switch to a new core crate beside r2ssa and migrate passes into it.
+The 2026-10-04 review rated the code 4/10: sound ideas and discipline (~7),
+weak algorithms and structure (~3) — hand-rolled iteration, recomputation,
+entity-keyed side tables, eight caches, twelve owners of the frame, a renderer
+that proves again. Hence **algorithms and structure before features**.
 
 Decisions
 ---------
 
-Taken (2026-10-03):
+| | Decision | State |
+|-|----------|-------|
+| D1 | Restructure, not rewrite: one roadmap item per branch replaces its owner outright and deletes the old path in the same branch; the gates run once at the item's exit, and the census diff is read there (was: run beside until the gates agree, 2026-10-06) | standing |
+| D2 | Stable identity before more facts | done (F1) |
+| D3 | Stages are types | done (F1) |
+| D4 | Provenance on every fact, as `Fact<T>` | C0–C1 done |
+| D5 | Gates are blessed in CI, never on a laptop | standing |
+| D6 | Equivalence runs on arm64 too | standing |
+| D7 | The visual mode never calls the engine while drawing | done (V1) |
+| D8 | The observation journal is replaced by R, not kept | standing |
+| D9 | Location SSA is superseded; its remainder was F2.2 | done |
+| D10 | DecBench is measured again only where PyPI is reachable | standing |
+| D11 | No new iteration off the fixpoint driver or a stated worklist; no silent cap; no entity-keyed map; no cache outside the query database. Dylints enforce each as its owner lands | standing |
+| D12 | One IR, indexed once ([adr-one-ir](doc/adr-one-ir.md)) | F2 |
+| D13 | One query database ([adr-query-database](doc/adr-query-database.md)) | Q |
+| D14 | One frame model ([adr-frame-model](doc/adr-frame-model.md)) | P4 |
+| D15 | One machine profile from the trusted Sleigh bundle; no architecture-name match below the lifter ([adr-machine-profile](doc/adr-machine-profile.md)) | M |
+| D16 | One byte relation: every pass that asks which bytes an operation reads or writes reads one relation, and a boundary slot is a lane of a root ([adr-byte-relation](doc/adr-byte-relation.md)) | B |
+| D17 | No new crates: a layer boundary inside a crate is a module boundary enforced by a Dylint; the IR depends on neither the lifter nor type inference | L |
 
-- **D1. Restructure, not rewrite**, as above.
-- **D2. Stable identity before more facts.** Op and value identities are stable
-  and never reused; no fact is keyed by position. F1 lands before P4's memory
-  SSA, so the memory model is not built on positions.
-- **D3. Stages are types.** `Lifted → Prepared → Sealed`; a transform consumes a
-  stage and returns the next. Remapping twice or editing a sealed artifact does
-  not compile.
-- **D4. Provenance is part of every fact.** Track C's `Confidence{grade, basis,
-  premises}` is extended from discovery to interfaces, types, names and
-  certificates, as `Fact<T>`; a consumer states the least grade it accepts, and
-  a Dylint rejects an unwrapped answer field. It replaces
-  `types_are_carrier_widths`.
-- **D5. Gates are blessed in CI, never on a laptop**, from pinned containers. A
-  queued run that no runner takes is an alert, not a silence.
-- **D6. Equivalence runs on arm64 too**, under qemu-user, so "x86-64 only" stops
-  being a limit of the oracle.
-- **D7. The visual mode never calls the engine while drawing.**
-
-To confirm (each reverses or retires an earlier decision):
-
-- **D8. The observation journal is replaced, not kept.** plan-extension.md's
-  track H says it stays because it feeds the obligation ledger. The month's
-  evidence says the journal is where proofs are re-derived after rendering; a
-  render tree built with its obligation ids, checked once, makes the journal
-  redundant. Proposed: R replaces it.
-- **D9. `doc/adr-location-ssa.md` is superseded**, not implemented: P1's
-  `ValueView` answers bit identity and P4's partition answers frame identity.
-  What the ADR wanted that neither yet gives — one liveness model over
-  locations (issue #50) and pruned flag and temporary phis (#56) — moves to F2.
-- **D10. DecBench is measured again** only once it runs on a machine that can
-  reach PyPI; until then quality is the equivalence gate plus reading `pdd`.
+The Sleigh crates (`libsla`, `libsla-sys`, `sleigh-config`) are vendored (`vendor/`), so M0's rest reads `.ldefs` and `.dwarf` by changing `vendor/sleigh-config/build.rs`.
 
 The program
 -----------
 
-Identifiers are kept from plan.md and plan-extension.md (P*, PE, C, H, I, K, Q,
-S, E, A); the new ones are G (gates), F (foundation), R (renderer as printer)
-and V (visual mode and shell experience).
+### Foundation
 
-### G. Gates first — now, blocks everything
+| Item | ADR | Done | Left |
+|------|-----|------|------|
+| **G0** Gates real | [testing](doc/testing.md) | the census and release timing (budget 1.3x on the large functions) and the x86-64 equivalence ratchet are CI jobs; the aarch64 equivalence ratchet is a CI job (cross gcc 13, clang 18, qemu-user, the blessed toolchain); the clang-21 failures are fixed | — |
+| **B** One byte relation | [byte-relation](doc/adr-byte-relation.md) | B0 one transfer, checked against the evaluator; B1 one closure; B3 call results, returns and reaching values match the program root; argument lanes, entry-lane projections and certificates match by lane, and a declared float slot narrows to its value's low lane; float merges and root writes answer the lane | B3 rest: a recovered interface's float slots (with P7); B4 measured, no instance yet (see the ADR); liveness over locations (B2, r2dec's dead values, moved into R2: the inventory must own liveness first) |
+| **L** Layering | — | L2 C typing at render boundaries (`typed`) moved from r2rewrite to r2dec, so r2rewrite no longer depends on r2types; L4 r2sleigh-export merged into r2sleigh-cli (13 crates); L1 the body walk moved to r2engine and `block::to_ssa` takes a spelling, so r2ssa reads the lifter only for the trusted-lift authority types; L3a only a stated import takes its library model by name; L3b the library models are the engine's (`r2engine::library`), handed to preparation as `CalleeEvidence` beside the callees' interfaces, preserved registers and reach |   L5 r2ssa's IR and facts layers as modules with a Dylint boundary |
+| **F1** Stable ids, stage types | [stable-identity](doc/adr-stable-identity.md) | all | — |
+| **K** One fixpoint driver | [fixpoint](doc/adr-fixpoint.md) | r2ssa | r2types' loops (with C3), r2dec's (with R) |
+| **F2** One IR, indexed once | [one-ir](doc/adr-one-ir.md) | F2.0; F2.1 and F2.2 in part (dense dominators, loops, liveness once; interface recovery reads its provisional graph once); F2.3; F2.6 (entity-keyed-map Dylint fatal in r2ssa and r2types, in CI) | F2.1 `FunctionIndex` on `Sealed`; F2.2 one byte-granular liveness model (#47, #50); F2.3's name-keyed readers deleted; F2.4 builder with incremental def-use (one graph build); F2.5 projections as indexes |
+| **M** One machine profile | [machine-profile](doc/adr-machine-profile.md) | M0 cspec parsed, languages chosen through `.ldefs`, `.pspec` tracked values, `.dwarf` numbers; M1 slots, call effect, convention rows; M2 r2ssa reads roles and slots only (call reads in the call effect, `AbiProfile` source-only, family enum replaced by the lift's identity, DF role gone); M3 r2types tables gone (stack roots, stated argument registers, no convention guess); M4 r2dec config is a pointer width; M5 DWARF numbers from the language, frame pointer a cited row; M6a RV64 embedded and admitted, `jalr` stubs named, `shapes_zig_riscv64_O0` in the census | M6 rest: RISC-V 64 opens, decodes, names imports and renders 29 of `shapes`' 39 functions with no arm added; the 10 refusals are frame-base homes (P4), and RISC-V has no equivalence target yet |
+| **Q** One query database | [query-database](doc/adr-query-database.md) | Q0 the database (red-green, a random-write session equals a fresh open); Q1 in part (names, import stubs); Q3 returns, survey and modes as queries over one `View`, with held lookups and deposits; Q2 the analysis, callee reads and sealing as queries, stops typed and never held, the memo deleted; Q3e pointer parameters as a query; Q4a the reference index as a query; Q4b renderings as a query, capacity keeps dependencies; Q4c machines load lazily, `ensure_current` deleted; Q4d `Revision` deleted; Q4e the cache Dylint fatal in r2engine ; the exit test over the real program holds | Q2 rest: decode and lift per address as queries; Q3 rest: summaries with P6 |
+| **P4** One frame model | [frame-model](doc/adr-frame-model.md) | — | one partition, one escape analysis, promotion as an SSA rewrite, canary under its premise; `afv` agrees with `pdd` |
+| **R** Renderer as a printer | [renderer-printer](doc/adr-renderer-printer.md) | — | R1 terms may start before P4; r2dec reads only sealed facts; journal, binding-plan fixpoint and retries deleted; absorbs partition-first's decision 5, access-syntax and the semantic-kernel principles as its invariants |
 
-| Item | Exit |
-|------|------|
-| CI under ten minutes: one `ci`-profile build every gate downloads, equivalence in six shards held to the baseline by `tests/equiv/merge_shards.py`, the harness's own tests in their own job | The slowest job finishes in ten minutes; it was 33 for equivalence alone |
-| CI green, with the equivalence, coverage and source-gold baselines re-blessed from CI's own run (the merge job writes `baseline.proposed.json`) | Every gate passes on a push with no laptop baseline |
-| Queued-run alert; pinned containers for gcc 13, clang 18 and the macOS coverage compiler; compiled coverage cells replaced by pinned bytes | A gate result does not depend on the runner |
-| Diagnose the equivalence `PipelineTests`/`SelfTestSuite` stall on hosted runners. From unittest a driver run never returns, and the step outlives even a step-level timeout, so some process is in an uninterruptible wait (the runtime's guard install is the first suspect); the same self-tests pass inside every equivalence shard. Reproduce on x86-64 Linux: `tests/equiv/bounded.sh 240 test_equiv.SelfTestSuite`. The two classes are out of CI until then | Both classes pass from `bounded.sh` and gate again in the harness job |
-| arm64 equivalence under qemu-user (D6) | `tests/equiv` reports both architectures |
-| SSA integrity check in CI: one definition per value, every use dominated | Fails on the duplicate `tmp:2c200_1` definition seen in #56, or proves it a display artefact |
-| Split PR #66 into reviewable pieces and merge | `master` carries the program |
-| Close the issues fixed since August; update the partial ones; one tracking issue per item below | The issue board is the roadmap |
+### Analysis
 
-### F. Foundation — the spine (r2ssa, r2source)
-
-| Item | Depends on | Exit |
-|------|-----------|------|
-| **F1** Stable op and value ids; every `(block, op index)` map re-keyed; stage types (D2, D3) | G | `get_block_mut`, `op_mut`, the revision asserts and the remap comment are gone |
-| **F2** One IR with views: blocks, graph and value views built once at seal; the machine projection and term arena become indexes; one liveness model over locations; flag and temporary phis pruned by liveness | F1, P4 | No rebuild after seal; closes #47, #50, #56 |
-| **K** One fixpoint driver: lattice height, widening and a visible budget for every iterative pass, Kani on the lattice laws (the rest of track K) | F1 | No bare `loop` until unchanged; `objects.rs:196` first |
-
-### Analysis (detail in plan.md)
-
-| Item | Depends on | Exit |
-|------|-----------|------|
-| **PE** Byte-dependency relation; result width from the written-lane lattice; `narrow_zero_extend_input_size` deleted | F1 | `main` returns `int`-width, `gt` is not `uint8_t`, `fnv1a32` returns 32 bits (#58, #63) |
-| **P1.7** `Unspecified(width)` leaf for partial entry-lane writes | PE | The rotl listing makes no false claim |
-| **C** Confidence everywhere as `Fact<T>` (D4) | — | Every public answer field is a `Fact`; the minted-interface flag is deleted |
-| **P4** Memory model: frame partition (P4.1 in part), MemorySSA on stable ids, stack-protector elision, `afv`/`afi` from sealed entities | F1, C | The canary traps in #61 are gone; one owner of frame objects |
-| **Q** Demand-driven query database; `memo.rs` and the eight caches deleted | F1 | A random-write session equals a fresh open |
-| **I** Unread container facts: CFI extents and save slots as stated entries, LSDA, IBT, RELRO, init arrays | Q | Stripped discovery finds every FDE start |
-| **P5** Value domain completed; loads from immutable memory fold | K | The `optimize.rs` round cap is gone |
-| **R** Renderer as printer: the render plan is one pure function of sealed facts with no rounds; the render tree carries obligation ids by construction; one linear checker; P10's render-only lowering and admissibility rules; the journal deleted (D8) | F2, P5 | r2dec reads only sealed facts; the three bound-address rules are one |
-| **P6** One resolved body per function per revision, on Q; callee summaries bottom-up over SCCs | Q, I | `read_callees` is gone |
-| **P7** Call contracts: one ABI classifier, variadic and format roles, result proof over the call graph | PE, P6, C | No dropped or invented argument; printf's stack tail renders |
-| **P8** Data objects and strings | P5, P7 | `iz` lists proven strings |
-| **P9** Types over the graph: declared-pointee propagation, inferred aggregates | P4, P8 | A struct pointer is not `uint32_t*` (`rec_index`) |
-| **P11** Names and commands: one spelling of an unnamed function, aliases by occupancy | C, P6 | Differential disagreements all judged |
+| Item | Done | Left (exit) |
+|------|------|-------------|
+| **PE** Written-lane result widths ([written-lanes](doc/adr-written-lanes.md)) | result widths | the rest is B (one relation, `cover(demanded)`, the eval/Kani check) |
+| **P1.7** Entry lanes are the caller's | done | — |
+| **C** Provenance ([provenance](doc/adr-provenance.md)) | C0; C1 types and the format parameter | C1 r2dec reads the grade (`from_source_signature` deleted); C2 every answer field a `Fact`; C3 r2types on `Basis`; C4 references carry `Confidence` |
+| **P5** Values as an index | — | XMM lane noise gone; immutable loads fold |
+| **P6** One resolved body per function, as a query | [resolved-bodies](doc/adr-resolved-bodies.md); P6a the walk through dispatch tables is the `Walked` query; P6c1 a callee resolved as a root is; P6c2 return-only demand (`Resolved`, `Demand`, `result_owners`); `read_callees` kept as the one loop a root reads callees through (the database answers it with `Resolved`, a plain `Program` with each callee resolved alone) | — (parameters stay what each body proves alone: transitive resolution measured at 21 s for pumasim `main`, declined) |
+| **I** Unread container facts (CFI, LSDA, IBT, RELRO, init arrays) | — | stripped discovery finds every FDE start |
+| **P7** Call contracts | Darwin arm64 variadic tail (M1c); declared `double` arguments reach their calls (B3) | no dropped or invented argument; printf's stack tail on x86-64; a recovered interface's float parameters and float result (a body's float work feeds only the float result, so recovery never observes it; the variadic save area's spills read as parameters in both classes, and the convention's `al` read at entry states the tail) |
+| **P8** Data objects and strings | — | `iz` lists proven strings |
+| **P9** Types over the graph | — | a struct pointer is not `uint32_t*` |
+| **P11** Names and commands | — | every differential disagreement judged |
+| **SD** Structuring quality ([structure-dominator-tree](doc/adr-structure-dominator-tree.md)) | dominator-tree structurer | no more labels than the old structurer; condition chains and irreducible-entry splitting behind a BDD identity check; lexical ancestry as dominance retires `region_does_not_dominate_occurrence` |
 
 ### Surface
 
-| Item | Depends on | Exit |
-|------|-----------|------|
-| **V1** Visual-mode core: message-driven state, engine on a worker thread with a cache keyed by address and revision, a ticked event loop, mouse and resize; a `reedline` prompt with history shared by the shell and `:` | G | No engine call while drawing; first frame within 50 ms whatever the function costs |
-| **S1** One verb table (verb, arity, help, JSON shape); `?` generated from it; `j` on every verb; `e` for presentation keys | — | Help and completion cannot disagree with dispatch |
-| **V2** Colour from the engine: token roles from the disassembly speller and `pddj`, radare2's colour roles and `eco` themes, terminal detection, colour in the shell too | V1 | `pd` and `pdd` coloured identically in the shell and the visual mode |
-| **V3** Completion and discoverability: grammar-aware tab completion from `line.rs` and S1's table; flags, functions, config keys; prefix-key hints; `Ctrl-P` palette; contextual `?` | V1, S1 | Every action is findable without documentation |
-| **V4** Panels: a layout tree of splits and tabs (`V!`), linked cursors across C, disassembly and graph, breadcrumbs | V1 | A C line lights its instructions in every pane |
-| **V5** Graphs: edge kinds coloured and labelled, back edges distinct, zoom levels, path highlighting, search, follow calls, loops shaded and folded from sealed loop facts, call and reference graphs through one renderer | V2; loop shading after F2 | `agf`, `agc` and `agx` share the renderer; layout off the UI thread |
-| **S2** `@@` iterators, search, pipes and redirects, `-i`/`-q0` for r2pipe | Q | `diff_r2.py` covers the `j` forms |
-| **E** Emulation over `r2il::eval`, then verify (`Proved`/`Disproved`/`Unknown`) | P2.3 | aarch64 originals checked against host-compiled renderings |
-| **A** Agent surface: stateless typed queries, `Fact<T>` fields, budgets and elision, explain | Q, C | A transcript test and a shuffled-order determinism test |
-| **V6** Annotation: rename, comment, retype and define as stored user facts, recompute through Q, undo | R, Q | An edit shows in every pane without reopening |
+| Item | Done | Left |
+|------|------|------|
+| **V1** Visual-mode core | done | its worker asks Q once Q lands |
+| **S1** Verb table, `?`, `e` | done | `j` on every verb |
+| **V2** Colour from the engine | done | `eco` themes |
+| **V3** Completion | shell | visual-mode hints, palette, `?` |
+| **V4** Panels, linked cursors | — | a C line lights its instructions in every pane |
+| **V5** Graphs through one renderer | — | `agf`/`agc`/`agx` share it, layout off the UI thread |
+| **S2** `@@`, search, pipes | — | `diff_r2.py` covers the `j` forms |
+| **E** Emulation, then verify | — | aarch64 originals checked against host-compiled renderings |
+| **A** Agent surface | — | transcript and shuffled-order determinism tests |
+| **V6** Annotation as user facts | — | an edit shows in every pane without reopening |
 
-### Order
+### Gate work
 
-One engineer per track; a single engineer takes them in this order.
+| Item | Left |
+|------|------|
+| Pinned containers; compiled coverage cells as pinned bytes | gate results independent of the runner |
+| `PipelineTests`/`SelfTestSuite` stall on hosted runners | both gate again |
+| arm64 equivalence in CI (D6) | done with G0 |
+| macOS arm64 equivalence | Mach-O renderings run beside their originals |
+| Stage merges of PR #67 to master | finished items land on master |
+| "Where this stands" generated from CI artifacts | no hand-typed status |
+| Ratchet on file length (largest today 5.2k lines) | no file grows past the cap |
+| D11 Dylints: unbudgeted loops | fatal in r2engine (caches outside Q: fatal since Q4e) |
+| Hygiene: `long_comments` ratchet (3833), dead code | comments one or two lines; no unreferenced items; the structure ratchets are suspended inside an item and blessed at its exit (AGENTS.md, Validation Bar) |
 
-```
-wave  engine                         analysis                 surface
-W0    G                              —                        —
-W1    F1                             PE, C, P1.7              V1, S1
-W2    K                              P4, Q                    V2, V3
-W3    F2                             I, P5                    V4, S2
-W4    R                              P6                       V5
-W5    —                              P7                       E, A
-W6    —                              P8, P9                   V6
-W7    —                              P11                      DecBench (D10)
-```
+Order
+-----
 
-Single-engineer order: G, F1, PE, C, V1, S1, V2, V3, K, P4, Q, F2, V4, I, P5,
-R, V5, P6, P7, E, A, P8, P9, V6, P11.
+Done out of order: Q (step 6) landed before G0, B, P4 and R. From 2026-10-06
+the order is the dependency path, and nothing jumps it.
 
-Rules for every item: it runs beside the path it replaces and deletes it when
-the gates agree; it deletes more than it adds or says why not; no new
-renderer-side policy lands while R is open; no visual-mode feature calls the
-engine synchronously.
+0. **G0** next: equivalence on both architectures, the census and release
+   timing as CI jobs, so an item's exit is one CI run, not a hand-run queue.
+1. **B**: one byte relation (blocks P4, P5 and R).
+2. **R1**, then **P4**, then **P5**, then **R** (R0, R2–R4): the critical path.
+3. **P6** return-only demand: a function whose result a callee's unstated
+   result owns is resolved again with that callee resolved; transitive
+   resolution measured at 21 s for pumasim `main` and declined. Then **I**.
+4. **C2–C4**, then **P7, P8, P9, P11**.
+5. Beside the path, as small items when a step waits on CI: **L5**, **M6**
+   rest, **F2.1–F2.5**, **Q2** rest, **K** rest.
+6. **Surface** on its own branch: S2, A and V3 now; V4, V5 and the rest after R.
 
-### After the program
+Every item replaces what it owns and deletes the old path in its own branch
+(D1); at its exit it deletes more than it adds or says why, names each moved
+census line, adds no renderer policy while R is open, and violates nothing in
+D11.
 
-From the vision's tiers, in order, each only once its consumers exist: binary
-diffing over callee summaries; exception-handler recovery; the outside
-techniques of issue #65 (the switch prover's own harness, SAILR idioms as
-r2rewrite rules one at a time, library identification measured before built,
-Retypd revisited after P9); static rewriting; deobfuscation; trace recording
-and query; the debugger (`doc/debugger-build-plan.md`).
+Upstream radare2 (differential target, [radare2-function-walk](doc/adr-radare2-function-walk.md)):
+`ret` given one definition, one read-ahead cache per walk, predecessor in the
+frame, edge-labelled path state, the callee-recursion cap derived. Each its own
+pull request, measured alone.
+
+After the program, each only once its consumers exist: binary diffing over
+callee summaries, exception-handler recovery, the techniques of #65 (switch
+prover harness, SAILR idioms as r2rewrite rules, library identification,
+Retypd after P9), static rewriting, deobfuscation, trace recording.
 
 Issues
 ------
 
-Triaged against `fe7698e8` on 2026-10-03.
-
-| Issue | State | Owner here |
-|-------|-------|-----------|
-| #49, #51, #52, #53, #54, #55, #59 | Fixed | close |
-| #60 | Fixed on x86-64 | close after an arm64 -O0 check |
-| #57 | Obsolete (the plugin is deleted) | close |
-| #47, #50 | Partly fixed | F2 |
-| #56 | Open; possible duplicate definition | G (integrity check), F2 |
-| #58 | Partly: pointers fixed, return widths and pointee types open | PE, P9 |
-| #63 | Partly: 21 of 24 equal; the rest is result width | PE |
-| #61 | 85 of 98; tracker kept | P4 (canary), R (unaligned loads), P7 |
-| #65 | Slice library and switch prover landed | After the program |
+| Issue | State | Owner |
+|-------|-------|-------|
+| #47, #50 | one liveness model in r2ssa; consumers remain | F2, R |
+| #63 | fixed on CI | close after review |
+| #58 | widths fixed; pointee types open | P9 |
+| #61 | 85 of 98 traps | P4 (canary), R, P7 |
+| #65 | slice library and switch prover landed | after the program |
 
 Standing debt
 -------------
 
-Carried with a cause, not as a baseline:
-
-- The source-gold baseline lists the pointee `const` qualifier machine code does
-  not carry, uncertified pointer parameters, `rotl32`'s signedness and the
-  return widths PE removes. It was approximated with gcc 16 and clang ELF
-  builds; G re-blesses it on CI's gcc 13.
-- The coverage baseline's compiled cells come from CI's clang 17 run of
-  `903718c5`, its pinned and system cells from a local run; G replaces the
-  compiled cells with pinned bytes.
-- Pointer parameters take the width every certified access reads, so `Rec *`
-  renders as `uint32_t *`; correct at the machine level, not the source type
-  (P9).
-- `pdd` on ARM 32-bit is not admitted until the Sleigh tuple is verified.
-- Entry condition flags cannot be booleans until the architecture specification
-  carries a flag fact.
-- `doc/wip/*.patch` are written against the deleted plugin; each is re-derived
-  on the current tree or deleted.
-
-Documents
----------
-
-| Document | Status |
-|----------|--------|
-| `doc/engine-vision.md` | Live: the why. Its sequencing defers to this file |
-| `doc/handoff/review-fixes/plan.md`, `plan-extension.md` | Live: per-phase specification; order and status here |
-| `doc/adr-access-syntax.md`, `adr-partition-first.md`, `adr-register-identity.md`, `adr-structure-dominator-tree.md`, `adr-floating-point.md` | Live |
-| `doc/adr-location-ssa.md` | Superseded by P1 and P4, remainder in F2 (D9, to confirm) |
-| `doc/adr-semantic-preservation-kernel.md` | Live in principle; its spine still names the radare2 snapshot and `r2sym`/`r2cert`, which no longer exist — to be rewritten against F and R |
-| `doc/architecture-plan.md` | History of the binding-spine rewrite; superseded by R |
-| `doc/phase1-plan.md`, `phase1-design.md`, `handoff-engine-inversion.md`, `handoff-location-ssa.md` | Plugin era; to archive |
-| `doc/beat-angr-end-to-end.md`, `decbench-plan.md` | Numbers measured through the plugin; kept for method, not for numbers |
-| `doc/debugger-build-plan.md` | Proposed; after the program |
-
-Ownership
----------
-
-| Crate | Owns |
-|-------|------|
-| `r2image` | What the container states: bytes, sections, symbols, relocations, entries, CFI, DWARF |
-| `r2abi` | Calling conventions, library prototypes per C library, platform register classes |
-| `r2il` | The low tier and its executable semantics (`r2il::eval`) |
-| `r2sleigh-lift` | Decoding and lifting through Sleigh |
-| `r2ssa` | The medium tier: stable ids, SSA, values, memory, liveness, certificates, refusal evidence |
-| `r2source` | Contracts between the layers, and `Confidence` |
-| `r2types` | Type inference, layouts, signatures |
-| `r2rewrite` | Term rewriting and its rule proofs |
-| `r2dec` | The render plan, structuring and printing — no proof of its own after R |
-| `r2engine` | Requests, discovery, the query database, summaries, emulation |
-| `r2s` | Commands, the verb table, the prompt, and the only implementor of `Program` |
-| `r2s-tui` | The visual mode: layout, keys, drawing; no fact about the program |
-
-One fact, one owner. When two places answer the same question, one of them is
-deleted.
+- r2types' confidence loops rank by `u8` scores and two stop after six rounds (C3).
+- r2dec's loops (`placement`, `rules`, `recording`, `prepared_semantic`) go with R.
+- A reload certified as the stored value binds as a copy of the stored temporary (three census functions; R3).
+- Listing claims follow the demand release, valid only for the function's meaning; annotations must read the index before it (F2).
+- Address-proven formals change no test or census function: P7 proves their use or deletes them.
+- Pointer parameters take the width every access reads, so `Rec *` renders as `uint32_t *` (P9).
+- `pdd` on 32-bit ARM is not admitted until its Sleigh tuple is verified.
+- Entry condition flags cannot be booleans until the specification carries a flag fact.
+- `StackObjectRefusal::ParameterHomeWidthMismatch` survives S2; shown genuine or deleted.
+- r2dec's `NormalizedOpSite` rows are positions in an edited copy; keyed by `OpId` (R).
+- `def_use_graph` seals a raw function to answer a listing (F2.1).
+- `seal_body_proven_interface` rewrites the format parameter after the build (C1).
+- x87 80-bit floats refuse ([floating-point](doc/adr-floating-point.md)).
+- Partition-first's conservatism (read closure, `CallRestore`, return carrier, call-use reads) and the semantic-kernel ADR's rewrite against F2 and R go with R.
