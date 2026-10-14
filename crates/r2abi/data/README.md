@@ -109,6 +109,10 @@ Where radare2 scopes differently:
   (`dyld_info -exports` on both), so it is `bzero` under a second name, and
   clang emits calls to it for `bzero` and zeroing `memset` on x86-64.
 
+- The portable table declares POSIX `<dlfcn.h>`'s `dlopen`, `dlsym`,
+  `dlclose` and `dlerror`, which radare2 does not; glibc, bionic and
+  libSystem declare them alike. Without them a call to one has no arity
+  but the stub's, a floor (ROADMAP P7).
 - The Objective-C runtime's records are objc4's (`objc/message.h`,
   `objc/objc-internal.h`), in the Darwin table only (GNUstep's libobjc2
   differs: its `objc_storeStrong` returns the object), where radare2's are not: `objc_msgSend` and
