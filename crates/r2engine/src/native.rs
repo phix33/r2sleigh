@@ -80,6 +80,14 @@ pub trait Program: crate::body::Program {
         self.region(vaddr).is_some_and(|region| region.execute)
     }
 
+    /// Whether a function can begin here: code the file holds bytes for (audit W29).
+    fn places_function(&self, vaddr: u64) -> bool {
+        self.holds_code(vaddr)
+            && self
+                .region(vaddr)
+                .is_some_and(|region| vaddr < region.file_end)
+    }
+
     /// What the loader writes before the program runs, sorted by place and
     /// disjoint, with the value the container states for each: the file's
     /// bytes there are not what the program reads. Nothing, where nothing is

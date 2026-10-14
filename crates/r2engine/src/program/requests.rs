@@ -190,6 +190,8 @@ impl Rendering {
 #[derive(Debug)]
 pub(super) struct Survey {
     functions: Vec<Discovered>,
+    /// Addresses stated or reached as functions that hold no code the file backs (audit W29).
+    placeless: BTreeMap<u64, Confidence>,
     walked: BTreeMap<u64, Result<bool, NativeRefusal>>,
     /// Each walked body's blocks and their bytes, as the walk traced them.
     extents: BTreeMap<u64, crate::body::TraceExtent>,
@@ -553,6 +555,13 @@ impl<S: Source + 'static> OpenProgram<S> {
         Ok(self.surveyed()?.functions.clone())
     }
 
+    /// Every address the container states or a body reaches as a function that holds no code
+    /// the file backs, with the strongest reason given, in address order; none is a function.
+    pub fn placeless_starts(&mut self) -> Result<BTreeMap<u64, Confidence>, String> {
+        self.start_request();
+        Ok(self.surveyed()?.placeless.clone())
+    }
+
     /// The entries of every believed body whose walk decoded this address as
     /// one of its instructions, in address order: more than one where bodies
     /// share a tail, none outside every body. O(log n) once discovery has
@@ -797,9 +806,14 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
         // Discovery decides each body's instruction set itself, so it reads no modes.
         let view = View::new(db, false);
         let seeds = stated_functions(&view);
+        let stated = Confidence::of(Basis::Stated);
+        let mut placeless = (view.stated_starts().placeless())
+            .map(|vaddr| (vaddr, stated.clone()))
+            .collect::<BTreeMap<_, _>>();
         if seeds.is_empty() {
             return Ok(Surveyed(Arc::new(Survey {
                 functions: Vec::new(),
+                placeless,
                 walked: BTreeMap::new(),
                 extents: BTreeMap::new(),
                 supervisor: BTreeMap::new(),
@@ -810,6 +824,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
         let walker = super::returns::Walking::new(view.clone(), true)?;
         let found = crate::discovery::functions(&view, seeds, &walker);
         db.deposit::<super::returns::ComesBack>(found.returns);
+        for (vaddr, confidence) in found.placeless {
+            placeless.entry(vaddr).or_insert(confidence);
+        }
         let extents = found
             .walks
             .iter()
@@ -842,6 +859,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
             .collect();
         Ok(Surveyed(Arc::new(Survey {
             functions: found.functions,
+            placeless,
             walked,
             extents,
             supervisor,

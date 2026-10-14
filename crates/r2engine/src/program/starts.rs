@@ -1,6 +1,6 @@
 //! Where the container states a function begins: the survey's seeds and every body walk's boundaries.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Imports, ProgramInputs, Source, SymbolKind};
 use crate::query::db::{Db, Query, Retention};
@@ -9,6 +9,8 @@ use crate::query::db::{Db, Query, Retention};
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct StatedStarts {
     starts: BTreeMap<u64, bool>,
+    /// Stated starts that hold no code the file backs, which begin no function (audit W29).
+    placeless: BTreeSet<u64>,
 }
 
 impl StatedStarts {
@@ -20,6 +22,11 @@ impl StatedStarts {
     /// Each stated start in address order, and whether its code is Thumb.
     pub(super) fn iter(&self) -> impl Iterator<Item = (u64, bool)> + '_ {
         self.starts.iter().map(|(vaddr, thumb)| (*vaddr, *thumb))
+    }
+
+    /// The stated starts dropped for holding no code, in address order.
+    pub(super) fn placeless(&self) -> impl Iterator<Item = u64> + '_ {
+        self.placeless.iter().copied()
     }
 }
 
@@ -59,7 +66,10 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Stated {
         let mut starts = StatedStarts::default();
         // The first statement at an address decides its instruction set.
         for (vaddr, thumb) in stated {
-            starts.starts.entry(vaddr).or_insert(thumb);
+            match inputs.places_function(vaddr) {
+                true => _ = starts.starts.entry(vaddr).or_insert(thumb),
+                false => _ = starts.placeless.insert(vaddr),
+            }
         }
         starts
     }

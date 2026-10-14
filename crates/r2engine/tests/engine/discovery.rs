@@ -12,7 +12,7 @@ use common::{
 };
 use r2abi::frames::FrameEntry;
 use r2engine::discovery::Basis;
-use r2engine::program::{OpenProgram, Symbol, SymbolKind};
+use r2engine::program::{EntryKind, OpenProgram, Symbol, SymbolKind};
 use r2engine::query::{Listing, Role, Stop};
 
 const CALLED: FrameEntry = FrameEntry::Called;
@@ -208,6 +208,32 @@ fn every_reference_every_believed_body_makes_is_indexed_once_in_order() {
         .collect::<Vec<_>>();
     let word = Role::Read { width: 4 };
     assert_eq!(read, [(ONE, STEPPED + 8, word), (TWO, STEPPED, word)]);
+}
+
+/// An initialiser the container lists outside every segment, and a `call 0` in a body, begin no
+/// function: each is dropped and recorded with its reason (audit W29).
+#[test]
+fn a_start_that_holds_no_code_is_no_function_and_is_recorded() {
+    const NOWHERE: u64 = 0x5000;
+    let literal = Literal::new().entering(NOWHERE, EntryKind::Init);
+    let mut program = OpenProgram::of(literal);
+    // caller: call 0 (rel32 = 0 - 0x1015); ret
+    (program.source_mut()).write(CALLER, &[0xe8, 0xeb, 0xef, 0xff, 0xff, 0xc3]);
+    let found = believed(&mut program);
+    assert!(
+        !found
+            .iter()
+            .any(|(address, _)| [0, NOWHERE].contains(address)),
+        "{found:x?}"
+    );
+    let placeless = program.placeless_starts().expect("surveyed");
+    let reasons = (placeless.iter())
+        .map(|(address, confidence)| (*address, confidence.basis))
+        .collect::<Vec<_>>();
+    assert_eq!(reasons, [(0, Basis::Called), (NOWHERE, Basis::Stated)]);
+    // Nothing proves the call never returns, so the caller's body runs on to its `ret`.
+    let extents = program.function_extents().expect("surveyed");
+    assert_eq!(extents[&CALLER].bytes, 6);
 }
 
 #[test]

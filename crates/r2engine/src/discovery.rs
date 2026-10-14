@@ -161,6 +161,8 @@ impl Holders {
 /// Every function in the program, whether control can come back from each, and each body as the fixpoint left it.
 pub struct Discovery<T, E> {
     pub functions: Vec<Discovered>,
+    /// Addresses offered as functions that hold no code the file backs, which begin none (audit W29).
+    pub placeless: BTreeMap<u64, Confidence>,
     pub returns: BTreeMap<u64, Return>,
     pub walks: BTreeMap<u64, Result<T, E>>,
 }
@@ -172,7 +174,8 @@ pub fn functions<W: Walker>(
     walker: &W,
 ) -> Discovery<W::Walk, W::Refusal> {
     let unknown = |_| None;
-    let mut fixpoint = Fixpoint::new(walker, &unknown, None);
+    let places = |address| program.places_function(address);
+    let mut fixpoint = Fixpoint::new(walker, &unknown, &places, None);
     for (address, confidence, thumb) in seeds {
         fixpoint.offer(address, confidence, thumb);
     }
@@ -189,6 +192,7 @@ pub fn functions<W: Walker>(
                 name: program.name_at(address),
             })
             .collect(),
+        placeless: fixpoint.placeless,
         returns,
         walks: fixpoint.walks,
     }
@@ -200,7 +204,9 @@ pub fn returns<W: Walker>(
     known: &dyn Fn(u64) -> Option<Return>,
     walker: &W,
 ) -> BTreeMap<u64, Return> {
-    let mut fixpoint = Fixpoint::new(walker, known, Some(seed));
+    // Asking whether one function returns lists no functions, so every address is placed.
+    let anywhere = |_| true;
+    let mut fixpoint = Fixpoint::new(walker, known, &anywhere, Some(seed));
     fixpoint.pending.push(seed);
     fixpoint.run();
     fixpoint.answers(fixpoint.walks.keys().copied())
@@ -220,9 +226,13 @@ struct Fixpoint<'w, W: Walker> {
     walker: &'w W,
     /// What an earlier run settled, which this one neither walks nor revises.
     known: &'w dyn Fn(u64) -> Option<Return>,
+    /// Whether a function can begin at an address.
+    places: &'w dyn Fn(u64) -> bool,
     /// The one function whose return is asked, where discovery is not walking every believed body.
     seed: Option<u64>,
     believed: BTreeMap<u64, (Confidence, bool)>,
+    /// Addresses offered that `places` refuses, with the strongest reason offered.
+    placeless: BTreeMap<u64, Confidence>,
     pending: Vec<u64>,
     walks: BTreeMap<u64, Result<W::Walk, W::Refusal>>,
     /// The functions shown to return so far.
@@ -236,12 +246,19 @@ struct Fixpoint<'w, W: Walker> {
 }
 
 impl<'w, W: Walker> Fixpoint<'w, W> {
-    fn new(walker: &'w W, known: &'w dyn Fn(u64) -> Option<Return>, seed: Option<u64>) -> Self {
+    fn new(
+        walker: &'w W,
+        known: &'w dyn Fn(u64) -> Option<Return>,
+        places: &'w dyn Fn(u64) -> bool,
+        seed: Option<u64>,
+    ) -> Self {
         Self {
             walker,
             known,
+            places,
             seed,
             believed: BTreeMap::new(),
+            placeless: BTreeMap::new(),
             pending: Vec::new(),
             walks: BTreeMap::new(),
             returning: BTreeSet::new(),
@@ -323,6 +340,16 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
 
     /// Believe an address for a reason, keeping the stronger one; the first reason decides the instruction set.
     fn offer(&mut self, address: u64, confidence: Confidence, thumb: bool) {
+        if !(self.places)(address) {
+            match self.placeless.get_mut(&address) {
+                Some(held) if confidence < *held => *held = confidence,
+                Some(_) => {}
+                None => _ = self.placeless.insert(address, confidence),
+            }
+            // As with a body that cannot be walked, nothing proves a call to it never returns.
+            self.join(address);
+            return;
+        }
         match self.believed.get_mut(&address) {
             Some((held, _)) => {
                 if confidence < *held {
@@ -514,6 +541,11 @@ mod tests {
 
         fn import_at(&self, _vaddr: u64) -> Option<String> {
             None
+        }
+
+        /// This program maps nothing, so every address is taken to hold code.
+        fn places_function(&self, _vaddr: u64) -> bool {
+            true
         }
 
         fn holds_static_data(&self, _vaddr: u64) -> bool {

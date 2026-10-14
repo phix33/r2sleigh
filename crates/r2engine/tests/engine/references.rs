@@ -25,8 +25,10 @@ fn listed(facts: &[Reference]) -> Vec<(u64, u64, Role, Basis)> {
 
 #[test]
 fn the_index_carries_the_scope_it_was_read_over() {
-    let nowhere = BASE + 0x1000;
+    // A stated function in the code whose first byte no x86-64 instruction begins with (`push es`).
+    let nowhere = STEPPED + 0xc;
     let mut literal = Literal::new().stating("nowhere", nowhere);
+    literal.write(nowhere, &[0x06]);
     // two: jmp rax, whose target no walk can know
     literal.write(TWO, &[0xff, 0xe0]);
     let mut program = OpenProgram::of(literal);

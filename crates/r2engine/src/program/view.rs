@@ -270,10 +270,11 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
     }
 
     fn holds_code(&self, vaddr: u64) -> bool {
-        match &self.db.inputs().code {
-            Some(code) => code.holds(vaddr),
-            None => crate::body::Program::region(self, vaddr).is_some_and(|region| region.execute),
-        }
+        self.db.inputs().holds_code(vaddr)
+    }
+
+    fn places_function(&self, vaddr: u64) -> bool {
+        self.db.inputs().places_function(vaddr)
     }
 
     fn result_reads(&self, entry: u64) -> Option<r2source::SourceResultReads> {

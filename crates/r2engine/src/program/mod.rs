@@ -672,6 +672,23 @@ impl<S: Source> ProgramInputs<S> {
     fn stated_thumb(&self, vaddr: u64) -> bool {
         (self.mapped.range(..=vaddr).next_back()).is_some_and(|(_, thumb)| *thumb)
     }
+
+    /// Whether the container states this address holds instructions: a section it says holds
+    /// code, or, where it states no sections, a region it maps executable.
+    fn holds_code(&self, vaddr: u64) -> bool {
+        let container = self.source.container();
+        match &self.code {
+            Some(code) => code.holds(vaddr),
+            None => {
+                (container.segment_at(vaddr)).is_some_and(|segment| segment.permissions.execute)
+            }
+        }
+    }
+
+    /// Whether a function can begin here: code the file holds bytes for (audit W29).
+    fn places_function(&self, vaddr: u64) -> bool {
+        self.holds_code(vaddr) && self.source.container().file_backed(vaddr, 1) > 0
+    }
 }
 
 impl<S: Source + 'static> Inputs for ProgramInputs<S> {
