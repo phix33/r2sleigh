@@ -1520,9 +1520,8 @@ fn an_exclusive_pair_reaches_the_rendering_rather_than_the_projection() {
     assert!(!output.contains("store_conditional"), "{output}");
 }
 
-/// `atomic_fetch_add` without LSE, relaxed (`ldxr`/`stxr`) and acquire-release (`ldaxr`/`stlxr`):
-/// the linked load's value is read and returned, its link and ordering a gap beside it, and the loop
-/// exits on the store's status, a residual, not on a constant (W20 left it 1 and the loop endless).
+/// `atomic_fetch_add` without LSE, relaxed and acquire-release: the loaded value is returned, its
+/// link and ordering a gap, and the loop exits on the store's status, not a constant (W20: endless).
 #[test]
 fn an_aarch64_exclusive_loop_returns_the_value_it_loaded() {
     for (ordered, load, store) in [

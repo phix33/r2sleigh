@@ -191,123 +191,128 @@ fn ordered_accesses(word: u32) -> Vec<String> {
         .collect()
 }
 
+/// Each instruction with what [`ordered_accesses`] reads of its lift.
+type Ordered = (&'static str, u32, &'static [&'static str]);
+
 /// Each AArch64 acquire is stated after its access and each release before it (Arm ARM B2.3);
 /// a relaxed form states neither, and only LDLAR's and STLLR's LORegion orderings stay unmodelled.
+const ORDERED: [Ordered; 34] = [
+    ("ldxr w8, [x0]", 0x885f_7c08, &["linked Relaxed"]),
+    ("ldaxr x0, [x8]", 0xc85f_fd00, &["linked Acquire"]),
+    ("ldaxr w0, [x8]", 0x885f_fd00, &["linked Acquire"]),
+    ("ldaxrb w0, [x8]", 0x085f_fd00, &["linked Acquire"]),
+    ("ldaxrh w0, [x8]", 0x485f_fd00, &["linked Acquire"]),
+    (
+        "ldxp x0, x1, [x8]",
+        0xc87f_0500,
+        &["linked Relaxed", "load"],
+    ),
+    // The pair's second load has no ordering of its own, so the fence after both stays.
+    (
+        "ldaxp x0, x1, [x8]",
+        0xc87f_8500,
+        &["linked Relaxed", "load", "fence Acquire"],
+    ),
+    ("stxr w10, w9, [x0]", 0x880a_7c09, &["conditional Relaxed"]),
+    ("stlxr w10, x9, [x8]", 0xc80a_fd09, &["conditional Release"]),
+    ("stlxrb w9, w1, [x8]", 0x0809_fd01, &["conditional Release"]),
+    ("stlxrh w9, w1, [x8]", 0x4809_fd01, &["conditional Release"]),
+    (
+        "stxp w9, x0, x1, [x8]",
+        0xc829_0500,
+        &["conditional Relaxed", "guarded Relaxed"],
+    ),
+    (
+        "stlxp w9, x0, x1, [x8]",
+        0xc829_8500,
+        &["conditional Release", "guarded Release"],
+    ),
+    ("ldar x0, [x8]", 0xc8df_fd00, &["load", "fence Acquire"]),
+    ("ldarb w0, [x8]", 0x08df_fd00, &["load", "fence Acquire"]),
+    ("stlr x0, [x8]", 0xc89f_fd00, &["fence Release", "store"]),
+    ("stlrh w0, [x8]", 0x489f_fd00, &["fence Release", "store"]),
+    ("ldapr x0, [x8]", 0xf8bf_c100, &["load", "fence Acquire"]),
+    (
+        "ldapurb w0, [x8, #3]",
+        0x1940_3100,
+        &["load", "fence Acquire"],
+    ),
+    (
+        "stlur w0, [x8, #-4]",
+        0x991f_c100,
+        &["fence Release", "store"],
+    ),
+    // A limited-ordering acquire orders only within its LORegion, so no ordering is stated.
+    ("ldlar x0, [x8]", 0xc8df_7d00, &["unmodelled", "load"]),
+    ("stllr w0, [x8]", 0x889f_7d00, &["store", "unmodelled"]),
+    ("ldadd w1, w0, [x8]", 0xb821_0100, &["load", "store"]),
+    (
+        "ldadda w1, w0, [x8]",
+        0xb8a1_0100,
+        &["load", "store", "fence Acquire"],
+    ),
+    (
+        "ldaddl x1, x0, [x8]",
+        0xf861_0100,
+        &["fence Release", "load", "store"],
+    ),
+    (
+        "ldaddal w1, w0, [x8]",
+        0xb8e1_0100,
+        &["fence Release", "load", "store", "fence Acquire"],
+    ),
+    (
+        "staddl w1, [x8]",
+        0xb861_011f,
+        &["fence Release", "load", "store"],
+    ),
+    (
+        "swpal x1, x0, [x8]",
+        0xf8e1_8100,
+        &["fence Release", "load", "store", "fence Acquire"],
+    ),
+    (
+        "ldsmaxal w1, w0, [x8]",
+        0xb8e1_4100,
+        &["fence Release", "load", "store", "fence Acquire"],
+    ),
+    (
+        "cas x0, x1, [x8]",
+        0xc8a0_7d01,
+        &["load", "guarded Relaxed"],
+    ),
+    (
+        "casa w0, w1, [x8]",
+        0x88e0_7d01,
+        &["load", "guarded Relaxed", "fence Acquire"],
+    ),
+    (
+        "casl w0, w1, [x8]",
+        0x88a0_fd01,
+        &["fence Release", "load", "guarded Relaxed"],
+    ),
+    (
+        "casalb w0, w1, [x8]",
+        0x08e0_fd01,
+        &["fence Release", "load", "guarded Relaxed", "fence Acquire"],
+    ),
+    (
+        "caspal x0, x1, x2, x3, [x8]",
+        0x4860_fd02,
+        &[
+            "fence Release",
+            "load",
+            "load",
+            "guarded Relaxed",
+            "guarded Relaxed",
+            "fence Acquire",
+        ],
+    ),
+];
+
 #[test]
 fn every_aarch64_acquire_and_release_is_stated_on_the_side_it_orders() {
-    for (name, word, expected) in [
-        ("ldxr w8, [x0]", 0x885f_7c08, &["linked Relaxed"][..]),
-        ("ldaxr x0, [x8]", 0xc85f_fd00, &["linked Acquire"]),
-        ("ldaxr w0, [x8]", 0x885f_fd00, &["linked Acquire"]),
-        ("ldaxrb w0, [x8]", 0x085f_fd00, &["linked Acquire"]),
-        ("ldaxrh w0, [x8]", 0x485f_fd00, &["linked Acquire"]),
-        (
-            "ldxp x0, x1, [x8]",
-            0xc87f_0500,
-            &["linked Relaxed", "load"],
-        ),
-        // The pair's second load has no ordering of its own, so the fence after both stays.
-        (
-            "ldaxp x0, x1, [x8]",
-            0xc87f_8500,
-            &["linked Relaxed", "load", "fence Acquire"],
-        ),
-        ("stxr w10, w9, [x0]", 0x880a_7c09, &["conditional Relaxed"]),
-        ("stlxr w10, x9, [x8]", 0xc80a_fd09, &["conditional Release"]),
-        ("stlxrb w9, w1, [x8]", 0x0809_fd01, &["conditional Release"]),
-        ("stlxrh w9, w1, [x8]", 0x4809_fd01, &["conditional Release"]),
-        (
-            "stxp w9, x0, x1, [x8]",
-            0xc829_0500,
-            &["conditional Relaxed", "guarded Relaxed"],
-        ),
-        (
-            "stlxp w9, x0, x1, [x8]",
-            0xc829_8500,
-            &["conditional Release", "guarded Release"],
-        ),
-        ("ldar x0, [x8]", 0xc8df_fd00, &["load", "fence Acquire"]),
-        ("ldarb w0, [x8]", 0x08df_fd00, &["load", "fence Acquire"]),
-        ("stlr x0, [x8]", 0xc89f_fd00, &["fence Release", "store"]),
-        ("stlrh w0, [x8]", 0x489f_fd00, &["fence Release", "store"]),
-        ("ldapr x0, [x8]", 0xf8bf_c100, &["load", "fence Acquire"]),
-        (
-            "ldapurb w0, [x8, #3]",
-            0x1940_3100,
-            &["load", "fence Acquire"],
-        ),
-        (
-            "stlur w0, [x8, #-4]",
-            0x991f_c100,
-            &["fence Release", "store"],
-        ),
-        // A limited-ordering acquire orders only within its LORegion, so no ordering is stated.
-        ("ldlar x0, [x8]", 0xc8df_7d00, &["unmodelled", "load"]),
-        ("stllr w0, [x8]", 0x889f_7d00, &["store", "unmodelled"]),
-        ("ldadd w1, w0, [x8]", 0xb821_0100, &["load", "store"]),
-        (
-            "ldadda w1, w0, [x8]",
-            0xb8a1_0100,
-            &["load", "store", "fence Acquire"],
-        ),
-        (
-            "ldaddl x1, x0, [x8]",
-            0xf861_0100,
-            &["fence Release", "load", "store"],
-        ),
-        (
-            "ldaddal w1, w0, [x8]",
-            0xb8e1_0100,
-            &["fence Release", "load", "store", "fence Acquire"],
-        ),
-        (
-            "staddl w1, [x8]",
-            0xb861_011f,
-            &["fence Release", "load", "store"],
-        ),
-        (
-            "swpal x1, x0, [x8]",
-            0xf8e1_8100,
-            &["fence Release", "load", "store", "fence Acquire"],
-        ),
-        (
-            "ldsmaxal w1, w0, [x8]",
-            0xb8e1_4100,
-            &["fence Release", "load", "store", "fence Acquire"],
-        ),
-        (
-            "cas x0, x1, [x8]",
-            0xc8a0_7d01,
-            &["load", "guarded Relaxed"],
-        ),
-        (
-            "casa w0, w1, [x8]",
-            0x88e0_7d01,
-            &["load", "guarded Relaxed", "fence Acquire"],
-        ),
-        (
-            "casl w0, w1, [x8]",
-            0x88a0_fd01,
-            &["fence Release", "load", "guarded Relaxed"],
-        ),
-        (
-            "casalb w0, w1, [x8]",
-            0x08e0_fd01,
-            &["fence Release", "load", "guarded Relaxed", "fence Acquire"],
-        ),
-        (
-            "caspal x0, x1, x2, x3, [x8]",
-            0x4860_fd02,
-            &[
-                "fence Release",
-                "load",
-                "load",
-                "guarded Relaxed",
-                "guarded Relaxed",
-                "fence Acquire",
-            ],
-        ),
-    ] {
+    for (name, word, expected) in ORDERED {
         assert_eq!(ordered_accesses(word), expected, "{name}");
     }
 }
