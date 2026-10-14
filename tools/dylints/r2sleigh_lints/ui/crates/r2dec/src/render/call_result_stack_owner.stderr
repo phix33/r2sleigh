@@ -17,7 +17,7 @@ LL | |         fallback_stack_local
 LL | |     }
    | |_____^
 
-warning: r2dec must consume prepared call-result ownership instead of deriving stack-local owners in op-lowering
+warning: r2dec must consume prepared call-result ownership instead of deriving stack-local owners
   --> $DIR/call_result_stack_owner.rs:9:36
    |
 LL |         let fallback_stack_local = self.semantic_stack_owner_name_for_alias(alias);

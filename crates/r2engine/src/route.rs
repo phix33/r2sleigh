@@ -121,7 +121,6 @@ pub enum EngineRequestKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EnginePlan {
     FastLocal,
-    SemanticSummary,
     SemanticStructured,
     ReplayValidated,
     RefuseWithEvidence,
@@ -232,16 +231,6 @@ pub fn select_engine_plan(
         EngineRequestKind::Decompile => match route {
             Some(route) if route.kind == r2types::DecompileRouteKind::FallbackComment => {
                 EnginePlan::RefuseWithEvidence
-            }
-            Some(route)
-                if matches!(
-                    route.kind,
-                    r2types::DecompileRouteKind::VmSummary
-                        | r2types::DecompileRouteKind::SummaryIslands
-                        | r2types::DecompileRouteKind::LinearWorker
-                ) =>
-            {
-                EnginePlan::SemanticSummary
             }
             Some(route) if route.kind == r2types::DecompileRouteKind::StructuredWorker => {
                 EnginePlan::SemanticStructured

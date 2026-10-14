@@ -630,9 +630,6 @@ pub fn admissible_declaration_type(
 pub enum DecompileRouteKind {
     Standard,
     StructuredWorker,
-    SummaryIslands,
-    LinearWorker,
-    VmSummary,
     FallbackComment,
 }
 

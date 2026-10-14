@@ -88,4 +88,5 @@ fn main() {
     let _ = Request {
         direct_target_context: None,
     };
+    let _ = name.trim_start_matches("const:");
 }

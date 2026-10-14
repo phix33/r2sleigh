@@ -33,7 +33,7 @@ today; GT closes it.
 | Source-gold (`scripts/differential_truth.py`) | Are signatures what the source declared, or marked? | soundness 43% and 21% (W49); `frame_agree.py` in no gate (T21) |
 | Coverage (`tests/coverage`) | How much of a binary renders; does any regress? | stale baseline; clang other than 17 ungated (T19) |
 | Differential (`scripts/diff_r2.py`) | Where discovery, naming, decoding disagree with radare2, and who is right. | not in CI and red; radare2-only values score as agreement (T4) |
-| Dylints (`tools/dylints`) | Does the code keep the structural rules? | 87 of 89 warn-only; at least 12 aim at deleted paths (T3) |
+| Dylints (`tools/dylints`) | Does the code keep the structural rules? | 77 of 79 warn-only, their count ratcheted in CI; every path filter names a live path, tested (T3) |
 | Structure (`scripts/structure-report.sh`) | Did nesting, length, arguments or clones rise? | — |
 
 Where this stands (2026-10-14, master 98dd6e06)
@@ -241,9 +241,6 @@ Retypd after P9), static rewriting, deobfuscation, trace recording.
 Open questions
 --------------
 
-- AGENTS.md gotcha 7 says the call-target parser rule is Dylint-enforced; the
-  lint aims at deleted paths (audit T3) until GT retargets it, which is GT's
-  first change, and the text stays as the rule it will be (2026-10-14).
 - AGENTS.md's Validation Bar still names the `rebuild` exemption (D27), which
   ended when `rebuild` merged.
 

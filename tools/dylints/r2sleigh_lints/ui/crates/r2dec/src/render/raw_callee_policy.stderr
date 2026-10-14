@@ -1,0 +1,28 @@
+warning: r2dec must consume the typed callee target policy contract instead of recomputing imported/modeled policy
+  --> $DIR/raw_callee_policy.rs:37:13
+   |
+LL |     let _ = facts.target_policy_for_callsite_or_identity();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(r2dec_call_target_policy_ownership)]` on by default
+
+warning: r2dec must consume the typed callee target policy contract instead of recomputing imported/modeled policy
+  --> $DIR/raw_callee_policy.rs:38:13
+   |
+LL |     let _ = identity.is_import_policy_authorized();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: r2dec must consume the typed callee target policy contract instead of recomputing imported/modeled policy
+  --> $DIR/raw_callee_policy.rs:39:13
+   |
+LL |     let _ = Identity::from_direct_target();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: r2dec must consume the typed callee target policy contract instead of recomputing imported/modeled policy
+  --> $DIR/raw_callee_policy.rs:40:13
+   |
+LL |     let _ = callee_name_is_import_like("sym.imp.printf");
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: 4 warnings emitted
+

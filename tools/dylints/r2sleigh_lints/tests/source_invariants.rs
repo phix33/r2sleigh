@@ -20,7 +20,34 @@
 
 mod source;
 
-use source::{View, file, production};
+use source::{View, file, production, workspace_root};
+
+/// A lint scoped to a path that no longer exists can never fire (ROADMAP D30, audit T3):
+/// every `"crates/…"` path a lint names is a file, or a directory when it ends in `/`.
+#[test]
+fn every_lint_path_filter_names_a_live_path() {
+    let lints = file("tools/dylints/r2sleigh_lints/src/lib.rs");
+    let paths = lints.view().literals_starting_with("crates/");
+    assert!(
+        paths.len() > 10,
+        "the lints' path filters were not found: {paths:?}"
+    );
+    let dead = paths
+        .into_iter()
+        .filter(|path| {
+            let on_disk = workspace_root().join(path);
+            if path.ends_with('/') {
+                !on_disk.is_dir()
+            } else {
+                !on_disk.is_file()
+            }
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(
+        dead.is_empty(),
+        "lint path filters name paths that do not exist: {dead:#?}"
+    );
+}
 
 /// Fails listing every retired pattern that has come back, where, and why it
 /// was retired. A pattern is found in code and in string literals, never in
@@ -526,6 +553,8 @@ fn r2dec_retired_renderer_repairs_stay_deleted() {
     const STANDARD: &str = "generic Standard rendering does not repair headers, calls or returns";
     const LOCAL: &str = "no local fallback stands in for a missing prepared fact";
     const SUMMARY: &str = "a summary route renders no executable C";
+    const ARGS: &str =
+        "a call argument renders from its certificate, not a name or a callee's policy";
     let dec = production("crates/r2dec/src");
     assert_retired(
         "r2dec",
@@ -588,6 +617,7 @@ fn r2dec_retired_renderer_repairs_stay_deleted() {
             ("resolve_stack_var", LOCAL),
             ("stack_var_for_addr_var", LOCAL),
             ("stable_stack_values", LOCAL),
+            ("local_store_owner_expr_for_offset", LOCAL),
             ("stack_slot_provenance_for_name", LOCAL),
             ("stack_offset_for_visible_storage_name", LOCAL),
             ("render_memory_access_from_visible_expr", LOCAL),
@@ -614,6 +644,13 @@ fn r2dec_retired_renderer_repairs_stay_deleted() {
             ("fn render_vm_semantic_summary", SUMMARY),
             ("fn render_semantic_worker_linearization", SUMMARY),
             ("structure_semantic_worker_islands", SUMMARY),
+            ("semantic_worker_structured_body", SUMMARY),
+            ("is_imported_call_target", ARGS),
+            ("is_modeled_call_target", ARGS),
+            ("imported_or_modeled_call_target_for_optional_site", ARGS),
+            ("source_var_name", ARGS),
+            ("certified_call_args_for_site", ARGS),
+            ("call_arg_binding_has_render_authority", ARGS),
         ],
     );
 }

@@ -148,8 +148,17 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-dylint,dylint-link
+      # The warning count is a ratchet held exactly: a rise fails, and so does a fall until
+      # warning-baseline.txt is lowered with it. Colours are stripped before counting.
       - name: Every crate
-        run: cargo dylint --path tools/dylints/r2sleigh_lints --workspace -- --all-features --lib --bins
+        run: |
+          set -o pipefail
+          cargo dylint --path tools/dylints/r2sleigh_lints --workspace -- --all-features --lib --bins 2>&1 | tee dylint.log
+          count=$(sed -E 's/\x1b\[[0-9;]*m//g' dylint.log | awk '/^warning: `[^`]*` \((lib|bin "[^"]*")\) generated [0-9]+ warnings?/ { for (i = 1; i < NF; i++) if ($i == "generated") n += $(i + 1) } END { print n + 0 }')
+          baseline=$(cat tools/dylints/r2sleigh_lints/warning-baseline.txt)
+          echo "Dylint warnings: $count (baseline $baseline)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$count" -gt "$baseline" ]; then echo "::error::Dylint warnings rose from $baseline to $count"; exit 1; fi
+          if [ "$count" -lt "$baseline" ]; then echo "::error::Dylint warnings fell to $count; lower warning-baseline.txt to it"; exit 1; fi
 
   # ── One build of the shell every gate grades ───────────────────────
   #

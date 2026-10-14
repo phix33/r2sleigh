@@ -13,7 +13,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 /// The repository root: this crate lives at `tools/dylints/r2sleigh_lints`.
-fn workspace_root() -> PathBuf {
+pub fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }
 
@@ -105,6 +105,17 @@ impl<'a> View<'a> {
     /// renderer might print is found as surely as a name it might call.
     pub fn lines_with_text(self, needle: &str) -> Vec<String> {
         self.lines_where(self.words, needle)
+    }
+
+    /// Every string literal outside comments that starts with `prefix`, without its quotes.
+    pub fn literals_starting_with(self, prefix: &str) -> Vec<&'a str> {
+        self.words
+            .match_indices(&format!("\"{prefix}"))
+            .filter_map(|(at, _)| {
+                let literal = &self.raw[at + 1..];
+                literal.find('"').map(|end| &literal[..end])
+            })
+            .collect()
     }
 
     fn lines_where(self, mask: &str, needle: &str) -> Vec<String> {
