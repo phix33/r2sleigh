@@ -173,8 +173,8 @@ fn an_aarch64_store_exclusive_is_one_conditional_store() {
     }
 }
 
-/// An instruction's accesses and orderings in program order, each ordering a fence on the side
-/// it orders (`vendor/README.md`).
+/// An instruction's accesses and orderings in program order: an exclusive's ordering is its own,
+/// any other's is a fence on the side it orders (`vendor/README.md`).
 fn ordered_accesses(word: u32) -> Vec<String> {
     aarch64(word)
         .iter()
@@ -196,7 +196,37 @@ fn ordered_accesses(word: u32) -> Vec<String> {
 #[test]
 fn every_aarch64_acquire_and_release_is_stated_on_the_side_it_orders() {
     for (name, word, expected) in [
-        ("ldar x0, [x8]", 0xc8df_fd00, &["load", "fence Acquire"][..]),
+        ("ldxr w8, [x0]", 0x885f_7c08, &["linked Relaxed"][..]),
+        ("ldaxr x0, [x8]", 0xc85f_fd00, &["linked Acquire"]),
+        ("ldaxr w0, [x8]", 0x885f_fd00, &["linked Acquire"]),
+        ("ldaxrb w0, [x8]", 0x085f_fd00, &["linked Acquire"]),
+        ("ldaxrh w0, [x8]", 0x485f_fd00, &["linked Acquire"]),
+        (
+            "ldxp x0, x1, [x8]",
+            0xc87f_0500,
+            &["linked Relaxed", "load"],
+        ),
+        // The pair's second load has no ordering of its own, so the fence after both stays.
+        (
+            "ldaxp x0, x1, [x8]",
+            0xc87f_8500,
+            &["linked Relaxed", "load", "fence Acquire"],
+        ),
+        ("stxr w10, w9, [x0]", 0x880a_7c09, &["conditional Relaxed"]),
+        ("stlxr w10, x9, [x8]", 0xc80a_fd09, &["conditional Release"]),
+        ("stlxrb w9, w1, [x8]", 0x0809_fd01, &["conditional Release"]),
+        ("stlxrh w9, w1, [x8]", 0x4809_fd01, &["conditional Release"]),
+        (
+            "stxp w9, x0, x1, [x8]",
+            0xc829_0500,
+            &["conditional Relaxed", "guarded Relaxed"],
+        ),
+        (
+            "stlxp w9, x0, x1, [x8]",
+            0xc829_8500,
+            &["conditional Release", "guarded Release"],
+        ),
+        ("ldar x0, [x8]", 0xc8df_fd00, &["load", "fence Acquire"]),
         ("ldarb w0, [x8]", 0x08df_fd00, &["load", "fence Acquire"]),
         ("stlr x0, [x8]", 0xc89f_fd00, &["fence Release", "store"]),
         ("stlrh w0, [x8]", 0x489f_fd00, &["fence Release", "store"]),

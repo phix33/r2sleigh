@@ -698,6 +698,7 @@ fn rewrite_exclusive_access(block: &mut R2ILBlock, names: &dyn Fn(u32) -> Option
         };
         Some((names(*userop)?, output.clone(), inputs.clone()))
     }
+    let mut rewrote = false;
     let mut at = 0;
     while at < block.ops.len() {
         let Some((name, output, inputs)) = user_op(block, at, names) else {
@@ -705,10 +706,7 @@ fn rewrite_exclusive_access(block: &mut R2ILBlock, names: &dyn Fn(u32) -> Option
             continue;
         };
         let rewritten = match name.as_str() {
-            // ARM's bare `ldrex` orders nothing; AArch64's p-code does not say which of
-            // `ldxr` and `ldaxr` it is.
-            "ExclusiveAccess" => linked_load(block, at, &inputs, MemoryOrdering::Relaxed),
-            "SetExclusiveMonitors" => linked_load(block, at, &inputs, MemoryOrdering::Unknown),
+            "ExclusiveAccess" | "SetExclusiveMonitors" => linked_load(block, at, &inputs),
             "hasExclusiveAccess" => conditional_store(block, at, output.as_ref(), &inputs),
             "ExclusiveMonitorPass" => monitored_store(block, at, output.as_ref(), &inputs, names),
             _ => None,
@@ -717,20 +715,70 @@ fn rewrite_exclusive_access(block: &mut R2ILBlock, names: &dyn Fn(u32) -> Option
             Some((span, ops)) => {
                 block.ops.splice(at..at + span, ops);
                 block.op_metadata = BTreeMap::new();
+                rewrote = true;
             }
             None => at += 1,
         }
     }
+    if rewrote {
+        absorb_ordering(block);
+    }
 }
 
-/// `mark(addr[, bytes]); dst = LOAD [ram] addr` is `dst = LoadLinked(addr)`; a pair's second
-/// load stays a plain one.
-fn linked_load(
-    block: &R2ILBlock,
-    at: usize,
-    inputs: &[Varnode],
-    ordering: MemoryOrdering,
-) -> Option<(usize, Vec<R2ILOp>)> {
+/// An exclusive's acquire fence after its linked load, or release fence before its conditional
+/// store, is that access's ordering; without one it is Relaxed (`vendor/README.md`).
+fn absorb_ordering(block: &mut R2ILBlock) {
+    let position = |found: fn(&R2ILOp) -> bool| block.ops.iter().position(found);
+    let linked = position(|op| matches!(op, R2ILOp::LoadLinked { .. }));
+    let conditional = position(|op| matches!(op, R2ILOp::StoreConditional { .. }));
+    let fence = |range: std::ops::Range<usize>, wanted: MemoryOrdering| {
+        (range.start..range.end)
+            .find(|&at| matches!(block.ops[at], R2ILOp::Fence { ordering } if ordering == wanted))
+    };
+    // A pair's second load has no ordering of its own, so the fence after it stays.
+    let acquire = linked
+        .filter(|&at| {
+            !block.ops[at..]
+                .iter()
+                .any(|op| matches!(op, R2ILOp::Load { .. }))
+        })
+        .and_then(|at| Some((at, fence(at..block.ops.len(), MemoryOrdering::Acquire)?)));
+    let release = conditional.and_then(|at| Some((at, fence(0..at, MemoryOrdering::Release)?)));
+    let mut absorbed = Vec::with_capacity(2);
+    if let Some((at, fence)) = acquire
+        && let R2ILOp::LoadLinked { ordering, .. } = &mut block.ops[at]
+    {
+        *ordering = MemoryOrdering::Acquire;
+        absorbed.push(fence);
+    }
+    if let Some((at, fence)) = release {
+        let ok = block.ops[at].output().cloned();
+        for op in &mut block.ops[at..] {
+            match op {
+                R2ILOp::StoreConditional { ordering, .. } => *ordering = MemoryOrdering::Release,
+                R2ILOp::StoreGuarded {
+                    guard, ordering, ..
+                } if ok.as_ref().is_some_and(|ok| same(ok, guard)) => {
+                    *ordering = MemoryOrdering::Release;
+                }
+                _ => {}
+            }
+        }
+        absorbed.push(fence);
+    }
+    if absorbed.is_empty() {
+        return;
+    }
+    absorbed.sort_unstable();
+    for fence in absorbed.into_iter().rev() {
+        block.ops.remove(fence);
+    }
+    block.op_metadata = BTreeMap::new();
+}
+
+/// `mark(addr[, bytes]); dst = LOAD [ram] addr` is `dst = LoadLinked(addr)`, Relaxed until
+/// [`absorb_ordering`] reads its fence; a pair's second load stays a plain one.
+fn linked_load(block: &R2ILBlock, at: usize, inputs: &[Varnode]) -> Option<(usize, Vec<R2ILOp>)> {
     let ([addr] | [addr, _]) = inputs else {
         return None;
     };
@@ -749,7 +797,7 @@ fn linked_load(
                 dst: dst.clone(),
                 space: *space,
                 addr: addr.clone(),
-                ordering,
+                ordering: MemoryOrdering::Relaxed,
             }],
         )
     })
@@ -825,7 +873,7 @@ fn conditional_store(
                 space: *space,
                 addr: addr.clone(),
                 val: val.clone(),
-                ordering: r2il::MemoryOrdering::Relaxed,
+                ordering: MemoryOrdering::Relaxed,
             },
             R2ILOp::BoolNot {
                 dst: not.clone(),
@@ -927,7 +975,7 @@ fn stores_under(guarded: &[R2ILOp], addr: &Varnode, ok: &Varnode) -> Option<Vec<
                     space: *space,
                     addr: addr.clone(),
                     val: val.clone(),
-                    ordering: MemoryOrdering::Unknown,
+                    ordering: MemoryOrdering::Relaxed,
                 });
             }
             R2ILOp::Store { space, addr, val } => ops.push(R2ILOp::StoreGuarded {
@@ -935,7 +983,7 @@ fn stores_under(guarded: &[R2ILOp], addr: &Varnode, ok: &Varnode) -> Option<Vec<
                 addr: addr.clone(),
                 val: val.clone(),
                 guard: ok.clone(),
-                ordering: MemoryOrdering::Unknown,
+                ordering: MemoryOrdering::Relaxed,
             }),
             op if op.is_speculatable_value()
                 && op.output().is_some_and(|dst| dst.space == SpaceId::Unique) =>
