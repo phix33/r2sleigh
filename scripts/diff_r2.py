@@ -297,7 +297,8 @@ def dumped(verb, line):
     if verb == "px":
         # Eight groups of four digits after two spaces; the ASCII column after them may look hex.
         return address, rest[1:40].replace(" ", "").lower()
-    words = rest.split()
+    # radare2 marks a line that starts inside the previous instruction with `~`.
+    words = [word for word in rest.split() if word != "~"]
     return (address, words[0].lower()) if words and re.fullmatch("[0-9a-fA-F]+", words[0]) else None
 
 
@@ -326,7 +327,9 @@ def judgment_for(judgments, binary, command, difference, corpus=None):
     for judgment in judgments:
         patterns = judgment["binaries"]
         patterns = [patterns] if isinstance(patterns, str) else patterns
-        if judgment["command"] != verb or not any(fnmatch.fnmatchcase(binary, p) for p in patterns):
+        verbs = judgment["command"]
+        verbs = [verbs] if isinstance(verbs, str) else verbs
+        if verb not in verbs or not any(fnmatch.fnmatchcase(binary, p) for p in patterns):
             continue
         if judgment.get("corpus", corpus) != corpus:
             continue
@@ -379,6 +382,10 @@ def answers(binary, commands, r2, r2s, timeout):
         return reason.replace("r2s: ", ""), {}
     said = {}
     for command, _ in commands:
+        # Every command seeks first, so a seek that timed out once times out each time.
+        if None in said.values():
+            said[command] = None
+            continue
         script = "s entry0;{}".format(command)
         right, _, right_code = run(
             [str(r2), "-N", "-q", "-e", "scr.color=0", "-c", script, str(binary)], timeout
@@ -399,7 +406,7 @@ def compare(name, command, mode, left, right, judgments, corpus=None):
 def grade(corpus, binaries, commands, r2, r2s, judgments, args):
     """One corpus: per command, binaries agreeing, judged, unjudged, and radare2-only values."""
     tally = {command: {"agree": 0, "judged": 0, "unjudged": 0, "r2-only": 0} for command, _ in commands}
-    unsupported, skipped = {}, 0
+    unsupported, skipped = {}, []
     # The tools run in parallel; judging stays in name order, so the report and the matches do not move.
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
         ran = pool.map(lambda binary: answers(binary, commands, r2, r2s, args.timeout), binaries)
@@ -410,7 +417,7 @@ def grade(corpus, binaries, commands, r2, r2s, judgments, args):
             reported = False
             for command, mode in commands:
                 if said[command] is None:
-                    skipped += 1
+                    skipped.append("{} {}".format(binary.name, command))
                     continue
                 left, right = said[command]
                 # A binary neither tool has anything to say about is not a difference.
@@ -535,7 +542,7 @@ def main():
         )
         return 2
 
-    unjudged, measured, skipped_any = 0, {}, 0
+    unjudged, measured = 0, {}
     for corpus, binaries in corpora.items():
         print("== {} ({} binaries)".format(corpus, len(binaries)))
         tally, unsupported, skipped = grade(corpus, binaries, commands, r2, r2s, judgments, args)
@@ -549,14 +556,14 @@ def main():
                 )
             )
             unjudged += row["unjudged"]
-        # A binary r2s stops opening hides its values, so the refusals are ratcheted beside them.
+        # A binary r2s stops opening, or a run that times out, hides its values: both are ratcheted.
         measured[corpus] = {
             command.split()[0]: tally[command]["r2-only"] for command, mode in commands if mode == "values"
         }
         measured[corpus]["refused"] = sum(unsupported.values())
-        skipped_any += skipped
+        measured[corpus]["skipped"] = len(skipped)
         if skipped:
-            print("\n{} runs skipped (timeout or launch failure)".format(skipped))
+            print("\n{} runs skipped (timeout or launch failure): {}".format(len(skipped), ", ".join(skipped)))
         if unsupported:
             print("\nnot opened by r2s:")
             for reason, count in sorted(unsupported.items(), key=lambda item: -item[1]):
@@ -575,10 +582,7 @@ def main():
     if args.limit is None:
         path = pathlib.Path(args.baseline)
         baseline = json.loads(path.read_text()) if path.exists() else {}
-        if args.bless and skipped_any:
-            print("not blessed: {} runs were skipped, so the counts are partial".format(skipped_any))
-            risen.append(("skipped", skipped_any))
-        elif args.bless:
+        if args.bless:
             for corpus, counts in measured.items():
                 baseline.setdefault(corpus, {}).update(counts)
             path.write_text(json.dumps(baseline, indent=2, sort_keys=True) + "\n")
