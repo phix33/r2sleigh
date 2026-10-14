@@ -28,3 +28,22 @@ fn lc_main_is_an_offset_from_the_mapped_header_and_names_main_in_its_mode() {
     assert_eq!(entry(EntryKind::Main), Some((0x2800, true)));
     assert_eq!(entry(EntryKind::CMain), Some((0x2800, true)));
 }
+
+#[test]
+fn an_object_s_sections_and_symbols_are_where_it_states_them() {
+    let image = image(include_bytes!("data/macho_object"));
+    assert!(!image.relocatable(), "a Mach-O object states its addresses");
+    let text = (image.sections().iter())
+        .find(|section| section.name == "__text")
+        .expect("the fixture states __text");
+    assert_eq!((text.vaddr, text.file_offset), (0, 0x100));
+    assert_eq!(
+        image.read(0, 1).as_deref(),
+        Some(&[0xc3][..]),
+        "__text is mapped at 0"
+    );
+    let f = (image.symbols().iter())
+        .find(|symbol| &*symbol.name == "_f")
+        .expect("the fixture states _f");
+    assert_eq!(f.vaddr, 4);
+}

@@ -2,6 +2,7 @@
 """Write the Mach-O quirk fixtures: small images, each stating one thing as dyld or the linker reads it.
 
 macho_indirect   an executable whose symbol table holds an N_INDR alias, whose n_value is a string index
+macho_object     an MH_OBJECT whose __text states addr 0 at file 0x100, and a symbol at its n_value 4
 macho_thumb_main an ARMv7 executable whose LC_MAIN entryoff is a file offset, odd for Thumb, into __TEXT at 0x1000
 """
 
@@ -49,6 +50,15 @@ def indirect():
     return macho64(MH_EXECUTE, [text, symtab, main], [(0x1000, CODE), (0x1010, symbols), (0x1030, strings)])
 
 
+def obj():
+    MH_OBJECT = 1
+    strings = b"\0_f\0"
+    symbol = struct.pack("<IBBHQ", 1, 0xE | 0x1, 1, 0, 4)
+    segment = segment64(b"", 0, len(CODE), 0x100, len(CODE), 7, [(b"__text", 0, len(CODE), 0x100, 0x80000400)])
+    symtab = struct.pack("<IIIIII", 0x2, 24, 0x110, 1, 0x120, len(strings))
+    return macho64(MH_OBJECT, [segment, symtab], [(0x100, CODE), (0x110, symbol), (0x120, strings)])
+
+
 def thumb_main():
     # __text runs over both readings of entryoff 0x1801: the address 0x2800 and, misread, 0x1800.
     code = bytearray(0x2000)
@@ -65,6 +75,6 @@ def thumb_main():
 
 if __name__ == "__main__":
     here = pathlib.Path(__file__).parent
-    for name, build in [("macho_indirect", indirect), ("macho_thumb_main", thumb_main)]:
+    for name, build in [("macho_indirect", indirect), ("macho_object", obj), ("macho_thumb_main", thumb_main)]:
         (here / name).write_bytes(build())
         print("wrote", name)

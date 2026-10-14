@@ -400,7 +400,10 @@ impl Placement {
 
     /// Fails where the sections, placed one after another, run past the address space.
     fn of(file: &object::File<'_>, length: u64) -> Result<Self, ImageError> {
-        let relocatable = file.kind() == object::ObjectKind::Relocatable;
+        // A Mach-O object states each section's address (`addr`, laid out from 0) and each symbol's
+        // (`n_value`), so only ELF and COFF objects are placed.
+        let relocatable = file.kind() == object::ObjectKind::Relocatable
+            && file.format() != object::BinaryFormat::MachO;
         let mut unbacked = BTreeMap::new();
         let mut end = Self::BASE
             .checked_add(length)

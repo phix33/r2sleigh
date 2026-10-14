@@ -60,16 +60,10 @@ verdict = "r2-right"
 reason = "0x100015fe0 begins __objc_stubs: it loads a selector into x1, then jumps through objc_msgSend's slot (0x100020270), so it is objc_msgSend$<selector>, yet r2s names it imp.objc_msgSend and names the stubs after it nothing; owner r2engine stub naming (ROADMAP P11, audit W10)"
 
 [[judged]]
-command = "iS"
+command = ["px", "pd"]
 binaries = "watchos-relocs.obj"
-verdict = "r2-right"
-reason = "an MH_OBJECT states __text at addr 0, file 0x264: r2s places it at 0x08000264 (base plus file offset) with no permissions, so nothing it lists is mapped (`px` at its own section says nothing mapped); radare2 places it at 0; owner r2image Mach-O object placement (ROADMAP I)"
-
-[[judged]]
-command = "px"
-binaries = "watchos-relocs.obj"
-verdict = "r2-right"
-reason = "r2s maps none of the object's sections (see its iS judgment), so it dumps nothing where radare2 dumps its fill; owner r2image Mach-O object placement (ROADMAP I)"
+verdict = "r2s-right"
+reason = "an MH_OBJECT states no entry: radare2 seeks entry0 to __text's file offset 0x264, used as an address no section holds, and dumps its fill; r2s has none and stays at 0, where __text is (and decodes it as ARM, though the symbol table states _main Thumb: ARMv7, ungraded)"
 
 [[judged]]
 command = "iS"

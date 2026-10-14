@@ -25,7 +25,7 @@ pub struct Container {
     /// radare2 presents `baddr`. Presentation only: no value the engine
     /// computes is relative to it.
     pub base_address: u64,
-    /// An object, which states no addresses: each section is where this reader placed it.
+    /// An object which states no addresses (ELF, COFF): each section is where this reader placed it.
     pub relocatable: bool,
     /// Where the loader maps the program and what it permits there, sorted by
     /// address and disjoint.
