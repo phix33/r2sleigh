@@ -722,13 +722,14 @@ impl Literal {
         self
     }
 
-    /// The same program with one more frame its call-frame information states, covering `range`.
-    pub fn unwinding(mut self, range: Range<u64>) -> Self {
+    /// The same program with one more frame its call-frame information states, covering `range`
+    /// and entered as `entry` says.
+    pub fn unwinding(mut self, range: Range<u64>, entry: r2abi::frames::FrameEntry) -> Self {
         self.container.unwind.insert(r2abi::frames::UnwindFrame {
             start: range.start,
             end: range.end,
             saves: BTreeMap::new(),
-            entry: r2abi::frames::FrameEntry::Called,
+            entry,
         });
         self
     }

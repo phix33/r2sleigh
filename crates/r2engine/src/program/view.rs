@@ -6,6 +6,7 @@ use std::rc::Rc;
 use super::LoaderWrite;
 use crate::machine::Machine;
 
+use super::starts::{Stated, StatedStarts};
 use super::{Imports, NameDb, Names, ProgramInputs, Source, naming};
 use crate::native::NativeTarget;
 use crate::query::db::Db;
@@ -29,6 +30,8 @@ pub(crate) struct View<'a, S: Source + 'static> {
     pub(super) db: &'a Db<ProgramInputs<S>>,
     names: Rc<NameDb>,
     imports: Rc<naming::Linkage>,
+    /// Where the container states a function begins, which bounds every body walk.
+    starts: Rc<StatedStarts>,
     /// Whether each function discovery found is Thumb; empty for discovery itself, which decides it.
     modes: Rc<BTreeMap<u64, bool>>,
 }
@@ -39,42 +42,36 @@ impl<S: Source + 'static> Clone for View<'_, S> {
             db: self.db,
             names: Rc::clone(&self.names),
             imports: Rc::clone(&self.imports),
+            starts: Rc::clone(&self.starts),
             modes: Rc::clone(&self.modes),
         }
     }
 }
 
 impl<'a, S: Source + 'static> View<'a, S> {
-    /// The view a query reads through; the names, the stubs and, where asked, the modes are asked once.
+    /// The view a query reads through; the names, the stubs, the stated starts and, where asked, the modes are asked once.
     pub(super) fn new(db: &'a Db<ProgramInputs<S>>, with_modes: bool) -> Self {
         let imports = db.get::<Imports>(&()).expect("the imports ask for nothing");
         let names = db
             .get::<Names>(&())
             .expect("the names ask only for the imports");
+        let starts = (db.get::<Stated>(&())).expect("the stated starts ask only for the imports");
         let modes = match with_modes {
             true => modes(db),
             false => Rc::default(),
         };
-        Self::with(db, names, imports, modes)
-    }
-
-    /// The view over tables the caller already holds for this revision.
-    pub(super) const fn with(
-        db: &'a Db<ProgramInputs<S>>,
-        names: Rc<NameDb>,
-        imports: Rc<naming::Linkage>,
-        modes: Rc<BTreeMap<u64, bool>>,
-    ) -> Self {
         Self {
             db,
             names,
             imports,
+            starts,
             modes,
         }
     }
 
-    pub(super) fn imports(&self) -> &BTreeMap<u64, naming::Stub> {
-        &self.imports.stubs
+    /// Where the container states a function begins.
+    pub(super) fn stated_starts(&self) -> &StatedStarts {
+        &self.starts
     }
 
     /// The program's linkage code: its stubs and the sections that hold only linkage code.
@@ -206,14 +203,7 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
     }
 
     fn is_entry(&self, vaddr: u64) -> bool {
-        // A stub is a function of the program's as much as a body is.
-        self.imports.stubs.contains_key(&vaddr)
-            || self
-                .db
-                .inputs()
-                .defined
-                .get(&vaddr)
-                .is_some_and(|function| *function)
+        self.starts.holds(vaddr)
     }
 
     fn returns(&self, callee: u64) -> bool {

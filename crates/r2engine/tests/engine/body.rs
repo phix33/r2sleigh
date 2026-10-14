@@ -26,8 +26,8 @@ fn listed_after_branch(mut program: OpenProgram<Literal>) -> Vec<u64> {
 
 #[test]
 fn a_branch_inside_a_function_stays_inside_it() {
-    // An import's undefined symbol, a nameless one and a data label at the
-    // branch target each say no function begins there.
+    // An import's undefined symbol and a data label at the branch target each
+    // say no function begins there.
     let stray = |name: &str, kind, defined| Symbol {
         name: name.into(),
         vaddr: TWO + 0xa,
@@ -40,7 +40,6 @@ fn a_branch_inside_a_function_stays_inside_it() {
     for literal in [
         Literal::new(),
         Literal::new().declaring(stray("imported", SymbolKind::Function, false)),
-        Literal::new().declaring(stray("", SymbolKind::Function, true)),
         Literal::new().declaring(stray("label", SymbolKind::Data, true)),
     ] {
         assert_eq!(
@@ -48,6 +47,12 @@ fn a_branch_inside_a_function_stays_inside_it() {
             [0x0, 0x2, 0x4, 0x9, 0xa, 0xf]
         );
     }
+    // A defined function symbol states a function by its kind, named or not, as `afl` seeds it.
+    let nameless = Literal::new().declaring(stray("", SymbolKind::Function, true));
+    assert_eq!(
+        listed_after_branch(OpenProgram::of(nameless)),
+        [0x0, 0x2, 0x4, 0x9]
+    );
 }
 
 /// What `caller` lists once it ends in `jmp` to `rel32`, as offsets into it.

@@ -858,7 +858,7 @@ fn a_patch_is_discovered_again_in_the_same_session() {
 /// The import table is *decoded*: which address is a linkage stub, and which
 /// import it stands for, comes from lifting the stub and following the slot it
 /// reads. So does the set of addresses a body walk may not run past, because
-/// `is_entry` answers from that same table. Deriving it once and holding it
+/// the stated starts `is_entry` reads include it. Deriving it once and holding it
 /// meant a patched stub left the walk bounded by a function that was no longer
 /// there -- a wrong body, reported as a clean one.
 #[test]

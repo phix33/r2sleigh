@@ -10,9 +10,12 @@ use common::{
     ARM_ENTRY, BASE, CALLER, FORKED, GLIBC, JOINED, Literal, ONE, PASSES, PLT_SEC_STUB, STEPPED,
     THUMB_CALLED, THUMB_LEAF, TWO, VENEER,
 };
+use r2abi::frames::FrameEntry;
 use r2engine::discovery::Basis;
 use r2engine::program::{OpenProgram, Symbol, SymbolKind};
 use r2engine::query::{Listing, Role, Stop};
+
+const CALLED: FrameEntry = FrameEntry::Called;
 
 fn believed(program: &mut OpenProgram<Literal>) -> Vec<(u64, Basis)> {
     program
@@ -94,13 +97,13 @@ fn a_stated_frame_begins_a_function_and_the_stub_table_s_does_not() {
     let unstated = believed(&mut OpenProgram::of(stripped()));
     assert!(!unstated.iter().any(|(address, _)| *address == STEPPED));
     let framed = believed(&mut OpenProgram::of(
-        stripped().unwinding(STEPPED..STEPPED + 0xc),
+        stripped().unwinding(STEPPED..STEPPED + 0xc, CALLED),
     ));
     assert!(framed.contains(&(STEPPED, Basis::Stated)), "{framed:x?}");
 
     let plt = believed(&mut OpenProgram::of(Literal::plt()));
     let framed_plt = believed(&mut OpenProgram::of(
-        Literal::plt().unwinding(BASE..BASE + 0x20),
+        Literal::plt().unwinding(BASE..BASE + 0x20, CALLED),
     ));
     assert_eq!(framed_plt, plt);
 }
@@ -109,12 +112,47 @@ fn a_stated_frame_begins_a_function_and_the_stub_table_s_does_not() {
 /// jump begins a function: no jump there is shown to read a loader word, so it is no linkage code.
 #[test]
 fn a_frame_over_an_unplaced_indirect_jump_begins_a_function() {
-    let program = Literal::tail_section().unwinding(BASE..BASE + 2);
+    let program = Literal::tail_section().unwinding(BASE..BASE + 2, CALLED);
     let found = believed(&mut OpenProgram::of(program));
     assert!(
         found.iter().any(|(address, _)| *address == BASE),
         "{found:x?}"
     );
+}
+
+/// `wrapper` (stated): `mov eax, 1; jmp tail`. `tail`, stated only by a frame: `add eax, 1; ret`.
+const TAIL_JUMP: &[u8] = &[
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 0x1000 mov eax, 1
+    0xeb, 0x09, // 0x1005 jmp 0x1010
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, //
+    0x83, 0xc0, 0x01, // 0x1010 add eax, 1
+    0xc3, // 0x1013 ret
+];
+
+/// A tail jump into a function its frame alone states ends the body there (audit W4); into a
+/// fragment entered mid-function, as GCC's `.cold` is, the body runs on through it.
+#[test]
+fn a_tail_jump_ends_at_a_framed_function_and_runs_on_through_a_fragment() {
+    const TAIL: u64 = BASE + 0x10;
+    let framed = |entry| {
+        let literal = Literal::of_code(TAIL_JUMP, &[("wrapper", BASE, 7)]);
+        OpenProgram::of(literal.unwinding(TAIL..TAIL + 4, entry))
+    };
+
+    let mut called = framed(FrameEntry::Called);
+    assert_eq!(
+        believed(&mut called),
+        [(BASE, Basis::Stated), (TAIL, Basis::Stated)]
+    );
+    assert_eq!(called.functions_holding(TAIL).expect("surveyed"), [TAIL]);
+    let extents = called.function_extents().expect("surveyed");
+    assert_eq!((extents[&BASE].blocks, extents[&BASE].bytes), (1, 7));
+
+    let mut fragment = framed(FrameEntry::MidFunction);
+    assert_eq!(believed(&mut fragment), [(BASE, Basis::Stated)]);
+    assert_eq!(fragment.functions_holding(TAIL).expect("surveyed"), [BASE]);
+    let extents = fragment.function_extents().expect("surveyed");
+    assert_eq!((extents[&BASE].blocks, extents[&BASE].bytes), (2, 11));
 }
 
 #[test]
@@ -132,7 +170,7 @@ fn a_frame_over_a_cet_plt_begins_no_function_though_the_plt_names_no_stub() {
     assert!(named.stubs.range(BASE..PLT_SEC_STUB).next().is_none());
     // The `.plt` frame holds PLT0 and a lazy entry; with no stub in it, only the section says so.
     let framed = believed(&mut OpenProgram::of(
-        Literal::plt_cet().unwinding(BASE..PLT_SEC_STUB),
+        Literal::plt_cet().unwinding(BASE..PLT_SEC_STUB, CALLED),
     ));
     assert_eq!(framed, plt);
     assert!(

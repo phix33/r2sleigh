@@ -15,6 +15,7 @@ mod requests;
 mod resolved;
 mod returns;
 pub mod source;
+mod starts;
 mod view;
 
 use view::View;
@@ -233,7 +234,6 @@ impl<S: Source + 'static> OpenProgram<S> {
             next: None,
             callers: Callers::Unread,
             db: Db::new(ProgramInputs {
-                defined: definitions(container),
                 extents: r2types::ProgramExtents::new(
                     container
                         .sections
@@ -620,40 +620,10 @@ pub(super) fn kernel(container: &Container) -> r2abi::Platform {
 /// `EI_OSABI` for GNU/Linux, which glibc and bionic both run on.
 const ELFOSABI_GNU: u8 = 3;
 
-/// Whether a function begins at each address the binary defines.
-///
-/// Names live in the name table; this answers the question a walk asks of an
-/// address and a name cannot. The first symbol at an address wins, so the
-/// index answers the same way twice over.
-fn definitions(container: &Container) -> BTreeMap<u64, bool> {
-    let mut defined = BTreeMap::new();
-    // The format's own entry first: a stripped binary has no symbol there.
-    for entry in &container.entries {
-        defined.entry(entry.vaddr).or_insert(true);
-    }
-    for symbol in &container.symbols {
-        if !symbol.defined || symbol.name.is_empty() {
-            continue;
-        }
-        defined
-            .entry(symbol.vaddr)
-            .or_insert(symbol.kind == SymbolKind::Function);
-    }
-    defined
-}
-
 /// What the query database reads: the source, and what no write moves -- the
 /// decoders and the slots the container states the loader fills.
 pub(crate) struct ProgramInputs<S> {
     pub(crate) source: S,
-    /// Whether a function begins at each address the binary defines, indexed
-    /// once.
-    ///
-    /// The engine asks this per call target and per branch target of every
-    /// body it walks, and answering it by scanning the symbol table made the
-    /// walk cost one pass over every symbol per edge. Read from the container
-    /// alone, so no write moves it.
-    defined: BTreeMap<u64, bool>,
     /// Where the loaded sections lie, indexed once from the container, which no write moves.
     extents: r2types::ProgramExtents,
     /// Where static data can live, by `Section::holds_static_data`, indexed
@@ -696,6 +666,11 @@ impl<S: Source> ProgramInputs<S> {
     fn assembled_at(&self, entry: u64) -> Result<&Assembled, String> {
         self.machines()?
             .assembled_at(self.source.container(), entry)
+    }
+
+    /// Whether the code from here on is Thumb, as the nearest mapping symbol at or below it states.
+    fn stated_thumb(&self, vaddr: u64) -> bool {
+        (self.mapped.range(..=vaddr).next_back()).is_some_and(|(_, thumb)| *thumb)
     }
 }
 
@@ -743,7 +718,7 @@ impl<S: Source + 'static> Source for Recorded<'_, S> {
 
 /// Which stub stands for which import, by the import's own name, and how
 /// large each is: stated by a Mach-O stub section, and decoded out of the
-/// bytes elsewhere. `is_entry` reads it, which is what bounds every body
+/// bytes elsewhere. The stated starts read it, which bound every body
 /// walk, so a stale table would be a body that ends in the wrong place.
 struct Imports;
 

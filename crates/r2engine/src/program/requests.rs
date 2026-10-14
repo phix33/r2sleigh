@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::{OpenProgram, ProgramInputs, Source, SymbolKind, View};
+use super::{OpenProgram, ProgramInputs, Source, View};
 use crate::discovery::{Basis, Confidence, Discovered};
 use crate::isolation::isolated;
 use crate::native::{NativeRefusal, Prepared};
@@ -886,33 +886,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Modes {
 
 /// Where the program states a function begins, and whether it states the code there is Thumb.
 fn stated_functions<S: Source + 'static>(view: &View<'_, S>) -> Vec<(u64, Confidence, bool)> {
-    let container = view.source().container();
-    let imports = view.imports();
-    // Each frame the call-frame information states begins a function, which survives a strip
-    // (ROADMAP I); one in a section of linkage code, or holding a stub, is the stub table's.
-    let linkage = view.linkage();
-    let frames = (container.unwind.frames())
-        .filter(|frame| !linkage.holds(frame.start))
-        .filter(|frame| {
-            imports
-                .range(frame.start..frame.end.max(frame.start + 1))
-                .next()
-                .is_none()
-        })
-        .map(|frame| (frame.start, view.thumb_at(frame.start)));
-    container
-        .entries
-        .iter()
-        .map(|entry| (entry.vaddr, entry.thumb))
-        .chain(
-            container
-                .symbols
-                .iter()
-                .filter(|symbol| symbol.defined && symbol.kind == SymbolKind::Function)
-                .map(|symbol| (symbol.vaddr, symbol.thumb)),
-        )
-        .chain(imports.keys().map(|vaddr| (*vaddr, false)))
-        .chain(frames)
+    let stated = view.stated_starts().iter();
+    stated
         .map(|(vaddr, thumb)| (vaddr, Confidence::of(Basis::Stated), thumb))
         .collect()
 }
