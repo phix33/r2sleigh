@@ -472,3 +472,21 @@ fn a_pointer_walked_to_its_end_runs_its_length_once_the_guard_excludes_zero() {
     let unguarded = walked(code(), 0x401339);
     assert_eq!(trips_of(&unguarded), [Err(TripRefusal::ZeroNotExcluded)]);
 }
+
+/// A run longer than any function's (D18's budget) ends at the budget with a named stop, never
+/// silently: hostile code chains overlapping jumps through megabytes of sections.
+#[test]
+fn a_body_past_the_budget_stops_there_by_name() {
+    let mut bytes = vec![0x90u8; r2engine::body::BODY_INSTRUCTIONS + 16];
+    bytes.push(0xc3);
+    let program = reader(Box::leak(bytes.into_boxed_slice()));
+    let body = lift_body(BASE, &x86_64(), &program, &BTreeMap::new()).expect("body");
+    let walked: usize = (body.blocks.iter())
+        .map(|block| block.lifted.size as usize)
+        .sum();
+    assert_eq!(walked, r2engine::body::BODY_INSTRUCTIONS);
+    assert_eq!(
+        body.unresolved.last().map(|stop| stop.reason),
+        Some(UnresolvedReason::Budget)
+    );
+}

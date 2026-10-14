@@ -414,6 +414,8 @@ fn section_stubs(
     let mut transfers: Vec<u64> = Vec::new();
     // Whether any run left as linkage code leaves: through a loader word or within the section.
     let mut left = false;
+    // Whether a run has left through a loader word yet.
+    let mut through_word = false;
     // Where the section's own entries jump: the resolver they share, which no import's stub is.
     let mut entered = std::collections::BTreeSet::new();
     // Where each reader's run began, beside it in `readers`.
@@ -490,6 +492,12 @@ fn section_stubs(
         if slot.is_some_and(|slot| container.loader_write_at(slot).is_none()) {
             return None;
         }
+        // A lazy entry's jump within the section follows a jump through a loader word (PLT0,
+        // `__stub_helper`'s header); code that jumps within itself first holds no linkage.
+        if direct && slot.is_none() && !through_word {
+            return None;
+        }
+        through_word |= slot.is_some();
         // Linkage is shown by a jump within the section or through a loader word; an unplaced
         // indirect jump (a tail call, a dispatch) shows nothing.
         left |= direct || slot.is_some();

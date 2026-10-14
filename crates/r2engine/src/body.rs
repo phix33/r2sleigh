@@ -188,7 +188,13 @@ pub enum UnresolvedReason {
     Undecodable,
     /// The instruction needs more bytes than the image maps at that address.
     Truncated,
+    /// The body reached [`BODY_INSTRUCTIONS`] before it closed (D18): no analysis reads it whole.
+    Budget,
 }
+
+/// How many instructions one body may hold: 8x the largest function the corpora hold (pumasim's
+/// Gui constructor, 8,250), so only hostile code (a chain of overlapping jumps) reaches it.
+pub const BODY_INSTRUCTIONS: usize = 1 << 16;
 
 /// Why a body could not be lifted at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +207,8 @@ pub enum BodyError {
     EntryUnbacked(u64),
     /// The entry address does not decode, so there is no first instruction.
     EntryUndecodable(u64),
+    /// The body at this entry holds more instructions than [`BODY_INSTRUCTIONS`].
+    Oversized(u64),
 }
 
 impl std::fmt::Display for BodyError {
@@ -216,6 +224,10 @@ impl std::fmt::Display for BodyError {
                 "the file holds no bytes at {addr:#x}: the loader fills zeros there"
             ),
             Self::EntryUndecodable(addr) => write!(f, "no instruction decodes at {addr:#x}"),
+            Self::Oversized(addr) => write!(
+                f,
+                "the body at {addr:#x} holds more than {BODY_INSTRUCTIONS} instructions, the budget no function reaches"
+            ),
         }
     }
 }
@@ -476,6 +488,10 @@ impl Walk {
         while let Some(addr) = pending.pop() {
             if self.decoded.contains_key(&addr) {
                 continue;
+            }
+            if self.decoded.len() >= BODY_INSTRUCTIONS {
+                self.stop(addr, UnresolvedReason::Budget);
+                break;
             }
             if let Some(instruction) = self.decode(addr, disasm, program) {
                 let enters = enters_supervisor(&instruction.lifted.ops, disasm.arch_spec());

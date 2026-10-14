@@ -1753,6 +1753,14 @@ impl Native<'_> {
         callees: &Callees,
         capture: Capture<'_>,
     ) -> Result<(r2sleigh_lift::TrustedLiftedFunction, r2ssa::CalleeEvidence), NativeRefusal> {
+        // A body the walk cut at its budget is no function's whole body: analysis refuses it, named.
+        let cut = (walked.body.unresolved.iter())
+            .any(|stop| stop.reason == crate::body::UnresolvedReason::Budget);
+        if cut {
+            return Err(NativeRefusal::Body(crate::body::BodyError::Oversized(
+                walked.body.entry,
+            )));
+        }
         let Capture {
             extra_literals,
             restatement,
