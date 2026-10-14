@@ -608,6 +608,7 @@ fn exact_tail_return_requires_a_complete_matching_source_boundary() {
         arguments_complete: true,
         results_complete: true,
         arguments_proven: true,
+        refusal: None,
     };
 
     assert!(exact_tail_return_certificate_matches(

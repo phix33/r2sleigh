@@ -540,8 +540,8 @@ pub(crate) fn variadic_callsite_arguments(
 pub(crate) struct ConventionCallBoundary {
     pub(crate) calling_convention: String,
     pub(crate) arguments: Vec<SourceCallArgumentFact>,
-    /// Whether the registers prove how many arguments the call takes; the results stand either way.
-    pub(crate) arguments_proven: bool,
+    /// Why the registers do not prove how many arguments the call takes; the results stand either way.
+    pub(crate) unproven: Option<CallBoundaryRefusal>,
     pub(crate) results: Vec<CallBoundaryValueFact>,
 }
 
@@ -798,8 +798,9 @@ pub(crate) fn convention_call_boundary(
     entry_values: &BTreeMap<CanonicalStorageId, Option<ValueId>>,
     written_anywhere: &mut BTreeMap<CanonicalStorageId, bool>,
     mut stack_pointer: Option<&mut ReachingStorage<'_>>,
-) -> Option<ConventionCallBoundary> {
-    let convention = machine_context.convention_slots()?;
+) -> Result<ConventionCallBoundary, CallBoundaryRefusal> {
+    let convention =
+        (machine_context.convention_slots()).ok_or(CallBoundaryRefusal::NoConvention)?;
     let results = |convention: &r2source::SourceConventionSlots| {
         convention
             .result_slot()
@@ -821,10 +822,12 @@ pub(crate) fn convention_call_boundary(
     if let Some(crate::SourceArity::Exact(count)) = arity {
         let (arguments, arguments_proven) =
             stated_call_arguments(at, machine_context, count, entry_values, stack_pointer);
-        return Some(ConventionCallBoundary {
+        return Ok(ConventionCallBoundary {
             calling_convention: convention.calling_convention().to_string(),
             arguments,
-            arguments_proven,
+            unproven: (!arguments_proven).then_some(CallBoundaryRefusal::StatedArgumentUnreached {
+                count: position(count),
+            }),
             results: results(convention),
         });
     }
@@ -908,7 +911,7 @@ pub(crate) fn convention_call_boundary(
         written.is_some()
     };
     let mut arguments = Vec::new();
-    let mut arguments_proven = true;
+    let mut unproven = None;
     for (position, slot) in convention.argument_slots().iter().enumerate() {
         let Ok(index) = u32::try_from(position) else {
             break;
@@ -932,7 +935,9 @@ pub(crate) fn convention_call_boundary(
             Some(ReachingAbiState::Value(value))
                 if value_is_call_clobber(graph, value) && position >= at_least =>
             {
-                arguments_proven &= !passes_result_on(*slot, position);
+                if passes_result_on(*slot, position) {
+                    unproven = Some(CallBoundaryRefusal::ResultPassedOn { slot: index });
+                }
                 break;
             }
             Some(ReachingAbiState::Value(value)) if graph.written_by_body(value) => {
@@ -964,7 +969,7 @@ pub(crate) fn convention_call_boundary(
                         "convention-arity-unproven",
                         "callsite ({block_addr:#x}, {op_index}) may hand on parameter slot {position}"
                     );
-                    arguments_proven = false;
+                    unproven = Some(CallBoundaryRefusal::MayHandOn { slot: index });
                     break;
                 }
                 if let Some(written) = written_later(position) {
@@ -972,7 +977,7 @@ pub(crate) fn convention_call_boundary(
                         "convention-arity-unproven",
                         "callsite ({block_addr:#x}, {op_index}) did not write argument slot {position}, yet the body writes {written:?}"
                     );
-                    arguments_proven = false;
+                    unproven = Some(CallBoundaryRefusal::SlotSkipped { slot: index });
                     break;
                 }
                 break;
@@ -1000,7 +1005,7 @@ pub(crate) fn convention_call_boundary(
         // that, an empty scan says nothing was looked at rather than that
         // nothing is there, and a call that passes arguments would be spelled
         // as one that passes none.
-        graph.block_id_for_addr(block_addr)?;
+        (graph.block_id_for_addr(block_addr)).ok_or(CallBoundaryRefusal::ArgumentAreaUnseen)?;
         if call_entering_stack_pointer_offset(
             CallPosition {
                 function,
@@ -1017,7 +1022,7 @@ pub(crate) fn convention_call_boundary(
                 "convention-argument-area",
                 "callsite ({block_addr:#x}, {op_index}) cannot see the argument area its convention passes on"
             );
-            return None;
+            return Err(CallBoundaryRefusal::ArgumentAreaUnseen);
         }
         // The callee names the same slot from the pointer it is entered with,
         // below the caller's by what the transfer spends on the return address.
@@ -1055,19 +1060,28 @@ pub(crate) fn convention_call_boundary(
 
     // A floor is no call's contract: a slot the count found past it is shown, never proven (W7).
     let past_floor = arity.is_some() && arguments.len() > at_least;
-    if past_floor && arguments_proven {
+    if past_floor && unproven.is_none() {
         r2il::refusal_evidence!(
             "convention-arity-floor",
             "callsite ({block_addr:#x}, {op_index}) calls a callee that takes at least {at_least} arguments; this body wrote {}",
             arguments.len()
         );
+        unproven = Some(CallBoundaryRefusal::Floor {
+            floor: position(at_least),
+            written: position(arguments.len()),
+        });
     }
-    Some(ConventionCallBoundary {
+    Ok(ConventionCallBoundary {
         calling_convention: convention.calling_convention().to_string(),
         arguments,
-        arguments_proven: arguments_proven && !past_floor,
+        unproven,
         results: results(convention),
     })
+}
+
+/// A count or slot position as a refusal states it.
+fn position(count: usize) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX)
 }
 
 /// The `count` arguments a callee's body states it takes, as they reach the call, register slots
@@ -1152,6 +1166,40 @@ fn stated_call_arguments(
     (arguments, true)
 }
 
+/// The boundary a convention built for a callee that mints no contract, beside what the callee's
+/// body `stated`, where it states anything (CalleeStatement).
+fn adopt_convention(
+    boundary: &mut SourceCallBoundaryFact,
+    convention: ConventionCallBoundary,
+    stated: Option<&crate::machine_context::CalleeStatement>,
+) {
+    boundary.calling_convention = Some(convention.calling_convention);
+    // Nothing said this callee is variadic, and the count came from the machine rather than from a
+    // prototype, so every argument found is a fixed one as far as anything here can tell.
+    boundary.variadic = Some(false);
+    let arguments_proven = convention.unproven.is_none();
+    boundary.fixed_argument_count = arguments_proven.then_some(convention.arguments.len());
+    boundary.arguments = convention.arguments;
+    // The convention's result is a guess about the caller's side; the callee's own proven
+    // result, where its statement carries one, is the callee's fact (CalleeStatement).
+    boundary.result_kind = stated
+        .and_then(|statement| statement.result)
+        .filter(|result| {
+            !matches!(result, SourceCallResult::Void) || convention.results.is_empty()
+        });
+    boundary.results = convention.results;
+    boundary.arguments_complete = arguments_proven;
+    // A count no callee statement bounds is the caller's registers, not the callee's arity.
+    boundary.arguments_proven = arguments_proven && stated.is_some();
+    boundary.results_complete = true;
+    boundary.complete = arguments_proven;
+    boundary.refusal = match (convention.unproven, stated) {
+        (Some(refusal), _) => Some(refusal),
+        (None, None) => Some(CallBoundaryRefusal::CountFromRegisters),
+        (None, Some(_)) => None,
+    };
+}
+
 pub(crate) fn collect_source_boundary_facts(
     body: Body<'_>,
     call_sites: &CallSiteFacts,
@@ -1200,6 +1248,7 @@ pub(crate) fn collect_source_boundary_facts(
             arguments_complete: false,
             results_complete: false,
             arguments_proven: false,
+            refusal: Some(CallBoundaryRefusal::NoConvention),
         };
         if let Some((machine_context, interface)) = machine_context.and_then(|context| {
             call_site
@@ -1211,6 +1260,7 @@ pub(crate) fn collect_source_boundary_facts(
             boundary.variadic = Some(interface.is_variadic());
             boundary.noreturn = Some(interface.is_noreturn());
             boundary.result_kind = Some(interface.result());
+            boundary.refusal = Some(CallBoundaryRefusal::InterfaceIncomplete);
             if interface.is_complete()
                 && let Some((block_addr, op_index)) = graph.walk_start(call_site.at)
             {
@@ -1385,7 +1435,7 @@ pub(crate) fn collect_source_boundary_facts(
                         }
                     }
                 } else if fixed_arguments.iter().all(Option::is_some) {
-                    boundary.arguments = fixed_arguments.into_iter().flatten().collect();
+                    boundary.arguments = fixed_arguments.iter().flatten().copied().collect();
                     true
                 } else {
                     false
@@ -1413,6 +1463,18 @@ pub(crate) fn collect_source_boundary_facts(
                 if let Some(results) = results {
                     boundary.results = results;
                 }
+                let unreached = (interface.arguments().iter().zip(&fixed_arguments))
+                    .find(|(_, found)| found.is_none())
+                    .map(|(argument, _)| argument.index());
+                boundary.refusal = match (boundary.variadic_argument_count_refusal, unreached) {
+                    _ if arguments_complete && results_complete => None,
+                    _ if arguments_complete => Some(CallBoundaryRefusal::ResultUnreached),
+                    (Some(refusal), _) => Some(CallBoundaryRefusal::VariadicCount(refusal)),
+                    (None, Some(index)) => {
+                        Some(CallBoundaryRefusal::DeclaredArgumentUnreached { index })
+                    }
+                    (None, None) => Some(CallBoundaryRefusal::InterfaceIncomplete),
+                };
                 boundary.arguments_complete = arguments_complete;
                 boundary.arguments_proven = arguments_complete;
                 boundary.results_complete = results_complete;
@@ -1454,37 +1516,20 @@ pub(crate) fn collect_source_boundary_facts(
                     .is_some_and(|identity| machine_context
                         .call_site_interface(identity)
                         .is_some()),
-                convention.is_some(),
+                convention.is_ok(),
                 convention.as_ref().map_or(0, |found| found.arguments.len()),
                 convention.as_ref().map_or(0, |found| found.results.len())
             );
-            if let Some(convention) = convention {
-                boundary.calling_convention = Some(convention.calling_convention);
-                // Nothing said this callee is variadic, and the count came from
-                // the machine rather than from a prototype, so every argument
-                // found is a fixed one as far as anything here can tell.
-                boundary.variadic = Some(false);
-                boundary.fixed_argument_count = convention
-                    .arguments_proven
-                    .then_some(convention.arguments.len());
-                boundary.arguments = convention.arguments;
-                // The convention's result is a guess about the caller's side; the callee's own proven
-                // result, where its statement carries one, is the callee's fact (CalleeStatement).
-                boundary.result_kind =
-                    stated
-                        .and_then(|statement| statement.result)
-                        .filter(|result| {
-                            !matches!(result, SourceCallResult::Void)
-                                || convention.results.is_empty()
-                        });
-                boundary.results = convention.results;
-                boundary.arguments_complete = convention.arguments_proven;
-                // A count no callee statement bounds is the caller's registers, not the callee's arity.
-                boundary.arguments_proven = convention.arguments_proven && stated.is_some();
-                boundary.results_complete = true;
-                boundary.complete = convention.arguments_proven;
+            match convention {
+                Err(refusal) => boundary.refusal = Some(refusal),
+                Ok(convention) => adopt_convention(&mut boundary, convention, stated),
             }
         }
+        debug_assert_eq!(
+            boundary.refusal.is_none(),
+            boundary.complete && boundary.arguments_proven,
+            "{boundary:?}"
+        );
         facts.calls.insert(call_site.id, boundary);
     }
 

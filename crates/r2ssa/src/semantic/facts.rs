@@ -621,7 +621,7 @@ pub struct VariadicCallsiteArgumentCountEvidence {
 }
 
 /// Why a variadic callsite could not prove and project its own argument list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum VariadicCallsiteArgumentCountRefusal {
     MissingFormatParameter,
     FormatArgumentUnavailable,
@@ -650,6 +650,36 @@ impl VariadicCallsiteArgumentCountRefusal {
             Self::FloatingVariadicArgument => "floating_variadic_argument",
         }
     }
+}
+
+/// The first fact a call boundary could not prove: why the call is incomplete or its arguments are
+/// not the callee's (audit M3). Slots and counts are argument positions, from zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CallBoundaryRefusal {
+    /// No machine context or convention describes the call.
+    NoConvention,
+    /// The callee's declared interface is incomplete.
+    InterfaceIncomplete,
+    /// The convention passes arguments in a stack area whose place the walk cannot see.
+    ArgumentAreaUnseen,
+    /// The callee's declaration names argument `index`, and no value reaches it.
+    DeclaredArgumentUnreached { index: u32 },
+    /// The callee's body states exactly `count` arguments, and one reaches no value.
+    StatedArgumentUnreached { count: u32 },
+    /// The callee is variadic, and this call's argument count is unproven.
+    VariadicCount(VariadicCallsiteArgumentCountRefusal),
+    /// The callee declares a result, and no value it leaves reaches the caller.
+    ResultUnreached,
+    /// The callee takes at least `floor` arguments, and this call writes `written`, past it.
+    Floor { floor: u32, written: u32 },
+    /// Slot `slot` holds what this function was handed, which the call may pass on.
+    MayHandOn { slot: u32 },
+    /// Slot `slot` is unwritten, yet this function writes a later one.
+    SlotSkipped { slot: u32 },
+    /// Slot `slot` holds an earlier call's result, and this function writes a later one.
+    ResultPassedOn { slot: u32 },
+    /// No callee states an arity: the count is only the registers written before the call.
+    CountFromRegisters,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -689,6 +719,8 @@ pub struct SourceCallBoundaryFact {
     /// takes (a prototype, its exact interface or statement, or a floor no written slot passes)
     /// and each reaches the call. An arity read off the registers written before it is none.
     pub arguments_proven: bool,
+    /// Why `complete` or `arguments_proven` is false; `None` exactly where both hold.
+    pub refusal: Option<CallBoundaryRefusal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

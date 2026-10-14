@@ -3222,6 +3222,7 @@ mod tests {
                 arguments_complete: true,
                 results_complete: true,
                 arguments_proven: true,
+                refusal: None,
             },
         );
         let inventory = SemanticObligationInventory::collect(
