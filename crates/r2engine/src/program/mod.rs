@@ -34,7 +34,7 @@ use crate::machine::Machine;
 use std::rc::Rc;
 
 use crate::names::NameDb;
-use crate::native::{NativeRefusal, NativeTarget, Prepared};
+use crate::native::{NativeRefusal, NativeTarget, Prepared, Unassembled};
 use crate::query::Decoders;
 use crate::query::db::{Db, Inputs, Query, Retention};
 
@@ -57,18 +57,18 @@ struct Machines {
     /// The same instruction set with TMode set, where the architecture has
     /// one. Which functions it decodes is what `modes` says.
     thumb: Option<Machine>,
-    assembled: Result<Assembled, String>,
+    assembled: Result<Assembled, Unassembled>,
     /// What a Go function needs, where the container states any: Go's convention by its
     /// toolchain's version (doc/adr-language-profile.md, LP1).
-    go: Option<Result<Assembled, String>>,
+    go: Option<Result<Assembled, Unassembled>>,
     /// ABI0, where the toolchain's own convention is ABIInternal: its assembly functions keep it.
-    go_abi0: Option<Result<Assembled, String>>,
+    go_abi0: Option<Result<Assembled, Unassembled>>,
     /// ABIInternal refusing, for a function under it whose ABI pclntab does not state.
-    go_unstated: Option<Result<Assembled, String>>,
+    go_unstated: Option<Result<Assembled, Unassembled>>,
 }
 
 impl Machines {
-    fn load(container: &Container) -> Result<Self, String> {
+    fn load(container: &Container) -> Result<Self, Unassembled> {
         let arch = container.arch.name.clone();
         // A PE runs under the Windows toolchain, whose language may differ.
         let machine = match container.format {
@@ -76,17 +76,22 @@ impl Machines {
             _ => r2sleigh_lift::embedded_machine(&arch),
         }
         .map(Machine::new)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| Unassembled::NoSpecification(error.to_string()))?;
         // Whether any function is Thumb is discovery's answer, so the
         // decoder is loaded wherever the architecture has one.
         let thumb = r2sleigh_lift::embedded_thumb_machine(&arch)
             .map(|machine| machine.map(Machine::new))
             .transpose()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| Unassembled::NoSpecification(error.to_string()))?;
         let psabi = kernel(container);
         let bits = container.arch.bits;
+        let unstated = |go| Unassembled::NoConvention {
+            architecture: arch.clone(),
+            bits,
+            go,
+        };
         let assembled = r2abi::calling_convention(&arch, bits, psabi)
-            .ok_or_else(|| format!("no calling convention for {arch} {bits}"))
+            .ok_or_else(|| unstated(false))
             .and_then(|convention| assemble(&machine, container, convention));
         let languages = &container.languages;
         let written_in_go = languages.program == SourceLanguage::Go
@@ -99,7 +104,7 @@ impl Machines {
         let abi0 = r2abi::go_abi0_convention(&arch, bits);
         let go = convention.map(|convention| {
             convention
-                .ok_or_else(|| format!("no Go calling convention for {arch} {bits}"))
+                .ok_or_else(|| unstated(true))
                 .and_then(|convention| assemble(&machine, container, convention))
         });
         let go_abi0 = convention
@@ -123,7 +128,7 @@ impl Machines {
 
     /// What a native request needs for the function at `entry`, by its language: a Go function under
     /// ABIInternal unless pclntab marks it assembly (ABI0), refusing where no table states which.
-    fn assembled_at(&self, container: &Container, entry: u64) -> Result<&Assembled, String> {
+    fn assembled_at(&self, container: &Container, entry: u64) -> Result<&Assembled, Unassembled> {
         let languages = &container.languages;
         let chosen = match (&self.go, &self.go_abi0, languages.at(entry)) {
             (Some(go), None, SourceLanguage::Go) => go,
@@ -144,7 +149,7 @@ fn assemble(
     machine: &Machine,
     container: &Container,
     convention: &'static r2abi::CallingConvention,
-) -> Result<Assembled, String> {
+) -> Result<Assembled, Unassembled> {
     let bits = container.arch.bits;
     // The system's ABI says which register it reserves for the thread
     // pointer and which control registers it makes callee-saved. A system
@@ -156,18 +161,18 @@ fn assemble(
     let specification = match (convention.prototype, container.format) {
         (Some((compiler, _)), _) => machine
             .compiler_spec_of(compiler)
-            .ok_or_else(|| format!("the language names no {compiler} compiler"))?,
+            .ok_or(Unassembled::NoCompiler(compiler))?,
         (None, Format::Pe) => machine
             .compiler_spec_of("windows")
             .unwrap_or(machine.compiler_spec),
         (None, _) => machine.compiler_spec,
     };
     let compiler = r2sleigh_lift::profile::LanguageProfile::parse(specification)
-        .map_err(|error| format!("the compiler specification does not parse: {}", error.0))?;
+        .map_err(|error| Unassembled::UnparsedCompiler(error.0))?;
     let compiler = match convention.prototype {
         Some((_, prototype)) => compiler
             .under(prototype)
-            .ok_or_else(|| format!("the compiler specification states no {prototype}"))?,
+            .ok_or(Unassembled::NoPrototype(prototype))?,
         None => compiler,
     };
     let call_effect =
@@ -288,7 +293,11 @@ impl<S: Source + 'static> OpenProgram<S> {
 
     /// Whether the program's machine loads, and why not: loaded on first use, since which instruction set a file is written in no patch changes.
     pub fn loaded(&self) -> Result<(), String> {
-        self.db.inputs().machines().map(|_| ())
+        self.db
+            .inputs()
+            .machines()
+            .map(|_| ())
+            .map_err(|why| why.to_string())
     }
 
     /// What this binary calls each address it names.
@@ -355,12 +364,11 @@ impl<S: Source + 'static> OpenProgram<S> {
 
     /// Whether what a native request needs of the machine was assembled when it loaded.
     fn assembled(&self) -> Result<(), String> {
-        let machines = self.db.inputs().machines()?;
-        machines
-            .assembled
-            .as_ref()
+        let machines = self.db.inputs().machines();
+        let machines = machines.map_err(|why| why.to_string())?;
+        (machines.assembled.as_ref())
             .map(|_| ())
-            .map_err(Clone::clone)
+            .map_err(ToString::to_string)
     }
 
     /// Everything about the machine that does not change between functions.
@@ -400,7 +408,10 @@ impl<S: Source + 'static> OpenProgram<S> {
     fn sealing(&self, entry: u64) -> analysis::Sealing {
         let key = self.analysis_key(entry);
         let sealing = self.db.get::<analysis::Sealed>(&key);
-        sealing.map_or(analysis::Sealing::Unanalysed, |sealing| (*sealing).clone())
+        sealing.map_or_else(
+            |cycle| analysis::Sealing::Unanalysed(NativeRefusal::Prepare(format!("{cycle:?}"))),
+            |sealing| (*sealing).clone(),
+        )
     }
 
     /// The control the request in hand runs under, or the last one ran under.
@@ -646,11 +657,11 @@ pub(crate) struct ProgramInputs<S> {
     slots: BTreeMap<u64, String>,
     /// The decoders and their assembly, loaded the first time a question needs them; the container decides them, so no write moves them.
     #[cfg_attr(dylint_lib = "r2sleigh_lints", allow(cache_outside_query_database))]
-    machines: std::cell::OnceCell<Result<Machines, String>>,
+    machines: std::cell::OnceCell<Result<Machines, Unassembled>>,
 }
 
 impl<S: Source> ProgramInputs<S> {
-    fn machines(&self) -> Result<&Machines, String> {
+    fn machines(&self) -> Result<&Machines, Unassembled> {
         let loaded = self
             .machines
             .get_or_init(|| Machines::load(self.source.container()));
@@ -663,7 +674,7 @@ impl<S: Source> ProgramInputs<S> {
     }
 
     /// What a native request needs for the function at `entry`.
-    fn assembled_at(&self, entry: u64) -> Result<&Assembled, String> {
+    fn assembled_at(&self, entry: u64) -> Result<&Assembled, Unassembled> {
         self.machines()?
             .assembled_at(self.source.container(), entry)
     }

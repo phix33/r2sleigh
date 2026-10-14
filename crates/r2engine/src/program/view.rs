@@ -83,6 +83,11 @@ impl<'a, S: Source + 'static> View<'a, S> {
         &self.db.inputs().source
     }
 
+    /// Why the program's decoders did not load, where they did not.
+    pub(super) fn unloaded(&self) -> Option<crate::native::Unassembled> {
+        self.db.inputs().machines().err()
+    }
+
     /// The decoder for one instruction set.
     pub(super) fn machine_in(&self, thumb: bool) -> Option<&'a Machine> {
         match thumb {
@@ -113,23 +118,23 @@ impl<'a, S: Source + 'static> View<'a, S> {
         &self,
         machine: &'a Machine,
         entry: u64,
-    ) -> Result<NativeTarget<'a>, String> {
-        self.target_under(machine, self.db.inputs().assembled_at(entry)?)
+    ) -> Result<NativeTarget<'a>, crate::native::Unassembled> {
+        Ok(self.target_under(machine, self.db.inputs().assembled_at(entry)?))
     }
 
     /// A decoder under the program's default convention, for a walk that reads no boundary.
     pub(super) fn decoder_of(&self, machine: &'a Machine) -> Result<NativeTarget<'a>, String> {
         let assembled = self.db.inputs().assembled();
-        self.target_under(machine, assembled.ok_or("the program was not assembled")?)
+        Ok(self.target_under(machine, assembled.ok_or("the program was not assembled")?))
     }
 
     fn target_under(
         &self,
         machine: &'a Machine,
         assembled: &'a super::Assembled,
-    ) -> Result<NativeTarget<'a>, String> {
+    ) -> NativeTarget<'a> {
         let inputs = self.db.inputs();
-        Ok(NativeTarget {
+        NativeTarget {
             arch: machine.tables(),
             disasm: &machine.disasm,
             cpu: machine.cpu,
@@ -139,15 +144,13 @@ impl<'a, S: Source + 'static> View<'a, S> {
             dwarf: &machine.dwarf,
             prototypes: &assembled.prototypes,
             declarations: &inputs.source.container().declarations,
-        })
+        }
     }
 
     pub(super) fn target(&self, addr: u64) -> Result<NativeTarget<'a>, String> {
-        self.target_of(
-            self.machine_at(addr)
-                .ok_or("no Sleigh specification for this architecture")?,
-            addr,
-        )
+        let machine = self.machine_at(addr);
+        let machine = machine.ok_or("no Sleigh specification for this architecture")?;
+        self.target_of(machine, addr).map_err(|why| why.to_string())
     }
 
     /// Whether control comes back from a call to `callee`: false only where the program proves it

@@ -174,15 +174,38 @@ pub struct Rendering {
     pub unread: Vec<crate::native::Unread>,
     /// The function's source language, as the container states it (LP0).
     pub language: r2abi::statement::SourceLanguage,
+    /// Why nothing was analysed to render, where nothing was: the response is then that record's
+    /// comment alone (ROADMAP D29).
+    pub refused: Option<NativeRefusal>,
 }
 
 impl Rendering {
+    /// The record of a function the engine refused to analyse or render, under its name.
+    pub(super) fn refused(
+        name: &str,
+        entry: u64,
+        language: r2abi::statement::SourceLanguage,
+        refusal: NativeRefusal,
+    ) -> Self {
+        let comment = crate::artifact_guard_fallback_comment(name, &refusal.to_string());
+        Self {
+            response: RenderedResponse {
+                output: crate::EngineRendering::Listing(comment),
+                obligation_ledger: None,
+                premises: std::collections::BTreeSet::new(),
+            },
+            definition: r2dec::rendered_name_of(Some(name), entry),
+            unread: Vec::new(),
+            language,
+            refused: Some(refusal),
+        }
+    }
+
     /// The rendering as one object a tool reads: `pddj`.
     ///
     /// `name` is the program's name for the function at `entry`.
     pub fn answer(&self, name: &str, entry: u64) -> crate::RenderedFunctionJson {
-        let definition = self.definition.clone();
-        crate::RenderedFunctionJson::of(&self.response, name, entry, definition, self.language)
+        crate::RenderedFunctionJson::of(self, name, entry)
     }
 }
 
@@ -318,9 +341,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             super::analysis::Sealing::Refused { response, .. } => {
                 return Ok(Err(Box::new((*response).clone())));
             }
-            super::analysis::Sealing::Unanalysed => {
-                return Err("the function has no analysis to seal".to_owned());
-            }
+            super::analysis::Sealing::Unanalysed(refusal) => return Err(refusal.to_string()),
         };
         let refused = |panicked: crate::isolation::Panicked| {
             let name = prepared.name();
@@ -330,16 +351,20 @@ impl<S: Source + 'static> OpenProgram<S> {
         Ok(isolated(|| read(&sealed)).map_err(refused))
     }
 
-    /// One function rendered.
+    /// One function rendered, or the record of why it was not; an address nothing maps names no
+    /// function, so it is the request's error.
     pub fn rendered(&mut self, entry: u64) -> Result<Rendering, String> {
         self.start_request();
-        self.loaded()?;
-        self.assembled()?;
         let key = self.analysis_key(entry);
         let render = self.db.get::<super::analysis::Rendered>(&key);
         let render = render.map_err(|cycle| format!("{cycle:?}"))?;
-        let drawn = render.0.as_ref().map_err(Clone::clone)?;
-        Ok(Rendering::clone(&drawn.rendering))
+        let rendering = &render.0.rendering;
+        match &rendering.refused {
+            Some(unmapped @ NativeRefusal::Body(crate::body::BodyError::EntryUnmapped(_))) => {
+                Err(unmapped.to_string())
+            }
+            _ => Ok(Rendering::clone(rendering)),
+        }
     }
 
     /// What one function is, read off the sealed analysis every rendering draws from.

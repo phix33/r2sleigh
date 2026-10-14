@@ -165,11 +165,8 @@ pub struct NativeTarget<'a> {
     pub declarations: &'a r2abi::Declarations,
 }
 
-/// Why a native decompile could not be attempted.
-///
-/// These are all refusals to start. Once the request is built, a function the
-/// engine cannot prove comes back as a rendered refusal rather than as an
-/// error here.
+/// Why a native decompile could not be attempted: the record `pdd`, `pddj`, `afi` and the listing
+/// carry, never an error (ROADMAP D29).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeRefusal {
     Body(BodyError),
@@ -181,6 +178,8 @@ pub enum NativeRefusal {
     /// The carriers or the convention slots are not a machine this engine can
     /// describe.
     Machine(&'static str),
+    /// The machine or the function's convention could not be assembled for this program.
+    Unassembled(Unassembled),
     /// The function's convention passes what no call boundary states (doc/adr-language-profile.md).
     Convention {
         name: &'static str,
@@ -215,6 +214,66 @@ impl NativeRefusal {
     pub const fn stopped(&self) -> bool {
         matches!(self, Self::Stopped(_))
     }
+
+    /// The refusal's kind, as `pddj` tags it.
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Body(BodyError::Oversized(_)) => "oversized",
+            Self::Body(_) => "walk",
+            Self::NoStackPointer
+            | Self::UnknownRegister(_)
+            | Self::Machine(_)
+            | Self::Unassembled(_) => "machine",
+            Self::Convention { .. } => "convention",
+            Self::Capture(_) => "capture",
+            Self::Lift(_) => "lift",
+            Self::Prepare(_) => "preparation",
+            Self::Stopped(_) => "stopped",
+            Self::Panicked { .. } => "panicked",
+        }
+    }
+}
+
+/// Why the machine a function runs on, or its convention, could not be assembled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unassembled {
+    /// No Sleigh specification decodes this architecture, as the lifter said.
+    NoSpecification(String),
+    /// No calling convention is stated for this architecture and width; `go` for Go's own.
+    NoConvention {
+        architecture: String,
+        bits: u32,
+        go: bool,
+    },
+    /// The convention runs under a compiler the language names none of.
+    NoCompiler(&'static str),
+    /// The compiler specification does not parse, as its parser said.
+    UnparsedCompiler(String),
+    /// The compiler specification states no prototype of the convention's name.
+    NoPrototype(&'static str),
+}
+
+impl std::fmt::Display for Unassembled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSpecification(error) => write!(f, "no Sleigh specification: {error}"),
+            Self::NoConvention {
+                architecture,
+                bits,
+                go,
+            } => {
+                let go = if *go { "Go " } else { "" };
+                write!(f, "no {go}calling convention for {architecture} {bits}")
+            }
+            Self::NoCompiler(compiler) => write!(f, "the language names no {compiler} compiler"),
+            Self::UnparsedCompiler(error) => {
+                write!(f, "the compiler specification does not parse: {error}")
+            }
+            Self::NoPrototype(prototype) => {
+                write!(f, "the compiler specification states no {prototype}")
+            }
+        }
+    }
 }
 
 impl From<crate::isolation::Panicked> for NativeRefusal {
@@ -233,6 +292,7 @@ impl std::fmt::Display for NativeRefusal {
             Self::NoStackPointer => write!(f, "the compiler specification names no stack pointer"),
             Self::UnknownRegister(name) => write!(f, "this architecture has no register {name}"),
             Self::Machine(what) => write!(f, "the machine cannot be described: {what}"),
+            Self::Unassembled(why) => write!(f, "the machine is not assembled: {why}"),
             Self::Convention { name, reason } => write!(f, "under the {name} convention: {reason}"),
             Self::Capture(error) => write!(f, "{error}"),
             Self::Lift(error) | Self::Prepare(error) => write!(f, "{error}"),

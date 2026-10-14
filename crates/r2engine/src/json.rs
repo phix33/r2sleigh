@@ -50,9 +50,22 @@ pub struct RenderedFunctionJson {
     pub residuals: Vec<RenderedResidualJson>,
 }
 
+/// Why a unit defines nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RenderRefusalJson {
+    /// What refused: an analysis record's kind (`NativeRefusal::kind`), or `rendering`.
+    pub kind: &'static str,
     pub reason: String,
+}
+
+impl RenderRefusalJson {
+    /// A refusal the renderer wrote, not an analysis record.
+    fn rendering(reason: String) -> Self {
+        Self {
+            kind: "rendering",
+            reason,
+        }
+    }
 }
 
 /// What became of every obligation the function's source imposes.
@@ -155,13 +168,11 @@ impl RenderedFunctionJson {
     ///
     /// `definition` is the C name the renderer gives the function, which is
     /// what a unit that defines nothing still names.
-    pub(crate) fn of(
-        response: &crate::program::RenderedResponse,
-        name: &str,
-        addr: u64,
-        definition: String,
-        language: r2abi::statement::SourceLanguage,
-    ) -> Self {
+    pub(crate) fn of(rendering: &crate::program::Rendering, name: &str, addr: u64) -> Self {
+        let response = &rendering.response;
+        let definition = rendering.definition.clone();
+        let language = rendering.language;
+        let record = rendering.refused.as_ref();
         let proof = RenderProofJson::of(response.obligation_ledger.as_ref());
         // Each decided check states what it rests on in the ledger: a canary the UB-free source, a
         // runtime's stack bound nothing.
@@ -182,19 +193,28 @@ impl RenderedFunctionJson {
             // A listing is what the engine answers with when nothing was
             // rendered: it is the reason, and the unit is only that.
             EngineRendering::Listing(text) => {
+                let refused = record.map_or_else(
+                    || {
+                        RenderRefusalJson::rendering(
+                            Some(comment_body(text))
+                                .filter(|reason| !reason.is_empty())
+                                .unwrap_or_else(|| {
+                                    "the engine rendered nothing and stated no reason".to_owned()
+                                }),
+                        )
+                    },
+                    |record| RenderRefusalJson {
+                        kind: record.kind(),
+                        reason: record.to_string(),
+                    },
+                );
                 return Self {
                     name: name.to_owned(),
                     addr,
                     language: language.spelled(),
                     definition,
                     signature: String::new(),
-                    refused: Some(RenderRefusalJson {
-                        reason: Some(comment_body(text))
-                            .filter(|reason| !reason.is_empty())
-                            .unwrap_or_else(|| {
-                                "the engine rendered nothing and stated no reason".to_owned()
-                            }),
-                    }),
+                    refused: Some(refused),
                     code: text.clone(),
                     proof,
                     premises,
@@ -218,7 +238,7 @@ impl RenderedFunctionJson {
             language: language.spelled(),
             definition: function.name.clone(),
             signature: emission.signature().unwrap_or_default().to_owned(),
-            refused: refused.map(|reason| RenderRefusalJson { reason }),
+            refused: refused.map(RenderRefusalJson::rendering),
             code: emission.unit().to_owned(),
             proof,
             premises,

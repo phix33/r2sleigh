@@ -1434,9 +1434,11 @@ fn obligations(session: &mut Session, argument: &str) -> Result<String, String> 
     let addr = parse_number(session, argument)?;
     let rendering = session.program.rendered(addr)?;
     let Some(ledger) = rendering.response.obligation_ledger.as_ref() else {
-        return Ok(
-            "no obligation ledger: the function did not reach native rendering\n".to_owned(),
+        let why = rendering.refused.as_ref().map_or_else(
+            || "the function did not reach native rendering".to_owned(),
+            ToString::to_string,
         );
+        return Ok(format!("no obligation ledger: {why}"));
     };
     let mut out = format!("{}\n", ledger.report());
     if !rendering.unread.is_empty() {

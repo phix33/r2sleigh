@@ -3,15 +3,29 @@
 use crate::common;
 
 use common::{BASE, GLIBC, Literal};
+use r2engine::native::NativeRefusal;
 use r2engine::program::OpenProgram;
 
 /// `lea rax, [rax + rbx]; ret`: Go's ABIInternal passes its first two integers in RAX and RBX.
 const ADDS: &[u8] = &[0x48, 0x8d, 0x04, 0x18, 0xc3];
 
+/// The C, or the refusal record's reason where the analysis refused (ROADMAP D29).
 fn rendered(program: Literal) -> Result<String, String> {
-    OpenProgram::of(program.running_on(GLIBC))
+    let rendering = OpenProgram::of(program.running_on(GLIBC))
         .rendered(BASE)
-        .map(|rendering| rendering.response.output.into_text())
+        .expect("a refusal is a record, never an error");
+    match rendering.refused {
+        Some(refusal) => {
+            assert!(
+                matches!(refusal, NativeRefusal::Convention { .. }),
+                "{refusal:?}"
+            );
+            let text = rendering.response.output.into_text();
+            assert!(text.contains(&refusal.to_string()), "{text}");
+            Err(refusal.to_string())
+        }
+        None => Ok(rendering.response.output.into_text()),
+    }
 }
 
 #[test]

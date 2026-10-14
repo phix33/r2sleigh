@@ -110,13 +110,19 @@ fn an_address_no_instruction_can_run_at_is_refused_rather_than_rendered_as_a_fun
         .with_data_after(common::TRANSFERRED)
         .data_mapped_after(common::TRANSFERRED);
     let mut program = OpenProgram::of(data);
-    let Err(refused) = program.rendered(common::TRANSFERRED) else {
-        panic!("data was rendered as a function");
-    };
+    let rendering = (program.rendered(common::TRANSFERRED)).expect("a refusal is a record");
+    let refused = (rendering.refused.clone()).expect("data was rendered as a function");
     assert_eq!(
-        refused,
+        refused.to_string(),
         "no instruction can run at 0x1100: the program maps it without execute permission"
     );
+    assert_eq!(refused.kind(), "walk");
+    // The record is what `pdd` prints, and `pddj` carries the same reason.
+    let text = rendering.response.output.text().to_owned();
+    assert!(text.contains(&refused.to_string()), "{text}");
+    let answer = rendering.answer("t", common::TRANSFERRED);
+    let json = answer.refused.expect("pddj carries the refusal");
+    assert_eq!((json.kind, json.reason), ("walk", refused.to_string()));
     // The code that calls it is still code, and still renders.
     let c = c_of(&mut program, BASE);
     assert!(c.contains(" f("), "{c}");

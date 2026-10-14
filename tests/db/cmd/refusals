@@ -1,0 +1,38 @@
+# Every refusal is a record (ROADMAP D29): `pdd` prints it, `pddj` carries its kind and reason,
+# and the shell exits 0. An address nothing maps names no function, so it is the request's error.
+
+NAME=a function renders
+FILE=tests/fixtures/rv_O0g
+CMDS=pdd @ sym.add; pddj @ sym.add
+EXPECT=<<EOF
+int32_t add(int32_t a, int32_t b)
+{
+    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered */
+    {
+        return (int32_t)((uint32_t)b + (uint32_t)a);
+    }
+}
+
+{"name":"sym.add","addr":4521,"language":"c","definition":"add","signature":"int32_t add(int32_t a, int32_t b)","refused":null,"code":"#include <stdint.h>\n\nint32_t add(int32_t a, int32_t b)\n{\n    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered */\n    {\n        return (int32_t)((uint32_t)b + (uint32_t)a);\n    }\n}\n","proof":{"total":10,"rendered":3,"elided":7,"refused":0,"residual":0,"split":0,"compiler_inserted":0,"assumed":0,"unaccounted":0},"variables":[{"name":"a","type":"int32_t","kind":"param","location":"arg:0"},{"name":"b","type":"int32_t","kind":"param","location":"arg:1"}],"lines":[{"line":7,"addrs":[4544]}],"links":[],"residuals":[]}
+EOF
+RUN
+
+NAME=data refuses at the walk
+FILE=tests/fixtures/rv_O0g
+CMDS=pdd @ 0x2000; pddj @ 0x2000; pddo @ 0x2000
+EXPECT=<<EOF
+/* r2sleigh refused _IO_stdin_used: no instruction can run at 0x2000: the program maps it without execute permission */
+{"name":"obj._IO_stdin_used","addr":8192,"language":"c","definition":"_IO_stdin_used","signature":"","refused":{"kind":"walk","reason":"no instruction can run at 0x2000: the program maps it without execute permission"},"code":"/* r2sleigh refused _IO_stdin_used: no instruction can run at 0x2000: the program maps it without execute permission */","proof":{"total":0,"rendered":0,"elided":0,"refused":0,"residual":0,"split":0,"compiler_inserted":0,"assumed":0,"unaccounted":0},"variables":[],"lines":[],"links":[],"residuals":[]}
+no obligation ledger: no instruction can run at 0x2000: the program maps it without execute permission
+EOF
+RUN
+
+NAME=nothing mapped is an error
+FILE=tests/fixtures/rv_O0g
+CMDS=pdd @ 0x9999999
+EXPECT_ERR=<<EOF
+r2s: nothing mapped at 0x9999999
+EOF
+EXPECT=<<EOF
+EOF
+RUN
