@@ -666,7 +666,9 @@ fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> 
         return Ok(flow);
     }
     match op {
-        R2ILOp::Nop => {}
+        // Ordering constrains only what other observers see; one thread sees its own accesses in
+        // program order (Arm ARM B2.3, internal visibility), so a fence changes no value it reads.
+        R2ILOp::Nop | R2ILOp::Fence { .. } => {}
         R2ILOp::Store {
             space: SpaceId::Ram,
             addr,
@@ -1118,6 +1120,51 @@ mod tests {
             }
             assert_eq!(state.register(ok.offset, 1), Some(took), "{ops:?}");
             assert_eq!(state.load(0x200, 4), Ok(stored), "{ops:?}");
+        }
+    }
+
+    /// A fence of any ordering runs and leaves registers, memory and the monitor as they were.
+    #[test]
+    fn a_fence_changes_nothing_one_thread_sees() {
+        let (addr, val, ok) = (
+            Varnode::register(0x20, 8),
+            Varnode::register(0x28, 4),
+            Varnode::register(0x30, 1),
+        );
+        for ordering in [
+            crate::MemoryOrdering::Relaxed,
+            crate::MemoryOrdering::Acquire,
+            crate::MemoryOrdering::Release,
+            crate::MemoryOrdering::AcqRel,
+            crate::MemoryOrdering::SeqCst,
+            crate::MemoryOrdering::Unknown,
+        ] {
+            let ops = [
+                R2ILOp::LoadLinked {
+                    dst: Varnode::register(0x40, 4),
+                    space: SpaceId::Ram,
+                    addr: addr.clone(),
+                    ordering: crate::MemoryOrdering::Relaxed,
+                },
+                R2ILOp::Fence { ordering },
+                R2ILOp::StoreConditional {
+                    result: Some(ok.clone()),
+                    space: SpaceId::Ram,
+                    addr: addr.clone(),
+                    val: val.clone(),
+                    ordering: crate::MemoryOrdering::Relaxed,
+                },
+            ];
+            let mut state = State::new(Endianness::Little, |_| Some(1u8), 64).expect("state");
+            state.set_register(addr.offset, 8, 0x200).expect("addr");
+            state.set_register(val.offset, 4, 0xdead_beef).expect("val");
+            state.store(0x200, 4, 0x0101_0101).expect("memory");
+            for op in &ops {
+                assert_eq!(step(op, &mut state), Flow::Next, "{op:?}");
+            }
+            assert_eq!(state.register(0x40, 4), Some(0x0101_0101), "{ordering:?}");
+            assert_eq!(state.register(ok.offset, 1), Some(1), "{ordering:?}");
+            assert_eq!(state.load(0x200, 4), Ok(0xdead_beef), "{ordering:?}");
         }
     }
 
