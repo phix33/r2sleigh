@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         compiler.compile(lang_entry.path(), &output_path)?;
                         writeln!(
                             &mut config_vars_file,
-                            r##"pub const {var_name}: &'static [u8] = include_bytes!(r#"{path}"#);"##,
+                            r##"pub static {var_name}: &[u8] = include_bytes!(r#"{path}"#);"##,
                             path = output_path.display()
                         )?;
 
@@ -67,7 +67,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                         writeln!(
                             &mut config_vars_file,
-                            r##"pub const {var_name}: &'static str = include_str!(r#"{path}"#);"##,
+                            r##"pub static {var_name}: &str = include_str!(r#"{path}"#);"##,
                             path = output_path.display()
                         )?;
 
@@ -83,7 +83,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                         writeln!(
                             &mut config_vars_file,
-                            r##"pub const {var_name}: &'static str = include_str!(r#"{path}"#);"##,
+                            r##"pub static {var_name}: &str = include_str!(r#"{path}"#);"##,
                             path = output_path.display()
                         )?;
 
@@ -99,7 +99,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         std::fs::copy(lang_entry.path(), &output_path)?;
                         writeln!(
                             &mut config_vars_file,
-                            r##"pub const {var_name}: &'static str = include_str!(r#"{path}"#);"##,
+                            r##"pub static {var_name}: &str = include_str!(r#"{path}"#);"##,
                             path = output_path.display()
                         )?;
                         module_files.push((lang_entry.file_name().display().to_string(), var_name));
@@ -111,12 +111,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             } // End language directory for loop
             module_files.sort();
             module_slas.sort();
-            writeln!(&mut config_vars_file, "pub const FILES: &[(&str, &str)] = &[")?;
+            writeln!(
+                &mut config_vars_file,
+                "pub static FILES: &[(&str, &str)] = &["
+            )?;
             for (name, var) in &module_files {
                 writeln!(&mut config_vars_file, r##"(r#"{name}"#, {var}),"##)?;
             }
             writeln!(&mut config_vars_file, "];")?;
-            writeln!(&mut config_vars_file, "pub const SLAS: &[(&str, &[u8])] = &[")?;
+            writeln!(
+                &mut config_vars_file,
+                "pub static SLAS: &[(&str, &[u8])] = &["
+            )?;
             for (name, var) in &module_slas {
                 writeln!(&mut config_vars_file, r##"(r#"{name}"#, {var}),"##)?;
             }
@@ -127,7 +133,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     writeln!(
         &mut config_vars_file,
-        r##"pub const SLA_DATA: [(&'static str, &'static [u8]); {len}] = ["##,
+        r##"pub static SLA_DATA: [(&str, &[u8]); {len}] = ["##,
         len = sla_data.len()
     )?;
     for entry in &sla_data {
@@ -137,7 +143,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     writeln!(
         &mut config_vars_file,
-        r##"pub const PSPEC_DATA: [(&'static str, &'static str); {len}] = ["##,
+        r##"pub static PSPEC_DATA: [(&str, &str); {len}] = ["##,
         len = pspec_data.len()
     )?;
     for entry in &pspec_data {
@@ -147,7 +153,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     writeln!(
         &mut config_vars_file,
-        r##"pub const CSPEC_DATA: [(&'static str, &'static str); {len}] = ["##,
+        r##"pub static CSPEC_DATA: [(&str, &str); {len}] = ["##,
         len = cspec_data.len()
     )?;
     for entry in &cspec_data {
