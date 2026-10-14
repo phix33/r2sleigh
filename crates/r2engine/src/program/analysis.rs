@@ -293,6 +293,10 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
             let rendering = super::Rendering::refused(&name, entry, language, refusal);
             Render(Rc::new(Drawn { rendering, stopped }))
         };
+        // D32's admission is the container's fact, asked before any analysis is paid for.
+        if let Err(unadmitted) = crate::route::admitted(&db.inputs().source.container().arch) {
+            return refused(unadmitted);
+        }
         let analysis = db
             .get::<Analysed>(key)
             .expect("an analysis asks for no rendering");

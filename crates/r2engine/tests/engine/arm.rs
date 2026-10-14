@@ -213,15 +213,23 @@ fn a_pool_word_reads_in_the_container_s_order_not_the_decoder_s() {
 fn a_branch_that_leaves_a_return_address_is_a_call() {
     // Sleigh lifts `sub pc, r3, 0x3f` as a branch, because that is the opcode;
     // the link register the specification names holding `0x100c` is what says
-    // control comes back, so the transfer renders as a call.
+    // control comes back, so the analysis certifies the transfer as a call.
     let mut program = opened_over(&LINK_REGISTER_CALL, Endian::Little);
-    let response = program.rendered(ARM).expect("it renders").response;
-    assert!(response.output.function().is_some(), "{}", response.output);
-    assert!(
-        response.output.text().contains("fcn_ffff0fc0();"),
-        "the helper call is missing:\n{}",
-        response.output
-    );
+    let prepared = program.prepared(ARM).expect("it is analysed");
+    let calls = (prepared
+        .artifact()
+        .artifact()
+        .certificates()
+        .callsites
+        .values())
+    .map(|site| site.direct_target)
+    .collect::<Vec<_>>();
+    assert_eq!(calls, [Some(0xffff_0fc0)], "the helper call is missing");
+    // No equivalence target grades ARM32, so its C is a refusal record (ROADMAP D32).
+    let rendering = program.rendered(ARM).expect("a refusal is a record");
+    let refused = rendering.refused.expect("ARM32 is rendered");
+    assert_eq!(refused.kind(), "architecture", "{refused}");
+    assert!(rendering.response.output.function().is_none());
     // Control comes back, so the `bx lr` after the transfer is this body's.
     let listed = program
         .function_listing(ARM)

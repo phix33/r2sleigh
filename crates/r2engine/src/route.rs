@@ -305,3 +305,63 @@ pub fn should_use_prepared_semantic_view(
     let _ = function_facts;
     prepared.is_some()
 }
+
+/// The machines an equivalence target grades, by family, width and byte order (ROADMAP D32):
+/// `pdd` renders these alone, and every other refuses with that reason.
+const GRADED: [(&str, u32, r2abi::statement::Endian); 2] = [
+    ("x86", 64, r2abi::statement::Endian::Little),
+    ("arm", 64, r2abi::statement::Endian::Little),
+];
+
+/// Whether `pdd` renders this architecture, or the record of why it does not. O(1).
+pub(crate) fn admitted(arch: &r2abi::statement::Arch) -> Result<(), crate::native::NativeRefusal> {
+    let family = r2abi::family(&arch.name);
+    let graded = (GRADED.iter()).any(|&(graded, bits, endian)| {
+        family == Some(graded) && arch.bits == bits && arch.endian == endian
+    });
+    match graded {
+        true => Ok(()),
+        false => Err(crate::native::NativeRefusal::Unadmitted {
+            architecture: arch.name.clone(),
+            bits: arch.bits,
+            big_endian: arch.endian == r2abi::statement::Endian::Big,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod admission {
+    use r2abi::statement::{Arch, Endian};
+
+    fn admitted(name: &str, bits: u32, endian: Endian) -> Result<(), String> {
+        let arch = Arch {
+            name: name.to_owned(),
+            bits,
+            endian,
+        };
+        super::admitted(&arch).map_err(|refusal| {
+            assert_eq!(refusal.kind(), "architecture");
+            refusal.to_string()
+        })
+    }
+
+    #[test]
+    fn only_the_graded_machines_are_rendered() {
+        assert_eq!(admitted("x86-64", 64, Endian::Little), Ok(()));
+        assert_eq!(admitted("AArch64", 64, Endian::Little), Ok(()));
+        // No equivalence target runs these: i386, x32, ARM32, big-endian AArch64, RISC-V 64.
+        for (name, bits, endian) in [
+            ("x86", 32, Endian::Little),
+            ("x86-64", 32, Endian::Little),
+            ("ARM", 32, Endian::Little),
+            ("AArch64", 64, Endian::Big),
+            ("riscv64", 64, Endian::Little),
+        ] {
+            assert!(admitted(name, bits, endian).is_err(), "{name} {bits}");
+        }
+        assert_eq!(
+            admitted("riscv64", 64, Endian::Little),
+            Err("no equivalence target grades riscv64 64-bit C, so none is rendered".to_owned())
+        );
+    }
+}

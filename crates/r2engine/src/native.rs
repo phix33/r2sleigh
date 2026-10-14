@@ -180,6 +180,12 @@ pub enum NativeRefusal {
     Machine(&'static str),
     /// The machine or the function's convention could not be assembled for this program.
     Unassembled(Unassembled),
+    /// No equivalence target grades this architecture's C, so none is rendered (ROADMAP D32).
+    Unadmitted {
+        architecture: String,
+        bits: u32,
+        big_endian: bool,
+    },
     /// The function's convention passes what no call boundary states (doc/adr-language-profile.md).
     Convention {
         name: &'static str,
@@ -224,6 +230,7 @@ impl NativeRefusal {
             | Self::UnknownRegister(_)
             | Self::Machine(_)
             | Self::Unassembled(_) => "machine",
+            Self::Unadmitted { .. } => "architecture",
             Self::Convention { .. } => "convention",
             Self::Capture(_) => "capture",
             Self::Lift(_) => "lift",
@@ -293,6 +300,17 @@ impl std::fmt::Display for NativeRefusal {
             Self::UnknownRegister(name) => write!(f, "this architecture has no register {name}"),
             Self::Machine(what) => write!(f, "the machine cannot be described: {what}"),
             Self::Unassembled(why) => write!(f, "the machine is not assembled: {why}"),
+            Self::Unadmitted {
+                architecture,
+                bits,
+                big_endian,
+            } => {
+                let order = if *big_endian { " big-endian" } else { "" };
+                write!(
+                    f,
+                    "no equivalence target grades {architecture} {bits}-bit{order} C, so none is rendered"
+                )
+            }
             Self::Convention { name, reason } => write!(f, "under the {name} convention: {reason}"),
             Self::Capture(error) => write!(f, "{error}"),
             Self::Lift(error) | Self::Prepare(error) => write!(f, "{error}"),
