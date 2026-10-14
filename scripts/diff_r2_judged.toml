@@ -106,13 +106,6 @@ verdict = "deliberate"
 reason = "a fuzzed section header's type byte (0x33, 0x50, 0x89, 0xc7) names no Mach-O section type: r2s prints the number, radare2 a name or nothing"
 
 [[judged]]
-command = "is"
-binaries = "macho-trie-bad-export-info-malformed-uleb128"
-values = ["0x26", "0x2c"]
-verdict = "r2-right"
-reason = "_alias_bar3 and _bar1 are N_INDR symbols, whose n_value is a string table index (nm: indirect, for _bar3); r2s lists the index as an address, radare2 lists neither; owner r2image symbols (ROADMAP I)"
-
-[[judged]]
 command = "pd"
 binaries = "macho-trie-bad-export-info-malformed-uleb128"
 r2 = 'nop word cs:\[rax \+ rax\]$'

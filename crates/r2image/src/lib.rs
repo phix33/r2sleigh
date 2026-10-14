@@ -167,6 +167,24 @@ where
     Some((text_base?.checked_add(entryoff)?, field))
 }
 
+/// Whether a Mach-O symbol is `N_INDR`: an alias whose `n_value` is the string-table index of the
+/// name it stands for, so it states no address of its own. One record read, by index.
+fn macho_indirect(file: &object::File<'_>, index: object::SymbolIndex) -> bool {
+    use object::read::macho::Nlist as _;
+    let n_type = match file {
+        object::File::MachO32(macho) => macho
+            .macho_symbol_table()
+            .symbol(index)
+            .map(|nlist| nlist.n_type()),
+        object::File::MachO64(macho) => macho
+            .macho_symbol_table()
+            .symbol(index)
+            .map(|nlist| nlist.n_type()),
+        _ => return false,
+    };
+    n_type.is_ok_and(|n_type| !n_type.is_stab() && n_type.typ() == object::macho::N_INDR)
+}
+
 /// Where ELF's header states the entry point: `e_entry`, after the sixteen
 /// identification bytes and the type, machine and version fields.
 const ELF_ENTRY_FIELD: u64 = 0x18;
@@ -640,7 +658,7 @@ impl Image {
         // is why such a library listed no functions at all.
         let read_symbol = |symbol: object::read::Symbol<'_, '_>, dynamic: bool| {
             let name = symbol.name().ok()?;
-            if name.is_empty() {
+            if name.is_empty() || macho_indirect(&file, symbol.index()) {
                 return None;
             }
             // An unplaced section's symbols are offsets into it, so they move with it.

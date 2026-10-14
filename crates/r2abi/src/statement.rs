@@ -485,7 +485,7 @@ pub enum SymbolKind {
     Section,
     /// The source file an object came from, which names no address.
     File,
-    /// A thread-local variable: its value is an offset into each thread's block, not an address.
+    /// A thread-local variable; ELF states its value as an offset into each thread's block.
     Tls,
     #[default]
     Other,
