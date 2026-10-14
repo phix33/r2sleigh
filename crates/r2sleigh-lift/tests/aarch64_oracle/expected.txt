@@ -2,10 +2,8 @@ sdiv_x: stop Undefined
 sdiv_w: stop Undefined
 udiv_x: stop Undefined
 udiv_w: stop Undefined
-crc32b: stop unmodelled Load
-crc32cx: stop unmodelled Load
-mrs_nzcv: stop unwritten nzcv
-msr_nzcv: wrong cy; wrong ng; wrong ov; wrong zr
+crc32b: stop unmodelled CALLOTHER crc32b
+crc32cx: stop unmodelled CALLOTHER crc32x
 sminv_8h: stop unmodelled CALLOTHER NEON_sminv
 tbl_2: stop unmodelled CALLOTHER a64_TBL
 umull_8h: stop unmodelled CALLOTHER NEON_umull

@@ -1861,8 +1861,8 @@ is size.ldstr & b_2429=0x1d & opt != 3 & cpyPhase & b_2121=0 & Rs_GPR64 & cpyTyp
 # C6.2.59 CRC32B, CRC32H, CRC32W, CRC32X page C6-611 line 35802 KEEPWITH
 # sf == 0 && sz = 00 CRC32CB variant
 
-crcpoly: "" is b_12=0 {tmp:4 = 0x04C11DB7; export *[const]:4 tmp; }
-crcpoly: "c" is b_12=1 { tmp:4 = 0x1EDC6F41; export *[const]:4 tmp; }
+crcpoly: "" is b_12=0 { export 0x04C11DB7:4; }
+crcpoly: "c" is b_12=1 { export 0x1EDC6F41:4; }
 
 # C6.2.100 CRC32B, CRC32H, CRC32W, CRC32X page C6-1438 line 85850 MATCH x1ac04000/mask=x7fe0f000
 # C6.2.101 CRC32CB, CRC32CH, CRC32CW, CRC32CX page C6-1440 line 85958 MATCH x1ac05000/mask=x7fe0f000
@@ -4295,6 +4295,13 @@ is b_2431=0xd5 & b_2223=0 & l=1 & CopReg & Rt_GPR64
 	Rt_GPR64 = CopReg;
 }
 
+# MRS <Xt>, NZCV: Zeros(32):N:Z:C:V:Zeros(28)
+:mrs Rt_GPR64, CopReg
+is b_2431=0xd5 & b_2223=0 & l=1 & Op0=3 & Op1_uimm3=3 & CRn=4 & CRm=2 & Op2_uimm3=0 & CopReg & Rt_GPR64
+{
+	Rt_GPR64 = (zext(NG) << 31) | (zext(ZR) << 30) | (zext(CY) << 29) | (zext(OV) << 28);
+}
+
 # C6.2.229 MSR (immediate) page C6-1684 line 99649 MATCH xd500401f/mask=xfff8f01f
 # CONSTRUCT xd500401f/mask=xfff8f01f MATCHED 1 DOCUMENTED OPCODES
 # AUNIT --inst xd500401f/mask=xfff8f01f --status nodest
@@ -4311,6 +4318,17 @@ is b_2431=0xd5 & b_2223=0 & l=0 & Op0=0 & PState_pstate_op & CRn=0x4 & CRm_uimm4
 is b_2431=0xd5 & b_2223=0 & l=0 & CopReg & Rt_GPR64
 {
 	CopReg = Rt_GPR64;
+}
+
+# MSR NZCV, <Xt>: PSTATE.<N,Z,C,V> = X[t]<31:28>
+:msr CopReg, Rt_GPR64
+is b_2431=0xd5 & b_2223=0 & l=0 & Op0=3 & Op1_uimm3=3 & CRn=4 & CRm=2 & Op2_uimm3=0 & CopReg & Rt_GPR64
+{
+	local val:8 = Rt_GPR64;
+	NG = ((val >> 31) & 1) != 0;
+	ZR = ((val >> 30) & 1) != 0;
+	CY = ((val >> 29) & 1) != 0;
+	OV = ((val >> 28) & 1) != 0;
 }
 
 # C6.2.231 MSUB page C6-1689 line 99963 MATCH x1b008000/mask=x7fe08000

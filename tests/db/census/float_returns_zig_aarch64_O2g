@@ -169,9 +169,9 @@ double loop_sum(const double* v, int32_t n)
     struct r2sleigh_bits_256 z0_5;
     uint64_t tmp_7b80_1;
     __uint128_t tmp_lane_1010598_1_7_1;
-    uint64_t tmp_cc600_1;
+    uint64_t tmp_cd000_1;
     __uint128_t tmp_lane_1010598_5_a_1;
-    uint64_t tmp_40100_1;
+    uint64_t tmp_40b00_1;
     uint64_t tmp_lane_1010598_1a_d_1;
     uint64_t tmp_lane_1010598_1e_12_1;
     uint64_t tmp_lane_1010598_1e_13_1;
@@ -188,7 +188,7 @@ double loop_sum(const double* v, int32_t n)
     uint64_t x8_3;
     struct r2sleigh_bits_256 z0_23;
     uint64_t tmp_lane_10105d0_2_2f_1;
-    uint64_t tmp_40100_2;
+    uint64_t tmp_40b00_2;
     uint64_t tmp_lane_10105d0_11_33_1;
     double tmp_lane_10105d0_11_35_1;
     struct r2sleigh_bits_256 z0_24;
@@ -215,9 +215,9 @@ double loop_sum(const double* v, int32_t n)
                 for (; ; ) {
                     tmp_7b80_1 = (uint64_t)((uint64_t)x10_2 - (uint64_t)16U);
                     tmp_lane_1010598_1_7_1 = r2sleigh_load_u128((void*)tmp_7b80_1);
-                    tmp_cc600_1 = (uint64_t)((uint64_t)tmp_7b80_1 + (uint64_t)16U);
-                    tmp_lane_1010598_5_a_1 = r2sleigh_load_u128((void*)tmp_cc600_1);
-                    tmp_40100_1 = (uint64_t)((uint64_t)x11_2 - (uint64_t)4U);
+                    tmp_cd000_1 = (uint64_t)((uint64_t)tmp_7b80_1 + (uint64_t)16U);
+                    tmp_lane_1010598_5_a_1 = r2sleigh_load_u128((void*)tmp_cd000_1);
+                    tmp_40b00_1 = (uint64_t)((uint64_t)x11_2 - (uint64_t)4U);
                     tmp_lane_1010598_1a_d_1 = (uint64_t)((__uint128_t)tmp_lane_1010598_1_7_1 >> 64U);
                     tmp_lane_1010598_1e_12_1 = r2sleigh_bits_extract_256_64(z0_5, 0U);
                     tmp_lane_1010598_1e_13_1 = (uint64_t)((__uint128_t)tmp_lane_1010598_1_7_1 >> 0U);
@@ -228,9 +228,9 @@ double loop_sum(const double* v, int32_t n)
                     z0_19 = r2sleigh_bits_insert_256_64(z0_18, (uint64_t)0U, 64U);
                     z0_20 = r2sleigh_bits_insert_256_64(z0_19, (uint64_t)0U, 128U);
                     z0_21 = r2sleigh_bits_insert_256_64(z0_20, (uint64_t)0U, 192U);
-                    if ((uint8_t)((uint64_t)tmp_40100_1 != (uint64_t)0U)) {
+                    if ((uint8_t)((uint64_t)tmp_40b00_1 != (uint64_t)0U)) {
                         x10_2 = (uint64_t)((uint64_t)x10_2 + (uint64_t)32U);
-                        x11_2 = tmp_40100_1;
+                        x11_2 = tmp_40b00_1;
                         z0_5 = z0_21;
                     } else {
                         break;
@@ -255,16 +255,16 @@ double loop_sum(const double* v, int32_t n)
                 z0_23 = z0_22;
                 for (; ; ) {
                     tmp_lane_10105d0_2_2f_1 = r2sleigh_load_u64((void*)x10_5);
-                    tmp_40100_2 = (uint64_t)((uint64_t)x8_3 - (uint64_t)1U);
+                    tmp_40b00_2 = (uint64_t)((uint64_t)x8_3 - (uint64_t)1U);
                     tmp_lane_10105d0_11_33_1 = r2sleigh_bits_extract_256_64(z0_23, 0U);
                     tmp_lane_10105d0_11_35_1 = r2sleigh_float_from_bits_64(tmp_lane_10105d0_11_33_1) + r2sleigh_float_from_bits_64(tmp_lane_10105d0_2_2f_1);
                     z0_24 = r2sleigh_bits_insert_256_64(r2sleigh_bits_zero_extend_64_256((uint64_t)0U), (uint64_t)r2sleigh_float_to_bits_64(tmp_lane_10105d0_11_35_1), 0U);
                     z0_25 = r2sleigh_bits_insert_256_64(z0_24, (uint64_t)0U, 64U);
                     z0_26 = r2sleigh_bits_insert_256_64(z0_25, (uint64_t)0U, 128U);
                     z0_27 = r2sleigh_bits_insert_256_64(z0_26, (uint64_t)0U, 192U);
-                    if ((uint8_t)((uint64_t)tmp_40100_2 != (uint64_t)0U)) {
+                    if ((uint8_t)((uint64_t)tmp_40b00_2 != (uint64_t)0U)) {
                         x10_5 = (uint64_t)((uint64_t)x10_5 + (uint64_t)8U);
-                        x8_3 = tmp_40100_2;
+                        x8_3 = tmp_40b00_2;
                         z0_23 = z0_27;
                     } else {
                         z0_28 = z0_27;
@@ -356,7 +356,7 @@ void __libc_csu_init(int32_t argc, char** argv, char** envp)
     uint64_t x22_2;
     uint64_t x23_2;
     uint64_t x8_4;
-    uint64_t tmp_40100_1;
+    uint64_t tmp_40b00_1;
 
     /* r2dec proof: no individual construct is marked; 45 source obligations: 30 rendered, 15 elided, 0 refused; 12 statements rendered */
     {
@@ -367,10 +367,10 @@ void __libc_csu_init(int32_t argc, char** argv, char** envp)
             for (; ; ) {
                 x8_4 = r2sleigh_load_u64((void*)x22_2);
                 ((uint64_t(*)(uint64_t, uint64_t, uint64_t))(uint64_t)r2sleigh_load_u64((void*)x22_2))((uint64_t)(uint32_t)argc, (uint64_t)argv, (uint64_t)envp);
-                tmp_40100_1 = (uint64_t)((uint64_t)x23_2 - (uint64_t)1U);
-                if ((uint8_t)((uint64_t)tmp_40100_1 != (uint64_t)0U)) {
+                tmp_40b00_1 = (uint64_t)((uint64_t)x23_2 - (uint64_t)1U);
+                if ((uint8_t)((uint64_t)tmp_40b00_1 != (uint64_t)0U)) {
                     x22_2 = (uint64_t)((uint64_t)x22_2 + (uint64_t)8U);
-                    x23_2 = tmp_40100_1;
+                    x23_2 = tmp_40b00_1;
                 } else {
                     break;
                 }
