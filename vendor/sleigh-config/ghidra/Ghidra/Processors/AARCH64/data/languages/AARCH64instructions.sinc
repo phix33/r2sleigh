@@ -3153,6 +3153,7 @@ define pcodeop DC_ZVA;
 define pcodeop DRPSInstruction;
 define pcodeop ExceptionReturn;
 define pcodeop ExclusiveMonitorPass;
+define pcodeop SetExclusiveMonitors;
 define pcodeop ExclusiveMonitorsStatus;
 define pcodeop HaltBreakPoint;
 define pcodeop Hint_Prefetch;

@@ -2869,6 +2869,7 @@ is size.ldstr=1 & b_2429=0x8 & b_23=1 & L=1 & b_21=0 & b_1620=0b11111 & b_15=1 &
 :ldaxp Rt_GPR64, Rt2_GPR64, addrReg
 is size.ldstr=3 & b_2429=0x8 & b_23=0 & L=1 & b_21=1 & b_15=1 & Rt2_GPR64 & addrReg & Rt_GPR64
 {
+	SetExclusiveMonitors(addrReg, 16:1);
 	local addrval1:8 = *(addrReg);
 	local addrval2:8 = *(addrReg+8);
 	Rt_GPR64 = addrval1;
@@ -2882,6 +2883,7 @@ is size.ldstr=3 & b_2429=0x8 & b_23=0 & L=1 & b_21=1 & b_15=1 & Rt2_GPR64 & addr
 :ldaxp Rt_GPR32, Rt2_GPR32, addrReg
 is size.ldstr=2 & b_2429=0x8 & b_23=0 & L=1 & b_21=1 & b_1620 & b_15=1 & Rt2_GPR32 & addrReg & Rt_GPR32 & Rt_GPR64 & Rt2_GPR64
 {
+	SetExclusiveMonitors(addrReg, 8:1);
 	local addrval1:8 = zext(*:4(addrReg));
 	local addrval2:8 = zext(*:4(addrReg+4));
 	Rt_GPR64 = addrval1;
@@ -2896,6 +2898,7 @@ is size.ldstr=2 & b_2429=0x8 & b_23=0 & L=1 & b_21=1 & b_1620 & b_15=1 & Rt2_GPR
 :ldaxr Rt_GPR64, addrReg
 is size.ldstr=3 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=1 & addrReg & Rt_GPR64
 {
+	SetExclusiveMonitors(addrReg, 8:1);
 	Rt_GPR64 = *addrReg;
 }
 
@@ -2907,6 +2910,7 @@ is size.ldstr=3 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=1 & addrReg & Rt_GPR
 :ldaxr Rt_GPR32, addrReg
 is size.ldstr=2 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=1 & addrReg & Rt_GPR32 & Rt_GPR64
 {
+	SetExclusiveMonitors(addrReg, 4:1);
 	tmp:4 = *addrReg;
 	Rt_GPR64 = zext(tmp);
 }
@@ -2919,6 +2923,7 @@ is size.ldstr=2 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=1 & addrReg & Rt_GPR
 :ldaxrb Rt_GPR32, addrReg
 is size.ldstr=0 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=1 & addrReg & Rt_GPR32 & Rt_GPR64
 {
+	SetExclusiveMonitors(addrReg, 1:1);
 	tmp:1 = *addrReg;
 	Rt_GPR64 = zext(tmp);
 }
@@ -2931,6 +2936,7 @@ is size.ldstr=0 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=1 & addrReg & Rt_GPR
 :ldaxrh Rt_GPR32, addrReg
 is size.ldstr=1 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=1 & addrReg & Rt_GPR32 & Rt_GPR64
 {
+	SetExclusiveMonitors(addrReg, 2:1);
 	tmp:2 = *addrReg;
 	Rt_GPR64 = zext(tmp);
 }
@@ -3527,6 +3533,7 @@ is size.ldstr=3 & b_2729=7 & v=0 & b_2425=0 & b_23=0 & b_2122=2 & b_1011=0 & Uns
 :ldxp Rt_GPR64, Rt2_GPR64, addrReg
 is size.ldstr=3 & b_2429=0x8 & b_23=0 & L=1 & b_21=1 & b_15=0 & Rt2_GPR64 & addrReg & Rt_GPR64
 {
+	SetExclusiveMonitors(addrReg, 16:1);
 	local addrval1:8 = *addrReg;
 	local addrval2:8 = *(addrReg + 8);
 	Rt_GPR64 = addrval1;
@@ -3541,6 +3548,7 @@ is size.ldstr=3 & b_2429=0x8 & b_23=0 & L=1 & b_21=1 & b_15=0 & Rt2_GPR64 & addr
 :ldxp Rt_GPR32, Rt2_GPR32, addrReg
 is size.ldstr=2 & b_2429=0x8 & b_23=0 & L=1 & b_21=1 & b_15=0 & Rt2_GPR32 & addrReg & Rt_GPR32 & Rt_GPR64 & Rt2_GPR64
 {
+	SetExclusiveMonitors(addrReg, 8:1);
 	local addrval1:8 = zext(*:4 addrReg);
 	local addrval2:8 = zext(*:4 (addrReg + 4));
 	Rt_GPR64 = addrval1;
@@ -3555,6 +3563,7 @@ is size.ldstr=2 & b_2429=0x8 & b_23=0 & L=1 & b_21=1 & b_15=0 & Rt2_GPR32 & addr
 :ldxr Rt_GPR64, addrReg
 is size.ldstr=3 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=0 & addrReg & Rt_GPR64
 {
+	SetExclusiveMonitors(addrReg, 8:1);
 	Rt_GPR64 = *addrReg;
 }
 
@@ -3566,6 +3575,7 @@ is size.ldstr=3 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=0 & addrReg & Rt_GPR
 :ldxr Rt_GPR32, addrReg
 is size.ldstr=2 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=0 & addrReg & Rt_GPR32 & Rt_GPR64
 {
+	SetExclusiveMonitors(addrReg, 4:1);
 	Rt_GPR64 = zext(*:4 addrReg);
 }
 
@@ -3577,6 +3587,7 @@ is size.ldstr=2 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=0 & addrReg & Rt_GPR
 :ldxrb Rt_GPR32, addrReg
 is size.ldstr=0 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=0 & addrReg & Rt_GPR32 & Rt_GPR64
 {
+	SetExclusiveMonitors(addrReg, 1:1);
 	Rt_GPR64 = zext(*:1 addrReg);
 }
 
@@ -3588,6 +3599,7 @@ is size.ldstr=0 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=0 & addrReg & Rt_GPR
 :ldxrh Rt_GPR32, addrReg
 is size.ldstr=1 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=0 & addrReg & Rt_GPR32 & Rt_GPR64
 {
+	SetExclusiveMonitors(addrReg, 2:1);
 	Rt_GPR64 = zext(*:2 addrReg);
 }
 

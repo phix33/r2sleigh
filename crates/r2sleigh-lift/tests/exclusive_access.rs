@@ -58,3 +58,55 @@ fn an_exclusive_pair_lifts_to_a_linked_load_and_a_conditional_store() {
         "the store happens only where the monitor held: {conditional:?}"
     );
 }
+
+/// The lift of one AArch64 instruction word.
+fn aarch64(word: u32) -> Vec<R2ILOp> {
+    let disassembler = r2sleigh_lift::Disassembler::from_trusted_profile(
+        r2sleigh_lift::TrustedSleighProfile::Aarch64Le,
+    )
+    .expect("trusted AArch64 specification");
+    let mut bytes = word.to_le_bytes().to_vec();
+    bytes.resize(16, 0);
+    disassembler
+        .lift_genuine_block(&bytes, 0x1000, 4)
+        .expect("the instruction lifts")
+        .block()
+        .ops
+        .clone()
+}
+
+/// Each AArch64 load-exclusive is one linked load of its access width at `[Xn]`, the monitor
+/// mark folded in; a pair's second register is a plain load beside it.
+#[test]
+fn an_aarch64_load_exclusive_is_one_linked_load() {
+    for (name, word, width, plain) in [
+        ("ldxr w8, [x0]", 0x885f_7c08, 4, 0),
+        ("ldaxr x0, [x8]", 0xc85f_fd00, 8, 0),
+        ("ldxrb w0, [x8]", 0x085f_7d00, 1, 0),
+        ("ldxp x0, x1, [x8]", 0xc87f_0500, 8, 1),
+    ] {
+        let ops = aarch64(word);
+        let linked: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                R2ILOp::LoadLinked { dst, addr, .. } => Some((dst.size, addr.space)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            linked,
+            vec![(width, r2il::SpaceId::Register)],
+            "{name}: {ops:?}"
+        );
+        let loads = ops
+            .iter()
+            .filter(|op| matches!(op, R2ILOp::Load { .. }))
+            .count();
+        assert_eq!(loads, plain, "{name}: {ops:?}");
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, R2ILOp::CallOther { .. } | R2ILOp::Unimplemented)),
+            "{name}: {ops:?}"
+        );
+    }
+}

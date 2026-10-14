@@ -16,7 +16,10 @@ mod unroll;
 
 use std::collections::BTreeMap;
 
-use r2il::{BlockStop, BlockTransfer, BlockTransferKind, R2ILBlock, R2ILOp, SpaceId, Varnode};
+use r2il::{
+    BlockStop, BlockTransfer, BlockTransferKind, MemoryOrdering, R2ILBlock, R2ILOp, SpaceId,
+    Varnode,
+};
 
 pub(crate) fn normalize_instruction_local_control(
     block: &mut R2ILBlock,
@@ -677,15 +680,8 @@ impl InstructionTempAllocator {
     }
 }
 
-/// Rewrite ARM's exclusive-access idioms into the linked load and conditional
-/// store they are.
-///
-/// Sleigh writes `ldrex` as a user operation that marks the monitor followed
-/// by an ordinary load, and `strex` as a user operation that tests the
-/// monitor, a branch over the store, and the store. Neither carries any
-/// semantics on its own, so a function using them refused whole -- and the
-/// branch, skipping a store rather than a value, could not be speculated past
-/// either. Both are exactly `LoadLinked` and `StoreConditional`.
+/// Rewrite the exclusive-access idioms, a monitor mark before a load and a
+/// monitor test skipping a store, into `LoadLinked` and `StoreConditional`.
 fn rewrite_exclusive_access(block: &mut R2ILBlock, names: &dyn Fn(u32) -> Option<String>) {
     fn user_op(
         block: &R2ILBlock,
@@ -709,7 +705,10 @@ fn rewrite_exclusive_access(block: &mut R2ILBlock, names: &dyn Fn(u32) -> Option
             continue;
         };
         let rewritten = match name.as_str() {
-            "ExclusiveAccess" => linked_load(block, at, &inputs),
+            // ARM's bare `ldrex` orders nothing; AArch64's p-code does not say which of
+            // `ldxr` and `ldaxr` it is.
+            "ExclusiveAccess" => linked_load(block, at, &inputs, MemoryOrdering::Relaxed),
+            "SetExclusiveMonitors" => linked_load(block, at, &inputs, MemoryOrdering::Unknown),
             "hasExclusiveAccess" => conditional_store(block, at, output.as_ref(), &inputs),
             _ => None,
         };
@@ -723,9 +722,15 @@ fn rewrite_exclusive_access(block: &mut R2ILBlock, names: &dyn Fn(u32) -> Option
     }
 }
 
-/// `ExclusiveAccess(addr); dst = LOAD [ram] addr` is `dst = LoadLinked(addr)`.
-fn linked_load(block: &R2ILBlock, at: usize, inputs: &[Varnode]) -> Option<(usize, Vec<R2ILOp>)> {
-    let [addr] = inputs else {
+/// `mark(addr[, bytes]); dst = LOAD [ram] addr` is `dst = LoadLinked(addr)`; a pair's second
+/// load stays a plain one.
+fn linked_load(
+    block: &R2ILBlock,
+    at: usize,
+    inputs: &[Varnode],
+    ordering: MemoryOrdering,
+) -> Option<(usize, Vec<R2ILOp>)> {
+    let ([addr] | [addr, _]) = inputs else {
         return None;
     };
     let R2ILOp::Load {
@@ -743,9 +748,7 @@ fn linked_load(block: &R2ILBlock, at: usize, inputs: &[Varnode]) -> Option<(usiz
                 dst: dst.clone(),
                 space: *space,
                 addr: addr.clone(),
-                // The bare exclusive load orders nothing; an acquiring one
-                // spells its barrier as a separate operation.
-                ordering: r2il::MemoryOrdering::Relaxed,
+                ordering,
             }],
         )
     })

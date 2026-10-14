@@ -8,9 +8,9 @@
 //! which operations are modelled on their own, one `CallOther` at a time: each
 //! row is an exact name the specification declares, never a prefix or a
 //! pattern, so a name this lift does not know is simply absent and its
-//! `CallOther` keeps refusing. The AArch64 exclusive-access pair is not here:
-//! it means something only together with the load or store beside it, and
-//! `internal_control` recognises it as that idiom.
+//! `CallOther` keeps refusing. The ARM and AArch64 exclusive-access markers are
+//! not here: each means something only together with the load or store beside
+//! it, and `internal_control` recognises it as that idiom.
 
 use std::collections::HashMap;
 

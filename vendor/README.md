@@ -12,5 +12,12 @@ list packages; a refresh copies the fork again and re-applies the trims.
 | `sleigh-compiler` 2.0.2 | 0verflowme/sleigh-compiler `4e380af4` | mnemonikr/sleigh-compiler | compiles against `DEP_SLA_INCLUDE`, `libsla-sys`'s Ghidra headers, since it links that `libsla` and must see the same class layouts (#1) | no Ghidra copy of its own: `DEP_SLA_INCLUDE` is required; built at `opt-level = 3` as a build dependency (audit B2) |
 | `sleigh-config` 1.0.1 | 0verflowme/sleigh-config `d649f7ad` | mnemonikr/sleigh-config | each processor's files by name with its `.ldefs` and `.dwarf` (#1); Ghidra's Go compiler specifications corrected to Go's `abi-internal.md` (ROADMAP LP1; #2); AArch64 `addv` zeroes the vector above its byte result (#3); resynced from Ghidra master (918acd744d): `ldpsw`, `ldapr Xt`, `ldar Wt`, `stlrb`/`stlrh`, scalar `fmadd`/`fmsub` and the reductions' zero-fill (#4), `eor3`/`bcax`/`rax1`/`xar` (GP-7313; #10); W-form sign-extending loads (#5, the shape of Ghidra #6471 and #6447); W/H/B atomics, CAS, `ldapr`, `ldlar` and `swp` write the whole register and min/max compare at the access size (#6, Ghidra #9893); `mrs`/`msr nzcv` and `crc32`'s polynomial (#7, Ghidra #9895, #9896); `stlxp` at +8 (#8, Ghidra #9894); scalar FP rounding (#9, Ghidra #9897); specifications and tables `static` (audit B3; #11); one `sla-<stem>` feature per `.slaspec` beside the processor features (audit B4; #12); AArch64 `casp` X form compares and stores Xs and Xt at `[Xn]` in either byte order (#13, Ghidra #9900) | only the x86, ARM, AARCH64, MIPS and RISCV processors, and only their `sla-<stem>` features (no processor feature), so the engine's 7 languages are the ones compiled |
 
+Carried in this tree, not yet in the fork: every AArch64 load-exclusive
+(`ldxr`, `ldaxr`, `ldxp`, `ldaxp` and the B/H forms) marks the monitor first
+with `SetExclusiveMonitors(addrReg, bytes)`, the Arm ARM's
+`AArch64.SetExclusiveMonitors`, where Ghidra's p-code was a plain load the
+store-exclusive's `ExclusiveMonitorPass` had nothing to pair with (audit M2;
+`AARCH64base.sinc`, `AARCH64instructions.sinc`).
+
 Licences: Apache-2.0 (each crate's `LICENSE`), with Ghidra's `NOTICE`,
 `DISCLAIMER.md` and `licenses/` kept beside its sources.
