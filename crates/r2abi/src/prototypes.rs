@@ -411,6 +411,31 @@ mod tests {
         assert!(printf.variadic);
     }
 
+    /// objc4, Darwin's runtime: a message send passes whatever the method takes after `self` and
+    /// `op`, and `objc_storeStrong` stores through a pointer (audit W10); no other platform has it.
+    #[test]
+    fn the_objective_c_runtime_is_declared_as_objc4_declares_it() {
+        let linux = Prototypes::embedded_for(Platform::Linux);
+        assert!(linux.get("objc_storeStrong").is_none());
+        let prototypes = Prototypes::embedded_for(Platform::Darwin);
+        let send = prototypes.get("objc_msgSend").expect("objc_msgSend");
+        assert_eq!(send.parameters.len(), 2);
+        assert!(send.variadic);
+        let store = prototypes
+            .get("objc_storeStrong")
+            .expect("objc_storeStrong");
+        let spellings: Vec<_> = (store.parameters.iter())
+            .map(|parameter| spelled(&prototypes, parameter))
+            .collect();
+        assert_eq!(
+            spellings,
+            [Some("void **".to_owned()), Some("void *".to_owned())]
+        );
+        assert_eq!(store.returns.as_written(), "void");
+        let retain = prototypes.get("objc_retain").expect("objc_retain");
+        assert_eq!(retain.returns.as_written(), "void *");
+    }
+
     #[test]
     fn a_name_is_looked_up_exactly_as_it_is_spelled() {
         let prototypes = Prototypes::embedded();

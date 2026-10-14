@@ -109,6 +109,14 @@ Where radare2 scopes differently:
   (`dyld_info -exports` on both), so it is `bzero` under a second name, and
   clang emits calls to it for `bzero` and zeroing `memset` on x86-64.
 
+- The Objective-C runtime's records are objc4's (`objc/message.h`,
+  `objc/objc-internal.h`), in the Darwin table only (GNUstep's libobjc2
+  differs: its `objc_storeStrong` returns the object), where radare2's are not: `objc_msgSend` and
+  `objc_msgSendSuper2` are variadic after `self` and `op`;
+  `objc_storeStrong` is `void (id *location, id obj)`, not `(void *, int)`
+  returning `void *`; `objc_retain` and
+  `objc_retainAutoreleasedReturnValue` return the object.
+
 ## Refreshing
 
 Diff radare2's `libr/anal/d/` against these files, and take a change only
