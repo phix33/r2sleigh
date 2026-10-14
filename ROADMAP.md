@@ -89,8 +89,8 @@ Decisions
 | D28 | A defect in a vendored Sleigh specification is fixed in `vendor/` with an `r2il::eval` regression and listed in `vendor/README.md`; it is reported upstream, or resynced where upstream already fixed it (the `addv` precedent, c886c13c) | VC |
 | D29 | Every refusal is a record: an analysis that stops (convention, capture, walk, image) yields a typed reason the verbs print and `pddj` carries, exit status 0; never a bare `Err` string | RF |
 | D30 | A gate grades what it claims or it is red: a check that compares nothing, a lint aimed at a deleted path, a silent skip and an unjudged disagreement are defects in the gate | GT |
-| D31 | Every layer has an executable oracle: the container against radare2 and DWARF, the lift against the CPU, each IR rewrite against `r2il::eval` before and after it, the C against the machine. A layer without one is not admitted to render (proposed 2026-10-14) | GT, VC |
-| D32 | `pdd` renders an architecture only where an equivalence target grades it; elsewhere the listing, discovery and references work and `pdd` refuses with that reason (proposed 2026-10-14: ARM32 and RISC-V 64 refuse until LS and M give them targets) | M, LS |
+| D31 | Every layer has an executable oracle: the container against radare2 and DWARF, the lift against the CPU, each IR rewrite against `r2il::eval` before and after it, the C against the machine. A layer without one is not admitted to render (2026-10-14) | standing (GT, VC) |
+| D32 | `pdd` renders an architecture only where an equivalence target grades it; elsewhere the listing, discovery and references work and `pdd` refuses with that reason (2026-10-14: ARM32 and RISC-V 64 refuse until LS and M give them targets) | standing (RF refuses; M, LS add targets) |
 
 The Sleigh crates (`libsla`, `libsla-sys`, `sleigh-config`) are vendored (`vendor/`).
 
@@ -241,12 +241,11 @@ Retypd after P9), static rewriting, deobfuscation, trace recording.
 Open questions
 --------------
 
-- D31 and D32 are proposed: D32 turns RISC-V 64's census renderings
-  (`shapes_zig_riscv64_O0`) into refusals until its equivalence target lands.
 - AGENTS.md gotcha 7 says the call-target parser rule is Dylint-enforced; the
   lint aims at deleted paths (audit T3) until GT retargets it, which is GT's
-  first change. AGENTS.md's Validation Bar still names the `rebuild`
-  exemption (D27), which ended when `rebuild` merged.
+  first change, and the text stays as the rule it will be (2026-10-14).
+- AGENTS.md's Validation Bar still names the `rebuild` exemption (D27), which
+  ended when `rebuild` merged.
 
 Issues
 ------
