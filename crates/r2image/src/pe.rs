@@ -1,5 +1,6 @@
 //! What a PE image's directories state: each import address table slot and the import the loader
-//! writes there, by library, and each address the export directory publishes.
+//! writes there, by library, and each address the export directory publishes; and what a COFF
+//! symbol record states that `object` does not give.
 
 use std::sync::Arc;
 
@@ -183,4 +184,37 @@ fn unsized_export_table<'data, Pe: ImageNtHeaders, R: ReadRef<'data>>(
     }
     let data = pe.section_table().pe_data_at(pe.data(), address)?;
     object::read::pe::ExportTable::parse(data, address).ok()
+}
+
+/// A COFF record's `Value`, which `object` gives as no address where the record names no section:
+/// an absolute record's (`SectionNumber` -1) is a value, not an address. One record read, by index.
+pub(crate) fn coff_value(file: &object::File<'_>, data: &[u8], index: usize) -> Option<u64> {
+    use object::read::coff::Symbol as _;
+    const RECORD: usize = 18;
+    let at = object::SymbolIndex(index);
+    let table = match file {
+        object::File::Coff(coff) => {
+            return coff
+                .coff_symbol_table()
+                .symbol(at)
+                .ok()
+                .map(|record| u64::from(record.value()));
+        }
+        object::File::CoffBig(coff) => {
+            return coff
+                .coff_symbol_table()
+                .symbol(at)
+                .ok()
+                .map(|record| u64::from(record.value()));
+        }
+        object::File::Pe32(pe) => pe.nt_headers().file_header.pointer_to_symbol_table.get(LE),
+        object::File::Pe64(pe) => pe.nt_headers().file_header.pointer_to_symbol_table.get(LE),
+        _ => return None,
+    };
+    // `Value` follows the record's eight-byte name.
+    let start = (table as usize)
+        .checked_add(index.checked_mul(RECORD)?)?
+        .checked_add(8)?;
+    let bytes = data.get(start..start.checked_add(4)?)?;
+    Some(u64::from(u32::from_le_bytes(bytes.try_into().ok()?)))
 }

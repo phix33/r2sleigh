@@ -813,9 +813,9 @@ command = "is"
 binaries = "*"
 corpus = "pe"
 columns = ["vaddr"]
-r2s = '^\d+ -{10} 0x0+ (GLOBAL|LOCAL) (OBJ|NOTYPE) '
-verdict = "r2-right"
-reason = "an absolute COFF record (SectionNumber -1: crackme0x00's ___tls_start__ is 0x407000, __size_of_stack_commit__ 0x1000) is listed at 0 instead of its Value; owner r2image COFF symbols (ROADMAP I, audit W37)"
+r2s = '^\d+ -{10} 0x[0-9a-f]+ GLOBAL OBJ 0 __\w+__$'
+verdict = "r2s-right"
+reason = "an absolute COFF record (SectionNumber -1: a2's __size_of_stack_commit__ and __section_alignment__ are 0x1000) states a value, not an address: r2s lists it unplaced at its Value; radare2 lists no absolute record"
 
 [[judged]]
 command = "is"

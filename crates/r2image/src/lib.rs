@@ -649,6 +649,11 @@ impl Image {
                 .flatten();
             let address = match common {
                 Some(address) => *address,
+                None if symbol.section() == object::SymbolSection::Absolute
+                    && matches!(format, Format::Pe | Format::Coff) =>
+                {
+                    pe::coff_value(&file, &data, symbol.index().0).unwrap_or_default()
+                }
                 None => {
                     symbol.address()
                         + symbol
