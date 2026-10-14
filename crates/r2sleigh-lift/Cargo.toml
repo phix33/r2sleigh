@@ -18,13 +18,16 @@ optional = true
 
 [features]
 default = []
-x86 = ["sleigh-config/x86"]
-arm = ["sleigh-config/ARM", "sleigh-config/AARCH64"]
-mips = ["sleigh-config/MIPS"]
-riscv = ["sleigh-config/RISCV"]
-
-[dev-dependencies]
-sleigh-config = { workspace = true, features = ["AARCH64"] }
+# The languages each feature reads (`TrustedSleighProfile`, `selection`); only these are compiled.
+x86 = ["sleigh-config/sla-x86", "sleigh-config/sla-x86-64"]
+arm = ["sleigh-config/sla-ARM8_le", "sleigh-config/sla-AARCH64", "sleigh-config/sla-AARCH64_AppleSilicon"]
+mips = [
+    "sleigh-config/sla-mips32be",
+    "sleigh-config/sla-mips32le",
+    "sleigh-config/sla-mips64be",
+    "sleigh-config/sla-mips64le",
+]
+riscv = ["sleigh-config/sla-riscv-ilp32d", "sleigh-config/sla-riscv-lp64d"]
 
 [lints]
 workspace = true

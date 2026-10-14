@@ -232,6 +232,7 @@ fn x86_byte_register_writes_do_not_invent_full_carrier_zero_extensions() {
     }
 }
 
+#[cfg(feature = "arm")]
 #[test]
 fn pinned_arm64_memory_space_is_ram_and_instance_stable() {
     let first = Disassembler::from_sla(
