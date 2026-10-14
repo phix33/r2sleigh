@@ -428,24 +428,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                     })
                     .collect()
             }
-            Form::Crel => {
-                let Ok(entries) = object::read::elf::CrelIterator::new(bytes) else {
-                    return Vec::new();
-                };
-                let rela = entries.is_rela();
-                entries
-                    .map_while(Result::ok)
-                    .enumerate()
-                    .map(|(index, entry)| {
-                        let record = Record {
-                            table: view.offset,
-                            index: index as u64,
-                        };
-                        let addend = rela.then_some(entry.r_addend);
-                        (record, entry.r_offset, entry.r_type, entry.r_sym, addend)
-                    })
-                    .collect()
-            }
+            Form::Crel => crel(bytes, view.offset),
             Form::Packed { addend } => {
                 let is_64 = self.file.is_64();
                 android_packed(bytes, addend)
@@ -586,100 +569,23 @@ enum Bound {
     Unplaced,
 }
 
-/// One record of an object, with what its symbol is.
-struct Bind {
-    record: Relocation,
-    bound: Bound,
-    /// The addend the record states, or for `REL` the one its place holds.
-    addend: Option<i64>,
-    loaded: bool,
+/// What a static link adds for an object's loaded records: a stub per import one branches or
+/// points to, then a slot per symbol one reads through the global offset table, from `linkage` on.
+struct Linkage {
+    /// Each import's stub and the name of the first record naming it.
+    stubs: BTreeMap<(usize, u32), (u64, String)>,
+    /// Each symbol's slot and the name of the first record naming it.
+    slots: BTreeMap<Bound, (u64, String)>,
 }
 
-impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
-    /// Every record of every relocation section, the stub and slot each import and table read needs, and what each writes.
-    fn linked(&self, placing: &Placing<'_>, linkage: u64) -> Linked {
-        let at = placing.section;
-        let endian = self.endian;
-        let table = self.file.elf_section_table();
-        let machine = self.file.elf_header().e_machine(endian);
-        let mut binds = Vec::new();
-        for header in table.iter() {
-            let form = match header.sh_type(endian) {
-                elf::SHT_REL => Form::Rel,
-                elf::SHT_RELA => Form::Rela,
-                elf::SHT_CREL => Form::Crel,
-                _ => continue,
-            };
-            let target = object::SectionIndex(header.sh_info(endian) as usize);
-            let (Ok(into), Some(base)) = (table.section(target), at(target)) else {
-                continue;
-            };
-            let symbols = object::SectionIndex(header.sh_link(endian) as usize);
-            let view = View {
-                offset: header.sh_offset(endian).into(),
-                size: header.sh_size(endian).into(),
-                form,
-                phase: 0,
-                symbols: Symbols::Section(symbols),
-            };
-            let loaded = into.sh_flags(endian).contains(elf::SHF_ALLOC);
-            let held =
-                (into.sh_type(endian) != elf::SHT_NOBITS).then(|| into.sh_offset(endian).into());
-            // Parsed once per relocation section: parsing looks its extended indices up across the section table.
-            let parsed = table
-                .symbol_table_by_index(endian, self.file.data(), symbols)
-                .ok();
-            let symbols = (symbols.0, parsed.as_ref());
-            for (record, offset, ntype, index, addend) in self.encoded(&view) {
-                let Some((applies, width, encoding)) = applies(machine, ntype, self.pointer) else {
-                    continue;
-                };
-                // A type this reader does not decode holds no value its bytes state.
-                let encoding = match applies {
-                    Applies::Unknown => Encoding::Typed,
-                    _ => encoding,
-                };
-                let (symbol, bound) = self.bound(symbols, index, placing);
-                let implicit = || {
-                    let word = held?.checked_add(offset)?;
-                    (encoding != Encoding::Typed)
-                        .then(|| self.implicit(word, width))
-                        .flatten()
-                };
-                binds.push(Bind {
-                    record: Relocation {
-                        vaddr: base.wrapping_add(offset),
-                        record,
-                        ntype: ntype.0,
-                        width,
-                        addend,
-                        symbol: symbol.map(Box::new),
-                        applies,
-                        encoding,
-                    },
-                    bound,
-                    addend: addend.or_else(implicit),
-                    loaded,
-                });
-            }
-        }
-        self.linkage(binds, linkage)
-    }
-
-    /// The linkage a static link adds -- a stub per import a loaded record branches or points to, a slot per symbol it reads through the global offset table -- and what every record writes.
-    fn linkage(&self, binds: Vec<Bind>, linkage: u64) -> Linked {
-        let pointer = self.pointer;
-        let named = |bind: &Bind| {
-            let symbol = bind.record.symbol.as_ref();
-            symbol.map_or_else(String::new, |symbol| symbol.name.to_string())
-        };
-        // Each import and each slot once, with the name of the first record naming it.
+impl Linkage {
+    fn of(binds: &[Bind], linkage: u64, pointer: u64) -> Self {
         let mut stubs: BTreeMap<(usize, u32), (u64, String)> = BTreeMap::new();
         let mut slots: BTreeMap<Bound, (u64, String)> = BTreeMap::new();
         for bind in binds.iter().filter(|bind| bind.loaded) {
             match (bind.record.applies, bind.bound) {
                 (Applies::GotRelative, bound) => {
-                    slots.entry(bound).or_insert_with(|| (0, named(bind)));
+                    slots.entry(bound).or_insert_with(|| (0, bind.name()));
                 }
                 (
                     Applies::PcRelative | Applies::PltRelative | Applies::Field,
@@ -687,26 +593,30 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                 ) => {
                     stubs
                         .entry((table, index))
-                        .or_insert_with(|| (0, named(bind)));
+                        .or_insert_with(|| (0, bind.name()));
                 }
                 _ => {}
             }
         }
-        let mut next = linkage;
-        let mut stated = Vec::with_capacity(stubs.len());
-        for (place, name) in stubs.values_mut() {
-            *place = next;
-            next += pointer;
-            stated.push(ImportStub {
-                vaddr: *place,
-                size: pointer,
-                symbol: name.clone(),
-            });
+        let places = stubs.values_mut().chain(slots.values_mut());
+        for (at, (place, _)) in places.enumerate() {
+            *place = linkage + at as u64 * pointer;
         }
-        let mut writes = Vec::with_capacity(binds.len() + slots.len());
-        for (bound, (place, name)) in slots.iter_mut() {
-            *place = next;
-            next += pointer;
+        Self { stubs, slots }
+    }
+
+    fn stated(&self, pointer: u64) -> Vec<ImportStub> {
+        let stub = |(place, name): &(u64, String)| ImportStub {
+            vaddr: *place,
+            size: pointer,
+            symbol: name.clone(),
+        };
+        self.stubs.values().map(stub).collect()
+    }
+
+    /// What the static linker writes into each slot: the symbol's address.
+    fn slot_writes(&self, pointer: u64) -> Vec<LoaderWrite> {
+        let slot = |(bound, (place, name)): (&Bound, &(u64, String))| {
             let kind = match *bound {
                 Bound::At {
                     address,
@@ -725,88 +635,188 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                 },
                 Bound::Unplaced => WriteKind::Unknown,
             };
-            writes.push(LoaderWrite {
+            LoaderWrite {
                 place: *place,
                 width: pointer,
                 kind,
                 encoding: Encoding::Word,
-            });
+            }
+        };
+        self.slots.iter().map(slot).collect()
+    }
+
+    /// What one record into a loaded section writes: its symbol, stub or slot plus its addend.
+    fn written(&self, bind: &Bind, mask: u64) -> LoaderWrite {
+        let record = &bind.record;
+        let plus = |address: u64| {
+            bind.addend
+                .map(|addend| address.wrapping_add(addend as u64) & mask)
+        };
+        let kind = match (record.applies, bind.bound) {
+            (Applies::ThreadLocal, _) => WriteKind::NotAnAddress,
+            (Applies::GotRelative, bound) => (self.slots.get(&bound))
+                .and_then(|(slot, _)| plus(*slot))
+                .map_or(WriteKind::Unknown, WriteKind::Absolute),
+            (Applies::Symbol | Applies::SymbolPlusAddend, Bound::Import(..))
+                if bind.addend == Some(0) =>
+            {
+                WriteKind::Import {
+                    symbol: bind.name(),
+                    library: None,
+                }
+            }
+            (
+                Applies::PcRelative | Applies::PltRelative | Applies::Field,
+                Bound::Import(table, index),
+            ) => (self.stubs.get(&(table, index)))
+                .and_then(|(stub, _)| plus(*stub))
+                .map_or(WriteKind::Unknown, WriteKind::Absolute),
+            (
+                Applies::Symbol
+                | Applies::SymbolPlusAddend
+                | Applies::PcRelative
+                | Applies::PltRelative
+                | Applies::Field,
+                Bound::At { address, weak },
+            ) => match (plus(address), weak) {
+                (Some(value), false) => WriteKind::Absolute(value),
+                (Some(value), true) => WriteKind::Preemptible {
+                    symbol: bind.name(),
+                    default: value,
+                },
+                (None, _) => WriteKind::Unknown,
+            },
+            _ => WriteKind::Unknown,
+        };
+        // An object's bytes hold no value a link has not written, so a write it states no value for is no word the file holds.
+        let encoding = match kind {
+            WriteKind::Unknown => Encoding::Typed,
+            _ => record.encoding,
+        };
+        LoaderWrite {
+            place: record.vaddr,
+            width: record.width,
+            kind,
+            encoding,
         }
-        let mask = match pointer {
+    }
+}
+
+/// One record of an object, with what its symbol is.
+struct Bind {
+    record: Relocation,
+    bound: Bound,
+    /// The addend the record states, or for `REL` the one its place holds.
+    addend: Option<i64>,
+    loaded: bool,
+}
+
+impl Bind {
+    fn name(&self) -> String {
+        let symbol = self.record.symbol.as_ref();
+        symbol.map_or_else(String::new, |symbol| symbol.name.to_string())
+    }
+}
+
+impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
+    /// Every record of every relocation section, the stub and slot each import and table read needs, and what each writes.
+    fn linked(&self, placing: &Placing<'_>, linkage: u64) -> Linked {
+        let mut binds = Vec::new();
+        for header in self.file.elf_section_table().iter() {
+            let form = match header.sh_type(self.endian) {
+                elf::SHT_REL => Form::Rel,
+                elf::SHT_RELA => Form::Rela,
+                elf::SHT_CREL => Form::Crel,
+                _ => continue,
+            };
+            self.bind(header, form, placing, &mut binds);
+        }
+        let mask = match self.pointer {
             4 => u64::from(u32::MAX),
             _ => u64::MAX,
         };
+        let linkage = Linkage::of(&binds, linkage, self.pointer);
+        let mut writes = linkage.slot_writes(self.pointer);
         let mut targets = Vec::new();
         let mut relocations = Vec::with_capacity(binds.len());
         for bind in binds {
-            let record = &bind.record;
-            let plus = |address: u64| {
-                bind.addend
-                    .map(|addend| address.wrapping_add(addend as u64) & mask)
-            };
-            if let (Bound::At { address, .. }, Some(target)) = (bind.bound, plus(0)) {
-                targets.push((record.vaddr, address.wrapping_add(target) & mask));
+            if let (Bound::At { address, .. }, Some(addend)) = (bind.bound, bind.addend) {
+                let target = address.wrapping_add(addend as u64) & mask;
+                targets.push((bind.record.vaddr, target));
             }
-            if bind.loaded {
-                let name = || named(&bind);
-                let kind = match (record.applies, bind.bound) {
-                    (Applies::ThreadLocal, _) => WriteKind::NotAnAddress,
-                    (Applies::GotRelative, bound) => slots
-                        .get(&bound)
-                        .and_then(|(slot, _)| plus(*slot))
-                        .map_or(WriteKind::Unknown, WriteKind::Absolute),
-                    (Applies::Symbol | Applies::SymbolPlusAddend, Bound::Import(..))
-                        if bind.addend == Some(0) =>
-                    {
-                        WriteKind::Import {
-                            symbol: name(),
-                            library: None,
-                        }
-                    }
-                    (
-                        Applies::PcRelative | Applies::PltRelative | Applies::Field,
-                        Bound::Import(table, index),
-                    ) => stubs
-                        .get(&(table, index))
-                        .and_then(|(stub, _)| plus(*stub))
-                        .map_or(WriteKind::Unknown, WriteKind::Absolute),
-                    (
-                        Applies::Symbol
-                        | Applies::SymbolPlusAddend
-                        | Applies::PcRelative
-                        | Applies::PltRelative
-                        | Applies::Field,
-                        Bound::At { address, weak },
-                    ) => match (plus(address), weak) {
-                        (Some(value), false) => WriteKind::Absolute(value),
-                        (Some(value), true) => WriteKind::Preemptible {
-                            symbol: name(),
-                            default: value,
-                        },
-                        (None, _) => WriteKind::Unknown,
-                    },
-                    _ => WriteKind::Unknown,
-                };
-                // An object's bytes hold no value a link has not written, so a write it states no value for is no word the file holds.
-                let encoding = match kind {
-                    WriteKind::Unknown => Encoding::Typed,
-                    _ => record.encoding,
-                };
-                writes.push(LoaderWrite {
-                    place: record.vaddr,
-                    width: record.width,
-                    kind,
-                    encoding,
-                });
-            }
+            writes.extend(bind.loaded.then(|| linkage.written(&bind, mask)));
             relocations.push(bind.record);
         }
         targets.sort_unstable();
         Linked {
             relocations,
             writes,
-            stubs: stated,
+            stubs: linkage.stated(self.pointer),
             targets,
+        }
+    }
+
+    /// Each record of one relocation section, with what its symbol is.
+    fn bind(
+        &self,
+        header: &E::SectionHeader,
+        form: Form,
+        placing: &Placing<'_>,
+        binds: &mut Vec<Bind>,
+    ) {
+        let endian = self.endian;
+        let table = self.file.elf_section_table();
+        let machine = self.file.elf_header().e_machine(endian);
+        let target = object::SectionIndex(header.sh_info(endian) as usize);
+        let (Ok(into), Some(base)) = (table.section(target), (placing.section)(target)) else {
+            return;
+        };
+        let symbols = object::SectionIndex(header.sh_link(endian) as usize);
+        let view = View {
+            offset: header.sh_offset(endian).into(),
+            size: header.sh_size(endian).into(),
+            form,
+            phase: 0,
+            symbols: Symbols::Section(symbols),
+        };
+        let loaded = into.sh_flags(endian).contains(elf::SHF_ALLOC);
+        let held = (into.sh_type(endian) != elf::SHT_NOBITS).then(|| into.sh_offset(endian).into());
+        // Parsed once per relocation section: parsing looks its extended indices up across the section table.
+        let parsed = table
+            .symbol_table_by_index(endian, self.file.data(), symbols)
+            .ok();
+        let symbols = (symbols.0, parsed.as_ref());
+        for (record, offset, ntype, index, addend) in self.encoded(&view) {
+            let Some((applies, width, encoding)) = applies(machine, ntype, self.pointer) else {
+                continue;
+            };
+            // A type this reader does not decode holds no value its bytes state.
+            let encoding = match applies {
+                Applies::Unknown => Encoding::Typed,
+                _ => encoding,
+            };
+            let (symbol, bound) = self.bound(symbols, index, placing);
+            let implicit = || {
+                let word = held?.checked_add(offset)?;
+                (encoding != Encoding::Typed)
+                    .then(|| self.implicit(word, width))
+                    .flatten()
+            };
+            binds.push(Bind {
+                record: Relocation {
+                    vaddr: base.wrapping_add(offset),
+                    record,
+                    ntype: ntype.0,
+                    width,
+                    addend,
+                    symbol: symbol.map(Box::new),
+                    applies,
+                    encoding,
+                },
+                bound,
+                addend: addend.or_else(implicit),
+                loaded,
+            });
         }
     }
 
@@ -1021,165 +1031,218 @@ fn applies(
     ntype: elf::RelocationType,
     pointer: u64,
 ) -> Option<(Applies, u64, Encoding)> {
-    use Applies as A;
-    use Encoding::{FromPlace, Typed, Word};
     if ntype.0 == 0 {
         return None;
     }
-    let (applies, width, encoding) = match machine {
-        elf::EM_X86_64 => match ntype {
-            elf::R_X86_64_64 => (A::SymbolPlusAddend, 8, Word),
-            elf::R_X86_64_32 | elf::R_X86_64_32S => (A::SymbolPlusAddend, 4, Word),
-            elf::R_X86_64_16 => (A::SymbolPlusAddend, 2, Word),
-            elf::R_X86_64_8 => (A::SymbolPlusAddend, 1, Word),
-            elf::R_X86_64_PC64 => (A::PcRelative, 8, FromPlace),
-            elf::R_X86_64_PC32 => (A::PcRelative, 4, FromPlace),
-            elf::R_X86_64_PC16 => (A::PcRelative, 2, FromPlace),
-            elf::R_X86_64_PC8 => (A::PcRelative, 1, FromPlace),
-            elf::R_X86_64_PLT32 => (A::PltRelative, 4, FromPlace),
-            elf::R_X86_64_GOTPCREL
-            | elf::R_X86_64_GOTPCRELX
-            | elf::R_X86_64_REX_GOTPCRELX
-            | elf::R_X86_64_CODE_4_GOTPCRELX
-            | elf::R_X86_64_CODE_5_GOTPCRELX
-            | elf::R_X86_64_CODE_6_GOTPCRELX => (A::GotRelative, 4, FromPlace),
-            elf::R_X86_64_GOTPCREL64 => (A::GotRelative, 8, FromPlace),
-            elf::R_X86_64_COPY => (A::Copy, pointer, Word),
-            elf::R_X86_64_GLOB_DAT | elf::R_X86_64_JUMP_SLOT => (A::Symbol, pointer, Word),
-            elf::R_X86_64_RELATIVE | elf::R_X86_64_RELATIVE64 => (A::Relative, pointer, Word),
-            elf::R_X86_64_IRELATIVE => (A::Resolver, pointer, Word),
-            elf::R_X86_64_DTPMOD64 | elf::R_X86_64_DTPOFF64 | elf::R_X86_64_TPOFF64 => {
-                (A::ThreadLocal, 8, Word)
-            }
-            elf::R_X86_64_TLSDESC => (A::ThreadLocal, 16, Word),
-            // Offsets from the thread pointer or into a module's block, in an instruction.
-            elf::R_X86_64_TLSGD
-            | elf::R_X86_64_TLSLD
-            | elf::R_X86_64_DTPOFF32
-            | elf::R_X86_64_GOTTPOFF
-            | elf::R_X86_64_TPOFF32
-            | elf::R_X86_64_GOTPC32_TLSDESC
-            | elf::R_X86_64_CODE_4_GOTTPOFF
-            | elf::R_X86_64_CODE_4_GOTPC32_TLSDESC => (A::ThreadLocal, 4, Typed),
-            // A marker on the call through a descriptor: it writes nothing.
-            elf::R_X86_64_TLSDESC_CALL => return None,
-            _ => (A::Unknown, pointer, Word),
-        },
-        elf::EM_386 => match ntype {
-            elf::R_386_32 => (A::SymbolPlusAddend, 4, Word),
-            elf::R_386_16 => (A::SymbolPlusAddend, 2, Word),
-            elf::R_386_8 => (A::SymbolPlusAddend, 1, Word),
-            elf::R_386_PC32 => (A::PcRelative, 4, FromPlace),
-            elf::R_386_PC16 => (A::PcRelative, 2, FromPlace),
-            elf::R_386_PC8 => (A::PcRelative, 1, FromPlace),
-            elf::R_386_PLT32 => (A::PltRelative, 4, FromPlace),
-            // Offsets from the global offset table, which no address states.
-            elf::R_386_GOT32 | elf::R_386_GOT32X | elf::R_386_GOTOFF | elf::R_386_GOTPC => {
-                (A::Unknown, 4, Typed)
-            }
-            elf::R_386_COPY => (A::Copy, 4, Word),
-            elf::R_386_GLOB_DAT | elf::R_386_JMP_SLOT => (A::Symbol, 4, Word),
-            elf::R_386_RELATIVE => (A::Relative, 4, Word),
-            elf::R_386_IRELATIVE => (A::Resolver, 4, Word),
-            elf::R_386_TLS_TPOFF
-            | elf::R_386_TLS_DTPMOD32
-            | elf::R_386_TLS_DTPOFF32
-            | elf::R_386_TLS_TPOFF32 => (A::ThreadLocal, 4, Word),
-            elf::R_386_TLS_DESC => (A::ThreadLocal, 8, Word),
-            _ => (A::Unknown, 4, Word),
-        },
-        elf::EM_AARCH64 => match ntype {
-            elf::R_AARCH64_ABS64 => (A::SymbolPlusAddend, 8, Word),
-            elf::R_AARCH64_ABS32 => (A::SymbolPlusAddend, 4, Word),
-            elf::R_AARCH64_ABS16 => (A::SymbolPlusAddend, 2, Word),
-            elf::R_AARCH64_PREL64 => (A::PcRelative, 8, FromPlace),
-            elf::R_AARCH64_PREL32 => (A::PcRelative, 4, FromPlace),
-            elf::R_AARCH64_PREL16 => (A::PcRelative, 2, FromPlace),
-            elf::R_AARCH64_CALL26
-            | elf::R_AARCH64_JUMP26
-            | elf::R_AARCH64_CONDBR19
-            | elf::R_AARCH64_TSTBR14
-            | elf::R_AARCH64_LD_PREL_LO19
-            | elf::R_AARCH64_ADR_PREL_LO21
-            | elf::R_AARCH64_ADR_PREL_PG_HI21
-            | elf::R_AARCH64_ADR_PREL_PG_HI21_NC
-            | elf::R_AARCH64_ADD_ABS_LO12_NC
-            | elf::R_AARCH64_LDST8_ABS_LO12_NC
-            | elf::R_AARCH64_LDST16_ABS_LO12_NC
-            | elf::R_AARCH64_LDST32_ABS_LO12_NC
-            | elf::R_AARCH64_LDST64_ABS_LO12_NC
-            | elf::R_AARCH64_LDST128_ABS_LO12_NC
-            | elf::R_AARCH64_MOVW_UABS_G0
-            | elf::R_AARCH64_MOVW_UABS_G0_NC
-            | elf::R_AARCH64_MOVW_UABS_G1
-            | elf::R_AARCH64_MOVW_UABS_G1_NC
-            | elf::R_AARCH64_MOVW_UABS_G2
-            | elf::R_AARCH64_MOVW_UABS_G2_NC
-            | elf::R_AARCH64_MOVW_UABS_G3 => (A::Field, 4, Typed),
-            elf::R_AARCH64_ADR_GOT_PAGE
-            | elf::R_AARCH64_LD64_GOT_LO12_NC
-            | elf::R_AARCH64_LD64_GOTPAGE_LO15 => (A::GotRelative, 4, Typed),
-            elf::R_AARCH64_COPY => (A::Copy, 8, Word),
-            // AArch64 adds the addend to both, which ELF gABI leaves to the psABI.
-            elf::R_AARCH64_GLOB_DAT | elf::R_AARCH64_JUMP_SLOT => (A::SymbolPlusAddend, 8, Word),
-            elf::R_AARCH64_RELATIVE => (A::Relative, 8, Word),
-            elf::R_AARCH64_IRELATIVE => (A::Resolver, 8, Word),
-            elf::R_AARCH64_TLS_DTPMOD | elf::R_AARCH64_TLS_DTPREL | elf::R_AARCH64_TLS_TPREL => {
-                (A::ThreadLocal, 8, Word)
-            }
-            elf::R_AARCH64_TLSDESC => (A::ThreadLocal, 16, Word),
-            _ => (A::Unknown, pointer, Word),
-        },
-        elf::EM_ARM => match ntype {
-            elf::R_ARM_ABS32 | elf::R_ARM_TARGET1 => (A::SymbolPlusAddend, 4, Word),
-            elf::R_ARM_REL32 => (A::PcRelative, 4, FromPlace),
-            elf::R_ARM_CALL
-            | elf::R_ARM_JUMP24
-            | elf::R_ARM_PC24
-            | elf::R_ARM_THM_PC22
-            | elf::R_ARM_THM_JUMP24
-            | elf::R_ARM_THM_JUMP19
-            | elf::R_ARM_PREL31
-            | elf::R_ARM_MOVW_ABS_NC
-            | elf::R_ARM_MOVT_ABS
-            | elf::R_ARM_MOVW_PREL_NC
-            | elf::R_ARM_MOVT_PREL
-            | elf::R_ARM_THM_MOVW_ABS_NC
-            | elf::R_ARM_THM_MOVT_ABS
-            | elf::R_ARM_THM_MOVW_PREL_NC
-            | elf::R_ARM_THM_MOVT_PREL => (A::Field, 4, Typed),
-            elf::R_ARM_THM_PC11 | elf::R_ARM_THM_PC9 => (A::Field, 2, Typed),
-            elf::R_ARM_GOT_PREL => (A::GotRelative, 4, FromPlace),
-            // A marker that `bx` may be rewritten for ARMv4: it states no value.
-            elf::R_ARM_V4BX => return None,
-            elf::R_ARM_COPY => (A::Copy, 4, Word),
-            elf::R_ARM_GLOB_DAT | elf::R_ARM_JUMP_SLOT => (A::Symbol, 4, Word),
-            elf::R_ARM_RELATIVE => (A::Relative, 4, Word),
-            elf::R_ARM_IRELATIVE => (A::Resolver, 4, Word),
-            elf::R_ARM_TLS_DTPMOD32 | elf::R_ARM_TLS_DTPOFF32 | elf::R_ARM_TLS_TPOFF32 => {
-                (A::ThreadLocal, 4, Word)
-            }
-            elf::R_ARM_TLS_DESC => (A::ThreadLocal, 8, Word),
-            _ => (A::Unknown, 4, Word),
-        },
-        elf::EM_RISCV => match ntype {
-            elf::R_RISCV_32 => (A::SymbolPlusAddend, 4, Word),
-            elf::R_RISCV_64 => (A::SymbolPlusAddend, 8, Word),
-            elf::R_RISCV_COPY => (A::Copy, pointer, Word),
-            elf::R_RISCV_JUMP_SLOT => (A::Symbol, pointer, Word),
-            elf::R_RISCV_RELATIVE => (A::Relative, pointer, Word),
-            elf::R_RISCV_IRELATIVE => (A::Resolver, pointer, Word),
-            elf::R_RISCV_TLS_DTPMOD32 | elf::R_RISCV_TLS_DTPREL32 | elf::R_RISCV_TLS_TPREL32 => {
-                (A::ThreadLocal, 4, Word)
-            }
-            elf::R_RISCV_TLS_DTPMOD64 | elf::R_RISCV_TLS_DTPREL64 | elf::R_RISCV_TLS_TPREL64 => {
-                (A::ThreadLocal, 8, Word)
-            }
-            _ => (A::Unknown, pointer, Word),
-        },
+    match machine {
+        elf::EM_X86_64 => x86_64(ntype, pointer),
+        elf::EM_386 => i386(ntype),
+        elf::EM_AARCH64 => aarch64(ntype, pointer),
+        elf::EM_ARM => arm(ntype),
+        elf::EM_RISCV => riscv(ntype, pointer),
+        _ => Some((Applies::Unknown, pointer, Encoding::Word)),
+    }
+}
+
+/// The x86-64 psABI's types.
+fn x86_64(ntype: elf::RelocationType, pointer: u64) -> Option<(Applies, u64, Encoding)> {
+    use Applies as A;
+    use Encoding::{FromPlace, Typed, Word};
+    Some(match ntype {
+        elf::R_X86_64_64 => (A::SymbolPlusAddend, 8, Word),
+        elf::R_X86_64_32 | elf::R_X86_64_32S => (A::SymbolPlusAddend, 4, Word),
+        elf::R_X86_64_16 => (A::SymbolPlusAddend, 2, Word),
+        elf::R_X86_64_8 => (A::SymbolPlusAddend, 1, Word),
+        elf::R_X86_64_PC64 => (A::PcRelative, 8, FromPlace),
+        elf::R_X86_64_PC32 => (A::PcRelative, 4, FromPlace),
+        elf::R_X86_64_PC16 => (A::PcRelative, 2, FromPlace),
+        elf::R_X86_64_PC8 => (A::PcRelative, 1, FromPlace),
+        elf::R_X86_64_PLT32 => (A::PltRelative, 4, FromPlace),
+        elf::R_X86_64_GOTPCREL
+        | elf::R_X86_64_GOTPCRELX
+        | elf::R_X86_64_REX_GOTPCRELX
+        | elf::R_X86_64_CODE_4_GOTPCRELX
+        | elf::R_X86_64_CODE_5_GOTPCRELX
+        | elf::R_X86_64_CODE_6_GOTPCRELX => (A::GotRelative, 4, FromPlace),
+        elf::R_X86_64_GOTPCREL64 => (A::GotRelative, 8, FromPlace),
+        elf::R_X86_64_COPY => (A::Copy, pointer, Word),
+        elf::R_X86_64_GLOB_DAT | elf::R_X86_64_JUMP_SLOT => (A::Symbol, pointer, Word),
+        elf::R_X86_64_RELATIVE | elf::R_X86_64_RELATIVE64 => (A::Relative, pointer, Word),
+        elf::R_X86_64_IRELATIVE => (A::Resolver, pointer, Word),
+        elf::R_X86_64_DTPMOD64 | elf::R_X86_64_DTPOFF64 | elf::R_X86_64_TPOFF64 => {
+            (A::ThreadLocal, 8, Word)
+        }
+        elf::R_X86_64_TLSDESC => (A::ThreadLocal, 16, Word),
+        // Offsets from the thread pointer or into a module's block, in an instruction.
+        elf::R_X86_64_TLSGD
+        | elf::R_X86_64_TLSLD
+        | elf::R_X86_64_DTPOFF32
+        | elf::R_X86_64_GOTTPOFF
+        | elf::R_X86_64_TPOFF32
+        | elf::R_X86_64_GOTPC32_TLSDESC
+        | elf::R_X86_64_CODE_4_GOTTPOFF
+        | elf::R_X86_64_CODE_4_GOTPC32_TLSDESC => (A::ThreadLocal, 4, Typed),
+        // A marker on the call through a descriptor: it writes nothing.
+        elf::R_X86_64_TLSDESC_CALL => return None,
         _ => (A::Unknown, pointer, Word),
+    })
+}
+
+/// The i386 psABI's types.
+fn i386(ntype: elf::RelocationType) -> Option<(Applies, u64, Encoding)> {
+    use Applies as A;
+    use Encoding::{FromPlace, Typed, Word};
+    Some(match ntype {
+        elf::R_386_32 => (A::SymbolPlusAddend, 4, Word),
+        elf::R_386_16 => (A::SymbolPlusAddend, 2, Word),
+        elf::R_386_8 => (A::SymbolPlusAddend, 1, Word),
+        elf::R_386_PC32 => (A::PcRelative, 4, FromPlace),
+        elf::R_386_PC16 => (A::PcRelative, 2, FromPlace),
+        elf::R_386_PC8 => (A::PcRelative, 1, FromPlace),
+        elf::R_386_PLT32 => (A::PltRelative, 4, FromPlace),
+        // Offsets from the global offset table, which no address states.
+        elf::R_386_GOT32 | elf::R_386_GOT32X | elf::R_386_GOTOFF | elf::R_386_GOTPC => {
+            (A::Unknown, 4, Typed)
+        }
+        elf::R_386_COPY => (A::Copy, 4, Word),
+        elf::R_386_GLOB_DAT | elf::R_386_JMP_SLOT => (A::Symbol, 4, Word),
+        elf::R_386_RELATIVE => (A::Relative, 4, Word),
+        elf::R_386_IRELATIVE => (A::Resolver, 4, Word),
+        elf::R_386_TLS_TPOFF
+        | elf::R_386_TLS_DTPMOD32
+        | elf::R_386_TLS_DTPOFF32
+        | elf::R_386_TLS_TPOFF32 => (A::ThreadLocal, 4, Word),
+        elf::R_386_TLS_DESC => (A::ThreadLocal, 8, Word),
+        _ => (A::Unknown, 4, Word),
+    })
+}
+
+/// The AArch64 ELF ABI's types.
+fn aarch64(ntype: elf::RelocationType, pointer: u64) -> Option<(Applies, u64, Encoding)> {
+    use Applies as A;
+    use Encoding::{FromPlace, Typed, Word};
+    Some(match ntype {
+        elf::R_AARCH64_ABS64 => (A::SymbolPlusAddend, 8, Word),
+        elf::R_AARCH64_ABS32 => (A::SymbolPlusAddend, 4, Word),
+        elf::R_AARCH64_ABS16 => (A::SymbolPlusAddend, 2, Word),
+        elf::R_AARCH64_PREL64 => (A::PcRelative, 8, FromPlace),
+        elf::R_AARCH64_PREL32 => (A::PcRelative, 4, FromPlace),
+        elf::R_AARCH64_PREL16 => (A::PcRelative, 2, FromPlace),
+        elf::R_AARCH64_CALL26
+        | elf::R_AARCH64_JUMP26
+        | elf::R_AARCH64_CONDBR19
+        | elf::R_AARCH64_TSTBR14
+        | elf::R_AARCH64_LD_PREL_LO19
+        | elf::R_AARCH64_ADR_PREL_LO21
+        | elf::R_AARCH64_ADR_PREL_PG_HI21
+        | elf::R_AARCH64_ADR_PREL_PG_HI21_NC
+        | elf::R_AARCH64_ADD_ABS_LO12_NC
+        | elf::R_AARCH64_LDST8_ABS_LO12_NC
+        | elf::R_AARCH64_LDST16_ABS_LO12_NC
+        | elf::R_AARCH64_LDST32_ABS_LO12_NC
+        | elf::R_AARCH64_LDST64_ABS_LO12_NC
+        | elf::R_AARCH64_LDST128_ABS_LO12_NC
+        | elf::R_AARCH64_MOVW_UABS_G0
+        | elf::R_AARCH64_MOVW_UABS_G0_NC
+        | elf::R_AARCH64_MOVW_UABS_G1
+        | elf::R_AARCH64_MOVW_UABS_G1_NC
+        | elf::R_AARCH64_MOVW_UABS_G2
+        | elf::R_AARCH64_MOVW_UABS_G2_NC
+        | elf::R_AARCH64_MOVW_UABS_G3 => (A::Field, 4, Typed),
+        elf::R_AARCH64_ADR_GOT_PAGE
+        | elf::R_AARCH64_LD64_GOT_LO12_NC
+        | elf::R_AARCH64_LD64_GOTPAGE_LO15 => (A::GotRelative, 4, Typed),
+        elf::R_AARCH64_COPY => (A::Copy, 8, Word),
+        // AArch64 adds the addend to both, which ELF gABI leaves to the psABI.
+        elf::R_AARCH64_GLOB_DAT | elf::R_AARCH64_JUMP_SLOT => (A::SymbolPlusAddend, 8, Word),
+        elf::R_AARCH64_RELATIVE => (A::Relative, 8, Word),
+        elf::R_AARCH64_IRELATIVE => (A::Resolver, 8, Word),
+        elf::R_AARCH64_TLS_DTPMOD | elf::R_AARCH64_TLS_DTPREL | elf::R_AARCH64_TLS_TPREL => {
+            (A::ThreadLocal, 8, Word)
+        }
+        elf::R_AARCH64_TLSDESC => (A::ThreadLocal, 16, Word),
+        _ => (A::Unknown, pointer, Word),
+    })
+}
+
+/// The Arm ELF ABI's types.
+fn arm(ntype: elf::RelocationType) -> Option<(Applies, u64, Encoding)> {
+    use Applies as A;
+    use Encoding::{FromPlace, Typed, Word};
+    Some(match ntype {
+        elf::R_ARM_ABS32 | elf::R_ARM_TARGET1 => (A::SymbolPlusAddend, 4, Word),
+        elf::R_ARM_REL32 => (A::PcRelative, 4, FromPlace),
+        elf::R_ARM_CALL
+        | elf::R_ARM_JUMP24
+        | elf::R_ARM_PC24
+        | elf::R_ARM_THM_PC22
+        | elf::R_ARM_THM_JUMP24
+        | elf::R_ARM_THM_JUMP19
+        | elf::R_ARM_PREL31
+        | elf::R_ARM_MOVW_ABS_NC
+        | elf::R_ARM_MOVT_ABS
+        | elf::R_ARM_MOVW_PREL_NC
+        | elf::R_ARM_MOVT_PREL
+        | elf::R_ARM_THM_MOVW_ABS_NC
+        | elf::R_ARM_THM_MOVT_ABS
+        | elf::R_ARM_THM_MOVW_PREL_NC
+        | elf::R_ARM_THM_MOVT_PREL => (A::Field, 4, Typed),
+        elf::R_ARM_THM_PC11 | elf::R_ARM_THM_PC9 => (A::Field, 2, Typed),
+        elf::R_ARM_GOT_PREL => (A::GotRelative, 4, FromPlace),
+        // A marker that `bx` may be rewritten for ARMv4: it states no value.
+        elf::R_ARM_V4BX => return None,
+        elf::R_ARM_COPY => (A::Copy, 4, Word),
+        elf::R_ARM_GLOB_DAT | elf::R_ARM_JUMP_SLOT => (A::Symbol, 4, Word),
+        elf::R_ARM_RELATIVE => (A::Relative, 4, Word),
+        elf::R_ARM_IRELATIVE => (A::Resolver, 4, Word),
+        elf::R_ARM_TLS_DTPMOD32 | elf::R_ARM_TLS_DTPOFF32 | elf::R_ARM_TLS_TPOFF32 => {
+            (A::ThreadLocal, 4, Word)
+        }
+        elf::R_ARM_TLS_DESC => (A::ThreadLocal, 8, Word),
+        _ => (A::Unknown, 4, Word),
+    })
+}
+
+/// The RISC-V psABI's types.
+fn riscv(ntype: elf::RelocationType, pointer: u64) -> Option<(Applies, u64, Encoding)> {
+    use Applies as A;
+    use Encoding::Word;
+    Some(match ntype {
+        elf::R_RISCV_32 => (A::SymbolPlusAddend, 4, Word),
+        elf::R_RISCV_64 => (A::SymbolPlusAddend, 8, Word),
+        elf::R_RISCV_COPY => (A::Copy, pointer, Word),
+        elf::R_RISCV_JUMP_SLOT => (A::Symbol, pointer, Word),
+        elf::R_RISCV_RELATIVE => (A::Relative, pointer, Word),
+        elf::R_RISCV_IRELATIVE => (A::Resolver, pointer, Word),
+        elf::R_RISCV_TLS_DTPMOD32 | elf::R_RISCV_TLS_DTPREL32 | elf::R_RISCV_TLS_TPREL32 => {
+            (A::ThreadLocal, 4, Word)
+        }
+        elf::R_RISCV_TLS_DTPMOD64 | elf::R_RISCV_TLS_DTPREL64 | elf::R_RISCV_TLS_TPREL64 => {
+            (A::ThreadLocal, 8, Word)
+        }
+        _ => (A::Unknown, pointer, Word),
+    })
+}
+
+/// Each entry of an object's compact stream, as `SHT_CREL` encodes it; the stream's own offset and each entry's position are its record.
+fn crel(bytes: &[u8], table: u64) -> Vec<Encoded> {
+    let Ok(entries) = object::read::elf::CrelIterator::new(bytes) else {
+        return Vec::new();
     };
-    Some((applies, width, encoding))
+    let rela = entries.is_rela();
+    let entry = |(index, entry): (usize, object::read::elf::Crel)| {
+        let record = Record {
+            table,
+            index: index as u64,
+        };
+        let addend = rela.then_some(entry.r_addend);
+        (record, entry.r_offset, entry.r_type, entry.r_sym, addend)
+    };
+    entries
+        .map_while(Result::ok)
+        .enumerate()
+        .map(entry)
+        .collect()
 }
 
 /// As many whole entries as the bytes hold.
