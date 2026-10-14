@@ -11,8 +11,10 @@ const BASE: u64 = 0x0800_0000;
 const TEXT: u64 = BASE + 0x40;
 const G: u64 = TEXT + 0x1f;
 const DATA: u64 = BASE + 0x60;
-/// The file is 0x578 bytes, so `.bss` is the first address past it, at its alignment.
-const BSS: u64 = BASE + 0x578;
+/// The file is 0x598 bytes, so `.bss` is the first address past it, at its alignment.
+const BSS: u64 = BASE + 0x598;
+/// The common symbol follows `.bss`, at its own alignment.
+const SHARED: u64 = BSS + 8;
 /// The linkage begins at the page after `.bss`: the stub for `ext`, then its slot.
 const STUB: u64 = BASE + 0x1000;
 const SLOT: u64 = STUB + 8;
@@ -141,6 +143,14 @@ fn an_unbacked_section_is_placed_past_the_file_and_its_objects_move_with_it() {
     assert_eq!(counter.vaddr, BSS);
     let (read, _) = written(&image, TEXT + 0x1a);
     assert_eq!(read, WriteKind::Absolute(BSS - 4));
+    // A common symbol's value is its alignment; the reader allocates it as a link would.
+    let shared = image
+        .symbols()
+        .iter()
+        .find(|symbol| &*symbol.name == "shared")
+        .expect("shared");
+    assert_eq!((shared.vaddr, shared.defined), (SHARED, true));
+    assert_eq!(SHARED % 16, 0);
 }
 
 /// A section sized past the address space is refused, not placed by a wrapping sum (D18).

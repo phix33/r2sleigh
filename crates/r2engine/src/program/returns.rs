@@ -75,6 +75,10 @@ impl crate::body::Program for Knowing<'_> {
         self.program.returns_through(slot)
     }
 
+    fn loader_writes(&self) -> &[crate::program::LoaderWrite] {
+        self.program.loader_writes()
+    }
+
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         self.program.return_address_register()
     }

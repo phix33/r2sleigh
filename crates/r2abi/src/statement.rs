@@ -708,10 +708,12 @@ impl LoaderWrite {
         }
     }
 
-    /// The address the written bytes resolve to, however they encode it: a pointer word's value, or a PC-relative field's target.
+    /// The address the written bytes resolve to when nothing replaces the definition, however they encode it: a pointer word's value, or a PC-relative field's target.
     pub const fn target(&self) -> Option<u64> {
         match self.kind {
-            WriteKind::Relative(value) | WriteKind::Absolute(value) => Some(value),
+            WriteKind::Relative(value)
+            | WriteKind::Absolute(value)
+            | WriteKind::Preemptible { default: value, .. } => Some(value),
             _ => None,
         }
     }

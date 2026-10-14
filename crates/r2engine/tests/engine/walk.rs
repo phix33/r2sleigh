@@ -490,3 +490,83 @@ fn a_body_past_the_budget_stops_there_by_name() {
         Some(UnresolvedReason::Budget)
     );
 }
+
+/// Two calls whose rel32 fields a static link fills: zero in the file, so read as they are each calls the next instruction.
+const RELOCATED_CALLS: &[u8] = &[
+    0xe8, 0x00, 0x00, 0x00, 0x00, // 0x1000 call <field at 0x1001>
+    0xe8, 0x00, 0x00, 0x00, 0x00, // 0x1005 call <field at 0x1006>
+    0xc3, // 0x100a ret
+];
+
+/// [`RELOCATED_CALLS`] with what the loader writes into each field.
+struct Relocated(Vec<r2engine::program::LoaderWrite>);
+
+impl r2engine::body::Program for Relocated {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        reader(RELOCATED_CALLS).read(vaddr, max)
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        reader(RELOCATED_CALLS).region(vaddr)
+    }
+
+    fn is_entry(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn loader_writes(&self) -> &[r2engine::program::LoaderWrite] {
+        &self.0
+    }
+}
+
+fn field(
+    place: u64,
+    kind: r2engine::program::WriteKind,
+    encoding: r2engine::program::Encoding,
+) -> r2engine::program::LoaderWrite {
+    r2engine::program::LoaderWrite {
+        place,
+        width: 4,
+        kind,
+        encoding,
+    }
+}
+
+/// A call's target is where its stated relocation resolves, never the zero the file holds (audit W5).
+#[test]
+fn a_call_through_a_relocated_field_goes_where_the_relocation_resolves() {
+    use r2engine::program::{Encoding, WriteKind};
+    // `call g` as R_X86_64_PLT32 g - 4: the field holds g - 4 less its place.
+    let program = Relocated(vec![
+        field(0x1001, WriteKind::Absolute(0x2000 - 4), Encoding::FromPlace),
+        field(0x1006, WriteKind::Absolute(0x3000 - 4), Encoding::FromPlace),
+    ]);
+    let body = lift_body(BASE, &x86_64(), &program, &BTreeMap::new()).expect("body");
+    assert_eq!(body.calls, vec![0x2000, 0x3000]);
+    assert!(body.unresolved.is_empty(), "{:?}", body.unresolved);
+}
+
+/// A field whose value the container does not state stops the walk with a typed reason: what its bytes decode to is not what runs.
+#[test]
+fn a_call_through_an_unstated_field_is_refused_not_read_from_the_file() {
+    use r2engine::program::{Encoding, WriteKind};
+    let program = Relocated(vec![
+        field(0x1001, WriteKind::Absolute(0x2000 - 4), Encoding::FromPlace),
+        field(0x1006, WriteKind::Unknown, Encoding::Typed),
+    ]);
+    let body = lift_body(BASE, &x86_64(), &program, &BTreeMap::new()).expect("body");
+    assert_eq!(
+        body.calls,
+        vec![0x2000],
+        "no call to 0x100a, the next instruction"
+    );
+    assert_eq!(
+        (body.unresolved.iter())
+            .map(|stop| (stop.addr, stop.reason))
+            .collect::<Vec<_>>(),
+        vec![(0x1005, UnresolvedReason::Relocated)]
+    );
+    let entry = Relocated(vec![field(0x1001, WriteKind::Unknown, Encoding::Typed)]);
+    let error = lift_body(BASE, &x86_64(), &entry, &BTreeMap::new()).expect_err("refused");
+    assert_eq!(error, r2engine::body::BodyError::EntryRelocated(BASE));
+}

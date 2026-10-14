@@ -320,6 +320,8 @@ struct Placement {
     relocatable: bool,
     /// Each unbacked section, by index.
     unbacked: BTreeMap<usize, u64>,
+    /// Each common symbol, by its index in the symbol table: the static linker allocates it.
+    common: BTreeMap<usize, u64>,
     linkage: u64,
 }
 
@@ -347,10 +349,23 @@ impl Placement {
                     .ok_or(ImageError::Unplaceable)?;
             }
         }
+        let mut common = BTreeMap::new();
+        let commons = file.symbols().filter(|_| relocatable);
+        for symbol in commons.filter(|symbol| symbol.section() == object::SymbolSection::Common) {
+            // A common symbol's value is its alignment.
+            let align = symbol.address().clamp(1, 1 << 16);
+            let at = end.checked_next_multiple_of(align);
+            let at = at.ok_or(ImageError::Unplaceable)?;
+            common.insert(symbol.index().0, at);
+            end = at
+                .checked_add(symbol.size())
+                .ok_or(ImageError::Unplaceable)?;
+        }
         let linkage = end.checked_next_multiple_of(0x1000);
         Ok(Self {
             relocatable,
             unbacked,
+            common,
             linkage: linkage.ok_or(ImageError::Unplaceable)?,
         })
     }
@@ -585,12 +600,20 @@ impl Image {
                 return None;
             }
             // An unplaced section's symbols are offsets into it, so they move with it.
-            let address = symbol.address()
-                + symbol
-                    .section_index()
-                    .filter(|_| relocatable)
-                    .and_then(|index| file.section_by_index(index).ok())
-                    .map_or(0, |section| placed(&section));
+            let common = (relocatable && !dynamic)
+                .then(|| placement.common.get(&symbol.index().0))
+                .flatten();
+            let address = match common {
+                Some(address) => *address,
+                None => {
+                    symbol.address()
+                        + symbol
+                            .section_index()
+                            .filter(|_| relocatable)
+                            .and_then(|index| file.section_by_index(index).ok())
+                            .map_or(0, |section| placed(&section))
+                }
+            };
             let mapped = is_arm32(&arch).then(|| mapping(name)).flatten();
             let import = symbol.section() == object::SymbolSection::Undefined;
             Some(Symbol {
@@ -623,7 +646,8 @@ impl Image {
                 },
                 // A name is defined here when it sits in a section of this image; `object` counts only STT_FUNC and STT_OBJECT, so every NASM label went unlisted.
                 // An absolute symbol sits in no section and a thread-local one is an offset into its block, so neither value is an address.
-                defined: matches!(symbol.section(), object::SymbolSection::Section(_))
+                defined: (matches!(symbol.section(), object::SymbolSection::Section(_))
+                    || common.is_some())
                     && symbol.kind() != object::SymbolKind::Tls,
                 import,
                 thumb: is_arm32(&arch)
@@ -721,6 +745,7 @@ impl Image {
             &data[..],
             &placed,
             placement.linkage,
+            &|index| placement.common.get(&(index as usize)).copied(),
             u64::from(arch.bits / 8),
         );
 

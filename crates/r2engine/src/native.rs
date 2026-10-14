@@ -88,14 +88,6 @@ pub trait Program: crate::body::Program {
                 .is_some_and(|region| vaddr < region.file_end)
     }
 
-    /// What the loader writes before the program runs, sorted by place and
-    /// disjoint, with the value the container states for each: the file's
-    /// bytes there are not what the program reads. Nothing, where nothing is
-    /// loaded. Read through [`crate::stated`], never directly.
-    fn loader_writes(&self) -> &[crate::program::LoaderWrite] {
-        &[]
-    }
-
     /// Where the program's loaded sections lie, code or data.
     ///
     /// A number nothing proves to move with the program names one of its
@@ -2123,10 +2115,12 @@ pub(crate) fn decodes(disasm: &Disassembler, program: &dyn Program, at: u64) -> 
     if !program.region(at).is_some_and(|region| region.execute) {
         return false;
     }
-    let Some(mut fetch) = program.read(at, WINDOW) else {
+    let Some(window) = program.read(at, WINDOW) else {
         return false;
     };
-    let available = fetch.len();
+    let available = window.len();
+    let endian = disasm.arch_spec().memory_endianness;
+    let mut fetch = crate::stated::code(program.loader_writes(), at, window, endian).bytes;
     fetch.resize(WINDOW, 0);
     disasm
         .lift(&fetch, at)

@@ -18,3 +18,29 @@ vaddr      paddr      type   ntype name
 0x080000b8 0x000000b8 ADD_32 2     ext - 0x080000b8
 EOF
 RUN
+
+# Each frame starts where its pc_begin relocation resolves: f and g, and no function at a raw
+# .eh_frame offset; the FDE against the undefined `ext` is refused.
+NAME=relocatable object functions
+FILE=crates/r2image/tests/data/relocated.elf
+CMDS=aa; afl
+EXPECT=<<EOF
+0x08000040    1     31 sym.f
+0x0800005f    1      1 sym.g
+EOF
+RUN
+
+# Each field decodes as the value its relocation states: the import through its stub, the local
+# function, the data, the table slot and the .bss object; never the next instruction.
+NAME=relocatable object listing
+FILE=crates/r2image/tests/data/relocated.elf
+CMDS=pdf @ sym.f
+EXPECT=<<EOF
+            0x08000040      e8bb0f0000     call 0x8001000 ; sym.imp.ext: arguments unproven (certified)
+            0x08000045      e815000000     call sym.g ; sym.g() (certified)
+            0x0800004a      488d3d1700..   lea rdi, [0x8000068] ; "*" (certified)
+            0x08000051      488b05b00f..   mov rax, qword [0x8001008]
+            0x08000058      8b053a050000   mov eax, dword [obj.counter] ; [0x8000598:4]=0x0 (decoded)
+            0x0800005e      c3             ret ; returns rax (certified)
+EOF
+RUN

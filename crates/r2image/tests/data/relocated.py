@@ -13,6 +13,7 @@ records say what each field is:
              ret
          g:  ret
   .data      .quad g                   R_X86_64_64 g
+  .symtab    `shared`, a common symbol of four bytes at an alignment of sixteen.
   .eh_frame  one CIE and three FDEs, whose pc_begin fields are R_X86_64_PC32
              against .text + 0 (f), .text + 0x1f (g) and the undefined ext.
 """
@@ -49,7 +50,7 @@ assert len(EH) == 0x58
 
 # Symbols: locals first. Index 1 and 2 are the section symbols of .text and .data.
 SHN = {".text": 1, ".data": 2, ".bss": 3, ".eh_frame": 4}
-strtab = b"\0g\0counter\0f\0ext\0"
+strtab = b"\0g\0counter\0f\0ext\0shared\0"
 
 
 def name(text):
@@ -66,6 +67,8 @@ symbols = [
     (name(b"counter"), (LOCAL << 4) | OBJECT, SHN[".bss"], 0, 8),
     (name(b"f"), (GLOBAL << 4) | FUNC, SHN[".text"], 0, 0x1F),
     (name(b"ext"), (GLOBAL << 4) | NOTYPE, 0, 0, 0),
+    # A common symbol: its value is its alignment, and the static linker allocates it.
+    (name(b"shared"), (GLOBAL << 4) | OBJECT, 0xFFF2, 16, 4),
 ]
 FIRST_GLOBAL = 5
 symtab = b"".join(

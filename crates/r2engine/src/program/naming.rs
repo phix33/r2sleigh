@@ -444,7 +444,9 @@ fn section_stubs(
         let Some(window) = source.read(pc, DECODE_WINDOW) else {
             break;
         };
-        let mut fetch = window;
+        let endian = decoder.arch_spec().memory_endianness;
+        let code = crate::stated::code(&container.loader_writes, pc, window, endian);
+        let mut fetch = code.bytes.clone();
         fetch.resize(DECODE_WINDOW, 0);
         // A word in a stub section that is not an instruction is the linker's
         // own data -- the offset an ARM stub adds, the padding before one --
@@ -465,7 +467,10 @@ fn section_stubs(
                 continue;
             }
         };
-        if chooses(&lifted.ops, section.vaddr..end, pc + u64::from(lifted.size)) {
+        // A stub's bytes are what the linker wrote; a field it left unstated is no stub's.
+        if code.unstated(&(pc..pc + u64::from(lifted.size)))
+            || chooses(&lifted.ops, section.vaddr..end, pc + u64::from(lifted.size))
+        {
             return None;
         }
         let leaves = lifted

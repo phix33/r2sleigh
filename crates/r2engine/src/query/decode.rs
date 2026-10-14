@@ -107,7 +107,11 @@ fn decoded(
     // instruction at an odd address on ARM, where none can begin.
     let step = u64::from(machine.arch.alignment.max(1));
     let available = window.len();
-    let mut fetch = window;
+    // The bytes the loader leaves: a field it writes decodes as the value it writes.
+    let endian = machine.disasm.arch_spec().memory_endianness;
+    let program = answered.memory.program;
+    let code = crate::stated::code(program.loader_writes(), pc, window, endian);
+    let mut fetch = code.bytes.clone();
     fetch.resize(DECODE_WINDOW, 0);
 
     // The window is the decoder's, not the instruction's: Sleigh reads the
@@ -124,12 +128,15 @@ fn decoded(
             |(lift, context)| (None, Some(lift), Some(context)),
         ),
     };
-    let flow = lift.as_ref().map(r2sleigh_lift::flow::of);
     let size = match (&syntax, &lift) {
         (Some(syntax), _) => syntax.size,
         (None, Some(lift)) => usize::try_from(lift.size).unwrap_or(0),
         (None, None) => 0,
     };
+    // A field whose value the container does not state is listed as encoded, and nothing is read from it (audit W5).
+    let stated = !code.unstated(&(pc..pc + size as u64));
+    let lift = lift.filter(|_| stated);
+    let flow = lift.as_ref().map(r2sleigh_lift::flow::of);
     if size == 0 || size > available {
         let stepped = usize::try_from(step).map_or(1, |step| step.clamp(1, available.max(1)));
         return Some(Decoded {
@@ -155,7 +162,7 @@ fn decoded(
             annotations: Vec::new(),
         },
         lift,
-        window: Some(fetch),
+        window: stated.then_some(fetch),
         next: pc + size as u64,
         context,
     })

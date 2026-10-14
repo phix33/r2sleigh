@@ -52,6 +52,14 @@ pub trait Program {
         false
     }
 
+    /// What the loader writes before the program runs, sorted by place and
+    /// disjoint, with the value the container states for each: the file's
+    /// bytes there are not what the program reads or runs. Nothing, where
+    /// nothing is loaded. Read through [`crate::stated`], never directly.
+    fn loader_writes(&self) -> &[crate::program::LoaderWrite] {
+        &[]
+    }
+
     /// Whether another function begins here.
     ///
     /// This is what bounds a body. The walk can see that control transfers; it
@@ -188,6 +196,9 @@ pub enum UnresolvedReason {
     Undecodable,
     /// The instruction needs more bytes than the image maps at that address.
     Truncated,
+    /// The loader writes a field of the instruction with a value the container does not state
+    /// (audit W5): what its bytes decode to is not what runs.
+    Relocated,
     /// The body reached [`BODY_INSTRUCTIONS`] before it closed (D18): no analysis reads it whole.
     Budget,
 }
@@ -207,6 +218,8 @@ pub enum BodyError {
     EntryUnbacked(u64),
     /// The entry address does not decode, so there is no first instruction.
     EntryUndecodable(u64),
+    /// The loader writes a field of the first instruction with a value the container does not state.
+    EntryRelocated(u64),
     /// The body at this entry holds more instructions than [`BODY_INSTRUCTIONS`].
     Oversized(u64),
 }
@@ -224,6 +237,10 @@ impl std::fmt::Display for BodyError {
                 "the file holds no bytes at {addr:#x}: the loader fills zeros there"
             ),
             Self::EntryUndecodable(addr) => write!(f, "no instruction decodes at {addr:#x}"),
+            Self::EntryRelocated(addr) => write!(
+                f,
+                "the instruction at {addr:#x} holds a field the loader writes with no value the container states"
+            ),
             Self::Oversized(addr) => write!(
                 f,
                 "the body at {addr:#x} holds more than {BODY_INSTRUCTIONS} instructions, the budget no function reaches"
@@ -461,6 +478,7 @@ impl Walk {
                 Some(UnresolvedReason::Unmapped) => BodyError::EntryUnmapped(entry),
                 Some(UnresolvedReason::NotExecutable) => BodyError::EntryNotExecutable(entry),
                 Some(UnresolvedReason::Unbacked) => BodyError::EntryUnbacked(entry),
+                Some(UnresolvedReason::Relocated) => BodyError::EntryRelocated(entry),
                 _ => BodyError::EntryUndecodable(entry),
             });
         };
@@ -528,9 +546,12 @@ impl Walk {
         }
         window.truncate(held);
         let available = window.len();
+        // What runs is what the loader leaves, so a field it writes decodes as the value it writes.
+        let endian = disasm.arch_spec().memory_endianness;
+        let code = crate::stated::code(program.loader_writes(), addr, window, endian);
         // Sleigh fetches a whole window whatever the instruction needs, so a
         // short one is padded and the decoded size checked against what is real.
-        let mut fetch = window;
+        let mut fetch = code.bytes.clone();
         fetch.resize(WINDOW, 0);
 
         // The decoder's context continues where this follows the last decode, exactly as a block lift of the same bytes would.
@@ -542,6 +563,9 @@ impl Walk {
         }
         if lifted.size as usize > available {
             return self.stop(addr, UnresolvedReason::Truncated);
+        }
+        if code.unstated(&(addr..addr + u64::from(lifted.size))) {
+            return self.stop(addr, UnresolvedReason::Relocated);
         }
 
         // Whether a call comes back is the callee's fact, decided where it is recorded.

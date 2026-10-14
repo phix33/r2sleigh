@@ -29,6 +29,7 @@ pub(crate) fn read(
     data: &[u8],
     placed: &dyn Fn(&object::read::Section<'_, '_>) -> u64,
     linkage: u64,
+    common: &dyn Fn(u32) -> Option<u64>,
     pointer: u64,
 ) -> Loaded {
     let relocatable = file.kind() == object::ObjectKind::Relocatable;
@@ -39,7 +40,11 @@ pub(crate) fn read(
                     .ok()
                     .map(|section| placed(&section))
             };
-            let linked = elf::linked(file, &at, linkage, pointer);
+            let placing = elf::Placing {
+                section: &at,
+                common,
+            };
+            let linked = elf::linked(file, &placing, linkage, pointer);
             return Loaded {
                 relocations: linked.relocations,
                 writes: composed(linked.writes, Vec::new()),

@@ -553,7 +553,7 @@ pub(super) struct Linked {
 /// A relocatable object's records, each at the place `at` gives its section, and what a static link puts at `linkage` for them.
 pub(super) fn linked(
     file: &object::File<'_>,
-    at: &dyn Fn(object::SectionIndex) -> Option<u64>,
+    at: &Placing<'_>,
     linkage: u64,
     pointer: u64,
 ) -> Linked {
@@ -567,6 +567,12 @@ pub(super) fn linked(
             targets: Vec::new(),
         },
     }
+}
+
+/// Where the reader puts an object's sections, and each common symbol of its symbol table by index.
+pub(super) struct Placing<'a> {
+    pub section: &'a dyn Fn(object::SectionIndex) -> Option<u64>,
+    pub common: &'a dyn Fn(u32) -> Option<u64>,
 }
 
 /// What a relocatable object's symbol is once its sections are placed.
@@ -591,7 +597,8 @@ struct Bind {
 
 impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
     /// Every record of every relocation section, the stub and slot each import and table read needs, and what each writes.
-    fn linked(&self, at: &dyn Fn(object::SectionIndex) -> Option<u64>, linkage: u64) -> Linked {
+    fn linked(&self, placing: &Placing<'_>, linkage: u64) -> Linked {
+        let at = placing.section;
         let endian = self.endian;
         let table = self.file.elf_section_table();
         let machine = self.file.elf_header().e_machine(endian);
@@ -632,7 +639,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                     Applies::Unknown => Encoding::Typed,
                     _ => encoding,
                 };
-                let (symbol, bound) = self.bound(symbols, index, at);
+                let (symbol, bound) = self.bound(symbols, index, placing);
                 let implicit = || {
                     let word = held?.checked_add(offset)?;
                     (encoding != Encoding::Typed)
@@ -780,11 +787,16 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                     },
                     _ => WriteKind::Unknown,
                 };
+                // An object's bytes hold no value a link has not written, so a write it states no value for is no word the file holds.
+                let encoding = match kind {
+                    WriteKind::Unknown => Encoding::Typed,
+                    _ => record.encoding,
+                };
                 writes.push(LoaderWrite {
                     place: record.vaddr,
                     width: record.width,
                     kind,
-                    encoding: record.encoding,
+                    encoding,
                 });
             }
             relocations.push(bind.record);
@@ -803,7 +815,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
         &self,
         (symbols, table): (usize, Option<&object::read::elf::SymbolTable<'data, E, R>>),
         index: u32,
-        at: &dyn Fn(object::SectionIndex) -> Option<u64>,
+        placing: &Placing<'_>,
     ) -> (Option<RelocationSymbol>, Bound) {
         let endian = self.endian;
         let sections = self.file.elf_section_table();
@@ -841,13 +853,19 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
         let value: u64 = symbol.st_value(endian).into();
         let bound = if symbol.is_undefined(endian) {
             Bound::Import(symbols, index)
+        } else if symbol.is_common(endian) {
+            // The reader allocates it as the static linker would, at the size and alignment it states.
+            match (placing.common)(index) {
+                Some(address) => Bound::At { address, weak },
+                None => Bound::Unplaced,
+            }
         } else if symbol.is_absolute(endian) {
             Bound::At {
                 address: value,
                 weak,
             }
         } else {
-            match section.and_then(at) {
+            match section.and_then(placing.section) {
                 Some(base) => Bound::At {
                     address: base.wrapping_add(value),
                     weak,
