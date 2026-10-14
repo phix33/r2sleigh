@@ -342,8 +342,9 @@ pub struct CallsiteCertificate {
     pub arguments_complete: bool,
     /// Whether every result value the caller observes was proved.
     pub results_complete: bool,
-    /// Whether a prototype or the callee's own interface describes the call, rather than its arity being read off the registers written before it.
-    pub described: bool,
+    /// The one "arguments proven" verdict, the boundary's (audit D3): `argument_values` are the
+    /// callee's arguments. r2engine's annotations and r2dec's calls both read it.
+    pub arguments_proven: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1218,7 +1219,7 @@ pub(crate) fn collect_prepared_function_certificates(
                     argument_certificates,
                     arguments_complete,
                     results_complete,
-                    described: boundary.is_some_and(|boundary| boundary.described),
+                    arguments_proven: boundary.is_some_and(|boundary| boundary.arguments_proven),
                 },
             )
         })

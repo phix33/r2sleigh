@@ -2604,6 +2604,15 @@ impl TrustedSsaArtifact {
         machine_context.set_result_owners(result_owners);
         machine_context.set_arity_owners(arity_owners);
         machine_context.set_result_ambiguous(result_ambiguous);
+        // A call to this function itself is stated by the interface just settled, where it mints none.
+        let mut callee_statements = callee_statements;
+        let entry = source.image().entry_address();
+        if let Some(own) = machine_context.function_interface()
+            && !callee_interfaces.contains_key(&entry)
+        {
+            let own = BTreeMap::from([(entry, own.clone())]);
+            callee_statements.extend(crate::machine_context::CalleeStatement::of(&own));
+        }
         machine_context.set_callee_statements(&callee_statements);
         machine_context.set_slot_targets(correlated_call_sites.slot_targets);
         machine_context.set_frame_saves(source.image().frame_saves());

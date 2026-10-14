@@ -279,10 +279,9 @@ enum Unplanned {
     /// A jump r2ssa found no call at: no refusal.
     NotACall,
     NoCertificate,
-    ArgumentsIncomplete,
+    /// r2ssa's verdict: the callee does not state these are its arguments.
+    ArgumentsUnproven,
     ResultsIncomplete,
-    /// No convention describes the call, and the function has no interface of its own.
-    Undescribed,
     NoCallee,
     /// The obligations name more than the one value the boundary defines after the call.
     ResultUnclear,
@@ -318,19 +317,9 @@ fn planned(
     let site = (artifact.facts().call_sites.by_inst.get(inst)).ok_or(Unplanned::NotACall)?;
     let certificate =
         (artifact.certificates().callsites.get(site)).ok_or(Unplanned::NoCertificate)?;
-    // r2ssa states every argument and result, or refuses where a pass-through or gap leaves one open.
-    check(
-        certificate.arguments_complete,
-        Unplanned::ArgumentsIncomplete,
-    )?;
+    // r2ssa's one verdict says the arguments are the callee's; r2dec derives none of its own (D3).
+    check(certificate.arguments_proven, Unplanned::ArgumentsUnproven)?;
     check(certificate.results_complete, Unplanned::ResultsIncomplete)?;
-    // Without the function's own interface, an undescribed call's arity drops a parameter it
-    // passes through unwritten (boundaries.rs, convention_call_boundary); that count is no proof.
-    let own_interface = artifact.machine_context().function_interface().is_some();
-    check(
-        certificate.described || own_interface,
-        Unplanned::Undescribed,
-    )?;
     let graph = artifact.graph();
     let identity = resolution.and_then(|resolution| resolution.identity_for_callsite(inst));
     let callee = callee(certificate, identity, graph, inst).ok_or(Unplanned::NoCallee)?;

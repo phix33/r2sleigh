@@ -487,15 +487,17 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
     assert!(!call_store.contains("r2sleigh_residual"), "{call_store}");
 }
 
-/// An indirect call goes through its target value, cast to the function type its classes state:
-/// `_init` calls `__gmon_start__` through the pointer it loads, where one is linked.
+/// An indirect call nothing describes takes no arity from the registers written before it: `_init`
+/// calls `__gmon_start__` through the pointer it loads, and the call is a residual, never
+/// `((uint64_t(*)(void))rax_1)()` (audit D3).
 #[test]
-fn a_staged_indirect_call_goes_through_its_target_value() {
+fn an_indirect_call_nothing_describes_is_a_residual() {
     let staged = r2s("pdd @ 0x401000");
+    assert!(!staged.out.contains("(*)("), "{}", staged.out);
     assert!(
         staged
             .out
-            .contains("((uint64_t(*)(void))(uint64_t)rax_1)();"),
+            .contains("r2dec gap: CallNotRendered at 0x401014"),
         "{}",
         staged.out
     );
@@ -555,7 +557,7 @@ fn a_staged_ledger_elides_what_the_certificates_elide() {
     assert!(
         staged
             .out
-            .contains("22 source obligations: 12 rendered, 10 elided, 0 refused;"),
+            .contains("22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual;"),
         "{}",
         staged.out
     );
@@ -1165,7 +1167,7 @@ mod listing {
 /// An aarch64 Mach-O whose dispatcher calls through a table of function
 /// pointers, which is the shape the engine has to derive for itself.
 mod dispatch_table {
-    use super::{Run, common, on};
+    use super::{Run, on};
     use std::path::PathBuf;
 
     fn fixture() -> PathBuf {
@@ -1186,40 +1188,15 @@ mod dispatch_table {
         assert!(!run.out.contains("= X1_0;"), "{}", run.out);
     }
 
+    /// A call through a table entry no prototype describes is shown unproven, never cast to the
+    /// arity the caller's registers suggest (audit D3); the entries' common prototype is SM's.
     #[test]
-    fn a_call_through_a_table_renders_as_a_call_through_a_pointer() {
+    fn a_call_through_a_table_is_shown_unproven() {
         let run = r2s("s 0x100000420; pdd");
         assert!(run.ok, "{}", run.out);
-        // The dispatcher loads an entry and calls it. Spelling that as a
-        // function-pointer call is the proof the target came from the table
-        // rather than from a guess.
         assert!(run.out.contains("_table_dispatch("), "{}", run.out);
-        // The entry loaded from the table is cast to a two-argument function and called with two.
-        let call = run
-            .out
-            .lines()
-            .find(|line| line.contains("(*)(") && line.trim_end().ends_with(");"))
-            .unwrap_or_else(|| panic!("no call through a pointer: {}", run.out));
-        let pointer = call.split_once("(*)(").map_or("", |(_, rest)| rest);
-        let parameters = pointer.split_once(')').map_or("", |(list, _)| list);
-        assert_eq!(parameters.split(", ").count(), 2, "{call}");
-        let open = call.rfind(")(").map_or(0, |at| at + 1);
-        let arguments = common::arguments_at(call, open);
-        assert_eq!(arguments.len(), 2, "{call}");
-        // The first argument is x0 on entry: the first parameter, through its spill and the loop.
-        let parameters = common::parameter_names(&run.out);
-        assert_eq!(parameters.len(), 2, "{}", run.out);
-        assert!(
-            common::starts_from(&run.out, &arguments[0], &parameters[0]),
-            "{} does not start from {}: {}",
-            arguments[0],
-            parameters[0],
-            run.out
-        );
-        assert!(
-            !common::starts_from(&run.out, &arguments[1], &parameters[0]),
-            "{call}"
-        );
+        assert!(!run.out.contains("(*)("), "{}", run.out);
+        assert!(run.out.contains("CallNotRendered"), "{}", run.out);
         assert!(run.out.contains("0 refused"), "{}", run.out);
     }
 

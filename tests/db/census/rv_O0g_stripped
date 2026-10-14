@@ -43,17 +43,17 @@ EXPECT=<<EOF
 uint64_t fcn_1000(void)
 {
     uint64_t rax_1;
-    uint64_t rax_2;
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 22 source obligations: 12 rendered, 10 elided, 0 refused; 6 statements rendered */
+    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 5 statements rendered; 1 never assigned, read as residuals (RAX_2) */
     {
         rax_1 = r2sleigh_load_u64((void*)(uint64_t)0x3fe8U);
         if ((uint8_t)((uint64_t)rax_1 == (uint64_t)0U)) {
             rax_3 = rax_1;
         } else {
-            rax_2 = ((uint64_t(*)(void))(uint64_t)rax_1)();
-            rax_3 = rax_2;
+            r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1014:4 covering 1 op (render::values) */
+            r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x1014:10 covering 1 op (render::values) */
+            rax_3 = r2sleigh_residual_u64(3);
         }
         {
             return (uint64_t)rax_3;
@@ -750,13 +750,10 @@ CMDS=aa; pdd @ 0x00001521
 EXPECT=<<EOF
 uint64_t fcn_1521(uint64_t arg0, uint32_t arg1)
 {
-    uint32_t tmp_lane_1521_18_2_1;
-
-    /* r2dec proof: 1 construct is marked below; 24 source obligations: 12 rendered, 10 elided, 0 refused, 2 residual; 3 statements rendered */
+    /* r2dec proof: 2 constructs are marked below; 24 source obligations: 0 rendered, 10 elided, 0 refused, 14 residual; 1 statements rendered */
     {
-        tmp_lane_1521_18_2_1 = (uint32_t)((uint64_t)((uint64_t)(uint32_t)arg1 + (uint64_t)1U) >> 0U);
-        ((void(*)(uint64_t, uint64_t, uint64_t, uint64_t))(uint64_t)arg0)((uint64_t)(uint32_t)arg1, (uint64_t)(uint32_t)tmp_lane_1521_18_2_1, arg0, (uint64_t)(uint32_t)tmp_lane_1521_18_2_1);
-        return r2sleigh_residual_u64(1);
+        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1521:48 covering 1 op (render::values) */
+        return r2sleigh_residual_u64(2);
     }
 }
 

@@ -685,8 +685,10 @@ pub struct SourceCallBoundaryFact {
     /// away a proven result because an argument beside it was unproven.
     pub arguments_complete: bool,
     pub results_complete: bool,
-    /// Whether a prototype or the callee's own interface describes the call, rather than its arity being read off the registers written before it.
-    pub described: bool,
+    /// The one "arguments proven" verdict (audit D3): the callee states how many arguments it
+    /// takes (a prototype, its exact interface or statement, or a floor no written slot passes)
+    /// and each reaches the call. An arity read off the registers written before it is none.
+    pub arguments_proven: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

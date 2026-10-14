@@ -58,17 +58,17 @@ EXPECT=<<EOF
 uint64_t _init(void)
 {
     uint64_t rax_1;
-    uint64_t rax_2;
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 22 source obligations: 12 rendered, 10 elided, 0 refused; 6 statements rendered */
+    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 5 statements rendered; 1 never assigned, read as residuals (RAX_2) */
     {
         rax_1 = r2sleigh_load_u64((void*)(uint64_t)0x404fe0U);
         if ((uint8_t)((uint64_t)rax_1 == (uint64_t)0U)) {
             rax_3 = rax_1;
         } else {
-            rax_2 = ((uint64_t(*)(void))(uint64_t)rax_1)();
-            rax_3 = rax_2;
+            r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401014:4 covering 1 op (render::values) */
+            r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401014:10 covering 1 op (render::values) */
+            rax_3 = r2sleigh_residual_u64(3);
         }
         {
             return (uint64_t)rax_3;
@@ -1452,16 +1452,10 @@ uint64_t shape_function_pointer(uint64_t arg0, uint64_t arg1)
     __uint128_t tmp_53d80_1;
     uint64_t rdx_3;
     uint64_t rdx_4;
-    uint32_t tmp_11f00_3;
-    uint64_t tmp_11f80_5;
-    uint64_t tmp_4a00_2;
-    uint64_t tmp_11f80_6;
-    uint64_t tmp_11f80_7;
-    uint64_t rax_13;
     uint32_t tmp_6a80_4;
     _Alignas(16) uint8_t frame[104];
 
-    /* r2dec proof: no individual construct is marked; 105 source obligations: 67 rendered, 33 elided, 0 refused, 5 compiler-inserted (assuming ub-free); 31 statements rendered; the result's second register is open: no call read decides it */
+    /* r2dec proof: 3 constructs are marked below; 105 source obligations: 45 rendered, 33 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 22 residual; 25 statements rendered; 1 never assigned, read as residuals (RAX_13); the result's second register is open: no call read decides it */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 24U), (uint64_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)arg1);
@@ -1481,13 +1475,9 @@ uint64_t shape_function_pointer(uint64_t arg0, uint64_t arg1)
                 rdx_3 = (uint64_t)((__uint128_t)tmp_53d80_1 >> 64U);
                 rdx_4 = (uint64_t)(uint32_t)1U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_3 >> (uint64_t)(uint32_t)1U);
                 r2sleigh_store_u64((void*)(uint64_t)(frame + 56U), (uint64_t)r2sleigh_load_u64((void*)((uint64_t)(frame + 64U) + (uint64_t)((uint64_t)((uint64_t)((uint64_t)tmp_4a00_1 - (uint64_t)rdx_4) - (uint64_t)rdx_4) - (uint64_t)rdx_4) * 8U)));
-                tmp_11f00_3 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
-                tmp_11f80_5 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
-                tmp_4a00_2 = (uint64_t)((uint64_t)(uint32_t)tmp_11f00_3 + (uint64_t)tmp_11f80_5);
-                tmp_11f80_6 = r2sleigh_load_u64((void*)(uint64_t)(frame + 48U));
-                tmp_11f80_7 = r2sleigh_load_u64((void*)(uint64_t)(frame + 56U));
-                rax_13 = ((uint64_t(*)(uint64_t, uint64_t, uint64_t, uint64_t))(uint64_t)tmp_11f80_7)(tmp_11f80_6, tmp_4a00_2, tmp_11f80_7, tmp_4a00_2);
-                r2sleigh_store_u64((void*)(uint64_t)(frame + 48U), (uint64_t)rax_13);
+                r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x402125:92 covering 1 op (render::values) */
+                r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x402125:98 covering 1 op (render::values) */
+                r2sleigh_store_u64((void*)(uint64_t)(frame + 48U), (uint64_t)r2sleigh_residual_u64(3));
                 tmp_6a80_4 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
                 r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)tmp_6a80_4 + (uint32_t)1U));
             } else {

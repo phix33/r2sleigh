@@ -1199,7 +1199,7 @@ pub(crate) fn collect_source_boundary_facts(
             complete: false,
             arguments_complete: false,
             results_complete: false,
-            described: false,
+            arguments_proven: false,
         };
         if let Some((machine_context, interface)) = machine_context.and_then(|context| {
             call_site
@@ -1209,7 +1209,6 @@ pub(crate) fn collect_source_boundary_facts(
         }) {
             boundary.calling_convention = Some(interface.calling_convention().to_string());
             boundary.variadic = Some(interface.is_variadic());
-            boundary.described = true;
             boundary.noreturn = Some(interface.is_noreturn());
             boundary.result_kind = Some(interface.result());
             if interface.is_complete()
@@ -1415,6 +1414,7 @@ pub(crate) fn collect_source_boundary_facts(
                     boundary.results = results;
                 }
                 boundary.arguments_complete = arguments_complete;
+                boundary.arguments_proven = arguments_complete;
                 boundary.results_complete = results_complete;
                 boundary.complete = arguments_complete && results_complete;
             }
@@ -1479,6 +1479,8 @@ pub(crate) fn collect_source_boundary_facts(
                         });
                 boundary.results = convention.results;
                 boundary.arguments_complete = convention.arguments_proven;
+                // A count no callee statement bounds is the caller's registers, not the callee's arity.
+                boundary.arguments_proven = convention.arguments_proven && stated.is_some();
                 boundary.results_complete = true;
                 boundary.complete = convention.arguments_proven;
             }

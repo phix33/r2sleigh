@@ -2552,7 +2552,7 @@ mod tests {
                 complete: true,
                 arguments_complete: true,
                 results_complete: true,
-                described: true,
+                arguments_proven: true,
             },
         );
         boundaries

@@ -386,12 +386,13 @@ fn a_callee_whose_analysis_panics_is_unread_with_where_and_its_caller_renders() 
         )),
         "{unread}"
     );
+    // Nothing states what the unread callee takes, so its call is a residual, never the caller's
+    // registers spelled as its arguments (audit D3).
     let response = decompile(&target, &PanickingCallee, BASE).expect("the caller renders");
-    assert!(
-        response.output.text().contains("fcn_100a("),
-        "{}",
-        response.output
-    );
+    let text = response.output.text();
+    assert!(response.output.function().is_some(), "{text}");
+    assert!(!text.contains("fcn_100a("), "{text}");
+    assert!(text.contains("r2sleigh_residual"), "{text}");
 }
 
 /// The emission a response carries: the unit, its lines, its names.
@@ -980,7 +981,8 @@ fn a_function_is_decompiled_on_aarch64_too() {
 }
 
 /// An AArch64 `blr` records no `CallRestore`: the pointer entering it is read from the function's
-/// solve of `sp` across a merge, so the slot stored at `[sp]` is the call's ninth argument.
+/// solve of `sp` across a merge, so the slot stored at `[sp]` is the call's ninth argument. Nothing
+/// states what `x9` takes, so the nine are shown and never proven (audit D3).
 #[test]
 fn an_aarch64_call_past_a_merge_reads_its_stack_argument_from_the_reaching_stack_pointer() {
     const NINE_ARGUMENTS: &[u8] = &[
@@ -1010,13 +1012,19 @@ fn an_aarch64_call_past_a_merge_reads_its_stack_argument_from_the_reaching_stack
         bytes: NINE_ARGUMENTS.to_vec(),
         name: "nine",
     };
-    let response = decompile(&target, &program, BASE).expect("decompile");
-    let text = response.output.text();
-    let call = (text.lines())
-        .find(|line| line.contains("(1, 2, 3, 4, 5, 6, 7, 8, "))
-        .unwrap_or_else(|| panic!("no nine-argument call: {text}"));
-    let ninth = call.rsplit(", ").next().unwrap().trim_end_matches(");");
-    assert!(text.contains(&format!("{ninth} = ")), "{text}");
+    let prepared = r2engine::native::analysed(&target, &program, BASE).expect("it prepares");
+    let artifact = prepared.artifact().shared_artifact();
+    let calls = &artifact.facts().boundaries.calls;
+    let [call] = calls.values().collect::<Vec<_>>()[..] else {
+        panic!("one call: {calls:?}");
+    };
+    assert_eq!(call.arguments.len(), 9, "{call:?}");
+    let ninth = &call.arguments[8];
+    assert!(
+        matches!(ninth.slot, r2ssa::CallBoundarySlot::Stack(_)),
+        "{call:?}"
+    );
+    assert!(!call.arguments_proven, "{call:?}");
 }
 
 /// A lane written into a vector register whose other bytes nobody reads.
