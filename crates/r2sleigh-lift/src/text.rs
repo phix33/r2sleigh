@@ -42,6 +42,7 @@ pub fn format_op(disasm: &Disassembler, op: &R2ILOp) -> String {
             )
         }
         Fence { ordering } => format!("Fence {{ ordering: {:?} }}", ordering),
+        ClearExclusive => "ClearExclusive".to_string(),
         LoadLinked {
             dst,
             space,

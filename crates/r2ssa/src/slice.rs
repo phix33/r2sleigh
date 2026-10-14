@@ -267,6 +267,7 @@ fn operation_kind<V>(op: &crate::SSAOp<V>) -> &'static str {
                 crate::SSAOp::Nop => "Nop",
                 crate::SSAOp::Unimplemented => "Unimplemented",
                 crate::SSAOp::Breakpoint => "Breakpoint",
+                crate::SSAOp::ClearExclusive => "ClearExclusive",
             }
         };
     }

@@ -111,6 +111,14 @@ fn an_aarch64_load_exclusive_is_one_linked_load() {
     }
 }
 
+/// AArch64 `clrex`, with or without its ignored immediate, is the one clear of the monitor.
+#[test]
+fn an_aarch64_clrex_clears_the_monitor() {
+    for word in [0xd503_3f5f, 0xd503_305f] {
+        assert_eq!(aarch64(word), vec![R2ILOp::ClearExclusive], "{word:#x}");
+    }
+}
+
 /// Each AArch64 store-exclusive is one conditional store of its access width at `[Xn]`, a pair's
 /// second register stored under its success, and the status register the negation of that
 /// success: no branch, no user operation, no store that happens either way.

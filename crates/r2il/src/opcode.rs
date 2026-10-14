@@ -139,6 +139,9 @@ pub enum R2ILOp {
     /// Memory fence/barrier with ordering semantics.
     Fence { ordering: MemoryOrdering },
 
+    /// Clears the exclusive monitor a linked load set, so the next conditional store fails.
+    ClearExclusive,
+
     /// Linked load from memory: dst = LL(*[space]addr).
     LoadLinked {
         dst: Varnode,
@@ -935,7 +938,7 @@ impl R2ILOp {
                 &transfer.count,
                 &transfer.direction,
             ],
-            R2ILOp::Fence { .. } => vec![],
+            R2ILOp::Fence { .. } | R2ILOp::ClearExclusive => vec![],
             R2ILOp::LoadLinked { addr, .. } => vec![addr],
             R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
             R2ILOp::AtomicCAS {
@@ -1069,7 +1072,7 @@ impl R2ILOp {
                 } = transfer.as_mut();
                 vec![destination, source, count, direction]
             }
-            R2ILOp::Fence { .. } => vec![],
+            R2ILOp::Fence { .. } | R2ILOp::ClearExclusive => vec![],
             R2ILOp::LoadLinked { addr, .. } => vec![addr],
             R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
             R2ILOp::AtomicCAS {
@@ -1224,6 +1227,7 @@ impl std::fmt::Display for R2ILOp {
                 write!(f, "STORE [{}]{} = {}", space, addr, val)
             }
             R2ILOp::Fence { ordering } => write!(f, "FENCE({ordering:?})"),
+            R2ILOp::ClearExclusive => write!(f, "CLEAR_EXCLUSIVE"),
             R2ILOp::LoadLinked {
                 dst,
                 space,

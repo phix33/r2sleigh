@@ -36,6 +36,8 @@ pub(crate) enum ModelledUserOperation {
     Trap,
     /// ARM `bx` switching instruction set, which the p-code has already done.
     SetIsaMode,
+    /// ARM and AArch64 `clrex`: the exclusive monitor a linked load set is cleared.
+    ClearExclusive,
     /// x86 `PMOVSX*` / `PMOVZX*`.
     PackedExtension(PackedExtension),
     /// x86 `PSHUFLW`, `PSHUFHW` and `PSHUFW`.
@@ -362,7 +364,7 @@ const WORD_SHUFFLES: [(&str, ShuffledQuadword, EncodingForm); 11] = [
 
 /// The operations outside the packed-extension family, by the exact name the
 /// specification declares.
-const NAMED: [(&str, ModelledUserOperation); 13] = [
+const NAMED: [(&str, ModelledUserOperation); 14] = [
     ("NEON_ext", ModelledUserOperation::NeonExt),
     ("NEON_ushl", ModelledUserOperation::NeonUshl),
     ("NEON_rev64", ModelledUserOperation::NeonRev64),
@@ -386,6 +388,7 @@ const NAMED: [(&str, ModelledUserOperation); 13] = [
     // x86 `ud0`, `ud1` and `ud2`.
     ("invalidInstructionException", ModelledUserOperation::Trap),
     ("setISAMode", ModelledUserOperation::SetIsaMode),
+    ("ClearExclusiveLocal", ModelledUserOperation::ClearExclusive),
 ];
 
 /// Every modelled operation with the exact name it is declared under.

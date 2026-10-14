@@ -743,6 +743,7 @@ fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> 
                 state.write(result, u128::from(took))?;
             }
         }
+        R2ILOp::ClearExclusive => state.monitor = None,
         R2ILOp::BlockTransfer(transfer) if transfer.space == SpaceId::Ram => {
             block(transfer, state)?;
         }
@@ -1056,8 +1057,8 @@ mod tests {
         assert_eq!(step(&ops[0], &mut state), Flow::Stop(Stop::Undefined));
     }
 
-    /// A conditional store takes, answering 1, only after a linked load of its address and width;
-    /// it clears the mark either way, so a second one fails, answers 0 and writes nothing.
+    /// A conditional store takes, answering 1, only after a linked load of its address and width
+    /// with no clear between; it clears the mark either way, so a second one fails and writes nothing.
     #[test]
     fn a_conditional_store_takes_only_after_a_linked_load_of_its_address() {
         let (addr, val, ok) = (
@@ -1093,6 +1094,11 @@ mod tests {
                 written,
             ),
             (vec![conditional.clone()], 0, untouched),
+            (
+                vec![linked(0x200), R2ILOp::ClearExclusive, conditional.clone()],
+                0,
+                untouched,
+            ),
             (vec![linked(0x208), conditional.clone()], 0, untouched),
             (vec![wide_linked, conditional.clone()], 0, untouched),
         ] {
