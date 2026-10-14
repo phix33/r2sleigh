@@ -630,7 +630,8 @@ fn a_staged_tail_call_returns_its_callee_s_result() {
 }
 
 /// A staged control residual says why in `pddj` (an untargeted `jmp rax`, an unproven return),
-/// and the proof counts no residual the text does not hold.
+/// and the proof counts no residual the text does not hold. `__do_global_dtors_aux`'s calls to
+/// floors past their floor are gaps beside its unproven returns (audit W7).
 #[test]
 fn a_staged_control_residual_states_its_cause() {
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
@@ -647,9 +648,13 @@ fn a_staged_control_residual_states_its_cause() {
             serde_json::from_str(staged.out.trim()).expect("pddj is JSON");
         let residuals = answer["residuals"].as_array().expect("residuals");
         assert!(!residuals.is_empty(), "{function}: {answer}");
-        for residual in residuals {
-            assert_eq!(residual["cause"], cause, "{function}: {residual}");
-            assert_eq!(residual["gap"].as_str(), gap, "{function}: {residual}");
+        let stated = |residual: &&serde_json::Value| {
+            residual["cause"] == cause && residual["gap"].as_str() == gap
+        };
+        assert!(residuals.iter().any(|r| stated(&r)), "{function}: {answer}");
+        for residual in residuals.iter().filter(|r| !stated(r)) {
+            assert_eq!(residual["cause"], "gap", "{function}: {residual}");
+            assert!(residual["gap"].is_string(), "{function}: {residual}");
         }
     }
 }

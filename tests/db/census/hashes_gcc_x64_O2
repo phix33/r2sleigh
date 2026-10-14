@@ -86,7 +86,7 @@ uint32_t fcn_401050(void)
     uint64_t adler32(uint64_t, uint64_t);
     uint64_t combined(uint64_t, uint64_t);
     uint32_t crc32_bitwise(uint64_t, uint64_t);
-    uint64_t crc32_init(uint64_t, uint64_t);
+    uint64_t crc32_init(void);
     uint32_t crc32_table(uint64_t, uint64_t);
     uint64_t djb2(uint64_t, uint64_t);
     uint64_t fletcher32(uint64_t, uint64_t);
@@ -112,10 +112,10 @@ uint32_t fcn_401050(void)
     uint64_t rax_35;
     uint64_t rax_38;
 
-    /* r2dec proof: no individual construct is marked; 322 source obligations: 235 rendered, 87 elided, 0 refused; 28 statements rendered; 13 callee prototypes supplied by the source */
+    /* r2dec proof: no individual construct is marked; 320 source obligations: 233 rendered, 87 elided, 0 refused; 28 statements rendered; 13 callee prototypes supplied by the source */
     /* symbol `main`; C allows that name no other prototype */
     {
-        crc32_init(0x402060, 61);
+        crc32_init();
         rax_2 = fnv1a32(0x402060, 61);
         __printf_chk(2, "fnv1a32     %08x\n", (uint64_t)(uint32_t)((uint64_t)rax_2 >> 0U));
         rax_5 = fnv1a64(0x402060, 61);
@@ -259,12 +259,12 @@ CMDS=aa; pdd @ 0x004012f0
 EXPECT=<<EOF
 uint64_t __do_global_dtors_aux(void)
 {
-    uint64_t deregister_tm_clones(void);
+    void deregister_tm_clones(void);
     extern char completed_0[];
 
     uint8_t tmp_3e180_1;
 
-    /* r2dec proof: 2 constructs are marked below; 26 source obligations: 10 rendered, 12 elided, 0 refused, 4 residual; 6 statements rendered; 1 data object type refused */
+    /* r2dec proof: 2 constructs are marked below; 24 source obligations: 8 rendered, 12 elided, 0 refused, 4 residual; 6 statements rendered; 1 data object type refused */
     {
         tmp_3e180_1 = r2sleigh_load_u8((void*)&completed_0);
         if ((uint8_t)((uint8_t)tmp_3e180_1 != (uint8_t)0U)) {

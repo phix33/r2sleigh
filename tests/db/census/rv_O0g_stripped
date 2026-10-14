@@ -189,13 +189,12 @@ EXPECT=<<EOF
 uint64_t entry_fini0(void)
 {
     void __cxa_finalize(uint64_t);
-    uint64_t fcn_10f0(void);
 
     uint8_t tmp_3e180_1;
     uint64_t tmp_3ea80_1;
     uint64_t rdi_1;
 
-    /* r2dec proof: 2 constructs are marked below; 39 source obligations: 19 rendered, 16 elided, 0 refused, 4 residual; 10 statements rendered */
+    /* r2dec proof: 3 constructs are marked below; 40 source obligations: 16 rendered, 17 elided, 0 refused, 7 residual; 9 statements rendered */
     {
         tmp_3e180_1 = r2sleigh_load_u8((void*)(uint64_t)0x4020U);
         if ((uint8_t)((uint8_t)tmp_3e180_1 != (uint8_t)0U)) {
@@ -208,9 +207,9 @@ uint64_t entry_fini0(void)
                 __cxa_finalize(rdi_1);
             }
             {
-                fcn_10f0();
+                r2sleigh_residual_void(2); /* r2dec gap: UnsupportedInstruction at 0x1187:17 covering 1 op (render::values) */
                 r2sleigh_store_u8((void*)(uint64_t)0x4020U, (uint8_t)1U);
-                return r2sleigh_residual_u64(2);
+                return r2sleigh_residual_u64(3);
             }
         }
     }

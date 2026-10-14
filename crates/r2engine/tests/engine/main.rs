@@ -3,6 +3,7 @@
 mod common;
 
 mod architecture;
+mod arity;
 mod arm;
 mod body;
 mod control;

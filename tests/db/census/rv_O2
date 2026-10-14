@@ -140,7 +140,7 @@ uint32_t fcn_10c0(uint64_t arg0, uint64_t* arg1)
     uint64_t copy_name(uint64_t, uint64_t, uint64_t);
     uint64_t dispatch(uint64_t, uint64_t, uint64_t);
     uint64_t fact(uint32_t);
-    uint64_t fill(uint64_t, uint64_t);
+    uint64_t fill(uint64_t);
     uint64_t find(uint64_t, uint32_t, uint32_t);
     uint32_t list_len(uint64_t);
     uint64_t mul_div(uint64_t, uint64_t);
@@ -177,7 +177,7 @@ uint32_t fcn_10c0(uint64_t arg0, uint64_t* arg1)
     uint32_t tmp_lane_11c4_70_52_1;
     _Alignas(16) uint8_t frame[232];
 
-    /* r2dec proof: 2 constructs are marked below; 248 source obligations: 181 rendered, 60 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 2 residual; 41 statements rendered; 1 never assigned, read as residuals (XMM0_4); 1 data object type refused; 1 callee prototype supplied by the source; the result's second register is open: no call read decides it */
+    /* r2dec proof: 2 constructs are marked below; 247 source obligations: 180 rendered, 60 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 2 residual; 41 statements rendered; 1 never assigned, read as residuals (XMM0_4); 1 data object type refused; 1 callee prototype supplied by the source; the result's second register is open: no call read decides it */
     /* symbol `main`; C allows that name no other prototype */
     {
         tmp_lane_10c0_b_0_1 = (uint32_t)((uint64_t)arg0 >> 0U);
@@ -205,7 +205,7 @@ uint32_t fcn_10c0(uint64_t arg0, uint64_t* arg1)
         rax_12 = fact(5);
         tmp_lane_10c0_9f_1e_1 = (uint64_t)((__uint128_t)r2sleigh_residual_u128(1) >> 0U);
         rbx_3 = (uint64_t)(uint32_t)((uint32_t)((uint64_t)rax_12 >> 0U) + (uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint64_t)rax_6 >> 0U) + (uint32_t)((uint64_t)rax_7 >> 0U)) + (uint32_t)((uint64_t)rax_8 >> 0U)) + (uint32_t)((uint64_t)rax_9 >> 0U)) + (uint32_t)((uint64_t)rax_10 >> 0U)) + (uint32_t)(r2sleigh_float_from_bits_64(tmp_lane_10c0_9f_1e_1) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_lane_10c0_9f_1e_1) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_lane_10c0_9f_1e_1) : r2sleigh_residual_i32(2))));
-        fill((uint64_t)(uint32_t)tmp_lane_10c0_b_0_1, 3);
+        fill((uint64_t)(uint32_t)tmp_lane_10c0_b_0_1);
         rsi_6 = r2sleigh_load_u64((void*)&g_msg);
         if ((uint8_t)((int32_t)tmp_lane_10c0_b_0_1 <= (int32_t)1U)) {
             rsi_8 = rsi_6;
@@ -331,7 +331,6 @@ EXPECT=<<EOF
 uint64_t __do_global_dtors_aux(void)
 {
     void __cxa_finalize(uint64_t);
-    uint64_t deregister_tm_clones(void);
     extern char __dso_handle[];
     extern char __TMC_END__[];
 
@@ -339,7 +338,7 @@ uint64_t __do_global_dtors_aux(void)
     uint64_t tmp_3ea80_1;
     uint64_t rdi_1;
 
-    /* r2dec proof: 2 constructs are marked below; 39 source obligations: 19 rendered, 16 elided, 0 refused, 4 residual; 10 statements rendered; 2 data object types refused */
+    /* r2dec proof: 3 constructs are marked below; 40 source obligations: 16 rendered, 17 elided, 0 refused, 7 residual; 9 statements rendered; 2 data object types refused */
     {
         tmp_3e180_1 = r2sleigh_load_u8((void*)&__TMC_END__);
         if ((uint8_t)((uint8_t)tmp_3e180_1 != (uint8_t)0U)) {
@@ -352,9 +351,9 @@ uint64_t __do_global_dtors_aux(void)
                 __cxa_finalize(rdi_1);
             }
             {
-                deregister_tm_clones();
+                r2sleigh_residual_void(2); /* r2dec gap: UnsupportedInstruction at 0x1347:17 covering 1 op (render::values) */
                 r2sleigh_store_u8((void*)&__TMC_END__, (uint8_t)1U);
-                return r2sleigh_residual_u64(2);
+                return r2sleigh_residual_u64(3);
             }
         }
     }

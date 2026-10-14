@@ -225,12 +225,12 @@ CMDS=aa; pdd @ 0x00401140
 EXPECT=<<EOF
 uint64_t __do_global_dtors_aux(void)
 {
-    uint64_t deregister_tm_clones(void);
+    void deregister_tm_clones(void);
     extern char __TMC_END__[];
 
     uint8_t tmp_3e180_1;
 
-    /* r2dec proof: 2 constructs are marked below; 26 source obligations: 10 rendered, 12 elided, 0 refused, 4 residual; 6 statements rendered; 1 data object type refused */
+    /* r2dec proof: 2 constructs are marked below; 24 source obligations: 8 rendered, 12 elided, 0 refused, 4 residual; 6 statements rendered; 1 data object type refused */
     {
         tmp_3e180_1 = r2sleigh_load_u8((void*)&__TMC_END__);
         if ((uint8_t)((uint8_t)tmp_3e180_1 != (uint8_t)0U)) {

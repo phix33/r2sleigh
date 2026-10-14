@@ -783,8 +783,9 @@ fn body_writes(graph: &SsaGraph, slot: CanonicalStorageId) -> bool {
     })
 }
 
-/// The arity a call takes from the convention when no prototype describes it: the argument
-/// registers this body provably wrote before the call, and the result register where it is read.
+/// The arity a call takes from the convention when no prototype describes it: exactly what its
+/// callee's body states, or else the argument registers this body provably wrote before the call,
+/// never proven past a floor (ROADMAP P7); and the result register where it is read.
 pub(crate) fn convention_call_boundary(
     function: &SSAFunction,
     prep: Option<&crate::DecompilePrepFacts>,
@@ -793,12 +794,41 @@ pub(crate) fn convention_call_boundary(
     live_out: &crate::liveout::FunctionLiveOut,
     block_addr: u64,
     op_index: usize,
-    at_least: usize,
+    arity: Option<crate::SourceArity>,
     entry_values: &BTreeMap<CanonicalStorageId, Option<ValueId>>,
     written_anywhere: &mut BTreeMap<CanonicalStorageId, bool>,
     mut stack_pointer: Option<&mut ReachingStorage<'_>>,
 ) -> Option<ConventionCallBoundary> {
     let convention = machine_context.convention_slots()?;
+    let results = |convention: &r2source::SourceConventionSlots| {
+        convention
+            .result_slot()
+            .and_then(|storage| {
+                observed_convention_call_result_after_call(
+                    graph, live_out, block_addr, op_index, storage,
+                )
+            })
+            .into_iter()
+            .collect()
+    };
+    let at = CallPosition {
+        function,
+        prep,
+        graph,
+        block_addr,
+        op_index,
+    };
+    if let Some(crate::SourceArity::Exact(count)) = arity {
+        let (arguments, arguments_proven) =
+            stated_call_arguments(at, machine_context, count, entry_values, stack_pointer);
+        return Some(ConventionCallBoundary {
+            calling_convention: convention.calling_convention().to_string(),
+            arguments,
+            arguments_proven,
+            results: results(convention),
+        });
+    }
+    let at_least = arity.map_or(0, crate::SourceArity::floor);
     // Whether a call returns its result in `slot`: what a call leaves there is a value, elsewhere garbage.
     let result_slot = |slot: CanonicalStorageId| {
         machine_context
@@ -1020,22 +1050,94 @@ pub(crate) fn convention_call_boundary(
         }
     }
 
-    let results = convention
-        .result_slot()
-        .and_then(|storage| {
-            observed_convention_call_result_after_call(
-                graph, live_out, block_addr, op_index, storage,
-            )
-        })
-        .into_iter()
-        .collect();
-
     Some(ConventionCallBoundary {
         calling_convention: convention.calling_convention().to_string(),
         arguments,
         arguments_proven,
-        results,
+        results: results(convention),
     })
+}
+
+/// The `count` arguments a callee's body states it takes, as they reach the call, register slots
+/// first, then the argument area; and whether each was found. O(count) reaching walks.
+fn stated_call_arguments(
+    at: CallPosition<'_>,
+    machine_context: &SourceMachineContext,
+    count: usize,
+    entry_values: &BTreeMap<CanonicalStorageId, Option<ValueId>>,
+    mut stack_pointer: Option<&mut ReachingStorage<'_>>,
+) -> (Vec<SourceCallArgumentFact>, bool) {
+    let Some(convention) = machine_context.convention_slots() else {
+        return (Vec::new(), false);
+    };
+    let registers = convention.argument_slots();
+    let mut arguments = Vec::with_capacity(count);
+    for (position, slot) in registers.iter().take(count).enumerate() {
+        // The callee reads the slot whatever merges into it.
+        let reaching = reaching_abi_value_in_block_with_policy(
+            at.function,
+            at.prep,
+            at.graph,
+            machine_context,
+            at.block_addr,
+            at.op_index,
+            *slot,
+            true,
+        );
+        let value = match reaching {
+            Some(ReachingAbiState::Value(value)) => SourceCallArgumentValue::Value(value),
+            Some(ReachingAbiState::PreservedEntry) => {
+                entry_values.get(slot).copied().flatten().map_or(
+                    SourceCallArgumentValue::PreservedEntry,
+                    SourceCallArgumentValue::Value,
+                )
+            }
+            None => return (arguments, false),
+        };
+        let (value, lane_of) = super::shared::narrowed_argument(at.prep, at.graph, value, *slot);
+        let Ok(index) = u32::try_from(position) else {
+            return (arguments, false);
+        };
+        arguments.push(SourceCallArgumentFact {
+            slot: CallBoundarySlot::Register {
+                index,
+                storage: *slot,
+            },
+            value,
+            lane_of,
+        });
+    }
+    let stacked = count.saturating_sub(registers.len());
+    if stacked == 0 {
+        return (arguments, true);
+    }
+    let Some(placement) = convention.stack_arguments() else {
+        return (arguments, false);
+    };
+    let spent = machine_context.return_mechanism().map_or(0, |mechanism| {
+        i64::from(mechanism.stack_pointer_delta_bytes())
+    });
+    for position in 0..stacked {
+        let Some(offset) = placement.offset_of(position) else {
+            return (arguments, false);
+        };
+        let argument = StackArgument {
+            offset,
+            callee_offset: offset.saturating_add(spent),
+            size_bytes: placement.stride_bytes(),
+        };
+        let Some((value, entry_offset)) =
+            reaching_stack_argument_before_call(at, argument, stack_pointer.as_deref_mut())
+        else {
+            return (arguments, false);
+        };
+        arguments.push(SourceCallArgumentFact {
+            slot: CallBoundarySlot::Stack(entry_offset),
+            value: SourceCallArgumentValue::Value(value),
+            lane_of: None,
+        });
+    }
+    (arguments, true)
 }
 
 pub(crate) fn collect_source_boundary_facts(
@@ -1323,7 +1425,7 @@ pub(crate) fn collect_source_boundary_facts(
                 live_out,
                 block_addr,
                 op_index,
-                stated.map_or(0, |statement| statement.at_least),
+                stated.map(|statement| statement.arity),
                 &entry_values,
                 &mut written_anywhere,
                 stack_pointer_states.as_mut(),
@@ -1331,10 +1433,10 @@ pub(crate) fn collect_source_boundary_facts(
             // One record of what the fallback was asked and what it answered.
             r2il::refusal_evidence!(
                 "call-boundary-fallback",
-                "callsite ({block_addr:#x}, {op_index}) raw_identity={:?} target={:?} at_least={:?} interface={} built={} arguments={} results={}",
+                "callsite ({block_addr:#x}, {op_index}) raw_identity={:?} target={:?} arity={:?} interface={} built={} arguments={} results={}",
                 call_site.raw_identity,
                 call_site.direct_target,
-                stated.map(|statement| statement.at_least),
+                stated.map(|statement| statement.arity),
                 call_site
                     .raw_identity
                     .is_some_and(|identity| machine_context

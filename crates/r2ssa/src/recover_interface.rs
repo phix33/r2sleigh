@@ -1178,6 +1178,7 @@ pub(crate) fn recover_interface(
     let stated = Stated {
         loader_role,
         result_reads: None,
+        unseen: false,
     };
     recover_interface_inner(func, None, slots, None, stated)
 }
@@ -1187,13 +1188,17 @@ pub(crate) fn recover_interface(
 pub(crate) struct Stated {
     loader_role: Option<r2source::SourceLoaderRole>,
     result_reads: Option<r2source::SourceResultReads>,
+    /// Whether the walk left a transfer it did not follow: code no read sees may take more arguments.
+    unseen: bool,
 }
 
 impl Stated {
-    pub(crate) const fn of(function: &r2source::FunctionIdentity) -> Self {
+    pub(crate) fn of(source: &r2source::OwnedFunctionSnapshot) -> Self {
+        let function = source.function();
         Self {
             loader_role: function.loader_role(),
             result_reads: function.result_reads(),
+            unseen: (source.image().blocks().iter()).any(|block| block.transfer_unresolved()),
         }
     }
 }
@@ -1227,6 +1232,7 @@ fn recover_interface_inner(
     Stated {
         loader_role,
         result_reads,
+        unseen,
     }: Stated,
 ) -> Option<RecoveredInterface> {
     // A convention with no argument registers still places its arguments: x86
@@ -1588,37 +1594,11 @@ fn recover_interface_inner(
     };
     let parameters = in_order(slots.argument_slots());
     let integers = parameters.len();
-    let reads_past_parameters =
-        slots.argument_slots()[integers..].iter().any(|slot| {
-            reads
-                .iter()
-                .any(|read| observed_in_slot(*read, *slot, machine_context).is_some())
-        }) || entry_reaches_unproven_call(
-            func,
-            prep,
-            graph,
-            &facts,
-            machine_context,
-            slots.argument_slots().get(integers),
-        ) || read_for_an_unproven_call(graph, &facts, slots.argument_slots().get(integers));
-    r2il::refusal_evidence!(
-        "interface-recovery",
-        "register parameters {:?} from reads {:?}",
-        parameters
-            .iter()
-            .map(|parameter| (parameter.slot.offset, parameter.observed.size))
-            .collect::<Vec<_>>(),
-        reads
-            .iter()
-            .map(|read| (read.offset, read.size))
-            .collect::<Vec<_>>()
-    );
     let return_mechanism = recovered_return_mechanism(&facts);
     let result_is_return_address = result.register().is_some()
         && result_is_the_return_address(graph, &facts, &live_out, return_mechanism);
-    // The convention fills every register slot before the argument area, so
-    // a stack slot is a parameter only once each register slot is proven.
-    let stack_parameters = if integers == slots.argument_slots().len() {
+    // The argument area as the body reads it, or `None` where the exits do not agree on where it is.
+    let argument_area = {
         // A convention with no argument registers takes its step from the
         // stack entry the specification declares instead.
         let slot_bytes = slots.argument_slots().first().map_or_else(
@@ -1630,23 +1610,70 @@ fn recover_interface_inner(
             |slot| slot.size,
         );
         match return_mechanism {
-            Some(RecoveredReturnMechanism::Link) => {
-                recovered_stack_parameters(&facts, &observations, 0, slot_bytes)
-            }
-            Some(RecoveredReturnMechanism::Stacked { slot_bytes: spent }) => {
-                recovered_stack_parameters(&facts, &observations, i64::from(spent), slot_bytes)
-            }
+            Some(RecoveredReturnMechanism::Link) => Some(recovered_stack_parameters(
+                &facts,
+                &observations,
+                0,
+                slot_bytes,
+            )),
+            Some(RecoveredReturnMechanism::Stacked { slot_bytes: spent }) => Some(
+                recovered_stack_parameters(&facts, &observations, i64::from(spent), slot_bytes),
+            ),
             None => {
                 r2il::refusal_evidence!(
                     "interface-recovery",
                     "the exits do not agree on a return mechanism, so the argument area is not read"
                 );
-                Vec::new()
+                None
             }
         }
-    } else {
-        Vec::new()
     };
+    // The convention fills every register slot before the argument area, so
+    // a stack slot is a parameter only once each register slot is proven.
+    let every_register = integers == slots.argument_slots().len();
+    let stack_parameters = match (every_register, &argument_area) {
+        (true, Some(area)) => area.clone(),
+        _ => Vec::new(),
+    };
+    // Past the prefix, a read of the argument area, or an area no exit places, is a floor.
+    let area_unread = match (every_register, &argument_area) {
+        (true, None) => true,
+        (false, Some(area)) => !area.is_empty(),
+        _ => false,
+    };
+    // A supervisor call reads registers no operation names, so what it is handed is no read here.
+    let enters_supervisor = (graph.insts.iter()).any(|inst| {
+        matches!(&inst.payload, crate::graph::InstPayload::Op(op) if func.enters_supervisor(op))
+    });
+    let reads_past_parameters = unseen
+        || enters_supervisor
+        || area_unread
+        || slots.argument_slots()[integers..].iter().any(|slot| {
+            reads
+                .iter()
+                .any(|read| observed_in_slot(*read, *slot, machine_context).is_some())
+        })
+        || entry_reaches_unproven_call(
+            func,
+            prep,
+            graph,
+            &facts,
+            machine_context,
+            slots.argument_slots().get(integers),
+        )
+        || read_for_an_unproven_call(graph, &facts, slots.argument_slots().get(integers));
+    r2il::refusal_evidence!(
+        "interface-recovery",
+        "register parameters {:?} from reads {:?}; a floor: {reads_past_parameters} (unseen {unseen}, supervisor {enters_supervisor}, argument area {area_unread})",
+        parameters
+            .iter()
+            .map(|parameter| (parameter.slot.offset, parameter.observed.size))
+            .collect::<Vec<_>>(),
+        reads
+            .iter()
+            .map(|read| (read.offset, read.size))
+            .collect::<Vec<_>>()
+    );
     let result_owners = match (result, slots.result_slot()) {
         (RecoveredFunctionResult::Unproven, Some(slot)) => result_owners(func, graph, &facts, slot),
         _ => BTreeSet::new(),
@@ -1895,7 +1922,7 @@ pub fn mint_recovered_interface(
         mint_recovered_interface_inner(recovered, roles, revision_identity, calling_convention)
             .map(|interface| {
                 if recovered.reads_past_parameters {
-                    interface.with_reads_past_parameters()
+                    interface.with_arity_floor()
                 } else {
                     interface
                 }
@@ -2246,7 +2273,7 @@ pub fn mint_recovered_call_site_interface(
     // A stack parameter is named from the callee's entry stack pointer; the
     // call site names the same slot from its own stack pointer before the
     // transfer spends the return-address slot the callee's mechanism states.
-    if callee.reads_past_parameters() {
+    if !callee.arity().is_exact() {
         r2il::refusal_evidence!(
             "call-site-minting",
             "the callee reads an argument slot past its {} parameters, so its arity is no call's contract",
@@ -2441,6 +2468,7 @@ mod tests {
         let stated = Stated {
             loader_role: None,
             result_reads: Some(reads(1)),
+            unseen: false,
         };
         let recovered =
             recover_interface_inner(&func, None, &slots, None, stated).expect("recovery");

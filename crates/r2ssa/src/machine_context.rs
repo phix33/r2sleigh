@@ -17,16 +17,16 @@ use crate::origin::BlockOrigins;
 pub use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
     SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceAbiClass,
-    SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceBoundaryReads,
-    SourceCallArgumentSpec, SourceCallEffect, SourceCallPreservedCarriers, SourceCallResult,
-    SourceCallSiteIdentity, SourceCallSiteInterface, SourceCallSiteInterfaceError,
-    SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature, SourceConventionSlots,
-    SourceFormatParameterRule, SourceFunctionInterface, SourceFunctionInterfaceError,
-    SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles, SourceMachineRolesError,
-    SourceOpaqueTag, SourceParameterLocation, SourceStackAllocationContract, SourceStackGrowth,
-    SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias,
-    SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
-    StackAddressBase,
+    SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceArity,
+    SourceBoundaryReads, SourceCallArgumentSpec, SourceCallEffect, SourceCallPreservedCarriers,
+    SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
+    SourceCallSiteInterfaceError, SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature,
+    SourceConventionSlots, SourceFormatParameterRule, SourceFunctionInterface,
+    SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles,
+    SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation,
+    SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec,
+    SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure, SourceTypeGraph,
+    SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind, StackAddressBase,
 };
 
 pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 27;
@@ -3000,9 +3000,9 @@ mod tests {
 /// What a callee's body states when it mints no call contract (doc/adr-resolved-bodies.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) struct CalleeStatement {
-    /// The register parameters its body itself proves it reads.
-    pub(crate) at_least: usize,
-    /// Its result, where the body proves it and only the parameters are a floor.
+    /// The arguments its body proves it takes, a floor where a slot past them may be read.
+    pub(crate) arity: crate::SourceArity,
+    /// Its result, where the body proves it: an unproven result leaves an exact arity exact.
     pub(crate) result: Option<crate::SourceCallResult>,
 }
 
@@ -3014,19 +3014,13 @@ impl CalleeStatement {
     ) -> BTreeMap<u64, Self> {
         let unproven = interfaces.iter().filter(|(_, interface)| {
             interface.return_kind() == crate::SourceFunctionReturn::Unproven
-                || interface.reads_past_parameters()
+                || !interface.arity().is_exact()
         });
-        let registers = |interface: &crate::SourceFunctionInterface| {
-            let parameters = interface.parameters().iter();
-            parameters
-                .filter(|parameter| parameter.register_storage().is_some())
-                .count()
-        };
         let statements = unproven.map(|(address, interface)| {
             (
                 *address,
                 Self {
-                    at_least: registers(interface),
+                    arity: interface.arity(),
                     result: match interface.return_kind() {
                         crate::SourceFunctionReturn::Void => Some(crate::SourceCallResult::Void),
                         crate::SourceFunctionReturn::Register { storage } => {
