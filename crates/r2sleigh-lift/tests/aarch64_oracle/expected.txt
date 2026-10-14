@@ -8,30 +8,27 @@ sminv_8h: stop unmodelled CALLOTHER NEON_sminv
 tbl_2: stop unmodelled CALLOTHER a64_TBL
 umull_8h: stop unmodelled CALLOTHER NEON_umull
 fmsub_s: wrong v0
-fmax_d: wrong v0
-fmin_s: wrong v0
-fmaxnm_d: wrong v0
+fmax_d: stop unmodelled CALLOTHER NEON_fmax
+fmin_s: stop unmodelled CALLOTHER NEON_fmin
+fmaxnm_d: stop unmodelled CALLOTHER NEON_fmaxnm
 fminnm_d: stop unmodelled CALLOTHER NEON_fminnm
 fcvtzs_xd: stop Undefined
 fcvtzs_wd: stop Undefined
 fcvtzs_ws: stop Undefined
 fcvtzs_xs: stop Undefined
-fcvtzu_xd: stop Undefined; wrong x0
+fcvtzu_xd: stop unmodelled Unimplemented
 fcvtzu_ws: stop Undefined; wrong x0
 fcvtzs_fix: stop Undefined
-fcvtas_xd: stop Undefined; wrong x0
-fcvtms_xd: stop Undefined; wrong x0
-fcvtps_ws: stop Undefined; wrong x0
-fcvtns_xd: stop Undefined; wrong x0
+fcvtas_xd: stop unmodelled Unimplemented
+fcvtms_xd: stop Undefined
+fcvtps_ws: stop Undefined
+fcvtns_xd: stop unmodelled Unimplemented
 fcvtzs_v4s: stop Undefined
 fccmp_d: stop unmodelled Unimplemented
-frintm_d: stop Undefined; wrong v0
-frintp_s: stop Undefined; wrong v0
-frintn_d: stop Undefined; wrong v0
-frinta_s: stop Undefined; wrong v0
-frintz_d: stop Undefined; wrong v0
-frintx_d: stop Undefined; wrong v0
-frinti_d: stop Undefined; wrong v0
+frintn_d: stop unmodelled Unimplemented
+frinta_s: stop unmodelled Unimplemented
+frintx_d: stop unmodelled CALLOTHER NEON_frintx
+frinti_d: stop unmodelled CALLOTHER NEON_frinti
 fmla_elem: wrong v0
 ldaxr_stlxr: stop unmodelled CALLOTHER ExclusiveMonitorPass
 ldxr_stxr_w: stop unmodelled CALLOTHER ExclusiveMonitorPass

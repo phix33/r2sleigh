@@ -6003,6 +6003,53 @@ is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=1 & fpDpOpcode=0x4 & b_
 
 # C7.2.63 FCVTAS (vector) page C7-1136 line 65961 KEEPWITH
 
+# FPRoundInt with rounding toward zero: floor for x >= 0, ceil for x < 0 (keeps -0 and NaN).
+macro fp_round_z(x, r)
+{
+	r = floor(x);
+	if (!(x f< 0)) goto <done>;
+	r = ceil(x);
+<done>
+}
+
+# FPRoundInt ties-away (FRINTA) and ties-to-even (FRINTN). frac2 = 2*|x - trunc(x)| is exact;
+# NaN and infinities leave frac2 NaN, so r stays trunc(x).
+macro fp_round_a(x, one, r)
+{
+	fp_round_z(x, r);
+	local frac2 = abs(x f- r);
+	frac2 = frac2 f+ frac2;
+	if (!(frac2 f>= one)) goto <done>;
+	if (x f< 0) goto <neg>;
+	r = r f+ one;
+	goto <done>;
+<neg>
+	r = r f- one;
+<done>
+}
+
+macro fp_round_n(x, one, r)
+{
+	fp_round_z(x, r);
+	local frac2 = abs(x f- r);
+	frac2 = frac2 f+ frac2;
+	if (frac2 f> one) goto <away>;
+	if (!(frac2 f== one)) goto <done>;
+	local half = r f/ (one f+ one);
+	if (floor(half) f== half) goto <done>;
+<away>
+	if (x f< 0) goto <neg>;
+	r = r f+ one;
+	goto <done>;
+<neg>
+	r = r f- one;
+<done>
+}
+
+# FRINTI and FRINTX round in the FPCR.RMode mode, which is not modelled.
+define pcodeop NEON_frinti;
+define pcodeop NEON_frintx;
+
 fcvt_vmnemonic: "fcvtas" is b_29=0 & b_23=0 & b_1314=0b10 & b_12=0 { }
 fcvt_vmnemonic: "fcvtau" is b_29=1 & b_23=0 & b_1314=0b10 & b_12=0 { }
 fcvt_vmnemonic: "fcvtms" is b_29=0 & b_23=0 & b_1314=0b01 & b_12=1 { }
@@ -6024,6 +6071,25 @@ fcvt_smnemonic: "fcvtps" is b_1920=0b01 & b_1618=0b000 { }
 fcvt_smnemonic: "fcvtpu" is b_1920=0b01 & b_1618=0b001 { }
 fcvt_smnemonic: "fcvtzs" is b_1920=0b11 & b_1618=0b000 { }
 fcvt_smnemonic: "fcvtzu" is b_1920=0b11 & b_1618=0b001 { }
+
+# Rn rounded to an integral value in the FCVT{A,M,N,P,Z} mode (FPToFixed rounding step)
+fcvt_rnd16: is b_1920=0b00 & b_18=0 & Rn_FPR16 { local one:2 = int2float(1:2); local r:2 = 0; fp_round_n(Rn_FPR16, one, r); export r; }
+fcvt_rnd16: is b_1920=0b01 & b_18=0 & Rn_FPR16 { local r:2 = ceil(Rn_FPR16); export r; }
+fcvt_rnd16: is b_1920=0b10 & b_18=0 & Rn_FPR16 { local r:2 = floor(Rn_FPR16); export r; }
+fcvt_rnd16: is b_1920=0b11 & b_18=0 & Rn_FPR16 { export Rn_FPR16; }
+fcvt_rnd16: is b_1920=0b00 & b_18=1 & Rn_FPR16 { local one:2 = int2float(1:2); local r:2 = 0; fp_round_a(Rn_FPR16, one, r); export r; }
+
+fcvt_rnd32: is b_1920=0b00 & b_18=0 & Rn_FPR32 { local one:4 = int2float(1:4); local r:4 = 0; fp_round_n(Rn_FPR32, one, r); export r; }
+fcvt_rnd32: is b_1920=0b01 & b_18=0 & Rn_FPR32 { local r:4 = ceil(Rn_FPR32); export r; }
+fcvt_rnd32: is b_1920=0b10 & b_18=0 & Rn_FPR32 { local r:4 = floor(Rn_FPR32); export r; }
+fcvt_rnd32: is b_1920=0b11 & b_18=0 & Rn_FPR32 { export Rn_FPR32; }
+fcvt_rnd32: is b_1920=0b00 & b_18=1 & Rn_FPR32 { local one:4 = int2float(1:4); local r:4 = 0; fp_round_a(Rn_FPR32, one, r); export r; }
+
+fcvt_rnd64: is b_1920=0b00 & b_18=0 & Rn_FPR64 { local one:8 = int2float(1:8); local r:8 = 0; fp_round_n(Rn_FPR64, one, r); export r; }
+fcvt_rnd64: is b_1920=0b01 & b_18=0 & Rn_FPR64 { local r:8 = ceil(Rn_FPR64); export r; }
+fcvt_rnd64: is b_1920=0b10 & b_18=0 & Rn_FPR64 { local r:8 = floor(Rn_FPR64); export r; }
+fcvt_rnd64: is b_1920=0b11 & b_18=0 & Rn_FPR64 { export Rn_FPR64; }
+fcvt_rnd64: is b_1920=0b00 & b_18=1 & Rn_FPR64 { local one:8 = int2float(1:8); local r:8 = 0; fp_round_a(Rn_FPR64, one, r); export r; }
 
 # C7.2.70 FCVTAS (vector) page C7-2174 line 126882 MATCH x5e79c800/mask=xfffffc00
 # C7.2.72 FCVTAU (vector) page C7-2179 line 127203 MATCH x7e79c800/mask=xfffffc00
@@ -6174,10 +6240,18 @@ is b_31=0 & b_30=1 & b_2328=0b011100 & b_22=1 & b_1021=0b100001110010 & fcvt_vmn
 # Half-precision to 32-bit variant when sf == 0 && type == 11
 
 :^fcvt_smnemonic Rd_GPR32, Rn_FPR16
-is b_31=0 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_1720=0b0010 & b_1015=0b000000 & fcvt_smnemonic & Rd_GPR32 & Rn_FPR16 & Rd_GPR64
+is b_31=0 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_17=0 & b_16=0 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd16 & Rd_GPR32 & Rn_FPR16 & Rd_GPR64
 {
-	Rd_GPR32 = trunc(Rn_FPR16);
+	Rd_GPR32 = trunc(fcvt_rnd16);
 	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
+}
+
+# Unsigned: values in [0, 2^32) convert exactly through a 64-bit signed conversion
+:^fcvt_smnemonic Rd_GPR32, Rn_FPR16
+is b_31=0 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_17=0 & b_16=1 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd16 & Rd_GPR32 & Rn_FPR16 & Rd_GPR64
+{
+	local wide:8 = trunc(fcvt_rnd16);
+	Rd_GPR64 = zext(wide:4);
 }
 
 # C7.2.71 FCVTAS (scalar) page C7-2177 line 127075 MATCH x1e240000/mask=x7f3ffc00
@@ -6189,9 +6263,15 @@ is b_31=0 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_1720=0b0010 & b_1015=0b0
 # Half-precision to 64-bit variant when sf == 1 && type == 11
 
 :^fcvt_smnemonic Rd_GPR64, Rn_FPR16
-is b_31=1 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_1720=0b0010 & b_1015=0b000000 & fcvt_smnemonic & Rd_GPR64 & Rn_FPR16
+is b_31=1 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_17=0 & b_16=0 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd16 & Rd_GPR64 & Rn_FPR16
 {
-	Rd_GPR64 = trunc(Rn_FPR16);
+	Rd_GPR64 = trunc(fcvt_rnd16);
+}
+
+:^fcvt_smnemonic Rd_GPR64, Rn_FPR16
+is b_31=1 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_17=0 & b_16=1 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd16 & Rd_GPR64 & Rn_FPR16
+{
+	Rd_GPR64 = trunc(fcvt_rnd16);
 }
 
 # C7.2.71 FCVTAS (scalar) page C7-2177 line 127075 MATCH x1e240000/mask=x7f3ffc00
@@ -6203,10 +6283,18 @@ is b_31=1 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_1720=0b0010 & b_1015=0b0
 # Single-precision to 32-bit variant when sf == 0 && type == 00
 
 :^fcvt_smnemonic Rd_GPR32, Rn_FPR32
-is b_31=0 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_1720=0b0010 & b_1015=0b000000 & fcvt_smnemonic & Rd_GPR32 & Rn_FPR32 & Rd_GPR64
+is b_31=0 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_17=0 & b_16=0 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd32 & Rd_GPR32 & Rn_FPR32 & Rd_GPR64
 {
-	Rd_GPR32 = trunc(Rn_FPR32);
+	Rd_GPR32 = trunc(fcvt_rnd32);
 	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
+}
+
+# Unsigned: values in [0, 2^32) convert exactly through a 64-bit signed conversion
+:^fcvt_smnemonic Rd_GPR32, Rn_FPR32
+is b_31=0 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_17=0 & b_16=1 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd32 & Rd_GPR32 & Rn_FPR32 & Rd_GPR64
+{
+	local wide:8 = trunc(fcvt_rnd32);
+	Rd_GPR64 = zext(wide:4);
 }
 
 # C7.2.71 FCVTAS (scalar) page C7-2177 line 127075 MATCH x1e240000/mask=x7f3ffc00
@@ -6218,9 +6306,22 @@ is b_31=0 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_1720=0b0010 & b_1015=0b0
 # Single-precision to 64-bit variant when sf == 1 && type == 00
 
 :^fcvt_smnemonic Rd_GPR64, Rn_FPR32
-is b_31=1 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_1720=0b0010 & b_1015=0b000000 & fcvt_smnemonic & Rd_GPR64 & Rn_FPR32
+is b_31=1 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_17=0 & b_16=0 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd32 & Rd_GPR64 & Rn_FPR32
 {
-	Rd_GPR64 = trunc(Rn_FPR32);
+	Rd_GPR64 = trunc(fcvt_rnd32);
+}
+
+# Unsigned: values in [2^63, 2^64) convert as (x - 2^63) + 2^63
+:^fcvt_smnemonic Rd_GPR64, Rn_FPR32
+is b_31=1 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_17=0 & b_16=1 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd32 & Rd_GPR64 & Rn_FPR32
+{
+	local r:4 = fcvt_rnd32;
+	local two63:4 = int2float(0x4000000000000000:8) f* int2float(2:4);
+	if (r f>= two63) goto <high>;
+	Rd_GPR64 = trunc(r);
+	goto inst_next;
+<high>
+	Rd_GPR64 = trunc(r f- two63) + 0x8000000000000000;
 }
 
 # C7.2.71 FCVTAS (scalar) page C7-2177 line 127075 MATCH x1e240000/mask=x7f3ffc00
@@ -6232,10 +6333,18 @@ is b_31=1 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_1720=0b0010 & b_1015=0b0
 # Double-precision to 32-bit variant when sf == 0 && type == 01
 
 :^fcvt_smnemonic Rd_GPR32, Rn_FPR64
-is b_31=0 & b_2430=0b0011110 & b_2223=0b01 & b_21=1 & b_1720=0b0010 & b_1015=0b000000 & fcvt_smnemonic & Rd_GPR32 & Rn_FPR64 & Rd_GPR64
+is b_31=0 & b_2430=0b0011110 & b_2223=0b01 & b_21=1 & b_17=0 & b_16=0 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd64 & Rd_GPR32 & Rn_FPR64 & Rd_GPR64
 {
-	Rd_GPR32 = trunc(Rn_FPR64);
+	Rd_GPR32 = trunc(fcvt_rnd64);
 	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
+}
+
+# Unsigned: values in [0, 2^32) convert exactly through a 64-bit signed conversion
+:^fcvt_smnemonic Rd_GPR32, Rn_FPR64
+is b_31=0 & b_2430=0b0011110 & b_2223=0b01 & b_21=1 & b_17=0 & b_16=1 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd64 & Rd_GPR32 & Rn_FPR64 & Rd_GPR64
+{
+	local wide:8 = trunc(fcvt_rnd64);
+	Rd_GPR64 = zext(wide:4);
 }
 
 # C7.2.71 FCVTAS (scalar) page C7-2177 line 127075 MATCH x1e240000/mask=x7f3ffc00
@@ -6247,9 +6356,22 @@ is b_31=0 & b_2430=0b0011110 & b_2223=0b01 & b_21=1 & b_1720=0b0010 & b_1015=0b0
 # Double-precision to 64-bit variant sf == 1 && type == 01
 
 :^fcvt_smnemonic Rd_GPR64, Rn_FPR64
-is b_31=1 & b_2430=0b0011110 & b_2223=0b01 & b_21=1 & b_1720=0b0010 & b_1015=0b000000 & fcvt_smnemonic & Rd_GPR64 & Rn_FPR64
+is b_31=1 & b_2430=0b0011110 & b_2223=0b01 & b_21=1 & b_17=0 & b_16=0 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd64 & Rd_GPR64 & Rn_FPR64
 {
-	Rd_GPR64 = trunc(Rn_FPR64);
+	Rd_GPR64 = trunc(fcvt_rnd64);
+}
+
+# Unsigned: values in [2^63, 2^64) convert as (x - 2^63) + 2^63
+:^fcvt_smnemonic Rd_GPR64, Rn_FPR64
+is b_31=1 & b_2430=0b0011110 & b_2223=0b01 & b_21=1 & b_17=0 & b_16=1 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd64 & Rd_GPR64 & Rn_FPR64
+{
+	local r:8 = fcvt_rnd64;
+	local two63:8 = int2float(0x4000000000000000:8) f* int2float(2:8);
+	if (r f>= two63) goto <high>;
+	Rd_GPR64 = trunc(r);
+	goto inst_next;
+<high>
+	Rd_GPR64 = trunc(r f- two63) + 0x8000000000000000;
 }
 
 # C7.2.74 FCVTL, FCVTL2 page C7-2184 line 127524 MATCH x0e217800/mask=xbfbffc00
@@ -6522,12 +6644,7 @@ is b_31=0 & b_30=1 & b_2428=0b01110 & b_22=1 & b_1321=0b100001101 & b_1011=0b10 
 # AUNIT --inst x1ee00000/mask=xffe6fc00 --rand hfp --status noqemu --comment "nofpround"
 # Half-precision to 32-bit variant when sf == 0 && type == 11
 
-:^fcvt_smnemonic Rd_GPR32, Rn_FPR16
-is b_31=0 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_1718=0b00 & b_1015=0b000000 & fcvt_smnemonic & Rd_GPR32 & Rn_FPR16 & Rd_GPR64
-{
-	Rd_GPR32 = trunc(Rn_FPR16);
-	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
-}
+# (merged into the FCVT{A,M,N,P,Z}{S,U} constructors above)
 
 # C7.2.76 FCVTMS (scalar) page C7-2189 line 127807 MATCH x1e300000/mask=x7f3ffc00
 # C7.2.78 FCVTMU (scalar) page C7-2194 line 128131 MATCH x1e310000/mask=x7f3ffc00
@@ -6543,11 +6660,7 @@ is b_31=0 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_1718=0b00 & b_1015=0b000
 # AUNIT --inst x9ee00000/mask=xffe6fc00 --rand hfp --status noqemu --comment "nofpround"
 # Half-precision to 64-bit variant when sf == 1 && type == 11
 
-:^fcvt_smnemonic Rd_GPR64, Rn_FPR16
-is b_31=1 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_1718=0b00 & b_1015=0b000000 & fcvt_smnemonic & Rd_GPR64 & Rn_FPR16
-{
-	Rd_GPR64 = trunc(Rn_FPR16);
-}
+# (merged into the FCVT{A,M,N,P,Z}{S,U} constructors above)
 
 # C7.2.76 FCVTMS (scalar) page C7-2189 line 127807 MATCH x1e300000/mask=x7f3ffc00
 # C7.2.78 FCVTMU (scalar) page C7-2194 line 128131 MATCH x1e310000/mask=x7f3ffc00
@@ -6563,12 +6676,7 @@ is b_31=1 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_1718=0b00 & b_1015=0b000
 # AUNIT --inst x1e200000/mask=xffe6fc00 --rand sfp --status fail --comment "nofpround"
 # Single-precision to 32-bit variant when sf == 0 && type == 00
 
-:^fcvt_smnemonic Rd_GPR32, Rn_FPR32
-is b_31=0 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_1718=0b00 & b_1015=0b000000 & fcvt_smnemonic & Rd_GPR32 & Rn_FPR32 & Rd_GPR64
-{
-	Rd_GPR32 = trunc(Rn_FPR32);
-	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
-}
+# (merged into the FCVT{A,M,N,P,Z}{S,U} constructors above)
 
 # C7.2.76 FCVTMS (scalar) page C7-2189 line 127807 MATCH x1e300000/mask=x7f3ffc00
 # C7.2.78 FCVTMU (scalar) page C7-2194 line 128131 MATCH x1e310000/mask=x7f3ffc00
@@ -6584,11 +6692,7 @@ is b_31=0 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_1718=0b00 & b_1015=0b000
 # AUNIT --inst x9e200000/mask=xffe6fc00 --rand sfp --status fail --comment "nofpround"
 # Single-precision to 64-bit variant when sf == 1 && type == 00
 
-:^fcvt_smnemonic Rd_GPR64, Rn_FPR32
-is b_31=1 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_1718=0b00 & b_1015=0b000000 & fcvt_smnemonic & Rd_GPR64 & Rn_FPR32
-{
-	Rd_GPR64 = trunc(Rn_FPR32);
-}
+# (merged into the FCVT{A,M,N,P,Z}{S,U} constructors above)
 
 # C7.2.76 FCVTMS (scalar) page C7-2189 line 127807 MATCH x1e300000/mask=x7f3ffc00
 # C7.2.78 FCVTMU (scalar) page C7-2194 line 128131 MATCH x1e310000/mask=x7f3ffc00
@@ -6604,12 +6708,7 @@ is b_31=1 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_1718=0b00 & b_1015=0b000
 # AUNIT --inst x1e600000/mask=xffe6fc00 --rand dfp --status fail --comment "nofpround"
 # Double-precision to 32-bit variant when sf == 0 && type == 01
 
-:^fcvt_smnemonic Rd_GPR32, Rn_FPR64
-is b_31=0 & b_2430=0b0011110 & b_2223=0b01 & b_21=1 & b_1718=0b00 & b_1015=0b000000 & fcvt_smnemonic & Rd_GPR32 & Rn_FPR64 & Rd_GPR64
-{
-	Rd_GPR32 = trunc(Rn_FPR64);
-	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
-}
+# (merged into the FCVT{A,M,N,P,Z}{S,U} constructors above)
 
 # C7.2.76 FCVTMS (scalar) page C7-2189 line 127807 MATCH x1e300000/mask=x7f3ffc00
 # C7.2.78 FCVTMU (scalar) page C7-2194 line 128131 MATCH x1e310000/mask=x7f3ffc00
@@ -6625,11 +6724,7 @@ is b_31=0 & b_2430=0b0011110 & b_2223=0b01 & b_21=1 & b_1718=0b00 & b_1015=0b000
 # AUNIT --inst x9e600000/mask=xffe6fc00 --rand dfp --status fail --comment "nofpround"
 # Double-precision to 64-bit variant sf == 1 && type == 01
 
-:^fcvt_smnemonic Rd_GPR64, Rn_FPR64
-is b_31=1 & b_2430=0b0011110 & b_2223=0b01 & b_21=1 & b_1718=0b00 & b_1015=0b000000 & fcvt_smnemonic & Rd_GPR64 & Rn_FPR64
-{
-	Rd_GPR64 = trunc(Rn_FPR64);
-}
+# (merged into the FCVT{A,M,N,P,Z}{S,U} constructors above)
 
 # C7.2.79 FCVTN, FCVTN2 page C7-2196 line 128262 MATCH x0e216800/mask=xbfbffc00
 # CONSTRUCT x0e616800/mask=xfffffc00 MATCHED 1 DOCUMENTED OPCODES
@@ -7001,11 +7096,11 @@ is b_3131=0 & q=1 & u=1 & b_2428=0xf & b_2023=1 & Imm_shr_imm16 & b_1115=0x1f & 
 :fcvtzu Rd_FPR16, Rn_FPR16, Imm_shr_imm32
 is b_2331=0b011111110 & b_2022=0b001 & b_1015=0b111111 & Imm_shr_imm32 & Rn_FPR16 & Rd_FPR16 & Zd
 {
-	local tmp1:2 = 1:2 << Imm_shr_imm32;
+	local tmp1:4 = 1:4 << Imm_shr_imm32;
 	local tmp2:2 = int2float(tmp1);
 	local tmp3:2 = Rn_FPR16 f* tmp2;
-	local tmp4:2 = abs(tmp3);
-	Rd_FPR16 = trunc(tmp4);
+	local wide:8 = trunc(tmp3);
+	Rd_FPR16 = wide:2;
 	zext_zh(Zd); # zero upper 30 bytes of Zd
 }
 
@@ -7019,11 +7114,11 @@ is b_2331=0b011111110 & b_2022=0b001 & b_1015=0b111111 & Imm_shr_imm32 & Rn_FPR1
 :fcvtzu Rd_FPR32, Rn_FPR32, Imm_shr_imm32
 is b_2331=0b011111110 & b_2122=0b01 & b_1015=0b111111 & Imm_shr_imm32 & Rn_FPR32 & Rd_FPR32 & Zd
 {
-	local tmp1:4 = 1:4 << Imm_shr_imm32:4;
+	local tmp1:8 = 1:8 << Imm_shr_imm32;
 	local tmp2:4 = int2float(tmp1);
 	local tmp3:4 = Rn_FPR32 f* tmp2;
-	local tmp4:4 = abs(tmp3);
-	Rd_FPR32 = trunc(tmp4);
+	local wide:8 = trunc(tmp3);
+	Rd_FPR32 = wide:4;
 	zext_zs(Zd); # zero upper 28 bytes of Zd
 }
 
@@ -7041,8 +7136,13 @@ is b_2331=0b011111110 & b_22=1 & b_1015=0b111111 & Imm_shr_imm32 & Rn_FPR64 & Rd
 	local tmp2:8 = 1:8 << tmp1;
 	local tmp3:8 = int2float(tmp2);
 	local tmp4:8 = Rn_FPR64 f* tmp3;
-	local tmp5:8 = abs(tmp4);
-	Rd_FPR64 = trunc(tmp5);
+	local two63:8 = int2float(0x4000000000000000:8) f* int2float(2:8);
+	if (tmp4 f>= two63) goto <high>;
+	Rd_FPR64 = trunc(tmp4);
+	goto <done>;
+<high>
+	Rd_FPR64 = trunc(tmp4 f- two63) + 0x8000000000000000;
+<done>
 	zext_zd(Zd); # zero upper 24 bytes of Zd
 }
 
@@ -7368,11 +7468,7 @@ is b_31=0 & b_30=1 & b_2129=0b001110010 & b_1015=0b001101 & Rd_VPR128.8H & Rn_VP
 :fmax Rd_FPR64, Rn_FPR64, Rm_FPR64
 is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=1 & b_2121=1 & Rm_FPR64 & b_1215=0x4 & b_1011=2 & Rn_FPR64 & Rd_FPR64 & Zd
 {
-	Rd_FPR64 = Rn_FPR64;
-	zext_zd(Zd); # zero upper 24 bytes of Zd
-	local tmp1:1 = Rn_FPR64 f> Rm_FPR64;
-	if (tmp1) goto inst_next;
-	Rd_FPR64 = Rm_FPR64;
+	Rd_FPR64 = NEON_fmax(Rn_FPR64, Rm_FPR64);
 	zext_zd(Zd); # zero upper 24 bytes of Zd
 }
 
@@ -7385,11 +7481,7 @@ is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=1 & b_2121=1 & Rm_FPR64 & b_1215=0
 :fmax Rd_FPR32, Rn_FPR32, Rm_FPR32
 is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=0 & b_2121=1 & Rm_FPR32 & b_1215=0x4 & b_1011=2 & Rn_FPR32 & Rd_FPR32 & Zd
 {
-	Rd_FPR32 = Rn_FPR32;
-	zext_zs(Zd); # zero upper 28 bytes of Zd
-	local tmp1:1 = Rn_FPR32 f> Rm_FPR32;
-	if (tmp1) goto inst_next;
-	Rd_FPR32 = Rm_FPR32;
+	Rd_FPR32 = NEON_fmax(Rn_FPR32, Rm_FPR32);
 	zext_zs(Zd); # zero upper 28 bytes of Zd
 }
 
@@ -7401,12 +7493,8 @@ is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=0 & b_2121=1 & Rm_FPR32 & b_1215=0
 :fmax Rd_FPR16, Rn_FPR16, Rm_FPR16
 is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=1 & Rm_FPR16 & b_1215=0x4 & b_1011=2 & Rn_FPR16 & Rd_FPR16 & Zd
 {
-	Rd_FPR16 = Rn_FPR16;
+	Rd_FPR16 = NEON_fmax(Rn_FPR16, Rm_FPR16);
 	zext_zh(Zd); # zero upper 30 bytes of Zd
-	local tmp1:1 = Rn_FPR16 f> Rm_FPR16;
-	if (tmp1) goto inst_next;
-	Rd_FPR16 = Rm_FPR16;
-	zext_zh(Zd);# zero upper 30 bytes of Zd
 }
 
 # C7.2.103 FMAXNM (vector) page C7-2252 line 131688 MATCH x0e20c400/mask=xbfa0fc00
@@ -7475,11 +7563,7 @@ is b_31=0 & b_30=1 & b_2129=0b001110010 & b_1015=0b000001 & Rd_VPR128.8H & Rn_VP
 :fmaxnm Rd_FPR64, Rn_FPR64, Rm_FPR64
 is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=1 & b_2121=1 & Rm_FPR64 & b_1215=0x6 & b_1011=2 & Rn_FPR64 & Rd_FPR64 & Zd
 {
-	Rd_FPR64 = Rn_FPR64;
-	zext_zd(Zd); # zero upper 24 bytes of Zd
-	local tmp1:1 = Rn_FPR64 f> Rm_FPR64;
-	if (tmp1) goto inst_next;
-	Rd_FPR64 = Rm_FPR64;
+	Rd_FPR64 = NEON_fmaxnm(Rn_FPR64, Rm_FPR64);
 	zext_zd(Zd); # zero upper 24 bytes of Zd
 }
 
@@ -7492,11 +7576,7 @@ is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=1 & b_2121=1 & Rm_FPR64 & b_1215=0
 :fmaxnm Rd_FPR32, Rn_FPR32, Rm_FPR32
 is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=0 & b_2121=1 & Rm_FPR32 & b_1215=0x6 & b_1011=2 & Rn_FPR32 & Rd_FPR32 & Zd
 {
-	Rd_FPR32 = Rn_FPR32;
-	zext_zs(Zd); # zero upper 28 bytes of Zd
-	local tmp1:1 = Rn_FPR32 f> Rm_FPR32;
-	if (tmp1) goto inst_next;
-	Rd_FPR32 = Rm_FPR32;
+	Rd_FPR32 = NEON_fmaxnm(Rn_FPR32, Rm_FPR32);
 	zext_zs(Zd); # zero upper 28 bytes of Zd
 }
 
@@ -7509,11 +7589,7 @@ is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=0 & b_2121=1 & Rm_FPR32 & b_1215=0
 :fmaxnm Rd_FPR16, Rn_FPR16, Rm_FPR16
 is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=1 & Rm_FPR16 & b_1215=0x6 & b_1011=2 & Rn_FPR16 & Rd_FPR16 & Zd
 {
-	Rd_FPR16 = Rn_FPR16;
-	zext_zh(Zd); # zero upper 30 bytes of Zd
-	local tmp1:1 = Rn_FPR16 f> Rm_FPR16;
-	if (tmp1) goto inst_next;
-	Rd_FPR16 = Rm_FPR16;
+	Rd_FPR16 = NEON_fmaxnm(Rn_FPR16, Rm_FPR16);
 	zext_zh(Zd); # zero upper 30 bytes of Zd
 }
 
@@ -7834,11 +7910,7 @@ is b_31=0 & b_30=1 & b_2129=0b001110110 & b_1015=0b001101 & Rd_VPR128.8H & Rn_VP
 :fmin Rd_FPR64, Rn_FPR64, Rm_FPR64
 is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=1 & b_2121=1 & Rm_FPR64 & b_1215=0x5 & b_1011=2 & Rn_FPR64 & Rd_FPR64 & Zd
 {
-	Rd_FPR64 = Rn_FPR64;
-	zext_zd(Zd); # zero upper 24 bytes of Zd
-	local tmp1:1 = Rn_FPR64 f<= Rm_FPR64;
-	if (tmp1) goto inst_next;
-	Rd_FPR64 = Rm_FPR64;
+	Rd_FPR64 = NEON_fmin(Rn_FPR64, Rm_FPR64);
 	zext_zd(Zd); # zero upper 24 bytes of Zd
 }
 
@@ -7850,11 +7922,7 @@ is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=1 & b_2121=1 & Rm_FPR64 & b_1215=0
 :fmin Rd_FPR32, Rn_FPR32, Rm_FPR32
 is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=0 & b_2121=1 & Rm_FPR32 & b_1215=0x5 & b_1011=2 & Rn_FPR32 & Rd_FPR32 & Zd
 {
-	Rd_FPR32 = Rn_FPR32;
-	zext_zs(Zd); # zero upper 28 bytes of Zd
-	local tmp1:1 = Rn_FPR32 f<= Rm_FPR32;
-	if (tmp1) goto inst_next;
-	Rd_FPR32 = Rm_FPR32;
+	Rd_FPR32 = NEON_fmin(Rn_FPR32, Rm_FPR32);
 	zext_zs(Zd); # zero upper 28 bytes of Zd
 }
 
@@ -7866,12 +7934,8 @@ is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=0 & b_2121=1 & Rm_FPR32 & b_1215=0
 :fmin Rd_FPR16, Rn_FPR16, Rm_FPR16
 is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=1 & Rm_FPR16 & b_1215=0x5 & b_1011=2 & Rn_FPR16 & Rd_FPR16 & Zd
 {
-	Rd_FPR16 = Rn_FPR16;
+	Rd_FPR16 = NEON_fmin(Rn_FPR16, Rm_FPR16);
 	zext_zh(Zd); # zero upper 30 bytes of Zd
-	local tmp1:1 = Rn_FPR16 f<= Rm_FPR16;
-	if (tmp1) goto inst_next;
-	Rd_FPR16 = Rm_FPR16;
-	zext_zh(Zd);# zero upper 30 bytes of Zd
 }
 
 # C7.2.113 FMINNM (vector) page C7-2272 line 132865 MATCH x0ea0c400/mask=xbfa0fc00
@@ -7940,6 +8004,7 @@ is b_31=0 & b_30=1 & b_2129=0b001110110 & b_1015=0b000001 & Rd_VPR128.8H & Rn_VP
 is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=1 & b_2121=1 & Rm_FPR64 & b_1215=0x7 & b_1011=2 & Rn_FPR64 & Rd_FPR64 & Zd
 {
 	Rd_FPR64 = NEON_fminnm(Rn_FPR64, Rm_FPR64);
+	zext_zd(Zd); # zero upper 24 bytes of Zd
 }
 
 # C7.2.114 FMINNM (scalar) page C7-2274 line 132998 MATCH x1e207800/mask=xff20fc00
@@ -7951,6 +8016,7 @@ is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=1 & b_2121=1 & Rm_FPR64 & b_1215=0
 is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=0 & b_2121=1 & Rm_FPR32 & b_1215=0x7 & b_1011=2 & Rn_FPR32 & Rd_FPR32 & Zd
 {
 	Rd_FPR32 = NEON_fminnm(Rn_FPR32, Rm_FPR32);
+	zext_zs(Zd); # zero upper 28 bytes of Zd
 }
 
 # C7.2.114 FMINNM (scalar) page C7-2274 line 132998 MATCH x1e207800/mask=xff20fc00
@@ -7962,6 +8028,7 @@ is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=0 & b_2121=1 & Rm_FPR32 & b_1215=0
 is m=0 & b_3030=0 & s=0 & b_2428=0x1e & ftype=3 & b_2121=1 & Rm_FPR16 & b_1215=0x7 & b_1011=2 & Rn_FPR16 & Rd_FPR16 & Zd
 {
 	Rd_FPR16 = NEON_fminnm(Rn_FPR16, Rm_FPR16);
+	zext_zh(Zd); # zero upper 30 bytes of Zd
 }
 
 # C7.2.115 FMINNMP (scalar) page C7-2276 line 133108 MATCH x7eb0c800/mask=xffbffc00
@@ -10717,6 +10784,31 @@ frint_smode: "p" is b_1517=0b001 { }
 frint_smode: "x" is b_1517=0b110 { }
 frint_smode: "z" is b_1517=0b011 { }
 
+# Rn rounded to an integral value in the frint_smode mode (FPRoundInt)
+frint_s16: is b_1517=0b100 & Rn_FPR16 { local one:2 = int2float(1:2); local r:2 = 0; fp_round_a(Rn_FPR16, one, r); export r; }
+frint_s16: is b_1517=0b111 & Rn_FPR16 { local r:2 = NEON_frinti(Rn_FPR16); export r; }
+frint_s16: is b_1517=0b010 & Rn_FPR16 { local r:2 = floor(Rn_FPR16); export r; }
+frint_s16: is b_1517=0b000 & Rn_FPR16 { local one:2 = int2float(1:2); local r:2 = 0; fp_round_n(Rn_FPR16, one, r); export r; }
+frint_s16: is b_1517=0b001 & Rn_FPR16 { local r:2 = ceil(Rn_FPR16); export r; }
+frint_s16: is b_1517=0b110 & Rn_FPR16 { local r:2 = NEON_frintx(Rn_FPR16); export r; }
+frint_s16: is b_1517=0b011 & Rn_FPR16 { local r:2 = 0; fp_round_z(Rn_FPR16, r); export r; }
+
+frint_s32: is b_1517=0b100 & Rn_FPR32 { local one:4 = int2float(1:4); local r:4 = 0; fp_round_a(Rn_FPR32, one, r); export r; }
+frint_s32: is b_1517=0b111 & Rn_FPR32 { local r:4 = NEON_frinti(Rn_FPR32); export r; }
+frint_s32: is b_1517=0b010 & Rn_FPR32 { local r:4 = floor(Rn_FPR32); export r; }
+frint_s32: is b_1517=0b000 & Rn_FPR32 { local one:4 = int2float(1:4); local r:4 = 0; fp_round_n(Rn_FPR32, one, r); export r; }
+frint_s32: is b_1517=0b001 & Rn_FPR32 { local r:4 = ceil(Rn_FPR32); export r; }
+frint_s32: is b_1517=0b110 & Rn_FPR32 { local r:4 = NEON_frintx(Rn_FPR32); export r; }
+frint_s32: is b_1517=0b011 & Rn_FPR32 { local r:4 = 0; fp_round_z(Rn_FPR32, r); export r; }
+
+frint_s64: is b_1517=0b100 & Rn_FPR64 { local one:8 = int2float(1:8); local r:8 = 0; fp_round_a(Rn_FPR64, one, r); export r; }
+frint_s64: is b_1517=0b111 & Rn_FPR64 { local r:8 = NEON_frinti(Rn_FPR64); export r; }
+frint_s64: is b_1517=0b010 & Rn_FPR64 { local r:8 = floor(Rn_FPR64); export r; }
+frint_s64: is b_1517=0b000 & Rn_FPR64 { local one:8 = int2float(1:8); local r:8 = 0; fp_round_n(Rn_FPR64, one, r); export r; }
+frint_s64: is b_1517=0b001 & Rn_FPR64 { local r:8 = ceil(Rn_FPR64); export r; }
+frint_s64: is b_1517=0b110 & Rn_FPR64 { local r:8 = NEON_frintx(Rn_FPR64); export r; }
+frint_s64: is b_1517=0b011 & Rn_FPR64 { local r:8 = 0; fp_round_z(Rn_FPR64, r); export r; }
+
 # C7.2.156 FRINTA (scalar) page C7-2371 line 138539 MATCH x1e264000/mask=xff3ffc00
 # C7.2.158 FRINTI (scalar) page C7-2375 line 138773 MATCH x1e27c000/mask=xff3ffc00
 # C7.2.160 FRINTM (scalar) page C7-2379 line 139011 MATCH x1e254000/mask=xff3ffc00
@@ -10731,9 +10823,9 @@ frint_smode: "z" is b_1517=0b011 { }
 # Half-precision variant when type = 11 suf=16
 
 :frint^frint_smode Rd_FPR16, Rn_FPR16
-is b_2431=0b00011110 & b_2223=0b11 & b_1821=0b1001 & b_1517 & b_1014=0b10000 & frint_smode & Rd_FPR16 & Rn_FPR16 & Zd
+is b_2431=0b00011110 & b_2223=0b11 & b_1821=0b1001 & b_1517 & b_1014=0b10000 & frint_smode & Rd_FPR16 & Rn_FPR16 & Zd & frint_s16
 {
-	Rd_FPR16 = trunc(Rn_FPR16);
+	Rd_FPR16 = frint_s16;
 	zext_zh(Zd); # zero upper 30 bytes of Zd
 }
 
@@ -10751,9 +10843,9 @@ is b_2431=0b00011110 & b_2223=0b11 & b_1821=0b1001 & b_1517 & b_1014=0b10000 & f
 # Single-precision variant when type = 00 suf=32
 
 :frint^frint_smode Rd_FPR32, Rn_FPR32
-is b_2431=0b00011110 & b_2223=0b00 & b_1821=0b1001 & b_1517 & b_1014=0b10000 & frint_smode & Rd_FPR32 & Rn_FPR32 & Zd
+is b_2431=0b00011110 & b_2223=0b00 & b_1821=0b1001 & b_1517 & b_1014=0b10000 & frint_smode & Rd_FPR32 & Rn_FPR32 & Zd & frint_s32
 {
-	Rd_FPR32 = trunc(Rn_FPR32);
+	Rd_FPR32 = frint_s32;
 	zext_zs(Zd); # zero upper 28 bytes of Zd
 }
 
@@ -10771,9 +10863,9 @@ is b_2431=0b00011110 & b_2223=0b00 & b_1821=0b1001 & b_1517 & b_1014=0b10000 & f
 # Double-precision variant when type = 01 suf=64
 
 :frint^frint_smode Rd_FPR64, Rn_FPR64
-is b_2431=0b00011110 & b_2223=0b01 & b_1821=0b1001 & b_1517 & b_1014=0b10000 & frint_smode & Rd_FPR64 & Rn_FPR64 & Zd
+is b_2431=0b00011110 & b_2223=0b01 & b_1821=0b1001 & b_1517 & b_1014=0b10000 & frint_smode & Rd_FPR64 & Rn_FPR64 & Zd & frint_s64
 {
-	Rd_FPR64 = trunc(Rn_FPR64);
+	Rd_FPR64 = frint_s64;
 	zext_zd(Zd); # zero upper 24 bytes of Zd
 }
 

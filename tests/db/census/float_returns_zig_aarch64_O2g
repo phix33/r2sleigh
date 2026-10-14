@@ -169,7 +169,7 @@ double loop_sum(const double* v, int32_t n)
     struct r2sleigh_bits_256 z0_5;
     uint64_t tmp_7b80_1;
     __uint128_t tmp_lane_1010598_1_7_1;
-    uint64_t tmp_cd000_1;
+    uint64_t tmp_d0e00_1;
     __uint128_t tmp_lane_1010598_5_a_1;
     uint64_t tmp_40b00_1;
     uint64_t tmp_lane_1010598_1a_d_1;
@@ -215,8 +215,8 @@ double loop_sum(const double* v, int32_t n)
                 for (; ; ) {
                     tmp_7b80_1 = (uint64_t)((uint64_t)x10_2 - (uint64_t)16U);
                     tmp_lane_1010598_1_7_1 = r2sleigh_load_u128((void*)tmp_7b80_1);
-                    tmp_cd000_1 = (uint64_t)((uint64_t)tmp_7b80_1 + (uint64_t)16U);
-                    tmp_lane_1010598_5_a_1 = r2sleigh_load_u128((void*)tmp_cd000_1);
+                    tmp_d0e00_1 = (uint64_t)((uint64_t)tmp_7b80_1 + (uint64_t)16U);
+                    tmp_lane_1010598_5_a_1 = r2sleigh_load_u128((void*)tmp_d0e00_1);
                     tmp_40b00_1 = (uint64_t)((uint64_t)x11_2 - (uint64_t)4U);
                     tmp_lane_1010598_1a_d_1 = (uint64_t)((__uint128_t)tmp_lane_1010598_1_7_1 >> 64U);
                     tmp_lane_1010598_1e_12_1 = r2sleigh_bits_extract_256_64(z0_5, 0U);
