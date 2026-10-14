@@ -47,3 +47,17 @@ fn an_object_s_sections_and_symbols_are_where_it_states_them() {
         .expect("the fixture states _f");
     assert_eq!(f.vaddr, 4);
 }
+
+#[test]
+fn mach_o_states_thumb_in_n_desc_and_in_a_function_start_s_low_bit() {
+    use r2image::EntryKind;
+    let image = image(include_bytes!("data/macho_thumb_main"));
+    let main = (image.symbols().iter())
+        .find(|symbol| &*symbol.name == "_main")
+        .expect("the fixture states _main");
+    assert_eq!((main.vaddr, main.thumb), (0x2800, true));
+    let declared = (image.entry_points().iter())
+        .find(|entry| entry.kind == EntryKind::Declared)
+        .map(|entry| (entry.vaddr, entry.thumb));
+    assert_eq!(declared, Some((0x2800, true)));
+}

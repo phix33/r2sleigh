@@ -3,7 +3,8 @@
 
 macho_indirect   an executable whose symbol table holds an N_INDR alias, whose n_value is a string index
 macho_object     an MH_OBJECT whose __text states addr 0 at file 0x100, and a symbol at its n_value 4
-macho_thumb_main an ARMv7 executable whose LC_MAIN entryoff is a file offset, odd for Thumb, into __TEXT at 0x1000
+macho_thumb_main an ARMv7 executable whose LC_MAIN entryoff is a file offset, odd for Thumb, into __TEXT at 0x1000;
+                 its _main is stated Thumb by n_desc, and its function start by the low bit
 """
 
 import pathlib
@@ -66,10 +67,18 @@ def thumb_main():
     sections = struct.pack("<16s16sIIIIIIIII", b"__text", b"__TEXT", 0x1100, len(code), 0x100, 1, 0, 0, 0x80000400, 0, 0)
     text = struct.pack("<II16sIIIIiiII", 0x1, 56 + 68, b"__TEXT", 0x1000, 0x3000, 0, 0x2100, 5, 5, 1, 0) + sections
     main = struct.pack("<IIQQ", 0x80000028, 24, 0x1801, 0)
-    commands = [text, main]
+    # _main at 0x2800, Thumb by N_ARM_THUMB_DEF; a function start ld64 writes with the low bit, 0x1801 past __TEXT.
+    strings = b"\0_main\0"
+    symbols = struct.pack("<IBBHI", 1, 0xE | 0x1, 1, 0x0008, 0x2800)
+    starts = bytes([0x81, 0x30, 0, 0])
+    symtab = struct.pack("<IIIIII", 0x2, 24, 0x2100, 1, 0x2110, len(strings))
+    function_starts = struct.pack("<IIII", 0x26, 16, 0x2120, len(starts))
+    commands = [text, main, symtab, function_starts]
     header = struct.pack("<IiiIIII", 0xFEEDFACE, 12, 9, MH_EXECUTE, len(commands), sum(map(len, commands)), 0)
     out = bytearray(header + b"".join(commands))
     out += bytes(0x100 - len(out)) + code
+    out += symbols + bytes(0x2110 - 0x2100 - len(symbols)) + strings
+    out += bytes(0x2120 - len(out)) + starts
     return bytes(out)
 
 

@@ -63,7 +63,7 @@ reason = "0x100015fe0 begins __objc_stubs: it loads a selector into x1, then jum
 command = ["px", "pd"]
 binaries = "watchos-relocs.obj"
 verdict = "r2s-right"
-reason = "an MH_OBJECT states no entry: radare2 seeks entry0 to __text's file offset 0x264, used as an address no section holds, and dumps its fill; r2s has none and stays at 0, where __text is (and decodes it as ARM, though the symbol table states _main Thumb: ARMv7, ungraded)"
+reason = "an MH_OBJECT states no entry: radare2 seeks entry0 to __text's file offset 0x264, used as an address no section holds, and dumps its fill; r2s has none and stays at 0, where __text is"
 
 [[judged]]
 command = "iS"
@@ -552,9 +552,11 @@ reason = "radare2 names each LC_FUNCTION_STARTS entry sym.func.*; r2s names no f
 
 [[judged]]
 command = "pd"
-binaries = ["TestRTTI-armv7", "arm-or-thumb", "arm16-ofp.lzh", "arm32-ofp.lzh", "hello-objc-arm", "ired-thumb", "misaligned_data-iOS-armv7", "test-thumb", "thumb-test", "BatteryLife.arm_32.0"]
-verdict = "r2-right"
-reason = "ARMv7 (ungraded): r2s states the Mach-O entry Thumb (LC_MAIN's low bit) and decodes its first instruction so, then decodes ARM where radare2 reads Thumb (mov r7, sp); owner r2engine's listing mode"
+binaries = "BatteryLife.arm_32.0"
+r2 = 'str r8, \[sp, 0xfffffffffffffffc\]!$'
+r2s = 'push\.w r8$'
+verdict = "deliberate"
+reason = "ARMv7 (ungraded): f84d 8d04 is STR r8, [sp, #-4]! with writeback, the encoding the ARM ARM disassembles as its PUSH.W alias; Sleigh spells the alias, radare2 the store"
 
 [[judged]]
 command = "pd"

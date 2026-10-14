@@ -738,9 +738,12 @@ impl Image {
                     || common.is_some())
                     && symbol.kind() != object::SymbolKind::Tls,
                 import,
+                // ELF sets the address's low bit; Mach-O states `N_ARM_THUMB_DEF` in `n_desc`.
                 thumb: is_arm32(&arch)
                     && symbol.kind() == object::SymbolKind::Text
-                    && address & 1 == 1,
+                    && (address & 1 == 1
+                        || matches!(symbol.flags(), object::SymbolFlags::MachO { n_desc, .. }
+                            if n_desc.contains(object::macho::N_ARM_THUMB_DEF))),
                 binding: symbol_binding(&symbol, os_abi),
                 visibility: match symbol.flags() {
                     object::SymbolFlags::Elf { st_other, .. } => match st_other.visibility() {
@@ -906,12 +909,14 @@ impl Image {
         }
         // The linker wrote one entry per function it laid out, so a body no
         // symbol names and nothing calls is still stated here.
-        for vaddr in macho_function_starts(&file, &data[..]) {
+        // ld64 sets a Thumb start's low bit, as an ARM code pointer carries it.
+        for raw in macho_function_starts(&file, &data[..]) {
+            let vaddr = code_address(&arch, raw);
             if executable(vaddr) {
                 entries.push(Entry {
                     vaddr,
                     kind: EntryKind::Declared,
-                    thumb: false,
+                    thumb: is_arm32(&arch) && raw & 1 == 1,
                     stated_at: None,
                 });
             }
