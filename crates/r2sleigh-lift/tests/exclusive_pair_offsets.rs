@@ -1,9 +1,5 @@
-//! A 64-bit AArch64 store-exclusive pair writes its second register eight bytes above the first.
-//!
-//! The Arm ARM stores `el1:el2` as one 16-byte access, so on a little-endian machine `Rt2` lands at
-//! `[Xn + 8]`. Ghidra's `stlxp` stored it at `+ 4`, overlapping the first; `stxp` was right. The
-//! oracle cannot run either (eval does not model the exclusive monitor), so the stores are read
-//! off the lift: each store's address is the base register or the base plus a constant.
+//! A 64-bit AArch64 store-exclusive pair writes Rt2 at [Xn + 8] (Arm ARM: `el1:el2`, one 16-byte
+//! access); eval does not run the exclusive monitor, so the store offsets are read off the lift.
 #![cfg(feature = "arm")]
 
 use r2il::{R2ILOp, Varnode};

@@ -1,15 +1,8 @@
-//! Each AArch64 instruction in `aarch64_oracle/cases.txt` computes, through the trusted lift and
-//! `r2il::eval`, what an arm64 CPU computed from the same state.
-//!
-//! `aarch64_oracle/record.sh` ran every case on a CPU from states drawn by one xorshift stream and
-//! recorded only what changed (`recorded.txt`); this test draws the same states, checks each
-//! against the recorded hash, runs the lift and compares every register, flag, vector and memory
-//! byte, a NaN matching any NaN in its lane. Cases that stop or disagree are listed in
-//! `expected.txt`, a ratchet: a case leaving it must be removed from it, and a case joining it
-//! fails. `R2S_BLESS=1` rewrites it.
+//! Each AArch64 case in `aarch64_oracle/cases.txt` computes, through the trusted lift and
+//! `r2il::eval`, what an arm64 CPU computed from the same state (`aarch64_oracle/README.md`).
 #![cfg(feature = "arm")]
 
-use r2il::eval::{Flow, State, Stop, TransferKind, step};
+use r2il::eval::{Flow, Mapped, State, Stop, TransferKind, step};
 use r2il::{Endianness, R2ILOp, Varnode};
 use r2sleigh_lift::{Disassembler, TrustedSleighProfile};
 use std::collections::{BTreeMap, BTreeSet};
@@ -310,6 +303,15 @@ fn after(case: &Case, before: &Machine, changes: &str) -> Machine {
     out
 }
 
+/// The flags and the NZCV bit each is.
+const FLAGS: [(u32, &str); 4] = [(31, "ng"), (30, "zr"), (29, "cy"), (28, "ov")];
+
+/// What follows an operation that did not fall through.
+enum Next {
+    Instruction(usize),
+    Done { taken: bool },
+}
+
 struct Lift {
     disassembler: Disassembler,
 }
@@ -340,7 +342,7 @@ impl Lift {
             .map_or_else(|| format!("{offset:#x}"), |register| register.name.clone())
     }
 
-    fn set<M: r2il::eval::Mapped>(&self, state: &mut State<M>, name: &str, value: u128) {
+    fn set<M: Mapped>(&self, state: &mut State<M>, name: &str, value: u128) {
         let (offset, size) = self.register(name);
         state.set_register(offset, size, value).expect(name);
     }
@@ -368,6 +370,15 @@ impl Lift {
         before: &Machine,
         cpu: &Machine,
     ) -> BTreeSet<String> {
+        let mut state = self.start(case, before);
+        match self.execute(case, lifted, &mut state) {
+            Ok(taken) => self.compare(&mut state, cpu, taken),
+            Err(stop) => BTreeSet::from([stop]),
+        }
+    }
+
+    /// The machine as the CPU began: the drawn registers, flags, vectors and memory.
+    fn start(&self, case: &Case, before: &Machine) -> State<impl Mapped> {
         let image = before.memory.clone();
         let mapped = move |address: u64| {
             address
@@ -377,73 +388,92 @@ impl Lift {
         };
         let mut state = State::new(Endianness::Little, mapped, 1 << 16).expect("machine");
         // The specification's scratch flags (`tmpNG` and the rest) are no CPU state; they start zero.
-        let scratch: Vec<String> = self
-            .disassembler
-            .arch_spec()
-            .registers
+        let registers = &self.disassembler.arch_spec().registers;
+        for register in registers
             .iter()
-            .filter(|register| register.name.to_ascii_lowercase().starts_with("tmp"))
-            .map(|register| register.name.clone())
-            .collect();
-        for name in &scratch {
-            self.set(&mut state, name, 0);
+            .filter(|r| r.name.to_ascii_lowercase().starts_with("tmp"))
+        {
+            self.set(&mut state, &register.name, 0);
         }
         for (n, x) in before.x.iter().enumerate() {
             self.set(&mut state, &format!("x{n}"), u128::from(*x));
         }
-        self.set(&mut state, "xzr", 0);
-        self.set(&mut state, "sp", 0x7ff0_0000);
-        self.set(&mut state, "pc", u128::from(case.code));
-        self.set(&mut state, "fpcr", 0);
-        self.set(&mut state, "fpsr", 0);
-        for (bit, flag) in [(31, "ng"), (30, "zr"), (29, "cy"), (28, "ov")] {
+        for (name, value) in [
+            ("xzr", 0),
+            ("sp", 0x7ff0_0000),
+            ("pc", u128::from(case.code)),
+            ("fpcr", 0),
+            ("fpsr", 0),
+        ] {
+            self.set(&mut state, name, value);
+        }
+        for (bit, flag) in FLAGS {
             self.set(&mut state, flag, u128::from((before.nzcv >> bit) & 1));
         }
         for (n, lane) in before.v.iter().enumerate() {
             self.set(&mut state, &format!("z{n}"), *lane);
         }
-        let end = case.code + 4 * case.words.len() as u64;
-        let mut taken = false;
+        state
+    }
+
+    /// Runs the case's instructions; whether its branch was taken, or why the run stopped.
+    fn execute<M: Mapped>(
+        &self,
+        case: &Case,
+        lifted: &[Vec<R2ILOp>],
+        state: &mut State<M>,
+    ) -> Result<bool, String> {
         let mut at = 0usize;
-        'instructions: while at < lifted.len() {
-            for op in &lifted[at] {
-                match step(op, &mut state) {
-                    Flow::Next => {}
-                    Flow::Transfer(transfer) if transfer.kind == TransferKind::Jump => {
-                        if transfer.to == case.target {
-                            taken = true;
-                            break 'instructions;
-                        }
-                        if transfer.to == end {
-                            break 'instructions;
-                        }
-                        let within = transfer.to.wrapping_sub(case.code);
-                        if within % 4 == 0 && within < 4 * lifted.len() as u64 {
-                            at = (within / 4) as usize;
-                            continue 'instructions;
-                        }
-                        return BTreeSet::from([format!("stop jump to {:#x}", transfer.to)]);
-                    }
-                    Flow::Transfer(transfer) => {
-                        return BTreeSet::from([format!("stop {:?}", transfer.kind)]);
-                    }
-                    Flow::Stop(Stop::Unmodelled) => {
-                        return BTreeSet::from([format!("stop unmodelled {}", self.operation(op))]);
-                    }
-                    Flow::Stop(Stop::Unmapped { .. }) => {
-                        return BTreeSet::from(["stop unmapped".to_string()]);
-                    }
-                    Flow::Stop(Stop::Unwritten { offset, .. }) => {
-                        return BTreeSet::from([format!(
-                            "stop unwritten {}",
-                            self.name_at(offset)
-                        )]);
-                    }
-                    Flow::Stop(stop) => return BTreeSet::from([format!("stop {stop:?}")]),
+        while at < lifted.len() {
+            let Some((op, flow)) = lifted[at].iter().find_map(|op| match step(op, state) {
+                Flow::Next => None,
+                flow => Some((op, flow)),
+            }) else {
+                at += 1;
+                continue;
+            };
+            match self.after(case, lifted.len(), op, flow)? {
+                Next::Instruction(next) => at = next,
+                Next::Done { taken } => return Ok(taken),
+            }
+        }
+        Ok(false)
+    }
+
+    /// Where control goes after an operation that did not fall through.
+    fn after(&self, case: &Case, count: usize, op: &R2ILOp, flow: Flow) -> Result<Next, String> {
+        let end = case.code + 4 * count as u64;
+        match flow {
+            Flow::Transfer(transfer) if transfer.kind == TransferKind::Jump => {
+                let within = transfer.to.wrapping_sub(case.code);
+                if transfer.to == case.target || transfer.to == end {
+                    Ok(Next::Done {
+                        taken: transfer.to == case.target,
+                    })
+                } else if within % 4 == 0 && within < 4 * count as u64 {
+                    Ok(Next::Instruction((within / 4) as usize))
+                } else {
+                    Err(format!("stop jump to {:#x}", transfer.to))
                 }
             }
-            at += 1;
+            Flow::Transfer(transfer) => Err(format!("stop {:?}", transfer.kind)),
+            Flow::Stop(Stop::Unmodelled) => Err(format!("stop unmodelled {}", self.operation(op))),
+            Flow::Stop(Stop::Unmapped { .. }) => Err("stop unmapped".to_string()),
+            Flow::Stop(Stop::Unwritten { offset, .. }) => {
+                Err(format!("stop unwritten {}", self.name_at(offset)))
+            }
+            Flow::Stop(stop) => Err(format!("stop {stop:?}")),
+            Flow::Next => unreachable!("only an operation that did not fall through is asked"),
         }
+    }
+
+    /// Every register, flag, vector and memory byte that differs from what the CPU left.
+    fn compare<M: Mapped>(
+        &self,
+        state: &mut State<M>,
+        cpu: &Machine,
+        taken: bool,
+    ) -> BTreeSet<String> {
         let mut wrong = BTreeSet::new();
         for n in (0..31).filter(|n| *n != 18) {
             let (offset, size) = self.register(&format!("x{n}"));
@@ -451,7 +481,7 @@ impl Lift {
                 wrong.insert(format!("x{n}"));
             }
         }
-        for (bit, flag) in [(31, "ng"), (30, "zr"), (29, "cy"), (28, "ov")] {
+        for (bit, flag) in FLAGS {
             let (offset, size) = self.register(flag);
             if state.register(offset, size) != Some(u128::from((cpu.nzcv >> bit) & 1)) {
                 wrong.insert(flag.to_string());

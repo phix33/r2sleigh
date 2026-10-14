@@ -774,10 +774,8 @@ fn sign(bytes: u32) -> Result<u128, Stop> {
     }
 }
 
-/// Executes a float operation in round-to-nearest-even, returning whether `op` is one.
-///
-/// What p-code leaves undefined has no value: `FLOAT_ROUND` of a tie (Ghidra's C++ and Java
-/// emulators break it differently) and a conversion to an integer the value does not fit.
+/// Executes a float operation in round-to-nearest-even, returning whether `op` is one; what p-code
+/// leaves undefined (a `FLOAT_ROUND` tie, an integer the value does not fit) has no value.
 fn floating<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<bool, Stop> {
     let mut float = |varnode: &Varnode| -> Result<Float, Stop> {
         Float::of(state.read(varnode)?, varnode.size)
@@ -1180,95 +1178,93 @@ mod tests {
         assert_eq!(step(&scan, &mut machine), stopped);
     }
 
+    /// Runs one float operation from `inputs` (offset, size, bits) and reads its result at offset 32.
+    fn float_run(op: &R2ILOp, inputs: &[(u64, u32, u128)]) -> Result<u128, Stop> {
+        let mut machine = state();
+        for (offset, size, value) in inputs {
+            machine
+                .set_register(*offset, *size, *value)
+                .expect("an input");
+        }
+        match step(op, &mut machine) {
+            Flow::Next => Ok(machine
+                .register(32, op.output().map_or(8, |dst| dst.size))
+                .expect("a result")),
+            Flow::Stop(stop) => Err(stop),
+            flow => panic!("{flow:?}"),
+        }
+    }
+
+    fn double(x: f64) -> u128 {
+        u128::from(x.to_bits())
+    }
+
     #[test]
-    fn floats_round_to_nearest_even_and_leave_undefined_what_p_code_does() {
-        let run = |op: R2ILOp, inputs: &[(u64, u32, u128)]| {
-            let mut machine = state();
-            for (offset, size, value) in inputs {
-                machine
-                    .set_register(*offset, *size, *value)
-                    .expect("an input");
-            }
-            match step(&op, &mut machine) {
-                Flow::Next => Ok(machine
-                    .register(32, op.output().map_or(8, |dst| dst.size))
-                    .expect("a result")),
-                Flow::Stop(stop) => Err(stop),
-                flow => panic!("{flow:?}"),
-            }
-        };
+    fn floats_round_to_nearest_even_with_one_nan_and_keep_a_sign_operations_payload() {
         let (a, b, out) = (register(0, 8), register(8, 8), register(32, 8));
-        let one = u128::from(1f64.to_bits());
-        let third = u128::from((1f64 / 3.0).to_bits());
         let divide = R2ILOp::FloatDiv {
             dst: out.clone(),
             a: a.clone(),
             b: b.clone(),
         };
-        assert_eq!(
-            run(
-                divide.clone(),
-                &[(0, 8, one), (8, 8, u128::from(3f64.to_bits()))]
-            ),
-            Ok(third)
-        );
+        let thirds = [(0, 8, double(1.0)), (8, 8, double(3.0))];
+        assert_eq!(float_run(&divide, &thirds), Ok(double(1.0 / 3.0)));
         // 0/0 is the canonical NaN whatever the host would produce.
-        assert_eq!(
-            run(divide, &[(0, 8, 0), (8, 8, 0)]),
-            Ok(u128::from(DOUBLE_NAN))
-        );
+        let zeros = [(0, 8, 0), (8, 8, 0)];
+        assert_eq!(float_run(&divide, &zeros), Ok(u128::from(DOUBLE_NAN)));
         let signalling = 0x7ff4_0000_0000_0001u128;
         let negate = R2ILOp::FloatNeg {
-            dst: out.clone(),
+            dst: out,
             src: a.clone(),
         };
-        assert_eq!(run(negate, &[(0, 8, signalling)]), Ok(signalling | 1 << 63));
+        assert_eq!(
+            float_run(&negate, &[(0, 8, signalling)]),
+            Ok(signalling | 1 << 63)
+        );
         let less = R2ILOp::FloatLess {
             dst: register(32, 1),
-            a: a.clone(),
-            b: b.clone(),
+            a,
+            b,
         };
-        assert_eq!(run(less, &[(0, 8, signalling), (8, 8, one)]), Ok(0));
+        assert_eq!(
+            float_run(&less, &[(0, 8, signalling), (8, 8, double(1.0))]),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn a_conversion_rounds_once_and_a_tie_or_an_overflow_has_no_value() {
+        let (a, out) = (register(0, 8), register(32, 8));
         let round = R2ILOp::FloatRound {
             dst: out.clone(),
             src: a.clone(),
         };
         assert_eq!(
-            run(round.clone(), &[(0, 8, u128::from(2.5f64.to_bits()))]),
+            float_run(&round, &[(0, 8, double(2.5))]),
             Err(Stop::Undefined)
         );
-        assert_eq!(
-            run(round, &[(0, 8, u128::from(2.75f64.to_bits()))]),
-            Ok(u128::from(3f64.to_bits()))
-        );
+        assert_eq!(float_run(&round, &[(0, 8, double(2.75))]), Ok(double(3.0)));
         let truncate = R2ILOp::Trunc {
             dst: register(32, 4),
             src: a.clone(),
         };
         assert_eq!(
-            run(truncate.clone(), &[(0, 8, u128::from((-2.9f64).to_bits()))]),
+            float_run(&truncate, &[(0, 8, double(-2.9))]),
             Ok(0xffff_fffe)
         );
-        assert_eq!(
-            run(truncate, &[(0, 8, u128::from(2147483648f64.to_bits()))]),
-            Err(Stop::Undefined)
-        );
+        let past = [(0, 8, double(2147483648.0))];
+        assert_eq!(float_run(&truncate, &past), Err(Stop::Undefined));
         let widen = R2ILOp::Int2Float {
-            dst: out.clone(),
+            dst: out,
             src: register(0, 4),
         };
-        assert_eq!(
-            run(widen, &[(0, 4, 0xffff_ffff)]),
-            Ok(u128::from((-1f64).to_bits()))
-        );
+        assert_eq!(float_run(&widen, &[(0, 4, 0xffff_ffff)]), Ok(double(-1.0)));
         let narrow = R2ILOp::FloatFloat {
             dst: register(32, 4),
             src: a,
         };
-        assert_eq!(
-            run(narrow, &[(0, 8, third)]),
-            Ok(u128::from((1f32 / 3.0).to_bits()))
-        );
+        let third = u128::from((1f32 / 3.0).to_bits());
+        assert_eq!(float_run(&narrow, &[(0, 8, double(1.0 / 3.0))]), Ok(third));
     }
 
     #[test]
