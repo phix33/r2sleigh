@@ -24,14 +24,12 @@ EXPECT=<<EOF
 void _start(void)
 {
     uint64_t tmp_55400_2;
-    uint64_t tmp_3cb80_1;
 
-    /* r2dec proof: 5 constructs are marked below; 27 source obligations: 2 rendered, 3 elided, 0 refused, 22 residual; 2 statements rendered; 1 held from entry, read as residuals (stack_p0) */
+    /* r2dec proof: 5 constructs are marked below; 27 source obligations: 0 rendered, 5 elided, 0 refused, 22 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0) */
     {
         tmp_55400_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x10014e0:29 covering 1 op (render::values) */
         r2sleigh_residual_void(3); /* r2dec gap: StoreNotSpelled at 0x10014e0:32 covering 1 op (render::values) */
-        tmp_3cb80_1 = r2sleigh_load_u64((void*)(uint64_t)0x1002728U);
         r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x10014e0:46 covering 1 op (render::values) */
         r2sleigh_residual_void(5); /* r2dec gap: TailTransferNotRendered at 0x10014e0 (render::control) */
     }

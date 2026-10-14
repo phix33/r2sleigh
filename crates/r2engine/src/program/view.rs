@@ -184,6 +184,10 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
         &self.source().container().loader_writes
     }
 
+    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
+        self.source().container().immutable(range)
+    }
+
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let read = self.source().read(vaddr, max)?;
         // Only what is mapped: no write can land in the unmapped rest.
@@ -274,10 +278,6 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
 
     fn holds_static_data(&self, vaddr: u64) -> bool {
         self.db.inputs().static_data.holds(vaddr)
-    }
-
-    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
-        self.source().container().immutable(range)
     }
 
     fn holds_code(&self, vaddr: u64) -> bool {

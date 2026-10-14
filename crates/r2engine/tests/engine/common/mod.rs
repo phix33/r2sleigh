@@ -872,6 +872,12 @@ impl Literal {
         self
     }
 
+    /// The same program, with one more relocation record the container states.
+    pub fn relocated(mut self, relocation: Relocation) -> Self {
+        self.container.relocations.push(relocation);
+        self
+    }
+
     /// The same program, stating that the loader writes this before it runs.
     pub fn loader_written(mut self, write: LoaderWrite) -> Self {
         self.container.loader_writes.push(write);

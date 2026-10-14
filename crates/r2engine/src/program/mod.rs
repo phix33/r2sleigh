@@ -492,6 +492,10 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         &self.source().container().loader_writes
     }
 
+    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
+        self.source().container().immutable(range)
+    }
+
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         self.view().read(vaddr, max)
     }
@@ -537,10 +541,6 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
 
     fn holds_static_data(&self, vaddr: u64) -> bool {
         self.view().holds_static_data(vaddr)
-    }
-
-    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
-        self.view().immutable(range)
     }
 
     fn holds_code(&self, vaddr: u64) -> bool {

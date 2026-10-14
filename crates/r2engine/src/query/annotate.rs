@@ -489,11 +489,10 @@ fn pointer_use(
     let call = op.transfer().filter(|transfer| transfer.call)?;
     let callee = if call.direct {
         Callee::At(encoded_target(call.target)?)
+    } else if let Some(slot) = r2ssa::loaded_target_slot(block, at) {
+        Callee::ThroughSlot(slot.offset)
     } else {
-        match BlockOrigins::upto(block, at).of(call.target)? {
-            ValueOrigin::Constant { value, .. } => Callee::At(value),
-            ValueOrigin::LoadedSlot(slot) => Callee::ThroughSlot(slot.offset),
-        }
+        Callee::At(BlockOrigins::upto(block, at).of(call.target)?.constant()?)
     };
     let held = |storage: &CanonicalStorageId| {
         holders

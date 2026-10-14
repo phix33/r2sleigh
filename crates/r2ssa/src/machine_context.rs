@@ -485,6 +485,8 @@ pub struct SourceMachineContext {
     tail_call_sites: BTreeSet<SourceCallSiteIdentity>,
     /// Who each raw call site calls, where the source knew.
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
+    /// The sealed import slot each `CallSlot` site calls through (audit W8).
+    slot_targets: BTreeMap<SourceCallSiteIdentity, u64>,
     /// The name the source gave each raw call site's callee.
     callee_names: BTreeMap<SourceCallSiteIdentity, String>,
     /// How far each callee is proven to touch through each pointer argument,
@@ -879,6 +881,7 @@ impl SourceMachineContext {
             raw_call_sites,
             tail_call_sites,
             callee_linkages: BTreeMap::new(),
+            slot_targets: BTreeMap::new(),
             callee_names: BTreeMap::new(),
             callee_argument_reach: BTreeMap::new(),
             callee_library: BTreeMap::new(),
@@ -1294,6 +1297,15 @@ impl SourceMachineContext {
         self.callee_names.get(&identity).map(String::as_str)
     }
 
+    pub(crate) fn set_slot_targets(&mut self, slots: BTreeMap<SourceCallSiteIdentity, u64>) {
+        self.slot_targets = slots;
+    }
+
+    /// The sealed import slot a call through memory reaches, where the source states one.
+    pub(crate) fn slot_target(&self, identity: SourceCallSiteIdentity) -> Option<u64> {
+        self.slot_targets.get(&identity).copied()
+    }
+
     /// Who the site calls, as the source's symbol or relocation said; unknown where it said nothing.
     pub fn callee_linkage(
         &self,
@@ -1516,10 +1528,20 @@ pub fn terminal_indirect_loaded_slot(
     if branch_op_index + 1 != block.ops.len() {
         return None;
     }
-    let R2ILOp::BranchInd { target } = block.ops.get(branch_op_index)? else {
+    let R2ILOp::BranchInd { .. } = block.ops.get(branch_op_index)? else {
         return None;
     };
-    BlockOrigins::upto(block, branch_op_index)
+    loaded_target_slot(block, branch_op_index)
+}
+
+/// The canonical RAM slot an indirect call or branch at `op_index` loads its target from, as the
+/// block's own origins show it: the one reader of `call [slot]` and `jmp [slot]` (audit W8, D3).
+pub fn loaded_target_slot(block: &R2ILBlock, op_index: usize) -> Option<CanonicalStorageId> {
+    let (R2ILOp::CallInd { target } | R2ILOp::BranchInd { target }) = block.ops.get(op_index)?
+    else {
+        return None;
+    };
+    BlockOrigins::upto(block, op_index)
         .of(target)?
         .loaded_slot()
 }

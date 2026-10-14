@@ -1735,6 +1735,15 @@ fn unique_call_site_identity(
                             crate::origin::folded_call_target(block, op_index)?,
                         )
                     }
+                    // The site is the target value; the address is the slot its block loads it from.
+                    (r2source::AdvisoryCallTransfer::CallSlot, R2ILOp::CallInd { target })
+                        if instruction().is_some() =>
+                    {
+                        (
+                            CanonicalStorageId::from_varnode(target),
+                            crate::machine_context::loaded_target_slot(block, op_index)?.offset,
+                        )
+                    }
                     (r2source::AdvisoryCallTransfer::TailJump, R2ILOp::Branch { target })
                         if last =>
                     {
@@ -1862,6 +1871,8 @@ struct CorrelatedCallSites {
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
     /// The name the source gave each correlated site's callee.
     callee_names: BTreeMap<SourceCallSiteIdentity, String>,
+    /// The sealed import slot each correlated `CallSlot` site calls through.
+    slot_targets: BTreeMap<SourceCallSiteIdentity, u64>,
 }
 
 fn correlate_call_site_interfaces(
@@ -1872,6 +1883,7 @@ fn correlate_call_site_interfaces(
     let mut tail_calls = Vec::new();
     let mut interfaces = Vec::new();
     let mut callee_linkages = BTreeMap::new();
+    let mut slot_targets = BTreeMap::new();
     let mut callee_names = BTreeMap::new();
     for call in source.advisory_calls() {
         let Some(identity) = unique_call_site_identity(blocks, calls, call) else {
@@ -1894,6 +1906,9 @@ fn correlate_call_site_interfaces(
         }
         if call.linkage() != r2source::AdvisoryCalleeLinkage::Unknown {
             callee_linkages.insert(identity, call.linkage());
+        }
+        if call.transfer() == r2source::AdvisoryCallTransfer::CallSlot {
+            slot_targets.insert(identity, call.target_address());
         }
         if let Some(name) = call.target_name() {
             callee_names.insert(identity, name.to_string());
@@ -2022,6 +2037,7 @@ fn correlate_call_site_interfaces(
         interfaces,
         callee_linkages,
         callee_names,
+        slot_targets,
     }
 }
 
@@ -2460,6 +2476,8 @@ impl TrustedSsaArtifact {
                     .bind_source_string_literals(source.image().string_literals());
                 provisional_machine_context.bind_read_only(source.image().read_only());
                 provisional_machine_context.set_callee_statements(&callee_statements);
+                provisional_machine_context
+                    .set_slot_targets(correlated_call_sites.slot_targets.clone());
                 provisional_machine_context.set_reentering_callees(reentering.clone());
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
@@ -2587,6 +2605,7 @@ impl TrustedSsaArtifact {
         machine_context.set_arity_owners(arity_owners);
         machine_context.set_result_ambiguous(result_ambiguous);
         machine_context.set_callee_statements(&callee_statements);
+        machine_context.set_slot_targets(correlated_call_sites.slot_targets);
         machine_context.set_frame_saves(source.image().frame_saves());
         machine_context.set_accepted_premises(premises.clone());
         // What each entry of a captured code pointer table names, recorded

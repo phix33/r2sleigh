@@ -804,6 +804,9 @@ pub enum AdvisoryCallTransfer {
     Call,
     TailJump,
     TailSlot,
+    /// A call through a slot the loader binds to an import and seals: the site's target address is
+    /// the slot, and the machine still has to show that the call reads it (audit W8).
+    CallSlot,
 }
 
 /// Who the callee is, from the symbol or relocation that named it: a function

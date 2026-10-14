@@ -82,3 +82,45 @@ fn under_aa_a_floor_its_callee_owns_is_resolved_bottom_up() {
     );
     assert!(!text.contains(", 7)"), "{text}");
 }
+
+/// `caller`: `mov edi, 5; mov esi, 7; call [rip + 0x10]; ret`, the slot at 0x1020 the loader binds
+/// to `puts`, in a segment the program may write.
+const CALL_THROUGH_A_SLOT: &[u8] = &[
+    0xbf, 0x05, 0x00, 0x00, 0x00, // 1000 mov edi, 5
+    0xbe, 0x07, 0x00, 0x00, 0x00, // 1005 mov esi, 7
+    0xff, 0x15, 0x10, 0x00, 0x00, 0x00, // 100a call [rip + 0x10]
+    0xc3, // 1010 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1011 padding
+    0, 0, 0, 0, 0, 0, 0, 0, // 1020 the slot
+];
+
+/// `caller` over the slot, sealed after load or not.
+fn slot_caller(sealed: bool) -> String {
+    let slot = BASE + 0x20;
+    let mut literal = Literal::of_code(CALL_THROUGH_A_SLOT, &[("caller", BASE, 0x11)])
+        .writable_data_after(slot)
+        .loader_written(common::import_write(slot, 8, "puts"))
+        .relocated(common::import_slot(slot, "puts"));
+    if sealed {
+        literal = literal.sealed(slot..slot + 8);
+    }
+    OpenProgram::of(literal)
+        .rendered(BASE)
+        .expect("it renders")
+        .response
+        .output
+        .into_text()
+}
+
+/// A call through a slot the loader binds to an import and seals is a call to that import, with
+/// its declaration's arity: `puts(5)`, not a pointer call handed every register written (audit
+/// W8). A slot the program may rebind stays a call through memory.
+#[test]
+fn a_call_through_a_sealed_import_slot_calls_the_import() {
+    let text = slot_caller(true);
+    assert!(text.contains("puts((const char*)(uint64_t)5U)"), "{text}");
+    assert!(!text.contains(", 7)"), "{text}");
+    let text = slot_caller(false);
+    assert!(!text.contains("puts("), "{text}");
+}

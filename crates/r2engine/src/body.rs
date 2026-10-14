@@ -60,6 +60,15 @@ pub trait Program {
         &[]
     }
 
+    /// Whether nothing can write any byte of `range` once the program runs:
+    /// a segment mapped without write permission, or one the loader seals
+    /// after it is done. Where the program says nothing of sealing, only the
+    /// region's own permission answers.
+    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
+        self.region(range.start)
+            .is_some_and(|region| !region.write && range.end <= region.end)
+    }
+
     /// Whether another function begins here.
     ///
     /// This is what bounds a body. The walk can see that control transfers; it
@@ -427,6 +436,8 @@ struct Walk {
     calls: BTreeSet<u64>,
     loads: BTreeSet<u64>,
     tail_calls: BTreeSet<u64>,
+    /// Each call through a slot the loader binds to an import and seals, by instruction: the slot.
+    slot_calls: BTreeMap<u64, u64>,
     falls_into: BTreeSet<u64>,
     entered_with: BTreeMap<u64, u64>,
     unresolved: Vec<Unresolved>,
@@ -464,6 +475,7 @@ impl Walk {
             calls: BTreeSet::new(),
             loads: BTreeSet::new(),
             tail_calls: BTreeSet::new(),
+            slot_calls: BTreeMap::new(),
             falls_into: BTreeSet::new(),
             entered_with: BTreeMap::new(),
             unresolved: Vec::new(),
@@ -718,7 +730,17 @@ impl Walk {
             // back -- unless it calls through a slot whose pointer the
             // program states, and what it states there never returns.
             BlockTerminator::IndirectCall { fallthrough } => {
-                let through = called_slot(&instruction.lifted.ops);
+                let ops = &instruction.lifted.ops;
+                let at = ops
+                    .iter()
+                    .rposition(|op| matches!(op, r2il::R2ILOp::CallInd { .. }));
+                let through = at.and_then(|at| r2ssa::loaded_target_slot(&instruction.lifted, at));
+                let through = through.map(|slot| slot.offset);
+                if let Some(slot) = through
+                    && crate::stated::sealed_import(program, slot).is_some()
+                {
+                    self.slot_calls.insert(addr, slot);
+                }
                 if through.is_none_or(|slot| program.returns_through(slot)) {
                     self.continues(fallthrough, &mut successors, program)
                 }
@@ -840,6 +862,7 @@ impl Walk {
             link,
             dispatched: &self.dispatched,
             tail_calls: &self.tail_calls,
+            slot_calls: &self.slot_calls,
         };
         for (addr, instruction) in self.lifted.unwrap_or_default() {
             let broken = parts
@@ -880,33 +903,6 @@ impl Walk {
     }
 }
 
-/// The constant address an indirect call reads its target from, where the
-/// call's target is exactly a load of one: `call [slot]`.
-fn called_slot(ops: &[r2il::R2ILOp]) -> Option<u64> {
-    let target = ops.iter().rev().find_map(|op| match op {
-        r2il::R2ILOp::CallInd { target } => Some(target),
-        _ => None,
-    })?;
-    // The last write of the target before the call is what it calls.
-    let at = ops
-        .iter()
-        .position(|op| matches!(op, r2il::R2ILOp::CallInd { .. }))?;
-    ops[..at].iter().rev().find_map(|op| {
-        let written = op.output()?;
-        if written != target {
-            return None;
-        }
-        Some(match op {
-            r2il::R2ILOp::Load { space, addr, .. }
-                if *space == r2il::SpaceId::Ram && addr.space == r2il::SpaceId::Const =>
-            {
-                Some(addr.offset)
-            }
-            _ => None,
-        })
-    })?
-}
-
 /// Every address a load reads that the operations state as a constant.
 fn constant_loads(ops: &[r2il::R2ILOp]) -> impl Iterator<Item = u64> + '_ {
     ops.iter().filter_map(|op| match op {
@@ -919,11 +915,30 @@ fn constant_loads(ops: &[r2il::R2ILOp]) -> impl Iterator<Item = u64> + '_ {
     })
 }
 
+/// The call through a sealed import slot an instruction makes, which the walk recorded.
+fn slot_call(
+    instruction: &Instruction,
+    base: usize,
+    slot_calls: &BTreeMap<u64, u64>,
+) -> Option<Transfer> {
+    let slot = *slot_calls.get(&instruction.lifted.addr)?;
+    let ops = &instruction.lifted.ops;
+    let at = ops
+        .iter()
+        .rposition(|op| matches!(op, r2il::R2ILOp::CallInd { .. }))?;
+    Some(Transfer {
+        op: base + at,
+        target: slot,
+        kind: r2source::AdvisoryCallTransfer::CallSlot,
+    })
+}
+
 /// What ending a block reads of the walk.
 struct Ending<'a> {
     link: Option<&'a r2il::Varnode>,
     dispatched: &'a BTreeMap<u64, Vec<u64>>,
     tail_calls: &'a BTreeSet<u64>,
+    slot_calls: &'a BTreeMap<u64, u64>,
 }
 
 /// The transfer to another function an instruction ends in, at `base`, its first operation's
@@ -1008,6 +1023,7 @@ fn finish(parts: &mut Vec<Instruction>, ending: &Ending<'_>, closed: bool) -> Bo
     let mut base = 0;
     for part in parts.iter() {
         transfers.extend(transfer_of(part, base, ending.tail_calls));
+        transfers.extend(slot_call(part, base, ending.slot_calls));
         base += part.lifted.ops.len();
     }
     let lifted = R2ILBlock::join(start, size, parts.drain(..).map(|part| part.lifted));

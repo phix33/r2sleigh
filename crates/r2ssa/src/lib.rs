@@ -153,7 +153,7 @@ pub use machine_context::{
     SourceOpaqueTag, SourceParameterLocation, SourceStackAllocationContract, SourceStackGrowth,
     SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias,
     SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
-    terminal_indirect_loaded_slot,
+    loaded_target_slot, terminal_indirect_loaded_slot,
 };
 pub use obligation::{
     CanonicalInstructionId, CanonicalInstructionSite, ObligationInventoryFailure,

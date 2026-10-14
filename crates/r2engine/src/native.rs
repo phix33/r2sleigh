@@ -64,15 +64,6 @@ pub trait Program: crate::body::Program {
     /// [`holds_static_data`](crate::program::Section::holds_static_data).
     fn holds_static_data(&self, vaddr: u64) -> bool;
 
-    /// Whether nothing can write any byte of `range` once the program runs:
-    /// a segment mapped without write permission, or one the loader seals
-    /// after it is done. Where the program says nothing of sealing, only the
-    /// region's own permission answers.
-    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
-        self.region(range.start)
-            .is_some_and(|region| !region.write && range.end <= region.end)
-    }
-
     /// Whether the container states the code at this address is instructions:
     /// a section it says holds code, or, where it states no sections, a region
     /// it maps executable.
@@ -721,7 +712,8 @@ pub(crate) fn hands_a_function(
     let direct = callees
         .into_iter()
         .filter_map(|callee| program.name_at(callee));
-    let through_a_slot = loads.iter().filter_map(|slot| program.import_at(*slot));
+    let sealed = |slot: &u64| crate::stated::sealed_import(program, *slot).map(str::to_owned);
+    let through_a_slot = loads.iter().filter_map(sealed);
     direct.chain(through_a_slot).any(|name| {
         let prototype = target.prototypes.get(&name);
         prototype.is_some_and(|prototype| {
@@ -1086,11 +1078,13 @@ fn read_callees(
     let declared = declare_imports(native, target, &targets, ptr_bits, &mut callees);
     let mut facts = Vec::new();
     // A stub is not a body: walking one recovers an interface with no
-    // parameters, which would displace the declaration that has them.
+    // parameters, which would displace the declaration that has them. A sealed
+    // import slot is a word of data, its import declared or not.
     let bodies: Vec<u64> = targets
         .iter()
         .copied()
         .filter(|address| *address != entry && !callees.interfaces.contains_key(address))
+        .filter(|address| crate::stated::sealed_import(native.program, *address).is_none())
         .collect();
     let mut unread = Vec::new();
     for address in &bodies {
@@ -2101,42 +2095,26 @@ impl Native<'_> {
             .collect()
     }
 
-    /// What one call operation calls, where the program names it.
-    ///
-    /// A direct call names its target outright. An import is usually reached
-    /// indirectly, through a slot the loader fills, and what that slot stands
-    /// for is a relocation the program declares -- so the callee is named
-    /// there rather than guessed from the address the load lands on.
+    /// What one call operation calls, as the walk's transfer names it: a direct call its
+    /// target, a call through a sealed import slot that import (`CallSlot`, audit W8).
     fn called_name(
         &self,
-        prepared: &r2ssa::SsaArtifact,
         sites: &[NativeCall],
         op: &r2ssa::SSAOp<r2ssa::ValueId>,
     ) -> Option<(u64, String)> {
-        match op {
-            r2ssa::SSAOp::Call {
-                instruction: Some(instruction),
-                ..
-            } => {
-                let site = sites.iter().find(|site| site.instruction == *instruction)?;
-                Some((*instruction, self.program.name_at(site.target)?))
-            }
-            r2ssa::SSAOp::CallInd {
-                target,
-                instruction: Some(instruction),
-            } => {
-                let graph = prepared.graph();
-                let value = *target;
-                let defined = graph.inst(graph.def_inst(value)?)?;
-                let r2ssa::InstPayload::Op(r2ssa::SSAOp::Load { addr, .. }) = &defined.payload
-                else {
-                    return None;
-                };
-                let slot = prepared.folded_value(*addr)?;
-                Some((*instruction, self.program.import_at(slot)?))
-            }
-            _ => None,
+        let (r2ssa::SSAOp::Call {
+            instruction: Some(instruction),
+            ..
         }
+        | r2ssa::SSAOp::CallInd {
+            instruction: Some(instruction),
+            ..
+        }) = op
+        else {
+            return None;
+        };
+        let site = sites.iter().find(|site| site.instruction == *instruction)?;
+        Some((*instruction, self.program.name_at(site.target)?))
     }
 
     /// Addresses this body hands to a parameter a declaration calls a function.
@@ -2157,8 +2135,7 @@ impl Native<'_> {
                 let (Some(op), Some(id)) = (graph.op(inst), graph.op_for_inst(inst)) else {
                     continue;
                 };
-                let Some((instruction, callee)) = self.called_name(prepared.as_ref(), &sites, op)
-                else {
+                let Some((instruction, callee)) = self.called_name(&sites, op) else {
                     continue;
                 };
                 let Some(declared) = Declared::import(self.target, &callee) else {

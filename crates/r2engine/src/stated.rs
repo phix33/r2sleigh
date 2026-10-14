@@ -31,6 +31,18 @@ impl StatedWord {
     }
 }
 
+/// The import a call through the word at `slot` reaches: the loader binds it there as a pointer
+/// word and seals it, so nothing rebinds it once the program runs (RELRO, a read-only Mach-O
+/// segment). A lazily bound slot names none. O(log W) in the loader's writes (audit W8).
+pub fn sealed_import(program: &dyn crate::body::Program, slot: u64) -> Option<&str> {
+    let write = r2abi::statement::write_at(program.loader_writes(), slot)?;
+    let r2abi::statement::WriteKind::Import { symbol, .. } = &write.kind else {
+        return None;
+    };
+    let word = write.place == slot && write.encoding == r2abi::statement::Encoding::Word;
+    (word && program.immutable(&(slot..write.end()))).then_some(symbol.as_str())
+}
+
 /// Whether the loader writes any byte of `range`: one search.
 pub fn written(program: &dyn Program, range: &Range<u64>) -> bool {
     r2abi::statement::writes_any(program.loader_writes(), range)
