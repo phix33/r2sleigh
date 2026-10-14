@@ -164,7 +164,7 @@ uint64_t _fnv_fold(uint64_t arg0, uint64_t arg1)
     uint8_t tmp_25480_1;
     uint64_t x10_1;
     uint64_t x0_9;
-    uint64_t tmp_3e300_1;
+    uint64_t tmp_3eb00_1;
     uint64_t x0_10;
 
     /* r2dec proof: no individual construct is marked; 47 source obligations: 47 rendered, 0 elided, 0 refused; 18 statements rendered */
@@ -180,10 +180,10 @@ uint64_t _fnv_fold(uint64_t arg0, uint64_t arg1)
                 tmp_25480_1 = r2sleigh_load_u8((void*)x8_2);
                 x10_1 = (uint64_t)(uint8_t)tmp_25480_1;
                 x0_9 = (uint64_t)((uint64_t)((uint64_t)x0_8 ^ (uint64_t)(uint32_t)((uint8_t)((uint32_t)((uint32_t)((uint64_t)x10_1 >> 0U) - (uint32_t)65U) < (uint32_t)26U) ? (uint32_t)((uint32_t)((uint64_t)x10_1 >> 0U) | (uint32_t)32U) : (uint32_t)((uint64_t)x10_1 >> 0U))) * (uint64_t)0x100000001b3U);
-                tmp_3e300_1 = (uint64_t)((uint64_t)x1_1 - (uint64_t)1U);
-                if ((uint8_t)((uint64_t)tmp_3e300_1 != (uint64_t)0U)) {
+                tmp_3eb00_1 = (uint64_t)((uint64_t)x1_1 - (uint64_t)1U);
+                if ((uint8_t)((uint64_t)tmp_3eb00_1 != (uint64_t)0U)) {
                     x0_8 = x0_9;
-                    x1_1 = tmp_3e300_1;
+                    x1_1 = tmp_3eb00_1;
                     x8_2 = (uint64_t)((uint64_t)x8_2 + (uint64_t)1U);
                 } else {
                     x0_10 = x0_9;
@@ -208,7 +208,7 @@ CMDS=aa; pdd @ 0x1000005dc
 EXPECT=<<EOF
 uint64_t _sparse_switch(uint32_t arg0, uint32_t arg1, uint32_t arg2)
 {
-    uint32_t tmp_36508_1;
+    uint32_t tmp_36d08_1;
 
     /* r2dec proof: 1 construct is marked below; 57 source obligations: 55 rendered, 0 elided, 0 refused, 2 residual; 15 statements rendered */
     {
@@ -233,8 +233,8 @@ uint64_t _sparse_switch(uint32_t arg0, uint32_t arg1, uint32_t arg2)
                         if ((uint8_t)((uint32_t)arg2 == (uint32_t)0U)) {
                             return (uint64_t)0xffffffffU;
                         } else {
-                            tmp_36508_1 = (uint32_t)arg1 == (uint32_t)0x80000000U && (uint32_t)arg2 == (uint32_t)0xffffffffU ? r2sleigh_residual_u32(1) : (uint32_t)((int32_t)arg1 / (int32_t)arg2);
-                            return (uint64_t)(uint32_t)((uint8_t)((uint32_t)arg2 == (uint32_t)0U) ? (uint32_t)0U : (uint32_t)tmp_36508_1);
+                            tmp_36d08_1 = (uint32_t)arg1 == (uint32_t)0x80000000U && (uint32_t)arg2 == (uint32_t)0xffffffffU ? r2sleigh_residual_u32(1) : (uint32_t)((int32_t)arg1 / (int32_t)arg2);
+                            return (uint64_t)(uint32_t)((uint8_t)((uint32_t)arg2 == (uint32_t)0U) ? (uint32_t)0U : (uint32_t)tmp_36d08_1);
                         }
                     }
                 }
@@ -272,7 +272,7 @@ uint32_t _table_walk(uint64_t arg0, uint64_t arg1)
     uint64_t x14_1;
     uint64_t x11_3;
     uint8_t tmp_25480_2;
-    uint64_t tmp_3e300_1;
+    uint64_t tmp_3eb00_1;
     uint8_t tmp_25680_1;
     uint32_t tmp_24c80_1;
     uint64_t x0_2;
@@ -310,11 +310,11 @@ uint32_t _table_walk(uint64_t arg0, uint64_t arg1)
                                 if ((uint8_t)((uint32_t)((uint64_t)x14_1 >> 0U) != (uint32_t)((uint64_t)(uint8_t)tmp_25480_2 >> 0U))) {
                                     goto L3;
                                 } else {
-                                    tmp_3e300_1 = (uint64_t)((uint64_t)x13_2 - (uint64_t)1U);
-                                    if ((uint8_t)((uint64_t)tmp_3e300_1 != (uint64_t)0U)) {
+                                    tmp_3eb00_1 = (uint64_t)((uint64_t)x13_2 - (uint64_t)1U);
+                                    if ((uint8_t)((uint64_t)tmp_3eb00_1 != (uint64_t)0U)) {
                                         x11_2 = x11_3;
                                         x12_2 = x12_3;
-                                        x13_2 = tmp_3e300_1;
+                                        x13_2 = tmp_3eb00_1;
                                     } else {
                                         break;
                                     }
@@ -385,8 +385,8 @@ uint64_t _state_machine(uint8_t* arg0)
     uint64_t x11_2;
     uint64_t x8_2;
     uint64_t x9_2;
-    uint32_t tmp_3d100_7;
-    uint32_t tmp_3d100_8;
+    uint32_t tmp_3d900_7;
+    uint32_t tmp_3d900_8;
     uint64_t x8_3;
     uint64_t x8_10;
     uint64_t x10_4;
@@ -421,8 +421,8 @@ uint64_t _state_machine(uint8_t* arg0)
                         }
                     default:
                         {
-                            tmp_3d100_8 = (uint32_t)((uint32_t)((uint64_t)x11_2 >> 0U) - (uint32_t)58U);
-                            if ((uint8_t)((uint32_t)(uint8_t)r2sleigh_int_carry_32((uint32_t)tmp_3d100_8, (uint32_t)11U) & (uint32_t)(uint8_t)((uint32_t)((uint32_t)tmp_3d100_8 + (uint32_t)11U) != (uint32_t)0U))) {
+                            tmp_3d900_8 = (uint32_t)((uint32_t)((uint64_t)x11_2 >> 0U) - (uint32_t)58U);
+                            if ((uint8_t)((uint32_t)(uint8_t)r2sleigh_int_carry_32((uint32_t)tmp_3d900_8, (uint32_t)11U) & (uint32_t)(uint8_t)((uint32_t)((uint32_t)tmp_3d900_8 + (uint32_t)11U) != (uint32_t)0U))) {
                                 x8_3 = x8_2;
                             } else {
                                 goto L4;
@@ -447,8 +447,8 @@ uint64_t _state_machine(uint8_t* arg0)
                                 goto L1;
                             default:
                                 {
-                                    tmp_3d100_7 = (uint32_t)((uint32_t)((uint64_t)x11_2 >> 0U) - (uint32_t)123U);
-                                    if ((uint8_t)((uint32_t)(uint8_t)r2sleigh_int_carry_32((uint32_t)tmp_3d100_7, (uint32_t)27U) & (uint32_t)(uint8_t)((uint32_t)((uint32_t)tmp_3d100_7 + (uint32_t)27U) != (uint32_t)0U))) {
+                                    tmp_3d900_7 = (uint32_t)((uint32_t)((uint64_t)x11_2 >> 0U) - (uint32_t)123U);
+                                    if ((uint8_t)((uint32_t)(uint8_t)r2sleigh_int_carry_32((uint32_t)tmp_3d900_7, (uint32_t)27U) & (uint32_t)(uint8_t)((uint32_t)((uint32_t)tmp_3d900_7 + (uint32_t)27U) != (uint32_t)0U))) {
                                         x10_4 = 1;
                                         x8_4 = x8_2;
                                         goto L1;
@@ -775,7 +775,7 @@ uint64_t _mem_scan2(uint64_t arg0, uint64_t arg1, uint32_t arg2, uint32_t arg3)
     __uint128_t tmp_lane_100000884_3_75_1;
     uint64_t tmp_7b80_6;
     __uint128_t tmp_lane_100000884_5_76_1;
-    uint64_t tmp_ca680_1;
+    uint64_t tmp_cae80_1;
     __uint128_t tmp_lane_100000884_9_79_1;
     uint8_t tmp_lane_100000884_15_82_1;
     uint8_t tmp_lane_100000884_15_83_1;
@@ -1515,7 +1515,7 @@ uint64_t _mem_scan2(uint64_t arg0, uint64_t arg1, uint32_t arg2, uint32_t arg3)
     uint64_t tmp_lane_100000884_31f_685_1;
     struct r2sleigh_bits_256 z18_7;
     struct r2sleigh_bits_256 z18_8;
-    uint64_t tmp_3e300_1;
+    uint64_t tmp_3eb00_1;
     uint64_t tmp_lane_100000a04_18_6b9_1;
     uint64_t tmp_lane_100000a04_19_6bc_1;
     uint64_t x8_7;
@@ -1706,7 +1706,7 @@ uint64_t _mem_scan2(uint64_t arg0, uint64_t arg1, uint32_t arg2, uint32_t arg3)
     uint8_t tmp_25480_1;
     uint64_t x11_2;
     uint64_t x8_15;
-    uint64_t tmp_3e300_2;
+    uint64_t tmp_3eb00_2;
     uint64_t x8_16;
 
     /* r2dec proof: no individual construct is marked; 1466 source obligations: 1463 rendered, 3 elided, 0 refused; 1096 statements rendered */
@@ -1823,8 +1823,8 @@ uint64_t _mem_scan2(uint64_t arg0, uint64_t arg1, uint32_t arg2, uint32_t arg3)
                         tmp_lane_100000884_3_75_1 = r2sleigh_bits_extract_256_128(z27_5, 0U);
                         tmp_7b80_6 = (uint64_t)((uint64_t)x8_5 - (uint64_t)16U);
                         tmp_lane_100000884_5_76_1 = r2sleigh_load_u128((void*)tmp_7b80_6);
-                        tmp_ca680_1 = (uint64_t)((uint64_t)tmp_7b80_6 + (uint64_t)16U);
-                        tmp_lane_100000884_9_79_1 = r2sleigh_load_u128((void*)tmp_ca680_1);
+                        tmp_cae80_1 = (uint64_t)((uint64_t)tmp_7b80_6 + (uint64_t)16U);
+                        tmp_lane_100000884_9_79_1 = r2sleigh_load_u128((void*)tmp_cae80_1);
                         tmp_lane_100000884_15_82_1 = (uint8_t)((__uint128_t)tmp_lane_100000884_5_76_1 >> 0U);
                         tmp_lane_100000884_15_83_1 = (uint8_t)((__uint128_t)tmp_lane_100000824_29_2f_1 >> 0U);
                         tmp_lane_100000884_17_85_1 = (uint8_t)((__uint128_t)tmp_lane_100000884_5_76_1 >> 8U);
@@ -2563,9 +2563,9 @@ uint64_t _mem_scan2(uint64_t arg0, uint64_t arg1, uint32_t arg2, uint32_t arg3)
                         tmp_lane_100000884_31f_685_1 = (uint64_t)((uint64_t)tmp_lane_100000884_31f_683_1 + (uint64_t)tmp_lane_100000884_31f_684_1);
                         z18_7 = r2sleigh_bits_insert_256_64(z18_6, (uint64_t)tmp_lane_100000884_31f_685_1, 64U);
                         z18_8 = r2sleigh_bits_insert_256_64(z18_7, (uint64_t)0U, 128U);
-                        tmp_3e300_1 = (uint64_t)((uint64_t)x10_2 - (uint64_t)32U);
-                        if ((uint8_t)((uint64_t)tmp_3e300_1 != (uint64_t)0U)) {
-                            x10_2 = tmp_3e300_1;
+                        tmp_3eb00_1 = (uint64_t)((uint64_t)x10_2 - (uint64_t)32U);
+                        if ((uint8_t)((uint64_t)tmp_3eb00_1 != (uint64_t)0U)) {
+                            x10_2 = tmp_3eb00_1;
                             x8_5 = (uint64_t)((uint64_t)x8_5 + (uint64_t)32U);
                             z16_5 = r2sleigh_bits_insert_256_64(z16_8, (uint64_t)0U, 192U);
                             z17_5 = r2sleigh_bits_insert_256_64(z17_8, (uint64_t)0U, 192U);
@@ -2822,9 +2822,9 @@ L3: ;
                     tmp_25480_1 = r2sleigh_load_u8((void*)x9_8);
                     x11_2 = (uint64_t)(uint8_t)tmp_25480_1;
                     x8_15 = (uint8_t)((uint32_t)((uint8_t)((uint32_t)((uint64_t)x11_2 >> 0U) == (uint32_t)arg2) ? (uint8_t)1U : (uint8_t)((uint32_t)((uint64_t)x11_2 >> 0U) == (uint32_t)arg3)) ^ (uint32_t)(uint8_t)1U) ? (uint64_t)x8_14 : (uint64_t)((uint64_t)x8_14 + (uint64_t)1U);
-                    tmp_3e300_2 = (uint64_t)((uint64_t)x10_9 - (uint64_t)1U);
-                    if ((uint8_t)((uint64_t)tmp_3e300_2 != (uint64_t)0U)) {
-                        x10_9 = tmp_3e300_2;
+                    tmp_3eb00_2 = (uint64_t)((uint64_t)x10_9 - (uint64_t)1U);
+                    if ((uint8_t)((uint64_t)tmp_3eb00_2 != (uint64_t)0U)) {
+                        x10_9 = tmp_3eb00_2;
                         x8_14 = x8_15;
                         x9_8 = (uint64_t)((uint64_t)x9_8 + (uint64_t)1U);
                     } else {

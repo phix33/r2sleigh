@@ -6,7 +6,6 @@ crc32b: stop unmodelled Load
 crc32cx: stop unmodelled Load
 mrs_nzcv: stop unwritten nzcv
 msr_nzcv: wrong cy; wrong ng; wrong ov; wrong zr
-ldrsb_post: wrong x0
 sminv_8h: stop unmodelled CALLOTHER NEON_sminv
 tbl_2: stop unmodelled CALLOTHER a64_TBL
 umull_8h: stop unmodelled CALLOTHER NEON_umull
@@ -73,15 +72,6 @@ swpal_w: stop unmodelled CALLOTHER LOAcquire
 ldset_w: wrong x0
 ldumin_w: wrong x0
 ldaddh: wrong x0
-ldursb_w: wrong x0
-ldursh_w: wrong x0
-ldrsb_w_uimm: wrong x0
-ldrsb_w_pre: wrong x0
-ldrsb_w_reg: wrong x0
-ldrsh_w_uimm: wrong x0
-ldrsh_w_post: wrong x0
-ldrsh_w_reg: wrong x0
-ldtrsb_w: wrong x0
 ldapr_w: wrong x0
 ldaprb: wrong x0
 fmadd_s: stop unmodelled FloatMult

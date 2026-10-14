@@ -82,20 +82,20 @@ uint32_t _out_param_parse(uint8_t* arg0, struct fcn_1000005d8_arg1* arg1)
     uint64_t stack_m48_1;
     uint64_t stack_m40_2;
     uint64_t stack_m32_1;
-    uint8_t tmp_26080_1;
-    uint8_t tmp_26080_2;
+    uint8_t tmp_26380_1;
+    uint8_t tmp_26380_2;
     uint32_t stack_m52_1;
-    uint8_t tmp_26080_3;
+    uint8_t tmp_26380_3;
     uint64_t stack_m32_3;
     uint8_t tmp_25680_1;
     uint64_t stack_m48_4;
-    uint8_t tmp_26080_4;
+    uint8_t tmp_26380_4;
     uint32_t stack_m56_1;
 
-    /* r2dec proof: no individual construct is marked; 121 source obligations: 118 rendered, 3 elided, 0 refused; 33 statements rendered; 1 structure laid out from a parameter's accesses */
+    /* r2dec proof: no individual construct is marked; 116 source obligations: 113 rendered, 3 elided, 0 refused; 33 statements rendered; 1 structure laid out from a parameter's accesses */
     {
         tmp_25a80_1 = r2sleigh_load_u8((void*)(uint64_t)arg0);
-        if ((uint8_t)((uint32_t)((uint64_t)(int8_t)tmp_25a80_1 >> 0U) != (uint32_t)45U)) {
+        if ((uint8_t)((uint32_t)(int8_t)tmp_25a80_1 != (uint32_t)45U)) {
             stack_m40_1 = 0;
             stack_m20_1 = 1;
         } else {
@@ -109,13 +109,13 @@ uint32_t _out_param_parse(uint8_t* arg0, struct fcn_1000005d8_arg1* arg1)
             stack_m40_2 = stack_m40_1;
             stack_m32_1 = 0;
             for (; ; ) {
-                tmp_26080_1 = r2sleigh_load_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m40_2 * 1U));
-                if ((uint8_t)((int32_t)((uint64_t)(int8_t)tmp_26080_1 >> 0U) < (int32_t)48U)) {
+                tmp_26380_1 = r2sleigh_load_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m40_2 * 1U));
+                if ((uint8_t)((int32_t)(int8_t)tmp_26380_1 < (int32_t)48U)) {
                     stack_m52_1 = 0;
                 } else {
                     {
-                        tmp_26080_2 = r2sleigh_load_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m40_2 * 1U));
-                        stack_m52_1 = (uint32_t)((uint64_t)(uint8_t)((int32_t)((uint64_t)(int8_t)tmp_26080_2 >> 0U) <= (int32_t)57U) >> 0U);
+                        tmp_26380_2 = r2sleigh_load_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m40_2 * 1U));
+                        stack_m52_1 = (uint32_t)((uint64_t)(uint8_t)((int32_t)(int8_t)tmp_26380_2 <= (int32_t)57U) >> 0U);
                     }
                 }
                 {
@@ -123,8 +123,8 @@ uint32_t _out_param_parse(uint8_t* arg0, struct fcn_1000005d8_arg1* arg1)
                         break;
                     } else {
                         {
-                            tmp_26080_3 = r2sleigh_load_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m40_2 * 1U));
-                            stack_m32_3 = (uint64_t)((uint64_t)((uint64_t)stack_m32_1 * (uint64_t)10U) + (uint64_t)(int32_t)((uint32_t)((uint64_t)(int8_t)tmp_26080_3 >> 0U) - (uint32_t)48U));
+                            tmp_26380_3 = r2sleigh_load_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m40_2 * 1U));
+                            stack_m32_3 = (uint64_t)((uint64_t)((uint64_t)stack_m32_1 * (uint64_t)10U) + (uint64_t)(int32_t)((uint32_t)(int8_t)tmp_26380_3 - (uint32_t)48U));
                             tmp_25680_1 = r2sleigh_load_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m40_2 * 1U));
                             stack_m48_4 = (uint64_t)((uint64_t)((uint64_t)(uint8_t)tmp_25680_1 ^ (uint64_t)stack_m48_1) * (uint64_t)0x100000001b3U);
                             {
@@ -145,8 +145,8 @@ uint32_t _out_param_parse(uint8_t* arg0, struct fcn_1000005d8_arg1* arg1)
                     stack_m56_1 = 0;
                 } else {
                     {
-                        tmp_26080_4 = r2sleigh_load_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m40_2 * 1U));
-                        stack_m56_1 = (uint32_t)((uint64_t)(uint8_t)((uint32_t)((uint64_t)(int8_t)tmp_26080_4 >> 0U) == (uint32_t)0U) >> 0U);
+                        tmp_26380_4 = r2sleigh_load_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m40_2 * 1U));
+                        stack_m56_1 = (uint32_t)((uint64_t)(uint8_t)((uint32_t)(int8_t)tmp_26380_4 == (uint32_t)0U) >> 0U);
                     }
                 }
                 {
@@ -226,7 +226,7 @@ CMDS=aa; pdd @ 0x100000824
 EXPECT=<<EOF
 uint32_t _sparse_switch(uint32_t arg0, uint32_t arg1, uint32_t arg2)
 {
-    uint32_t tmp_36508_1;
+    uint32_t tmp_36d08_1;
     uint32_t stack_m24_1;
     uint32_t stack_m4_1;
 
@@ -250,8 +250,8 @@ uint32_t _sparse_switch(uint32_t arg0, uint32_t arg1, uint32_t arg2)
                                     {
                                         if ((uint8_t)((uint32_t)arg0 == (uint32_t)0x3e8U)) {
                                             if ((uint8_t)((uint32_t)arg2 != (uint32_t)0U)) {
-                                                tmp_36508_1 = (uint32_t)arg1 == (uint32_t)0x80000000U && (uint32_t)arg2 == (uint32_t)0xffffffffU ? r2sleigh_residual_u32(1) : (uint32_t)((int32_t)arg1 / (int32_t)arg2);
-                                                stack_m24_1 = (uint8_t)((uint32_t)arg2 == (uint32_t)0U) ? (uint32_t)0U : (uint32_t)tmp_36508_1;
+                                                tmp_36d08_1 = (uint32_t)arg1 == (uint32_t)0x80000000U && (uint32_t)arg2 == (uint32_t)0xffffffffU ? r2sleigh_residual_u32(1) : (uint32_t)((int32_t)arg1 / (int32_t)arg2);
+                                                stack_m24_1 = (uint8_t)((uint32_t)arg2 == (uint32_t)0U) ? (uint32_t)0U : (uint32_t)tmp_36d08_1;
                                             } else {
                                                 {
                                                     stack_m24_1 = (uint32_t)0xffffffffU;
@@ -297,18 +297,18 @@ uint32_t _table_walk(uint64_t arg0, uint8_t* arg1)
     uint16_t tmp_25780_1;
     uint64_t stack_m48_1;
     uint16_t tmp_25780_2;
-    uint8_t tmp_26080_1;
+    uint8_t tmp_26380_1;
     uint64_t x8_15;
-    uint8_t tmp_26080_2;
-    uint8_t tmp_26080_3;
+    uint8_t tmp_26380_2;
+    uint8_t tmp_26380_3;
     uint32_t stack_m52_1;
     uint16_t tmp_25780_3;
-    uint8_t tmp_26080_4;
+    uint8_t tmp_26380_4;
     uint32_t tmp_24c80_3;
     uint64_t x8_30;
     uint32_t stack_m4_1;
 
-    /* r2dec proof: no individual construct is marked; 124 source obligations: 121 rendered, 3 elided, 0 refused; 40 statements rendered */
+    /* r2dec proof: no individual construct is marked; 120 source obligations: 117 rendered, 3 elided, 0 refused; 40 statements rendered */
     {
         stack_m40_1 = arg0;
         stack_m28_1 = 0;
@@ -333,15 +333,15 @@ uint32_t _table_walk(uint64_t arg0, uint8_t* arg1)
                                         stack_m52_1 = 0;
                                     } else {
                                         {
-                                            tmp_26080_1 = r2sleigh_load_u8((void*)((uint64_t)arg1 + (uint64_t)stack_m48_1 * 1U));
-                                            if ((uint8_t)((uint32_t)((uint64_t)(int8_t)tmp_26080_1 >> 0U) == (uint32_t)0U)) {
+                                            tmp_26380_1 = r2sleigh_load_u8((void*)((uint64_t)arg1 + (uint64_t)stack_m48_1 * 1U));
+                                            if ((uint8_t)((uint32_t)(int8_t)tmp_26380_1 == (uint32_t)0U)) {
                                                 stack_m52_1 = 0;
                                             } else {
                                                 {
                                                     x8_15 = r2sleigh_load_u64((void*)((uint64_t)stack_m40_1 + (uint64_t)3U * 8U));
-                                                    tmp_26080_2 = r2sleigh_load_u8((void*)(uint64_t)((uint64_t)x8_15 + (uint64_t)stack_m48_1));
-                                                    tmp_26080_3 = r2sleigh_load_u8((void*)((uint64_t)arg1 + (uint64_t)stack_m48_1 * 1U));
-                                                    stack_m52_1 = (uint32_t)((uint64_t)(uint8_t)((uint32_t)((uint64_t)(int8_t)tmp_26080_3 >> 0U) == (uint32_t)((uint64_t)(int8_t)tmp_26080_2 >> 0U)) >> 0U);
+                                                    tmp_26380_2 = r2sleigh_load_u8((void*)(uint64_t)((uint64_t)x8_15 + (uint64_t)stack_m48_1));
+                                                    tmp_26380_3 = r2sleigh_load_u8((void*)((uint64_t)arg1 + (uint64_t)stack_m48_1 * 1U));
+                                                    stack_m52_1 = (uint32_t)((uint64_t)(uint8_t)((uint32_t)(int8_t)tmp_26380_2 == (uint32_t)(int8_t)tmp_26380_3) >> 0U);
                                                 }
                                             }
                                         }
@@ -361,8 +361,8 @@ uint32_t _table_walk(uint64_t arg0, uint8_t* arg1)
                                     if ((uint8_t)((uint64_t)(uint16_t)tmp_25780_3 != (uint64_t)stack_m48_1)) {
                                     } else {
                                         {
-                                            tmp_26080_4 = r2sleigh_load_u8((void*)((uint64_t)arg1 + (uint64_t)stack_m48_1 * 1U));
-                                            if ((uint8_t)((uint32_t)((uint64_t)(int8_t)tmp_26080_4 >> 0U) != (uint32_t)0U)) {
+                                            tmp_26380_4 = r2sleigh_load_u8((void*)((uint64_t)arg1 + (uint64_t)stack_m48_1 * 1U));
+                                            if ((uint8_t)((uint32_t)(int8_t)tmp_26380_4 != (uint32_t)0U)) {
                                             } else {
                                                 break;
                                             }
@@ -417,9 +417,9 @@ uint32_t _state_machine(uint8_t* arg0)
     uint64_t stack_m32_1;
     uint32_t stack_m24_1;
     uint32_t stack_m20_1;
-    uint8_t tmp_26080_1;
+    uint8_t tmp_26380_1;
     uint8_t tmp_25580_1;
-    uint8_t tmp_3aa00_1;
+    uint8_t tmp_3b200_1;
     uint32_t stack_m20_5;
     uint32_t stack_m20_6;
     uint32_t stack_m24_3;
@@ -433,36 +433,36 @@ uint32_t _state_machine(uint8_t* arg0)
     uint32_t stack_m20_7;
     uint32_t stack_m4_1;
 
-    /* r2dec proof: no individual construct is marked; 220 source obligations: 217 rendered, 3 elided, 0 refused; 86 statements rendered */
+    /* r2dec proof: no individual construct is marked; 219 source obligations: 216 rendered, 3 elided, 0 refused; 86 statements rendered */
     {
         stack_m32_1 = 0;
         stack_m24_1 = 0;
         stack_m20_1 = 0;
         for (; ; ) {
-            tmp_26080_1 = r2sleigh_load_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m32_1 * 1U));
-            if ((uint8_t)((uint32_t)((uint64_t)(int8_t)tmp_26080_1 >> 0U) == (uint32_t)0U)) {
+            tmp_26380_1 = r2sleigh_load_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m32_1 * 1U));
+            if ((uint8_t)((uint32_t)(int8_t)tmp_26380_1 == (uint32_t)0U)) {
                 goto L16;
             } else {
                 {
                     tmp_25580_1 = r2sleigh_load_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m32_1 * 1U));
-                    tmp_3aa00_1 = tmp_25580_1;
+                    tmp_3b200_1 = tmp_25580_1;
                     if ((uint8_t)((uint32_t)stack_m20_1 == (uint32_t)0U)) {
-                        if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) < (int32_t)97U)) {
+                        if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) < (int32_t)97U)) {
                         } else {
                             {
-                                if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) <= (int32_t)122U)) {
+                                if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) <= (int32_t)122U)) {
                                     goto L1;
                                 } else {
                                 }
                             }
                         }
                         {
-                            if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) != (uint32_t)95U)) {
-                                if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) < (int32_t)48U)) {
+                            if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) != (uint32_t)95U)) {
+                                if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) < (int32_t)48U)) {
                                     goto L2;
                                 } else {
                                     {
-                                        if ((uint8_t)((int32_t)57U < (int32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U))) {
+                                        if ((uint8_t)((int32_t)57U < (int32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U))) {
                                             goto L2;
                                         } else {
                                             {
@@ -492,13 +492,13 @@ L3: ;
                     } else {
                         {
                             if ((uint8_t)((uint32_t)stack_m20_1 == (uint32_t)1U)) {
-                                if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) < (int32_t)48U)) {
+                                if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) < (int32_t)48U)) {
                                 } else {
                                     {
-                                        if ((uint8_t)((int32_t)57U < (int32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U))) {
+                                        if ((uint8_t)((int32_t)57U < (int32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U))) {
                                         } else {
                                             {
-                                                stack_m24_4 = (uint32_t)((uint32_t)((uint32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) + (uint32_t)stack_m24_1) - (uint32_t)48U);
+                                                stack_m24_4 = (uint32_t)((uint32_t)((uint32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) + (uint32_t)stack_m24_1) - (uint32_t)48U);
                                                 stack_m20_4 = 2;
                                                 goto L9;
                                             }
@@ -506,18 +506,18 @@ L3: ;
                                     }
                                 }
                                 {
-                                    if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) != (uint32_t)45U)) {
-                                        if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) < (int32_t)97U)) {
+                                    if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) != (uint32_t)45U)) {
+                                        if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) < (int32_t)97U)) {
                                         } else {
                                             {
-                                                if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) <= (int32_t)122U)) {
+                                                if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) <= (int32_t)122U)) {
                                                     goto L7;
                                                 } else {
                                                 }
                                             }
                                         }
                                         {
-                                            if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) == (uint32_t)95U)) {
+                                            if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) == (uint32_t)95U)) {
                                             } else {
                                                 goto L6;
                                             }
@@ -546,13 +546,13 @@ L9: ;
                             } else {
                                 {
                                     if ((uint8_t)((uint32_t)stack_m20_1 == (uint32_t)2U)) {
-                                        if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) != (uint32_t)95U)) {
-                                            if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) != (uint32_t)45U)) {
-                                                if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) < (int32_t)48U)) {
+                                        if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) != (uint32_t)95U)) {
+                                            if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) != (uint32_t)45U)) {
+                                                if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) < (int32_t)48U)) {
                                                     goto L11;
                                                 } else {
                                                     {
-                                                        if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) <= (int32_t)57U)) {
+                                                        if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) <= (int32_t)57U)) {
                                                             stack_m20_5 = stack_m20_1;
                                                         } else {
                                                             goto L10;
@@ -578,7 +578,7 @@ L9: ;
                                         }
                                     } else {
                                         {
-                                            if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) == (uint32_t)120U)) {
+                                            if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) == (uint32_t)120U)) {
                                                 stack_m24_5 = stack_m24_1;
                                                 stack_m20_7 = 0;
                                             } else {
@@ -648,18 +648,18 @@ CMDS=aa; pdd @ 0x100000d4c
 EXPECT=<<EOF
 uint64_t _mem_scan2(uint8_t* arg0, uint64_t arg1, uint8_t arg2, uint8_t arg3)
 {
-    uint8_t tmp_3aa00_1;
-    uint8_t tmp_3aa00_2;
+    uint8_t tmp_3b200_1;
+    uint8_t tmp_3b200_2;
     uint64_t stack_m40_1;
     uint64_t stack_m32_1;
     uint8_t tmp_25580_1;
-    uint8_t tmp_3aa00_3;
+    uint8_t tmp_3b200_3;
     uint64_t stack_m32_2;
 
     /* r2dec proof: no individual construct is marked; 58 source obligations: 55 rendered, 3 elided, 0 refused; 17 statements rendered */
     {
-        tmp_3aa00_1 = arg2;
-        tmp_3aa00_2 = arg3;
+        tmp_3b200_1 = arg2;
+        tmp_3b200_2 = arg3;
         stack_m40_1 = 0;
         stack_m32_1 = 0;
         for (; ; ) {
@@ -668,14 +668,14 @@ uint64_t _mem_scan2(uint8_t* arg0, uint64_t arg1, uint8_t arg2, uint8_t arg3)
             } else {
                 {
                     tmp_25580_1 = r2sleigh_load_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m40_1 * 1U));
-                    tmp_3aa00_3 = tmp_25580_1;
-                    if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3aa00_1 >> 0U) == (uint32_t)((uint64_t)(uint8_t)tmp_3aa00_3 >> 0U))) {
+                    tmp_3b200_3 = tmp_25580_1;
+                    if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3b200_1 >> 0U) == (uint32_t)((uint64_t)(uint8_t)tmp_3b200_3 >> 0U))) {
                         {
                             stack_m32_2 = (uint64_t)((uint64_t)stack_m32_1 + (uint64_t)1U);
                         }
                     } else {
                         {
-                            if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3aa00_2 >> 0U) != (uint32_t)((uint64_t)(uint8_t)tmp_3aa00_3 >> 0U))) {
+                            if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_3b200_2 >> 0U) != (uint32_t)((uint64_t)(uint8_t)tmp_3b200_3 >> 0U))) {
                                 stack_m32_2 = stack_m32_1;
                             } else {
                                 {
