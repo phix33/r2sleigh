@@ -894,6 +894,21 @@ fn monitored_store(
     if read_after {
         return None;
     }
+    let mut ops = stores_under(guarded, addr, ok)?;
+    ops.push(R2ILOp::BoolNot {
+        dst: not.clone(),
+        src: ok.clone(),
+    });
+    ops.push(R2ILOp::Copy {
+        dst: status.clone(),
+        src: not.clone(),
+    });
+    Some((done - at, ops))
+}
+
+/// The skipped run with its first store, which must be at `addr`, conditional and answering `ok`,
+/// and any later one guarded by `ok`; `None` where anything else but a temporary is under it.
+fn stores_under(guarded: &[R2ILOp], addr: &Varnode, ok: &Varnode) -> Option<Vec<R2ILOp>> {
     let mut ops = Vec::with_capacity(guarded.len() + 2);
     let mut linked = false;
     for op in guarded {
@@ -930,18 +945,7 @@ fn monitored_store(
             _ => return None,
         }
     }
-    if !linked {
-        return None;
-    }
-    ops.push(R2ILOp::BoolNot {
-        dst: not.clone(),
-        src: ok.clone(),
-    });
-    ops.push(R2ILOp::Copy {
-        dst: status.clone(),
-        src: not.clone(),
-    });
-    Some((done - at, ops))
+    linked.then_some(ops)
 }
 
 #[cfg(test)]

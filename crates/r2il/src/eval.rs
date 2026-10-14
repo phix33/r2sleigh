@@ -713,8 +713,28 @@ fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> 
                 state.write(dst, value)?;
             }
         }
-        // One thread's monitor (Arm ARM B2.9.2): a conditional store takes only after a linked
-        // load of the same address and width, and clears the mark whether or not it took.
+        R2ILOp::BlockTransfer(transfer) if transfer.space == SpaceId::Ram => {
+            block(transfer, state)?;
+        }
+        _ if exclusive(op, state)? => {}
+        _ if floating(op, state)? => {}
+        _ => {
+            let (operation, dst, operands) = Operation::of(op).ok_or(Stop::Unmodelled)?;
+            let operands = operands
+                .into_iter()
+                .map(|operand| state.word(operand))
+                .collect::<Result<Vec<_>, _>>()?;
+            let value = apply(operation, &operands, dst.size)?;
+            state.write(dst, value)?;
+        }
+    }
+    Ok(Flow::Next)
+}
+
+/// One thread's monitor (Arm ARM B2.9.2): a conditional store takes only after a linked load of
+/// its address and width, and clears the mark whether or not it took; false for any other op.
+fn exclusive<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<bool, Stop> {
+    match op {
         R2ILOp::LoadLinked {
             dst,
             space: SpaceId::Ram,
@@ -744,21 +764,9 @@ fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> 
             }
         }
         R2ILOp::ClearExclusive => state.monitor = None,
-        R2ILOp::BlockTransfer(transfer) if transfer.space == SpaceId::Ram => {
-            block(transfer, state)?;
-        }
-        _ if floating(op, state)? => {}
-        _ => {
-            let (operation, dst, operands) = Operation::of(op).ok_or(Stop::Unmodelled)?;
-            let operands = operands
-                .into_iter()
-                .map(|operand| state.word(operand))
-                .collect::<Result<Vec<_>, _>>()?;
-            let value = apply(operation, &operands, dst.size)?;
-            state.write(dst, value)?;
-        }
+        _ => return Ok(false),
     }
-    Ok(Flow::Next)
+    Ok(true)
 }
 
 /// An IEEE binary32 or binary64 value; p-code's other float widths are not modelled.
@@ -1100,7 +1108,7 @@ mod tests {
                 untouched,
             ),
             (vec![linked(0x208), conditional.clone()], 0, untouched),
-            (vec![wide_linked, conditional.clone()], 0, untouched),
+            (vec![wide_linked, conditional], 0, untouched),
         ] {
             let mut state = State::new(Endianness::Little, |_| Some(1u8), 64).expect("state");
             state.set_register(addr.offset, 8, 0x200).expect("addr");
