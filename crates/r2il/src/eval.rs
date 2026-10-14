@@ -92,6 +92,8 @@ pub struct State<M> {
     written: BTreeMap<u64, u8>,
     mapped: M,
     accesses: Vec<Access>,
+    /// The address and width the last linked load marked, until a conditional store or a clear.
+    monitor: Option<(u64, u32)>,
     /// Operations and block elements the run may still execute.
     budget: u64,
 }
@@ -113,6 +115,7 @@ impl<M: Mapped> State<M> {
             written: BTreeMap::new(),
             mapped,
             accesses: Vec::new(),
+            monitor: None,
             budget,
         })
     }
@@ -710,6 +713,36 @@ fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> 
                 state.write(dst, value)?;
             }
         }
+        // One thread's monitor (Arm ARM B2.9.2): a conditional store takes only after a linked
+        // load of the same address and width, and clears the mark whether or not it took.
+        R2ILOp::LoadLinked {
+            dst,
+            space: SpaceId::Ram,
+            addr,
+            ..
+        } => {
+            let address = state.address(addr)?;
+            let value = state.load(address, dst.size)?;
+            state.write(dst, value)?;
+            state.monitor = Some((address, dst.size));
+        }
+        R2ILOp::StoreConditional {
+            result,
+            space: SpaceId::Ram,
+            addr,
+            val,
+            ..
+        } => {
+            let address = state.address(addr)?;
+            let value = state.read(val)?;
+            let took = state.monitor.take() == Some((address, val.size));
+            if took {
+                state.store(address, val.size, value)?;
+            }
+            if let Some(result) = result {
+                state.write(result, u128::from(took))?;
+            }
+        }
         R2ILOp::BlockTransfer(transfer) if transfer.space == SpaceId::Ram => {
             block(transfer, state)?;
         }
@@ -1021,6 +1054,57 @@ mod tests {
         let mut state = State::new(Endianness::Little, |_| Some(1u8), 64).expect("state");
         state.set_register(guard.offset, 1, 2).expect("guard");
         assert_eq!(step(&ops[0], &mut state), Flow::Stop(Stop::Undefined));
+    }
+
+    /// A conditional store takes, answering 1, only after a linked load of its address and width;
+    /// it clears the mark either way, so a second one fails, answers 0 and writes nothing.
+    #[test]
+    fn a_conditional_store_takes_only_after_a_linked_load_of_its_address() {
+        let (addr, val, ok) = (
+            Varnode::register(0x20, 8),
+            Varnode::register(0x28, 4),
+            Varnode::register(0x30, 1),
+        );
+        let linked = |at: u64| R2ILOp::LoadLinked {
+            dst: Varnode::register(0x40, 4),
+            space: SpaceId::Ram,
+            addr: Varnode::constant(at, 8),
+            ordering: crate::MemoryOrdering::Unknown,
+        };
+        let conditional = R2ILOp::StoreConditional {
+            result: Some(ok.clone()),
+            space: SpaceId::Ram,
+            addr: addr.clone(),
+            val: val.clone(),
+            ordering: crate::MemoryOrdering::Unknown,
+        };
+        let wide_linked = R2ILOp::LoadLinked {
+            dst: Varnode::register(0x40, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x200, 8),
+            ordering: crate::MemoryOrdering::Unknown,
+        };
+        let (written, untouched) = (0xdead_beef, 0x0101_0101);
+        for (ops, took, stored) in [
+            (vec![linked(0x200), conditional.clone()], 1, written),
+            (
+                vec![linked(0x200), conditional.clone(), conditional.clone()],
+                0,
+                written,
+            ),
+            (vec![conditional.clone()], 0, untouched),
+            (vec![linked(0x208), conditional.clone()], 0, untouched),
+            (vec![wide_linked, conditional.clone()], 0, untouched),
+        ] {
+            let mut state = State::new(Endianness::Little, |_| Some(1u8), 64).expect("state");
+            state.set_register(addr.offset, 8, 0x200).expect("addr");
+            state.set_register(val.offset, 4, 0xdead_beef).expect("val");
+            for op in &ops {
+                assert_eq!(step(op, &mut state), Flow::Next, "{op:?}");
+            }
+            assert_eq!(state.register(ok.offset, 1), Some(took), "{ops:?}");
+            assert_eq!(state.load(0x200, 4), Ok(stored), "{ops:?}");
+        }
     }
 
     /// A lane at bit 128 of a 256-bit register lies outside the carried word: unmodelled, not a panic.
