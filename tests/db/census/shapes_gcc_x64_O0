@@ -1567,7 +1567,7 @@ EXPECT=<<EOF
 uint64_t fcn_402206(void)
 {
     int32_t printf(const char*, ...);
-    uint64_t shape_bool_caller(uint64_t, uint64_t, uint64_t);
+    uint64_t shape_bool_caller(uint64_t, uint64_t);
     uint64_t shape_call_chain(uint64_t, uint64_t);
     uint64_t shape_function_pointer(uint64_t, uint64_t);
     uint64_t shape_multiword_return(uint64_t, uint64_t);
@@ -1597,7 +1597,7 @@ uint64_t fcn_402206(void)
     uint64_t rax_52;
     uint64_t rax_56;
 
-    /* r2dec proof: no individual construct is marked; 319 source obligations: 228 rendered, 91 elided, 0 refused; 29 statements rendered; 14 callee prototypes supplied by the source */
+    /* r2dec proof: no individual construct is marked; 318 source obligations: 227 rendered, 91 elided, 0 refused; 29 statements rendered; 14 callee prototypes supplied by the source */
     /* symbol `main`; C allows that name no other prototype */
     {
         rax_4 = shape_variadic((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
@@ -1626,7 +1626,7 @@ uint64_t fcn_402206(void)
         printf("%016llx\n", rax_48);
         rax_52 = shape_function_pointer((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
         printf("%016llx\n", rax_52);
-        rax_56 = shape_bool_caller((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U, (uint64_t)0xfedcba9876543210U);
+        rax_56 = shape_bool_caller((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
         printf("%016llx\n", rax_56);
         return 0;
     }

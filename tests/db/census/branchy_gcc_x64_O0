@@ -1133,7 +1133,7 @@ uint64_t fcn_401764(void)
     uint64_t opaque_self_xor(uint32_t);
     uint64_t paired_sum_diff(uint32_t, uint32_t);
     int32_t printf(const char*, ...);
-    uint64_t pure_zero_guard(uint64_t);
+    uint64_t pure_zero_guard(void);
     uint32_t rec_index(uint64_t, uint32_t, uint32_t);
     uint32_t rec_spread(uint64_t, uint32_t);
     uint32_t rec_write(uint64_t, uint32_t);
@@ -1158,7 +1158,6 @@ uint64_t fcn_401764(void)
     uint64_t rax_11;
     uint32_t tmp_11f00_5;
     uint64_t rax_13;
-    uint32_t tmp_11f00_6;
     uint64_t rax_17;
     uint32_t tmp_11f00_7;
     uint64_t rax_19;
@@ -1191,7 +1190,7 @@ uint64_t fcn_401764(void)
     uint64_t rax_62;
     _Alignas(16) uint8_t frame[568];
 
-    /* r2dec proof: no individual construct is marked; 558 source obligations: 370 rendered, 171 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 12 assumed (frame extent unproven); 82 statements rendered; 6 callee prototypes supplied by the source; the result's second register is open: no call read decides it */
+    /* r2dec proof: no individual construct is marked; 555 source obligations: 367 rendered, 171 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 12 assumed (frame extent unproven); 82 statements rendered; 6 callee prototypes supplied by the source; the result's second register is open: no call read decides it */
     /* symbol `main`; C allows that name no other prototype */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 48U), (uint64_t)0U);
@@ -1239,8 +1238,8 @@ uint64_t fcn_401764(void)
         rax_13 = gate_one((uint32_t)tmp_11f00_5);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)rbx_1);
         printf("%d %d %d %d %d %d\n", (uint64_t)(uint32_t)((uint64_t)rax_13 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_11 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_9 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_8 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_7 >> 0U), rbx_1);
-        tmp_11f00_6 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
-        rax_17 = pure_zero_guard((uint64_t)(uint32_t)tmp_11f00_6);
+        (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
+        rax_17 = pure_zero_guard();
         tmp_11f00_7 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         rax_19 = opaque_self_xor((uint32_t)tmp_11f00_7);
         rax_20 = (uint64_t)sign_xor(1, (uint32_t)0xffffffffU);

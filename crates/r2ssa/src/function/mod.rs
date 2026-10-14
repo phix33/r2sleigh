@@ -2420,6 +2420,7 @@ impl TrustedSsaArtifact {
         let stated_interface = source.function_interface().is_some();
         let mut built = None;
         let mut result_owners = BTreeSet::new();
+        let mut arity_owners = BTreeSet::new();
         let mut result_ambiguous = false;
         // Whether the recovered result is void on the premise that no caller outside the image reads it.
         let mut closed_world = false;
@@ -2514,6 +2515,7 @@ impl TrustedSsaArtifact {
                     preliminary.note_exhausted(exhausted);
                 }
                 result_owners.clone_from(recovered.result_owners());
+                arity_owners.clone_from(recovered.arity_owners());
                 result_ambiguous = recovered.result_ambiguous();
                 closed_world = recovered.assumes_closed_world();
                 let minted = crate::recover_interface::mint_recovered_interface(
@@ -2582,6 +2584,7 @@ impl TrustedSsaArtifact {
         machine_context.set_reentering_callees(reentering.clone());
         machine_context.set_callee_preserved(callees.preserved().clone());
         machine_context.set_result_owners(result_owners);
+        machine_context.set_arity_owners(arity_owners);
         machine_context.set_result_ambiguous(result_ambiguous);
         machine_context.set_callee_statements(&callee_statements);
         machine_context.set_frame_saves(source.image().frame_saves());

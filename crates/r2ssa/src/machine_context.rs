@@ -471,6 +471,8 @@ pub struct SourceMachineContext {
     callee_preserved: crate::function::CalleePreservedCarriers,
     /// Where the recovered result is unproven, the direct callees whose unstated result owns it.
     result_owners: BTreeSet<u64>,
+    /// Where the parameters are a floor, the direct callees whose stated arity could make them exact.
+    arity_owners: BTreeSet<u64>,
     /// Whether the result is unproven because the body writes both result registers.
     result_ambiguous: bool,
     /// How many arguments each callee whose result is unproven reads at least.
@@ -869,6 +871,7 @@ impl SourceMachineContext {
                 .unwrap_or_default(),
             callee_preserved: BTreeMap::new(),
             result_owners: BTreeSet::new(),
+            arity_owners: BTreeSet::new(),
             result_ambiguous: false,
             callee_statements: BTreeMap::new(),
             call_effect,
@@ -1067,6 +1070,16 @@ impl SourceMachineContext {
 
     pub(crate) fn set_result_owners(&mut self, owners: BTreeSet<u64>) {
         self.result_owners = owners;
+    }
+
+    /// The direct callees whose stated arity could make this function's exact, where recovery left
+    /// its parameters a floor.
+    pub const fn arity_owners(&self) -> &BTreeSet<u64> {
+        &self.arity_owners
+    }
+
+    pub(crate) fn set_arity_owners(&mut self, owners: BTreeSet<u64>) {
+        self.arity_owners = owners;
     }
 
     /// Whether recovery left the result unproven because the body writes both result registers,

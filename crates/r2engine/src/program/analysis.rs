@@ -167,7 +167,7 @@ pub(super) fn callee_read<S: Source + 'static>(
     let unread = |reason| CalleeRead {
         interface: None,
         facts: Err(reason),
-        result_owners: Default::default(),
+        owners: Default::default(),
     };
     let view = View::new(db, true);
     let target = view

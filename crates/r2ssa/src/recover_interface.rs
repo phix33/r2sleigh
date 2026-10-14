@@ -164,6 +164,9 @@ pub struct RecoveredInterface {
     return_mechanism: Option<RecoveredReturnMechanism>,
     /// Where the result is unproven, the callees whose unstated result owns it (doc/adr-resolved-bodies.md).
     result_owners: BTreeSet<u64>,
+    /// Where the parameters are a floor only because calls of unproven arity may be handed a slot,
+    /// those calls' direct callees: their stated arity could make this one exact.
+    arity_owners: BTreeSet<u64>,
     /// Whether the result is unproven because the body writes both result registers on its way out.
     result_ambiguous: bool,
     /// The registers an unproven result may be in, where a caller's read can say which.
@@ -191,6 +194,11 @@ impl RecoveredInterface {
     /// The direct callees whose stated result could prove this one's.
     pub const fn result_owners(&self) -> &BTreeSet<u64> {
         &self.result_owners
+    }
+
+    /// The direct callees whose stated arity could make this function's exact.
+    pub const fn arity_owners(&self) -> &BTreeSet<u64> {
+        &self.arity_owners
     }
 
     /// Whether the body writes both result registers and nothing said which a caller reads.
@@ -1645,23 +1653,29 @@ fn recover_interface_inner(
     let enters_supervisor = (graph.insts.iter()).any(|inst| {
         matches!(&inst.payload, crate::graph::InstPayload::Op(op) if func.enters_supervisor(op))
     });
-    let reads_past_parameters = unseen
+    let read_past = unseen
         || enters_supervisor
         || area_unread
         || slots.argument_slots()[integers..].iter().any(|slot| {
             reads
                 .iter()
                 .any(|read| observed_in_slot(*read, *slot, machine_context).is_some())
-        })
-        || entry_reaches_unproven_call(
+        });
+    let handed_on =
+        entry_reaches_unproven_call(
             func,
             prep,
             graph,
             &facts,
             machine_context,
             slots.argument_slots().get(integers),
-        )
-        || read_for_an_unproven_call(graph, &facts, slots.argument_slots().get(integers));
+        ) || read_for_an_unproven_call(graph, &facts, slots.argument_slots().get(integers));
+    let reads_past_parameters = read_past || handed_on;
+    // A floor only calls of unproven arity cause is one their callees' stated arity can lift.
+    let arity_owners = match handed_on && !read_past {
+        true => arity_owners(&facts),
+        false => BTreeSet::new(),
+    };
     r2il::refusal_evidence!(
         "interface-recovery",
         "register parameters {:?} from reads {:?}; a floor: {reads_past_parameters} (unseen {unseen}, supervisor {enters_supervisor}, argument area {area_unread})",
@@ -1686,6 +1700,7 @@ fn recover_interface_inner(
         result_is_return_address,
         return_mechanism,
         result_owners,
+        arity_owners,
         result_ambiguous,
         result_carriers,
         reads_past_parameters,
@@ -1776,6 +1791,18 @@ fn read_beyond_merges(graph: &SsaGraph, value: crate::ValueId) -> bool {
         }
     }
     false
+}
+
+/// The direct callees of every call of unproven arity, or none where one names no callee: then no
+/// callee's statement can make the arity exact. O(calls).
+fn arity_owners(facts: &crate::semantic::PreparedFunctionFacts) -> BTreeSet<u64> {
+    let unproven = facts.boundaries.calls.values();
+    let unproven = unproven.filter(|boundary| !boundary.arguments_complete);
+    let targets = unproven.map(|boundary| {
+        let call = facts.call_sites.by_id.get(&boundary.call_site)?;
+        call.direct_target
+    });
+    targets.collect::<Option<BTreeSet<_>>>().unwrap_or_default()
 }
 
 /// The direct callees an unproven result waits on: a tail target no prototype describes, or a call whose unstated result reaches an exit.

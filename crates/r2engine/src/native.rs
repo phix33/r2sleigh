@@ -120,10 +120,16 @@ pub trait Program: crate::body::Program {
     /// What one callee's body proves, as `read` derives it.
     ///
     /// A callee is prepared against the program and its imports alone, never
-    /// against a body of its own callees or of whichever root calls it, so
-    /// what it proves is a fact about the callee and the state of the program,
-    /// and a program that holds one per state need derive it only once.
-    fn read_callee(&self, _address: u64, read: &mut dyn FnMut() -> CalleeRead) -> Arc<CalleeRead> {
+    /// against a body of whichever root calls it, so what it proves is a fact
+    /// about the callee and the state of the program, and a program that holds
+    /// one per state need derive it only once. Under `aa` (`callers`) a program
+    /// may resolve it against its owners first.
+    fn read_callee(
+        &self,
+        _address: u64,
+        _callers: crate::program::Callers,
+        read: &mut dyn FnMut() -> CalleeRead,
+    ) -> Arc<CalleeRead> {
         Arc::new(read())
     }
 }
@@ -135,8 +141,18 @@ pub struct CalleeRead {
     /// preparation cannot be certified still proved.
     pub interface: Option<r2ssa::SourceFunctionInterface>,
     pub facts: Result<CalleeFacts, Unreadable>,
-    /// Where its result is unproven, the direct callees whose unstated result owns it.
-    pub result_owners: std::collections::BTreeSet<u64>,
+    /// The direct callees whose statement could prove what this body leaves open.
+    pub owners: Owners,
+}
+
+/// The direct callees whose statement could prove what a body leaves open (doc/adr-resolved-bodies.md).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Owners {
+    /// Where its result is unproven, the callees whose unstated result owns it.
+    pub result: std::collections::BTreeSet<u64>,
+    /// Where its parameters are a floor only because calls of unproven arity may be handed a slot,
+    /// those calls' callees.
+    pub arity: std::collections::BTreeSet<u64>,
 }
 
 /// Everything about the machine that does not change between functions.
@@ -927,8 +943,8 @@ fn prepare_callee(
     resolved_alone(native, target, address, ptr_bits, &walked, &[])
 }
 
-/// A resolved body, and where its result is unproven, the callees whose result owns it.
-type Resolution = (Arc<TrustedSsaArtifact>, std::collections::BTreeSet<u64>);
+/// A resolved body, and the callees whose statement could prove what it leaves open.
+type Resolution = (Arc<TrustedSsaArtifact>, Owners);
 
 /// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md).
 fn resolved_alone(
@@ -942,7 +958,7 @@ fn resolved_alone(
     let mut imports = Callees::default();
     let targets = reached(&walked.root.body, native.program);
     declare_imports(native, target, &targets, ptr_bits, &mut imports);
-    // Each resolved owner of its result; r2ssa reads a floor interface for its result alone.
+    // Each resolved owner of its result or arity, read as any callee's statement.
     for (owner, read) in owners {
         if let Ok(facts) = &read.facts {
             imports.record(*owner, facts);
@@ -998,7 +1014,7 @@ pub(crate) fn callee_read(
             return CalleeRead {
                 interface: None,
                 facts: Err(Unreadable::NotPrepared),
-                result_owners: Default::default(),
+                owners: Default::default(),
             };
         }
     };
@@ -1024,13 +1040,13 @@ fn read_callee(
 
 /// What a resolved callee proves, derived under isolation.
 fn read_of(resolved: Result<Resolution, Unreadable>, ptr_bits: u32) -> CalleeRead {
-    let (artifact, result_owners) = match resolved {
+    let (artifact, owners) = match resolved {
         Ok(resolved) => resolved,
         Err(reason) => {
             return CalleeRead {
                 interface: None,
                 facts: Err(reason),
-                result_owners: Default::default(),
+                owners: Default::default(),
             };
         }
     };
@@ -1050,16 +1066,16 @@ fn read_of(resolved: Result<Resolution, Unreadable>, ptr_bits: u32) -> CalleeRea
     CalleeRead {
         interface,
         facts,
-        result_owners,
+        owners,
     }
 }
 
 fn read_callees(
     native: &Native<'_>,
     target: &NativeTarget<'_>,
-    root: &Walked,
-    entry: u64,
+    (root, entry): (&Walked, u64),
     ptr_bits: u32,
+    callers: crate::program::Callers,
 ) -> Read {
     // What a call takes and returns is a fact about the callee's body, so the
     // bodies it calls are walked first and the root is prepared against them.
@@ -1078,7 +1094,7 @@ fn read_callees(
         .collect();
     let mut unread = Vec::new();
     for address in &bodies {
-        let read = native.program.read_callee(*address, &mut || {
+        let read = native.program.read_callee(*address, callers, &mut || {
             read_callee(native, target, *address, ptr_bits)
         });
         // Taking the interface keeps the call rendered as a call.
@@ -1130,7 +1146,7 @@ fn analyse(
         facts,
         declared,
         unread,
-    } = read_callees(&native, target, &walk.root, entry, ptr_bits);
+    } = read_callees(&native, target, (&walk.root, entry), ptr_bits, callers);
 
     let reads = callers == crate::program::Callers::Read;
     let (artifact, _) = native.resolve(entry, walk, &callees, reads)?;
@@ -1450,11 +1466,12 @@ impl Native<'_> {
         let restated = self.restated(&first, &declared_slots);
         let folded = self.folded_literals(&first, root);
         // Only the first preparation recovers the interface; the restated one is handed it.
-        let owners = first
-            .shared_artifact()
-            .machine_context()
-            .result_owners()
-            .clone();
+        let shared = first.shared_artifact();
+        let context = shared.machine_context();
+        let owners = Owners {
+            result: context.result_owners().clone(),
+            arity: context.arity_owners().clone(),
+        };
         let artifact = match restated.is_none() && folded.is_empty() {
             true => first,
             false => {

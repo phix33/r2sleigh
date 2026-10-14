@@ -245,13 +245,21 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         self.db.inputs().control.clone()
     }
 
+    /// A callee resolved against its result's owners; under `aa`, against its arity's too.
     fn read_callee(
         &self,
         address: u64,
+        callers: super::Callers,
         _read: &mut dyn FnMut() -> crate::native::CalleeRead,
     ) -> std::sync::Arc<crate::native::CalleeRead> {
         let thumb = self.thumb_at(address);
-        let read = self.db.get::<super::resolved::Resolved>(&(address, thumb));
+        let demand = match callers {
+            super::Callers::Read => super::resolved::Demand::Arity,
+            super::Callers::Unread => super::resolved::Demand::Result,
+        };
+        let read = self
+            .db
+            .get::<super::resolved::Resolved>(&((address, thumb), demand));
         let read = read.expect("a callee's read asks for no other root");
         std::sync::Arc::clone(&read.0)
     }
