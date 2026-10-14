@@ -368,6 +368,8 @@ pub fn imports(source: &impl Source, decoder: &Disassembler, alignment: u32) -> 
         .sections
         .iter()
         .filter(|section| section.loaded && section.is_code() && section.vsize > 0)
+        // A stub is bytes the file holds; the loader's zero fill holds none.
+        .filter(|section| image.file_backed(section.vaddr, 1) > 0)
         .filter(|section| !declared(section))
         .collect();
     for section in decoded {
@@ -403,6 +405,10 @@ pub fn imports(source: &impl Source, decoder: &Disassembler, alignment: u32) -> 
 /// instruction that is none of those ends the question: the section holds
 /// the program's own code, and none of it is a stub. That costs the program's
 /// code sections one run each.
+/// The most instructions one stub runs: x86-64's PLT entry is 3, AArch64's 4, ARM's with its
+/// literal 4, a Mach-O `__stub_helper` header 4; four times that leaves room for padding.
+const STUB_INSTRUCTIONS: usize = 16;
+
 fn section_stubs(
     source: &impl Source,
     decoder: &Disassembler,
@@ -480,6 +486,10 @@ fn section_stubs(
             }
             _ => None,
         }));
+        // No ABI's stub runs past a few instructions; a longer run is the program's own code.
+        if starts.len() >= STUB_INSTRUCTIONS {
+            return None;
+        }
         starts.push((pc, run.ops.len()));
         run.ops.extend(lifted.ops);
         run.size = (pc + u64::from(lifted.size) - run.addr) as u32;
