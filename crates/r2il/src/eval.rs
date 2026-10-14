@@ -685,6 +685,7 @@ fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> 
         R2ILOp::BlockTransfer(transfer) if transfer.space == SpaceId::Ram => {
             block(transfer, state)?;
         }
+        _ if floating(op, state)? => {}
         _ => {
             let (operation, dst, operands) = Operation::of(op).ok_or(Stop::Unmodelled)?;
             let operands = operands
@@ -696,6 +697,165 @@ fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> 
         }
     }
     Ok(Flow::Next)
+}
+
+/// An IEEE binary32 or binary64 value; p-code's other float widths are not modelled.
+#[derive(Clone, Copy)]
+enum Float {
+    Single(f32),
+    Double(f64),
+}
+
+/// The quiet NaN every arithmetic NaN result is: p-code leaves the payload open, and a
+/// host's own payload would make the run depend on the host.
+const SINGLE_NAN: u32 = 0x7fc0_0000;
+const DOUBLE_NAN: u64 = 0x7ff8_0000_0000_0000;
+
+impl Float {
+    fn of(bits: u128, bytes: u32) -> Result<Self, Stop> {
+        match bytes {
+            4 => Ok(Self::Single(f32::from_bits(bits as u32))),
+            8 => Ok(Self::Double(f64::from_bits(bits as u64))),
+            _ => Err(Stop::Unmodelled),
+        }
+    }
+
+    fn wide(self) -> f64 {
+        match self {
+            Self::Single(x) => f64::from(x),
+            Self::Double(x) => x,
+        }
+    }
+
+    /// The bits of an arithmetic result, its NaN the canonical one.
+    fn bits(self) -> u128 {
+        match self {
+            Self::Single(x) if x.is_nan() => u128::from(SINGLE_NAN),
+            Self::Double(x) if x.is_nan() => u128::from(DOUBLE_NAN),
+            Self::Single(x) => u128::from(x.to_bits()),
+            Self::Double(x) => u128::from(x.to_bits()),
+        }
+    }
+
+    /// `x` rounded once at this value's format.
+    fn at(self, x: f64) -> Self {
+        match self {
+            Self::Single(_) => Self::Single(x as f32),
+            Self::Double(_) => Self::Double(x),
+        }
+    }
+
+    fn binary(
+        self,
+        other: Self,
+        single: fn(f32, f32) -> f32,
+        double: fn(f64, f64) -> f64,
+    ) -> Result<Self, Stop> {
+        match (self, other) {
+            (Self::Single(a), Self::Single(b)) => Ok(Self::Single(single(a, b))),
+            (Self::Double(a), Self::Double(b)) => Ok(Self::Double(double(a, b))),
+            _ => Err(Stop::Unmodelled),
+        }
+    }
+
+    fn unary(self, single: fn(f32) -> f32, double: fn(f64) -> f64) -> Self {
+        match self {
+            Self::Single(x) => Self::Single(single(x)),
+            Self::Double(x) => Self::Double(double(x)),
+        }
+    }
+}
+
+/// The sign bit of a float `bytes` wide.
+fn sign(bytes: u32) -> Result<u128, Stop> {
+    match width(bytes)? {
+        bytes if bytes <= CARRIED => Ok(1u128 << (8 * bytes - 1)),
+        _ => Err(Stop::Unmodelled),
+    }
+}
+
+/// Executes a float operation in round-to-nearest-even, returning whether `op` is one.
+///
+/// What p-code leaves undefined has no value: `FLOAT_ROUND` of a tie (Ghidra's C++ and Java
+/// emulators break it differently) and a conversion to an integer the value does not fit.
+fn floating<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<bool, Stop> {
+    let mut float = |varnode: &Varnode| -> Result<Float, Stop> {
+        Float::of(state.read(varnode)?, varnode.size)
+    };
+    let (dst, value) = match op {
+        R2ILOp::FloatAdd { dst, a, b } => (
+            dst,
+            float(a)?
+                .binary(float(b)?, |a, b| a + b, |a, b| a + b)?
+                .bits(),
+        ),
+        R2ILOp::FloatSub { dst, a, b } => (
+            dst,
+            float(a)?
+                .binary(float(b)?, |a, b| a - b, |a, b| a - b)?
+                .bits(),
+        ),
+        R2ILOp::FloatMult { dst, a, b } => (
+            dst,
+            float(a)?
+                .binary(float(b)?, |a, b| a * b, |a, b| a * b)?
+                .bits(),
+        ),
+        R2ILOp::FloatDiv { dst, a, b } => (
+            dst,
+            float(a)?
+                .binary(float(b)?, |a, b| a / b, |a, b| a / b)?
+                .bits(),
+        ),
+        // Sign operations are not arithmetic: a NaN keeps its payload.
+        R2ILOp::FloatNeg { dst, src } => (dst, state.read(src)? ^ sign(src.size)?),
+        R2ILOp::FloatAbs { dst, src } => (dst, state.read(src)? & !sign(src.size)?),
+        R2ILOp::FloatSqrt { dst, src } => (dst, float(src)?.unary(f32::sqrt, f64::sqrt).bits()),
+        R2ILOp::FloatCeil { dst, src } => (dst, float(src)?.unary(f32::ceil, f64::ceil).bits()),
+        R2ILOp::FloatFloor { dst, src } => (dst, float(src)?.unary(f32::floor, f64::floor).bits()),
+        R2ILOp::FloatRound { dst, src } => {
+            let x = float(src)?;
+            if (x.wide() - x.wide().trunc()).abs() == 0.5 {
+                return Err(Stop::Undefined);
+            }
+            (dst, x.unary(f32::round, f64::round).bits())
+        }
+        R2ILOp::FloatNaN { dst, src } => (dst, u128::from(float(src)?.wide().is_nan())),
+        R2ILOp::FloatEqual { dst, a, b } => (dst, u128::from(float(a)?.wide() == float(b)?.wide())),
+        R2ILOp::FloatNotEqual { dst, a, b } => {
+            (dst, u128::from(float(a)?.wide() != float(b)?.wide()))
+        }
+        R2ILOp::FloatLess { dst, a, b } => (dst, u128::from(float(a)?.wide() < float(b)?.wide())),
+        R2ILOp::FloatLessEqual { dst, a, b } => {
+            (dst, u128::from(float(a)?.wide() <= float(b)?.wide()))
+        }
+        R2ILOp::FloatFloat { dst, src } => {
+            (dst, Float::of(0, dst.size)?.at(float(src)?.wide()).bits())
+        }
+        R2ILOp::Int2Float { dst, src } => {
+            let integer = Word::new(state.read(src)?, src.size)?.signed()?;
+            let value = match dst.size {
+                4 => Float::Single(integer as f32),
+                8 => Float::Double(integer as f64),
+                _ => return Err(Stop::Unmodelled),
+            };
+            (dst, value.bits())
+        }
+        R2ILOp::Trunc { dst, src } | R2ILOp::Float2Int { dst, src } => {
+            if !(1..=8).contains(&dst.size) {
+                return Err(Stop::Unmodelled);
+            }
+            let x = float(src)?.wide().trunc();
+            let bound = 2f64.powi(8 * dst.size as i32 - 1);
+            if x.is_nan() || x < -bound || x >= bound {
+                return Err(Stop::Undefined);
+            }
+            (dst, (x as i64) as u128 & mask(dst.size))
+        }
+        _ => return Ok(false),
+    };
+    state.write(dst, value)?;
+    Ok(true)
 }
 
 /// Where a transfer goes, or `None` for an operation that is not one.
@@ -1021,14 +1181,106 @@ mod tests {
     }
 
     #[test]
-    fn only_the_integer_core_runs_and_a_transfer_says_where() {
-        let mut machine = state();
-        let float = R2ILOp::FloatAdd {
-            dst: register(0, 8),
-            a: register(0, 8),
-            b: register(0, 8),
+    fn floats_round_to_nearest_even_and_leave_undefined_what_p_code_does() {
+        let run = |op: R2ILOp, inputs: &[(u64, u32, u128)]| {
+            let mut machine = state();
+            for (offset, size, value) in inputs {
+                machine
+                    .set_register(*offset, *size, *value)
+                    .expect("an input");
+            }
+            match step(&op, &mut machine) {
+                Flow::Next => Ok(machine
+                    .register(32, op.output().map_or(8, |dst| dst.size))
+                    .expect("a result")),
+                Flow::Stop(stop) => Err(stop),
+                flow => panic!("{flow:?}"),
+            }
         };
-        assert_eq!(step(&float, &mut machine), Flow::Stop(Stop::Unmodelled));
+        let (a, b, out) = (register(0, 8), register(8, 8), register(32, 8));
+        let one = u128::from(1f64.to_bits());
+        let third = u128::from((1f64 / 3.0).to_bits());
+        let divide = R2ILOp::FloatDiv {
+            dst: out.clone(),
+            a: a.clone(),
+            b: b.clone(),
+        };
+        assert_eq!(
+            run(
+                divide.clone(),
+                &[(0, 8, one), (8, 8, u128::from(3f64.to_bits()))]
+            ),
+            Ok(third)
+        );
+        // 0/0 is the canonical NaN whatever the host would produce.
+        assert_eq!(
+            run(divide, &[(0, 8, 0), (8, 8, 0)]),
+            Ok(u128::from(DOUBLE_NAN))
+        );
+        let signalling = 0x7ff4_0000_0000_0001u128;
+        let negate = R2ILOp::FloatNeg {
+            dst: out.clone(),
+            src: a.clone(),
+        };
+        assert_eq!(run(negate, &[(0, 8, signalling)]), Ok(signalling | 1 << 63));
+        let less = R2ILOp::FloatLess {
+            dst: register(32, 1),
+            a: a.clone(),
+            b: b.clone(),
+        };
+        assert_eq!(run(less, &[(0, 8, signalling), (8, 8, one)]), Ok(0));
+        let round = R2ILOp::FloatRound {
+            dst: out.clone(),
+            src: a.clone(),
+        };
+        assert_eq!(
+            run(round.clone(), &[(0, 8, u128::from(2.5f64.to_bits()))]),
+            Err(Stop::Undefined)
+        );
+        assert_eq!(
+            run(round, &[(0, 8, u128::from(2.75f64.to_bits()))]),
+            Ok(u128::from(3f64.to_bits()))
+        );
+        let truncate = R2ILOp::Trunc {
+            dst: register(32, 4),
+            src: a.clone(),
+        };
+        assert_eq!(
+            run(truncate.clone(), &[(0, 8, u128::from((-2.9f64).to_bits()))]),
+            Ok(0xffff_fffe)
+        );
+        assert_eq!(
+            run(truncate, &[(0, 8, u128::from(2147483648f64.to_bits()))]),
+            Err(Stop::Undefined)
+        );
+        let widen = R2ILOp::Int2Float {
+            dst: out.clone(),
+            src: register(0, 4),
+        };
+        assert_eq!(
+            run(widen, &[(0, 4, 0xffff_ffff)]),
+            Ok(u128::from((-1f64).to_bits()))
+        );
+        let narrow = R2ILOp::FloatFloat {
+            dst: register(32, 4),
+            src: a,
+        };
+        assert_eq!(
+            run(narrow, &[(0, 8, third)]),
+            Ok(u128::from((1f32 / 3.0).to_bits()))
+        );
+    }
+
+    #[test]
+    fn an_unmodelled_width_stops_and_a_transfer_says_where() {
+        let mut machine = state();
+        machine.set_register(0, 2, 0x3c00).expect("a half");
+        let half = R2ILOp::FloatAdd {
+            dst: register(0, 2),
+            a: register(0, 2),
+            b: register(0, 2),
+        };
+        assert_eq!(step(&half, &mut machine), Flow::Stop(Stop::Unmodelled));
         let unwritten = Stop::Unwritten {
             space: SpaceId::Register,
             offset: 8,

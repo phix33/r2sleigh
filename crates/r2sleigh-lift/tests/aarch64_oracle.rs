@@ -4,8 +4,9 @@
 //! `aarch64_oracle/record.sh` ran every case on a CPU from states drawn by one xorshift stream and
 //! recorded only what changed (`recorded.txt`); this test draws the same states, checks each
 //! against the recorded hash, runs the lift and compares every register, flag, vector and memory
-//! byte. Cases that stop or disagree are listed in `expected.txt`, a ratchet: a case leaving it
-//! must be removed from it, and a case joining it fails. `R2S_BLESS=1` rewrites it.
+//! byte, a NaN matching any NaN in its lane. Cases that stop or disagree are listed in
+//! `expected.txt`, a ratchet: a case leaving it must be removed from it, and a case joining it
+//! fails. `R2S_BLESS=1` rewrites it.
 #![cfg(feature = "arm")]
 
 use r2il::eval::{Flow, State, Stop, TransferKind, step};
@@ -458,7 +459,10 @@ impl Lift {
         }
         for (n, lane) in cpu.v.iter().enumerate() {
             let (offset, _) = self.register(&format!("q{n}"));
-            if state.register(offset, 16) != Some(*lane) {
+            if !state
+                .register(offset, 16)
+                .is_some_and(|lifted| same_lanes(lifted, *lane))
+            {
                 wrong.insert(format!("v{n}"));
             }
             let (z, _) = self.register(&format!("z{n}"));
@@ -482,6 +486,20 @@ impl Lift {
             .map(|field| format!("wrong {field}"))
             .collect()
     }
+}
+
+/// Equal, or equal but for NaNs at one lane width: p-code leaves a NaN's payload open.
+fn same_lanes(lifted: u128, cpu: u128) -> bool {
+    let lanes = |bits: u32, nan: fn(u128) -> bool| {
+        (0..128 / bits).all(|lane| {
+            let (a, b) = (lifted >> (lane * bits), cpu >> (lane * bits));
+            let mask = (1u128 << bits) - 1;
+            a & mask == b & mask || (nan(a & mask) && nan(b & mask))
+        })
+    };
+    lifted == cpu
+        || lanes(64, |x| f64::from_bits(x as u64).is_nan())
+        || lanes(32, |x| f32::from_bits(x as u32).is_nan())
 }
 
 fn data(name: &str) -> PathBuf {
