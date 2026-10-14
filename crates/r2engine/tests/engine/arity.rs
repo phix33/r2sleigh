@@ -83,6 +83,33 @@ fn under_aa_a_floor_its_callee_owns_is_resolved_bottom_up() {
     assert!(!text.contains(", 7)"), "{text}");
 }
 
+/// Without `aa`, `f`'s arity is a floor of none and `caller` writes two slots: the call is a gap
+/// that names `f` and its floor, never `f(5, 7)` and never an unsupported instruction (audit M3).
+#[test]
+fn a_call_past_a_floor_is_a_gap_naming_its_callee_and_floor() {
+    let text = OpenProgram::of(Literal::of_code(
+        HANDED_ON_ONE,
+        &[
+            ("f", BASE, 0x09),
+            ("g", BASE + 0x10, 0x03),
+            ("caller", BASE + 0x20, 0x10),
+        ],
+    ))
+    .rendered(BASE + 0x20)
+    .expect("it renders")
+    .response
+    .output
+    .into_text();
+    assert!(
+        text.contains(
+            "(render::values): call to f: its arity is only at least 0 (a floor), and this call writes 2 */"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("UnsupportedInstruction"), "{text}");
+    assert!(!text.contains("f(5"), "{text}");
+}
+
 /// `caller`: `mov edi, 5; mov esi, 7; call [rip + 0x10]; ret`, the slot at 0x1020 the loader binds
 /// to `puts`, in a segment the program may write.
 const CALL_THROUGH_A_SLOT: &[u8] = &[
@@ -95,13 +122,13 @@ const CALL_THROUGH_A_SLOT: &[u8] = &[
     0, 0, 0, 0, 0, 0, 0, 0, // 1020 the slot
 ];
 
-/// `caller` over the slot, sealed after load or not.
-fn slot_caller(sealed: bool) -> String {
+/// `caller` over the slot bound to `import`, sealed after load or not.
+fn slot_caller(import: &str, sealed: bool) -> String {
     let slot = BASE + 0x20;
     let mut literal = Literal::of_code(CALL_THROUGH_A_SLOT, &[("caller", BASE, 0x11)])
         .writable_data_after(slot)
-        .loader_written(common::import_write(slot, 8, "puts"))
-        .relocated(common::import_slot(slot, "puts"));
+        .loader_written(common::import_write(slot, 8, import))
+        .relocated(common::import_slot(slot, import));
     if sealed {
         literal = literal.sealed(slot..slot + 8);
     }
@@ -118,9 +145,23 @@ fn slot_caller(sealed: bool) -> String {
 /// W8). A slot the program may rebind stays a call through memory.
 #[test]
 fn a_call_through_a_sealed_import_slot_calls_the_import() {
-    let text = slot_caller(true);
+    let text = slot_caller("puts", true);
     assert!(text.contains("puts((const char*)(uint64_t)5U)"), "{text}");
     assert!(!text.contains(", 7)"), "{text}");
-    let text = slot_caller(false);
+    let text = slot_caller("puts", false);
     assert!(!text.contains("puts("), "{text}");
+}
+
+/// A send to `objc_msgSend`, variadic as objc4 declares it, states no argument count: the call is
+/// a gap naming the import and why, never an unsupported instruction (audit M3, RF's W10 case).
+#[test]
+fn a_variadic_call_with_no_count_is_a_gap_naming_its_callee() {
+    let text = slot_caller("objc_msgSend", true);
+    assert!(
+        text.contains(
+            "call to objc_msgSend: variadic, its argument count unproven (missing_format_parameter) */"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("UnsupportedInstruction"), "{text}");
 }

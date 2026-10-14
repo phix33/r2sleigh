@@ -66,7 +66,7 @@ uint64_t _init(void)
         if ((uint8_t)((uint64_t)rax_1 == (uint64_t)0U)) {
             rax_3 = rax_1;
         } else {
-            r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401014:4 covering 1 op (render::values) */
+            r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401014:4 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
             r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401014:10 covering 1 op (render::values) */
             rax_3 = r2sleigh_residual_u64(3);
         }
@@ -130,7 +130,7 @@ void _start(void)
         tmp_55400_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x401090:29 covering 1 op (render::values) */
         r2sleigh_residual_void(3); /* r2dec gap: StoreNotSpelled at 0x401090:32 covering 1 op (render::values) */
-        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x401090:68 covering 1 op (render::values) */
+        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x401090:68 covering 1 op (render::values): call to __libc_start_main: no arity is stated, only the registers written before it */
         r2sleigh_residual_void(5); /* r2dec gap: TailTransferNotRendered at 0x401090 (render::control) */
     }
 }
@@ -1475,7 +1475,7 @@ uint64_t shape_function_pointer(uint64_t arg0, uint64_t arg1)
                 rdx_3 = (uint64_t)((__uint128_t)tmp_53d80_1 >> 64U);
                 rdx_4 = (uint64_t)(uint32_t)1U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_3 >> (uint64_t)(uint32_t)1U);
                 r2sleigh_store_u64((void*)(uint64_t)(frame + 56U), (uint64_t)r2sleigh_load_u64((void*)((uint64_t)(frame + 64U) + (uint64_t)((uint64_t)((uint64_t)((uint64_t)tmp_4a00_1 - (uint64_t)rdx_4) - (uint64_t)rdx_4) - (uint64_t)rdx_4) * 8U)));
-                r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x402125:92 covering 1 op (render::values) */
+                r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x402125:92 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
                 r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x402125:98 covering 1 op (render::values) */
                 r2sleigh_store_u64((void*)(uint64_t)(frame + 48U), (uint64_t)r2sleigh_residual_u64(3));
                 tmp_6a80_4 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));

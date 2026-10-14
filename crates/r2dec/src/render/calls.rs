@@ -7,7 +7,7 @@ use r2ssa::{
 };
 use r2types::{CalleeClass, CalleeResolutionFacts};
 
-use crate::ast::{BinaryOp, CExpr, CType};
+use crate::ast::{BinaryOp, CExpr, CType, CallGap, CallRefusal, GapCallee};
 use crate::prelude::ResidualCause;
 use crate::symbol::ExternalKind;
 
@@ -273,56 +273,65 @@ fn pointee_spelling(ty: &CType, defines: &dyn Fn(&str, bool) -> bool) -> Option<
     }
 }
 
-/// Why a call has no plan: the first fact its C would need that the facts do not state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Unplanned {
-    /// A jump r2ssa found no call at: no refusal.
-    NotACall,
-    NoCertificate,
-    /// r2ssa's verdict: the callee does not state these are its arguments.
-    ArgumentsUnproven,
-    ResultsIncomplete,
-    NoCallee,
-    /// The obligations name more than the one value the boundary defines after the call.
-    ResultUnclear,
-    VariadicWithoutFixedCount,
-    SignatureArity,
-    ArgumentClass,
-    ResultClass,
-    IndirectVariadic,
-}
-
-/// The plan for the call at `inst`, where the facts state every argument, the result and the callee.
+/// The plan for the call at `inst`, where the facts state every argument, the result and the
+/// callee, else the gap it leaves; `None` where r2ssa finds no call there.
 pub(super) fn plan(
     artifact: &SsaArtifact,
     resolution: Option<&CalleeResolutionFacts>,
     inventory: &SemanticObligationInventory,
     inst: InstId,
-) -> Option<CallPlan> {
-    planned(artifact, resolution, inventory, inst)
-        .inspect_err(|why| {
-            if *why != Unplanned::NotACall {
-                r2il::refusal_evidence!("staged-call-plan", "{inst:?}: {why:?}");
+) -> Option<Result<CallPlan, CallGap>> {
+    let site = *artifact.facts().call_sites.by_inst.get(inst)?;
+    Some(
+        planned(artifact, resolution, inventory, (site, inst)).map_err(|reason| {
+            r2il::refusal_evidence!("staged-call-plan", "{inst:?}: {reason:?}");
+            CallGap {
+                callee: gap_callee(artifact, resolution, inst),
+                reason,
             }
-        })
-        .ok()
+        }),
+    )
+}
+
+/// Who the call at `inst` reaches, for the gap it leaves: the name r2types resolves, else its
+/// direct target, else a target computed at run time.
+pub(super) fn gap_callee(
+    artifact: &SsaArtifact,
+    resolution: Option<&CalleeResolutionFacts>,
+    inst: InstId,
+) -> GapCallee {
+    let calls = &artifact.facts().call_sites;
+    let direct = (calls.by_inst.get(inst))
+        .and_then(|site| calls.by_id.get(site))
+        .and_then(|site| site.direct_target);
+    let identity = resolution.and_then(|resolution| resolution.identity_for_callsite(inst));
+    match identity.and_then(|identity| named(identity, direct)) {
+        Some((name, _)) => GapCallee::Named(name),
+        None => (direct.or_else(|| identity.and_then(|identity| identity.target_addr)))
+            .map_or(GapCallee::Indirect, GapCallee::Address),
+    }
 }
 
 fn planned(
     artifact: &SsaArtifact,
     resolution: Option<&CalleeResolutionFacts>,
     inventory: &SemanticObligationInventory,
-    inst: InstId,
-) -> Result<CallPlan, Unplanned> {
-    let site = (artifact.facts().call_sites.by_inst.get(inst)).ok_or(Unplanned::NotACall)?;
+    (site, inst): (r2ssa::CallSiteId, InstId),
+) -> Result<CallPlan, CallRefusal> {
+    let site = &site;
     let certificate =
-        (artifact.certificates().callsites.get(site)).ok_or(Unplanned::NoCertificate)?;
-    // r2ssa's one verdict says the arguments are the callee's; r2dec derives none of its own (D3).
-    check(certificate.arguments_proven, Unplanned::ArgumentsUnproven)?;
-    check(certificate.results_complete, Unplanned::ResultsIncomplete)?;
+        (artifact.certificates().callsites.get(site)).ok_or(CallRefusal::NoCertificate)?;
+    // r2ssa's one verdict says the arguments are the callee's, and its refusal why not (D3, M3).
+    if !(certificate.arguments_proven && certificate.results_complete) {
+        let boundary = artifact.facts().boundaries.calls.get(site);
+        let why = boundary.and_then(|boundary| boundary.refusal);
+        return Err(CallRefusal::Boundary(
+            why.unwrap_or(r2ssa::CallBoundaryRefusal::NoConvention),
+        ));
+    }
     let graph = artifact.graph();
     let identity = resolution.and_then(|resolution| resolution.identity_for_callsite(inst));
-    let callee = callee(certificate, identity, graph, inst).ok_or(Unplanned::NoCallee)?;
+    let callee = callee(certificate, identity, graph, inst).ok_or(CallRefusal::NoCallee)?;
     let pair = (artifact.facts().boundaries.calls.get(site)).and_then(|boundary| {
         match boundary.result_kind {
             Some(r2source::SourceCallResult::Pair { low, high }) => Some((low, high)),
@@ -331,13 +340,13 @@ fn planned(
     });
     let pair = match pair {
         Some(registers) => {
-            Some(pair_values(inventory, graph, inst, registers).ok_or(Unplanned::ResultUnclear)?)
+            Some(pair_values(inventory, graph, inst, registers).ok_or(CallRefusal::ResultUnclear)?)
         }
         None => None,
     };
     let result = match pair {
         Some(_) => None,
-        None => result_value(inventory, graph, inst).ok_or(Unplanned::ResultUnclear)?,
+        None => result_value(inventory, graph, inst).ok_or(CallRefusal::ResultUnclear)?,
     };
     // Each argument passes in the class its register says, which a signature, where there is one,
     // must agree with; C passes a float in the variadic tail as a double.
@@ -345,16 +354,16 @@ fn planned(
     let fixed = match (certificate.variadic, certificate.fixed_argument_count) {
         (false, _) => certificate.argument_values.len(),
         (true, Some(fixed)) if fixed <= certificate.argument_values.len() => fixed,
-        (true, _) => return Err(Unplanned::VariadicWithoutFixedCount),
+        (true, _) => return Err(CallRefusal::VariadicWithoutFixedCount),
     };
     check(
         !signature.is_some_and(|signature| {
             signature.variadic != certificate.variadic || signature.params.len() != fixed
         }),
-        Unplanned::SignatureArity,
+        CallRefusal::SignatureArity,
     )?;
     let arguments =
-        arguments(artifact, certificate, signature, fixed).ok_or(Unplanned::ArgumentClass)?;
+        arguments(artifact, certificate, signature, fixed).ok_or(CallRefusal::ArgumentClass)?;
     let result = match (pair, result) {
         (Some((low, high, bits)), _) => Some(CallResult::Pair {
             low,
@@ -368,12 +377,12 @@ fn planned(
         (None, Some(value)) => Some(CallResult::One(
             value,
             result_class(artifact, (*site, inst), signature, value)
-                .ok_or(Unplanned::ResultClass)?,
+                .ok_or(CallRefusal::ResultClass)?,
         )),
     };
     check(
         !(matches!(callee, Callee::Through(_)) && certificate.variadic),
-        Unplanned::IndirectVariadic,
+        CallRefusal::IndirectVariadic,
     )?;
     let tail = (certificate.transfer == CallSiteTransfer::TailCall).then(|| {
         tail_result(
@@ -440,7 +449,7 @@ fn never_comes_back(artifact: &SsaArtifact, inst: InstId) -> bool {
     ends && last_call == Some(inst)
 }
 
-fn check(holds: bool, otherwise: Unplanned) -> Result<(), Unplanned> {
+fn check(holds: bool, otherwise: CallRefusal) -> Result<(), CallRefusal> {
     if holds { Ok(()) } else { Err(otherwise) }
 }
 
@@ -474,6 +483,28 @@ fn location(
         .map(|argument| &argument.location)
 }
 
+/// The C name and kind of the callee `identity` names, a function no symbol names only at the
+/// `direct` address the call reaches.
+fn named(
+    identity: &r2types::CalleeIdentity,
+    direct: Option<u64>,
+) -> Option<(String, ExternalKind)> {
+    let kind = match identity.class {
+        CalleeClass::Imported | CalleeClass::ExternalSymbol => ExternalKind::Import,
+        CalleeClass::Internal => ExternalKind::Function,
+        CalleeClass::RawAddress
+            if identity.target_addr.is_some() && identity.target_addr == direct =>
+        {
+            ExternalKind::Function
+        }
+        _ => return None,
+    };
+    let name = (identity.display_name.as_deref())
+        .or(identity.normalized_name.as_deref())
+        .or(identity.raw_name.as_deref())?;
+    Some((crate::ast::c_identifier(name), kind))
+}
+
 /// Who the call at `inst` reaches: the callee r2types names, or the value an indirect call's
 /// target holds where no identity names it.
 fn callee(
@@ -482,28 +513,9 @@ fn callee(
     graph: &r2ssa::SsaGraph,
     inst: InstId,
 ) -> Option<Callee> {
-    let kind = identity.and_then(|identity| match identity.class {
-        CalleeClass::Imported | CalleeClass::ExternalSymbol => Some(ExternalKind::Import),
-        CalleeClass::Internal => Some(ExternalKind::Function),
-        // A function no symbol names, at the address the call reaches.
-        CalleeClass::RawAddress
-            if identity.target_addr.is_some()
-                && identity.target_addr == certificate.direct_target =>
-        {
-            Some(ExternalKind::Function)
-        }
-        _ => None,
-    });
-    let name = identity.and_then(|identity| {
-        identity
-            .display_name
-            .as_deref()
-            .or(identity.normalized_name.as_deref())
-            .or(identity.raw_name.as_deref())
-    });
-    match (kind, name) {
-        (Some(kind), Some(name)) => Some(Callee::Named {
-            name: crate::ast::c_identifier(name),
+    match identity.and_then(|identity| named(identity, certificate.direct_target)) {
+        Some((name, kind)) => Some(Callee::Named {
+            name,
             kind,
             address: certificate
                 .direct_target

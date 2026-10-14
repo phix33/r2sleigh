@@ -99,9 +99,9 @@ uint64_t entry0(void)
 
     /* r2dec proof: 6 constructs are marked below; 37 source obligations: 6 rendered, 16 elided, 0 refused, 15 residual; 3 statements rendered */
     {
-        r2sleigh_residual_void(1); /* r2dec gap: UnsupportedInstruction at 0x401060:5 covering 1 op (render::values) */
+        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401060:5 covering 1 op (render::values): call to fcn_401000: its arity is only at least 0 (a floor), and this call writes 1 */
         r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x401060:9 covering 1 op (render::values) */
-        r2sleigh_residual_void(3); /* r2dec gap: UnsupportedInstruction at 0x401060:20 covering 1 op (render::values) */
+        r2sleigh_residual_void(3); /* r2dec gap: CallNotRendered at 0x401060:20 covering 1 op (render::values): call to fcn_401010: its arity is only at least 0 (a floor), and this call writes 1 */
         r2sleigh_residual_void(4); /* r2dec gap: EffectNotRendered at 0x401060:24 covering 1 op (render::values) */
         fcn_401030();
         fcn_401050();

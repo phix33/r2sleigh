@@ -87,7 +87,7 @@ uint64_t _table_dispatch(uint64_t arg0, uint64_t arg1)
                 break;
             } else {
                 {
-                    r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x10000046c:36 covering 1 op (render::values) */
+                    r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x10000046c:36 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
                     r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x10000046c:69 covering 1 op (render::values) */
                     {
                         stack_m76_1 = (uint32_t)((uint32_t)stack_m76_1 + (uint32_t)1U);

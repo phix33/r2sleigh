@@ -31,7 +31,7 @@ void _start(void)
         tmp_55400_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x1001520:29 covering 1 op (render::values) */
         r2sleigh_residual_void(3); /* r2dec gap: StoreNotSpelled at 0x1001520:32 covering 1 op (render::values) */
-        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x1001520:46 covering 1 op (render::values) */
+        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x1001520:46 covering 1 op (render::values): call to __libc_start_main: no arity is stated, only the registers written before it */
         r2sleigh_residual_void(5); /* r2dec gap: TailTransferNotRendered at 0x1001520 (render::control) */
     }
 }
@@ -188,7 +188,7 @@ void __libc_csu_init(int32_t argc, char** argv, char** envp)
             r13_5 = 1;
             for (; ; ) {
                 tmp_11f80_1 = r2sleigh_load_u64((void*)r12_2);
-                r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1001670:13 covering 1 op (render::values) */
+                r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1001670:13 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
                 r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x1001670:19 covering 1 op (render::values) */
                 r13_6 = (uint64_t)((uint64_t)r13_5 - (uint64_t)1U);
                 if ((uint8_t)((uint64_t)r13_6 != (uint64_t)0U)) {

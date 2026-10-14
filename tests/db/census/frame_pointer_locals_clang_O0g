@@ -35,7 +35,7 @@ uint64_t _init(void)
         if ((uint8_t)((uint64_t)rax_1 == (uint64_t)0U)) {
             rax_3 = rax_1;
         } else {
-            r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1014:4 covering 1 op (render::values) */
+            r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1014:4 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
             r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x1014:10 covering 1 op (render::values) */
             rax_3 = r2sleigh_residual_u64(3);
         }
@@ -74,7 +74,7 @@ void _start(void)
         tmp_55400_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x1040:29 covering 1 op (render::values) */
         r2sleigh_residual_void(3); /* r2dec gap: StoreNotSpelled at 0x1040:32 covering 1 op (render::values) */
-        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x1040:68 covering 1 op (render::values) */
+        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x1040:68 covering 1 op (render::values): call to __libc_start_main: no arity is stated, only the registers written before it */
         r2sleigh_residual_void(5); /* r2dec gap: TailTransferNotRendered at 0x1040 (render::control) */
     }
 }
@@ -171,10 +171,10 @@ uint64_t __do_global_dtors_aux(void)
             if ((uint8_t)((uint64_t)tmp_3ea80_1 == (uint64_t)0U)) {
             } else {
                 rdi_1 = r2sleigh_load_u64((void*)&__dso_handle);
-                r2sleigh_residual_void(2); /* r2dec gap: UnsupportedInstruction at 0x10fb:4 covering 1 op (render::values) */
+                r2sleigh_residual_void(2); /* r2dec gap: CallNotRendered at 0x10fb:4 covering 1 op (render::values): call to __cxa_finalize: its arity is only at least 0 (a floor), and this call writes 1 */
             }
             {
-                r2sleigh_residual_void(3); /* r2dec gap: UnsupportedInstruction at 0x1107:17 covering 1 op (render::values) */
+                r2sleigh_residual_void(3); /* r2dec gap: CallNotRendered at 0x1107:17 covering 1 op (render::values): call to deregister_tm_clones: argument slot 0 may hand on what this function was passed */
                 r2sleigh_store_u8((void*)&__TMC_END__, (uint8_t)1U);
                 return r2sleigh_residual_u64(4);
             }
