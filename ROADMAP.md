@@ -32,7 +32,7 @@ today; GT closes it.
 | Certification (`scripts/certify_render.py`) | Does every rendering read only what it assigns, and never panic? | grades 98 of 1,492 functions, none stripped; cannot see invented arguments (T6) |
 | Source-gold (`scripts/differential_truth.py`) | Are signatures what the source declared, or marked? | soundness 43% and 21% (W49); `frame_agree.py` in no gate (T21) |
 | Coverage (`tests/coverage`) | How much of a binary renders; does any regress? | stale baseline; clang other than 17 ungated (T19) |
-| Differential (`scripts/diff_r2.py`) | Where discovery, naming, decoding disagree with radare2, and who is right. | not in CI and red; radare2-only values score as agreement (T4) |
+| Differential (`scripts/diff_r2.py`) | Where discovery, naming, decoding disagree with radare2, and who is right. | in CI against radare2 6.2.4 on elf, mach0 and pe, every disagreement judged and radare2-only values ratcheted; `ir iz iee i f` not yet compared (T4) |
 | Dylints (`tools/dylints`) | Does the code keep the structural rules? | 77 of 79 warn-only, their count ratcheted in CI; every path filter names a live path, tested (T3) |
 | Structure (`scripts/structure-report.sh`) | Did nesting, length, arguments or clones rise? | — |
 

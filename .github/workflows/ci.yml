@@ -51,14 +51,14 @@ jobs:
   # ── What this run grades ────────────────────────────────────────────
   #
   # Every push runs the first tier: format, Clippy, tests (the golden files,
-  # the census among them), Dylints, the build, certification, hostile input,
-  # source-gold. The second tier, both equivalence ratchets, release timing
-  # against the base and the coverage sweep (31 of 42 jobs, most of the
-  # runner-minutes), runs on master, nightly, by hand, in the merge queue, on a
-  # pull request whose base is master (the next to merge) or that carries the
-  # `full-ci` label, and when `ci-on-request.yml` calls it. Every gate still
-  # runs before a merge; a restack of a 30-PR stack queues 30 first tiers, not
-  # 1,260 jobs.
+  # the census among them), Dylints, the build, certification, the radare2
+  # differential, hostile input, source-gold. The second tier, both
+  # equivalence ratchets, release timing against the base and the coverage
+  # sweep (31 of 43 jobs, most of the runner-minutes), runs on master, nightly,
+  # by hand, in the merge queue, on a pull request whose base is master (the
+  # next to merge) or that carries the `full-ci` label, and when
+  # `ci-on-request.yml` calls it. Every gate still runs before a merge; a
+  # restack of a 30-PR stack queues 30 first tiers, not 1,290 jobs.
   plan:
     name: Plan
     runs-on: ubuntu-24.04
@@ -241,6 +241,53 @@ jobs:
             --bins "$RUNNER_TEMP/testbins/elf" \
             --r2s target/ci/r2s \
             --limit 80 --functions 8
+
+  # ── The radare2 differential (ROADMAP GT, P11) ─────────────────────
+  #
+  # The same commands through the radare2 release the judgments name and r2s,
+  # over radare2's elf, mach0 and pe test binaries: a disagreement no entry of
+  # scripts/diff_r2_judged.toml judges fails, and so does a rise in the values
+  # only radare2 reports (scripts/diff_r2_baseline.json).
+  diff-r2:
+    name: radare2 Differential Gate
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: r2s
+          path: target/ci
+      - run: chmod +x target/ci/r2s
+      # The release the table names, checked against the checksum the release published.
+      - name: Install the pinned radare2
+        env:
+          RADARE2_DEB_SHA256: 7019eedc0e0e87d1f53d6b8f5fc62b898567679c5efdce7fbfc557c9e7655e90
+        run: |
+          set -eu
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("scripts/diff_r2_judged.toml", "rb"))["radare2"])')
+          deb="$RUNNER_TEMP/radare2_${version}_amd64.deb"
+          curl -fsSL -o "$deb" "https://github.com/radareorg/radare2/releases/download/$version/radare2_${version}_amd64.deb"
+          echo "$RADARE2_DEB_SHA256  $deb" | sha256sum -c -
+          sudo dpkg -i "$deb"
+          sudo ldconfig
+          radare2 -v
+      - name: Fetch radare2's elf, mach0 and pe test binaries
+        run: |
+          set -eu
+          dir="$RUNNER_TEMP/testbins"
+          git init -q "$dir"
+          git -C "$dir" remote add origin "$TESTBINS_URL"
+          git -C "$dir" sparse-checkout set elf mach0 pe
+          git -C "$dir" fetch -q --depth 1 --filter=blob:none origin "$TESTBINS_REF"
+          git -C "$dir" checkout -q FETCH_HEAD
+          test -d "$dir/elf" && test -d "$dir/mach0" && test -d "$dir/pe"
+      - name: Every disagreement judged, no radare2-only value added
+        run: |
+          python3 scripts/diff_r2.py --no-build --r2 /usr/bin/radare2 --r2s target/ci/r2s \
+            --bins "$RUNNER_TEMP/testbins/elf" "$RUNNER_TEMP/testbins/mach0" "$RUNNER_TEMP/testbins/pe" \
+            --jobs 4 --timeout 90 --verbose
 
   # ── Hostile input (ROADMAP H, D18) ───────────────────────────────
   #
@@ -637,7 +684,7 @@ jobs:
     name: Release Build
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    needs: [quality, capture-gate, source-gold, equivalence-harness, equivalence, equivalence-aarch64, coverage]
+    needs: [quality, capture-gate, diff-r2, source-gold, equivalence-harness, equivalence, equivalence-aarch64, coverage]
     if: github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v7
