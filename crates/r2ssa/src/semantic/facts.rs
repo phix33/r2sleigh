@@ -1695,17 +1695,20 @@ impl<'a> ObjectModelBuilder<'a> {
                 // from; otherwise the address is its operand's object,
                 // displaced.
                 if interior.is_none() && !self.evidenced_roots.contains(&root) {
+                    // The nearest span below the root on its base first: spans are ordered by
+                    // (base, offset), so only those starting below it on that base are read.
+                    let floor = StackAddressRoot {
+                        base: root.base,
+                        offset: i64::MIN,
+                    };
                     let containing = self
                         .evidenced_spans
-                        .iter()
-                        .filter(|(base, end)| {
-                            base.base == root.base
-                                && base.offset < root.offset
-                                && root.offset < **end
-                                && self.evidenced_roots.contains(base)
+                        .range(floor..root)
+                        .rev()
+                        .find(|(base, end)| {
+                            root.offset < **end && self.evidenced_roots.contains(*base)
                         })
-                        .map(|(base, _)| *base)
-                        .max_by_key(|base| base.offset);
+                        .map(|(base, _)| *base);
                     if let Some(container) = containing {
                         let object = self.ensure_stack_object(container);
                         self.interior_offsets
@@ -1867,18 +1870,27 @@ impl<'a> ObjectModelBuilder<'a> {
                     .lower_bound(index)
                     .and_then(|lower| i64::try_from(lower).ok())?;
                 let reached = position.offset.checked_add(first)?;
+                let (floor, at) = (
+                    StackAddressRoot {
+                        base: position.base,
+                        offset: i64::MIN,
+                    },
+                    StackAddressRoot {
+                        base: position.base,
+                        offset: reached,
+                    },
+                );
                 let container = self
                     .evidenced_roots
-                    .iter()
-                    .filter(|root| root.base == position.base && root.offset <= reached)
-                    .filter(|root| {
+                    .range(floor..=at)
+                    .rev()
+                    .find(|root| {
                         root.offset == reached
                             || self
                                 .evidenced_spans
                                 .get(root)
                                 .is_some_and(|end| reached < *end)
                     })
-                    .max_by_key(|root| root.offset)
                     .copied()?;
                 Some((container, position.offset - container.offset))
             });
