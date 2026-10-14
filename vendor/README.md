@@ -18,9 +18,10 @@ shape of Ghidra's `LOAcquire()`, named by the Arm ARM's own terms (B2.3):
 `LoadAcquire()` after the load of `ldar`, `ldaxr`, `ldaxp` and their B/H forms
 (C6.2.145-151), `LoadAcquirePC()` after `ldapr` and `ldapur*` (C6.2.136-144),
 `StoreRelease()` before the store of `stlr`, `stlur*`, `stlxr`, `stlxp` and
-their B/H forms (C6.2.310-319), and both around the LSE `ld<op>`, `st<op>`,
-`swp` and `cas`/`casp` A, L and AL forms (C6.2.42-45, C6.2.133-135,
-C6.2.366-368; `ls_loa`/`ls_lor` and the new `cas_loa`/`cas_lor`). A release
+their B/H forms (C6.2.310-319), each around the LSE `ld<op>`, `swp` and
+`cas`/`casp` A, L and AL forms and the release before `st<op>`'s L form
+(C6.2.42-45, C6.2.133-135, C6.2.366-368; `ls_loa`/`ls_lor` and the new
+`cas_loa`/`cas_lor`). A release
 opens the instruction and an acquire closes it, the side each orders, so the
 lift states either as a fence there. Ghidra's own `ls_loa`/`ls_lor` spelled the
 LSE forms with `LOAcquire`/`LORelease`, which are LDLAR's and STLLR's
