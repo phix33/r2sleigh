@@ -69,18 +69,8 @@ casb: stop unmodelled StoreGuarded
 casp_x: stop unmodelled Unimplemented
 ldaddal_w: stop unmodelled CALLOTHER LOAcquire
 swpal_w: stop unmodelled CALLOTHER LOAcquire
-ldset_w: wrong x0
-ldumin_w: wrong x0
-ldaddh: wrong x0
-ldapr_w: wrong x0
-ldaprb: wrong x0
 fmadd_s: stop unmodelled FloatMult
 fnmsub_d: stop unmodelled FloatMult
 fmul_d: stop unmodelled FloatMult
-swpb: wrong x0
-ldeor_w: wrong x0
 cas_w: stop unmodelled StoreGuarded
 casah: stop unmodelled StoreGuarded
-ldaddb: wrong x0
-ldsmax_w: wrong x0
-ldsminh: wrong memory; wrong x0
