@@ -1,13 +1,22 @@
 # Disagreements between radare2 and r2s that are judged: who is right, and why
 # (ROADMAP P11). `diff_r2.py` fails on any disagreement no entry covers and
-# reports an entry nothing matched.
+# reports an entry nothing matched. The first entry that covers a disagreement
+# takes it, so a narrow entry goes before a broad one.
 #
 # command   the verb (`pd`, `px`, `iS`, `is`, `ie`)
 # binaries  a shell pattern over the file name, or a list of them
+# corpus    the corpus directory's name (`elf`, `mach0`, `pe`); absent is any
 # r2, r2s   for a listing: regular expressions each tool's line must match
-#           (`<missing>` where the tool printed no line); an absent one is any
+#           (`<missing>` where the tool printed no line); an absent one is any.
+#           For a values listing: `r2s` matches the row r2s prints the value in,
+#           `r2` some radare2 row holding the value, each with single spaces
+# fill      for a listing: radare2's line is r2s's (or nothing) and then only
+#           this byte, as where radare2 fills what is not mapped
 # values    for a values listing: the values r2s reports and radare2 does not;
 #           none listed covers every value of the binaries
+# columns   for a values listing: the columns r2s prints them in
+# key       for a values listing: radare2's row with r2s's value in this column
+#           holds r2s's value rounded up to an alignment (0x200 to 0x10000)
 # verdict   r2s-right: radare2's defect, an upstream candidate
 #           r2-right: r2s's defect, with its owner in the reason
 #           unfilled: r2s does not yet state what radare2 does
