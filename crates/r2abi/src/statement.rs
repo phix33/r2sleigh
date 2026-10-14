@@ -149,7 +149,9 @@ impl Container {
         self.loader_writes
             .iter()
             .filter_map(|write| match &write.kind {
-                WriteKind::Import { symbol, .. } if !symbol.is_empty() => {
+                WriteKind::Import { symbol, .. }
+                    if !symbol.is_empty() && write.encoding == Encoding::Word =>
+                {
                     Some((write.place, symbol.as_str()))
                 }
                 _ => None,
@@ -561,6 +563,8 @@ pub struct Relocation {
     pub symbol: Option<Box<RelocationSymbol>>,
     /// What the loader computes for it.
     pub applies: Applies,
+    /// How the bytes at `vaddr` hold what it computes.
+    pub encoding: Encoding,
 }
 
 /// Where a relocation record is stated in the file.
@@ -600,6 +604,14 @@ pub enum Applies {
     Symbol,
     /// The symbol's address plus the addend (`R_X86_64_64`, `R_AARCH64_ABS64`).
     SymbolPlusAddend,
+    /// The symbol plus the addend, less the place (`R_X86_64_PC32`, `R_AARCH64_PREL32`).
+    PcRelative,
+    /// The symbol's linkage entry plus the addend, less the place; a static link of a defined symbol makes it the symbol (`R_X86_64_PLT32`).
+    PltRelative,
+    /// A global offset table slot for the symbol, which the static linker creates (`R_X86_64_GOTPCREL`).
+    GotRelative,
+    /// The symbol plus the addend, or less the place, in an instruction's immediate (`R_AARCH64_CALL26`, `R_ARM_MOVW_ABS_NC`).
+    Field,
     /// The address a resolver function returns; the addend is the resolver.
     Resolver,
     /// A thread-local module number or offset, which is no address.
@@ -645,6 +657,20 @@ pub struct LoaderWrite {
     pub place: u64,
     pub width: u64,
     pub kind: WriteKind,
+    /// How the bytes hold `kind`'s value: a `call rel32` field is written, but holds no pointer.
+    pub encoding: Encoding,
+}
+
+/// How the bytes at a loader write hold the value its kind states.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Encoding {
+    /// The bytes are the value: a pointer word.
+    #[default]
+    Word,
+    /// The bytes are the value less the write's place: a PC-relative field.
+    FromPlace,
+    /// As the psABI states for the record's type: an instruction's immediate, or a type this reader does not decode.
+    Typed,
 }
 
 impl LoaderWrite {
@@ -657,8 +683,10 @@ impl LoaderWrite {
     /// states it outright: an address of this image, or a definition in it
     /// no other image can replace.
     pub const fn value(&self) -> Option<u64> {
-        match self.kind {
-            WriteKind::Relative(value) | WriteKind::Absolute(value) => Some(value),
+        match (self.encoding, &self.kind) {
+            (Encoding::Word, WriteKind::Relative(value) | WriteKind::Absolute(value)) => {
+                Some(*value)
+            }
             _ => None,
         }
     }
@@ -667,10 +695,21 @@ impl LoaderWrite {
     /// program starts, which is a reference from the word whether or not
     /// another image may replace it later.
     pub const fn stated_address(&self) -> Option<u64> {
+        match (self.encoding, &self.kind) {
+            (
+                Encoding::Word,
+                WriteKind::Relative(value)
+                | WriteKind::Absolute(value)
+                | WriteKind::Preemptible { default: value, .. },
+            ) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// The address the written bytes resolve to, however they encode it: a pointer word's value, or a PC-relative field's target.
+    pub const fn target(&self) -> Option<u64> {
         match self.kind {
-            WriteKind::Relative(value)
-            | WriteKind::Absolute(value)
-            | WriteKind::Preemptible { default: value, .. } => Some(value),
+            WriteKind::Relative(value) | WriteKind::Absolute(value) => Some(value),
             _ => None,
         }
     }
@@ -808,6 +847,7 @@ mod tests {
             place,
             width,
             kind: WriteKind::Unknown,
+            encoding: Encoding::Word,
         };
         let container = Container {
             loader_writes: vec![write(0x10, 8), write(0x18, 8), write(0x40, 8)],

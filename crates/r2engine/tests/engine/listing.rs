@@ -737,6 +737,7 @@ fn a_table_the_loader_writes_is_read_as_the_values_the_container_states() {
             place: table + 8 * k as u64,
             width: 8,
             kind: WriteKind::Relative(target),
+            encoding: r2engine::program::Encoding::Word,
         });
     }
     let lines = OpenProgram::of(literal).function_listing(BASE);
@@ -763,6 +764,7 @@ fn a_table_the_loader_writes_is_read_as_the_values_the_container_states() {
             symbol: "elsewhere".to_owned(),
             library: None,
         },
+        encoding: r2engine::program::Encoding::Word,
     });
     literal.write(table + 8, &[0; 8]);
     let lines = OpenProgram::of(literal).function_listing(BASE);

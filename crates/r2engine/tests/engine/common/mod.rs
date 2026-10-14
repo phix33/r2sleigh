@@ -419,6 +419,7 @@ pub fn import_write(place: u64, width: u64, import: &str) -> LoaderWrite {
             symbol: import.to_owned(),
             library: None,
         },
+        encoding: r2engine::program::Encoding::Word,
     }
 }
 
@@ -615,6 +616,7 @@ impl Literal {
                 place: PLT_SLOT - 0x10,
                 width: 0x10,
                 kind: WriteKind::Unknown,
+                encoding: r2engine::program::Encoding::Word,
             },
             import_write(PLT_SLOT, 8, import),
         ];

@@ -98,6 +98,7 @@ fn an_arm_plt0_whose_literal_word_decodes_as_a_conditional_instruction_still_hol
             place: 0x2014,
             width: 8,
             kind: r2engine::program::WriteKind::Unknown,
+            encoding: r2engine::program::Encoding::Word,
         });
     let program = OpenProgram::of(literal);
     program.loaded().expect("it is current");

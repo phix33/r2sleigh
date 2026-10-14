@@ -5,7 +5,7 @@ use std::ops::Range;
 use object::read::pe::ImageNtHeaders;
 use object::{Object, ObjectSection};
 
-use r2abi::statement::{ImportStub, LoaderWrite, Relocation, WriteKind};
+use r2abi::statement::{Encoding, ImportStub, LoaderWrite, Relocation, WriteKind};
 
 mod elf;
 mod macho;
@@ -118,6 +118,9 @@ fn composed(mut writes: Vec<LoaderWrite>, ranges: Vec<Range<u64>>) -> Vec<Loader
             Some(last) if write.place < last.end() => {
                 last.width = last.end().max(write.end()) - last.place;
                 last.kind = WriteKind::Unknown;
+                if last.encoding != write.encoding {
+                    last.encoding = Encoding::Typed;
+                }
             }
             _ => stated.push(write),
         }
@@ -159,6 +162,7 @@ fn unknown(start: u64, end: u64) -> LoaderWrite {
         place: start,
         width: end - start,
         kind: WriteKind::Unknown,
+        encoding: Encoding::Word,
     }
 }
 
@@ -216,6 +220,7 @@ fn pe_imports(file: &object::File<'_>, pointer: u64) -> Vec<LoaderWrite> {
                 symbol: import.name.to_string(),
                 library: Some(import.library.to_string()),
             },
+            encoding: Encoding::Word,
         })
         .collect()
 }
@@ -313,7 +318,12 @@ mod tests {
 
     #[test]
     fn a_later_record_at_one_place_stands_and_a_range_no_record_states_is_unknown() {
-        let write = |place, width, kind| LoaderWrite { place, width, kind };
+        let write = |place, width, kind| LoaderWrite {
+            place,
+            width,
+            kind,
+            encoding: Encoding::Word,
+        };
         let writes = vec![
             write(0x10, 8, WriteKind::Relative(0x100)),
             write(

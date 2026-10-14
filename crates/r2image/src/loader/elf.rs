@@ -17,8 +17,8 @@ use object::read::elf::{
 use object::{Object, elf};
 
 use r2abi::statement::{
-    Applies, Binding, EntryKind, LoaderWrite, Record, Relocation, RelocationSymbol, StatedAt,
-    Visibility, WriteKind,
+    Applies, Binding, Encoding, EntryKind, LoaderWrite, Record, Relocation, RelocationSymbol,
+    StatedAt, Visibility, WriteKind,
 };
 
 use super::written;
@@ -135,6 +135,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                 place: record.vaddr,
                 width: extent(record, self.pointer),
                 kind: self.kind(record),
+                encoding: record.encoding,
             })
             .collect();
         (relocations, writes, self.reserved().into_iter().collect())
@@ -156,7 +157,13 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
             Applies::Relative => addend().map_or(WriteKind::Unknown, WriteKind::Relative),
             Applies::Resolver => addend().map_or(WriteKind::Unknown, WriteKind::Resolver),
             Applies::ThreadLocal => WriteKind::NotAnAddress,
-            Applies::Copy | Applies::Unknown => WriteKind::Unknown,
+            // A field of an instruction or a word less its place, which a dynamic table states only for text relocations.
+            Applies::Copy
+            | Applies::Unknown
+            | Applies::PcRelative
+            | Applies::PltRelative
+            | Applies::GotRelative
+            | Applies::Field => WriteKind::Unknown,
             Applies::Symbol | Applies::SymbolPlusAddend => {
                 let offset = match record.applies {
                     Applies::Symbol => Some(0),
@@ -349,8 +356,8 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
             .into_iter()
             .filter_map(|(record, vaddr, ntype, symbol, addend)| {
                 // A packed relative word is a relative relocation of a pointer, whatever the machine numbers it.
-                let (applies, width) = match view.form {
-                    Form::Relr => (Applies::Relative, self.pointer),
+                let (applies, width, encoding) = match view.form {
+                    Form::Relr => (Applies::Relative, self.pointer, Encoding::Word),
                     _ => applies(machine, ntype, self.pointer)?,
                 };
                 let symbol = (symbol != 0)
@@ -364,6 +371,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                     addend,
                     symbol: symbol.map(Box::new),
                     applies,
+                    encoding,
                 })
             })
             .collect()
@@ -617,90 +625,174 @@ fn relative_type(machine: elf::Machine) -> Option<elf::RelocationType> {
     })
 }
 
-/// What a dynamic relocation type computes and how many bytes it writes, as the machine's psABI states it; `None` for the type that writes nothing.
+/// What a relocation type computes, how many bytes it writes and how they hold it, as the machine's psABI states it; `None` for a type that writes nothing.
 ///
-/// A type this table does not name is still a write the loader makes, so it
-/// is kept, at the width of a pointer, with its computation unknown.
+/// A type this table does not name is still a write, so it is kept, at the
+/// width of a pointer, with its computation unknown.
 fn applies(
     machine: elf::Machine,
     ntype: elf::RelocationType,
     pointer: u64,
-) -> Option<(Applies, u64)> {
+) -> Option<(Applies, u64, Encoding)> {
     use Applies as A;
+    use Encoding::{FromPlace, Typed, Word};
     if ntype.0 == 0 {
         return None;
     }
-    let (applies, width) = match machine {
+    let (applies, width, encoding) = match machine {
         elf::EM_X86_64 => match ntype {
-            elf::R_X86_64_64 => (A::SymbolPlusAddend, 8),
-            elf::R_X86_64_32 | elf::R_X86_64_32S => (A::SymbolPlusAddend, 4),
-            elf::R_X86_64_COPY => (A::Copy, pointer),
-            elf::R_X86_64_GLOB_DAT | elf::R_X86_64_JUMP_SLOT => (A::Symbol, pointer),
-            elf::R_X86_64_RELATIVE | elf::R_X86_64_RELATIVE64 => (A::Relative, pointer),
-            elf::R_X86_64_IRELATIVE => (A::Resolver, pointer),
+            elf::R_X86_64_64 => (A::SymbolPlusAddend, 8, Word),
+            elf::R_X86_64_32 | elf::R_X86_64_32S => (A::SymbolPlusAddend, 4, Word),
+            elf::R_X86_64_16 => (A::SymbolPlusAddend, 2, Word),
+            elf::R_X86_64_8 => (A::SymbolPlusAddend, 1, Word),
+            elf::R_X86_64_PC64 => (A::PcRelative, 8, FromPlace),
+            elf::R_X86_64_PC32 => (A::PcRelative, 4, FromPlace),
+            elf::R_X86_64_PC16 => (A::PcRelative, 2, FromPlace),
+            elf::R_X86_64_PC8 => (A::PcRelative, 1, FromPlace),
+            elf::R_X86_64_PLT32 => (A::PltRelative, 4, FromPlace),
+            elf::R_X86_64_GOTPCREL
+            | elf::R_X86_64_GOTPCRELX
+            | elf::R_X86_64_REX_GOTPCRELX
+            | elf::R_X86_64_CODE_4_GOTPCRELX
+            | elf::R_X86_64_CODE_5_GOTPCRELX
+            | elf::R_X86_64_CODE_6_GOTPCRELX => (A::GotRelative, 4, FromPlace),
+            elf::R_X86_64_GOTPCREL64 => (A::GotRelative, 8, FromPlace),
+            elf::R_X86_64_COPY => (A::Copy, pointer, Word),
+            elf::R_X86_64_GLOB_DAT | elf::R_X86_64_JUMP_SLOT => (A::Symbol, pointer, Word),
+            elf::R_X86_64_RELATIVE | elf::R_X86_64_RELATIVE64 => (A::Relative, pointer, Word),
+            elf::R_X86_64_IRELATIVE => (A::Resolver, pointer, Word),
             elf::R_X86_64_DTPMOD64 | elf::R_X86_64_DTPOFF64 | elf::R_X86_64_TPOFF64 => {
-                (A::ThreadLocal, 8)
+                (A::ThreadLocal, 8, Word)
             }
-            elf::R_X86_64_TLSDESC => (A::ThreadLocal, 16),
-            _ => (A::Unknown, pointer),
+            elf::R_X86_64_TLSDESC => (A::ThreadLocal, 16, Word),
+            // Offsets from the thread pointer or into a module's block, in an instruction.
+            elf::R_X86_64_TLSGD
+            | elf::R_X86_64_TLSLD
+            | elf::R_X86_64_DTPOFF32
+            | elf::R_X86_64_GOTTPOFF
+            | elf::R_X86_64_TPOFF32
+            | elf::R_X86_64_GOTPC32_TLSDESC
+            | elf::R_X86_64_CODE_4_GOTTPOFF
+            | elf::R_X86_64_CODE_4_GOTPC32_TLSDESC => (A::ThreadLocal, 4, Typed),
+            // A marker on the call through a descriptor: it writes nothing.
+            elf::R_X86_64_TLSDESC_CALL => return None,
+            _ => (A::Unknown, pointer, Word),
         },
         elf::EM_386 => match ntype {
-            elf::R_386_32 => (A::SymbolPlusAddend, 4),
-            elf::R_386_COPY => (A::Copy, 4),
-            elf::R_386_GLOB_DAT | elf::R_386_JMP_SLOT => (A::Symbol, 4),
-            elf::R_386_RELATIVE => (A::Relative, 4),
-            elf::R_386_IRELATIVE => (A::Resolver, 4),
+            elf::R_386_32 => (A::SymbolPlusAddend, 4, Word),
+            elf::R_386_16 => (A::SymbolPlusAddend, 2, Word),
+            elf::R_386_8 => (A::SymbolPlusAddend, 1, Word),
+            elf::R_386_PC32 => (A::PcRelative, 4, FromPlace),
+            elf::R_386_PC16 => (A::PcRelative, 2, FromPlace),
+            elf::R_386_PC8 => (A::PcRelative, 1, FromPlace),
+            elf::R_386_PLT32 => (A::PltRelative, 4, FromPlace),
+            // Offsets from the global offset table, which no address states.
+            elf::R_386_GOT32 | elf::R_386_GOT32X | elf::R_386_GOTOFF | elf::R_386_GOTPC => {
+                (A::Unknown, 4, Typed)
+            }
+            elf::R_386_COPY => (A::Copy, 4, Word),
+            elf::R_386_GLOB_DAT | elf::R_386_JMP_SLOT => (A::Symbol, 4, Word),
+            elf::R_386_RELATIVE => (A::Relative, 4, Word),
+            elf::R_386_IRELATIVE => (A::Resolver, 4, Word),
             elf::R_386_TLS_TPOFF
             | elf::R_386_TLS_DTPMOD32
             | elf::R_386_TLS_DTPOFF32
-            | elf::R_386_TLS_TPOFF32 => (A::ThreadLocal, 4),
-            elf::R_386_TLS_DESC => (A::ThreadLocal, 8),
-            _ => (A::Unknown, 4),
+            | elf::R_386_TLS_TPOFF32 => (A::ThreadLocal, 4, Word),
+            elf::R_386_TLS_DESC => (A::ThreadLocal, 8, Word),
+            _ => (A::Unknown, 4, Word),
         },
         elf::EM_AARCH64 => match ntype {
-            elf::R_AARCH64_ABS64 => (A::SymbolPlusAddend, 8),
-            elf::R_AARCH64_ABS32 => (A::SymbolPlusAddend, 4),
-            elf::R_AARCH64_COPY => (A::Copy, 8),
+            elf::R_AARCH64_ABS64 => (A::SymbolPlusAddend, 8, Word),
+            elf::R_AARCH64_ABS32 => (A::SymbolPlusAddend, 4, Word),
+            elf::R_AARCH64_ABS16 => (A::SymbolPlusAddend, 2, Word),
+            elf::R_AARCH64_PREL64 => (A::PcRelative, 8, FromPlace),
+            elf::R_AARCH64_PREL32 => (A::PcRelative, 4, FromPlace),
+            elf::R_AARCH64_PREL16 => (A::PcRelative, 2, FromPlace),
+            elf::R_AARCH64_CALL26
+            | elf::R_AARCH64_JUMP26
+            | elf::R_AARCH64_CONDBR19
+            | elf::R_AARCH64_TSTBR14
+            | elf::R_AARCH64_LD_PREL_LO19
+            | elf::R_AARCH64_ADR_PREL_LO21
+            | elf::R_AARCH64_ADR_PREL_PG_HI21
+            | elf::R_AARCH64_ADR_PREL_PG_HI21_NC
+            | elf::R_AARCH64_ADD_ABS_LO12_NC
+            | elf::R_AARCH64_LDST8_ABS_LO12_NC
+            | elf::R_AARCH64_LDST16_ABS_LO12_NC
+            | elf::R_AARCH64_LDST32_ABS_LO12_NC
+            | elf::R_AARCH64_LDST64_ABS_LO12_NC
+            | elf::R_AARCH64_LDST128_ABS_LO12_NC
+            | elf::R_AARCH64_MOVW_UABS_G0
+            | elf::R_AARCH64_MOVW_UABS_G0_NC
+            | elf::R_AARCH64_MOVW_UABS_G1
+            | elf::R_AARCH64_MOVW_UABS_G1_NC
+            | elf::R_AARCH64_MOVW_UABS_G2
+            | elf::R_AARCH64_MOVW_UABS_G2_NC
+            | elf::R_AARCH64_MOVW_UABS_G3 => (A::Field, 4, Typed),
+            elf::R_AARCH64_ADR_GOT_PAGE
+            | elf::R_AARCH64_LD64_GOT_LO12_NC
+            | elf::R_AARCH64_LD64_GOTPAGE_LO15 => (A::GotRelative, 4, Typed),
+            elf::R_AARCH64_COPY => (A::Copy, 8, Word),
             // AArch64 adds the addend to both, which ELF gABI leaves to the psABI.
-            elf::R_AARCH64_GLOB_DAT | elf::R_AARCH64_JUMP_SLOT => (A::SymbolPlusAddend, 8),
-            elf::R_AARCH64_RELATIVE => (A::Relative, 8),
-            elf::R_AARCH64_IRELATIVE => (A::Resolver, 8),
+            elf::R_AARCH64_GLOB_DAT | elf::R_AARCH64_JUMP_SLOT => (A::SymbolPlusAddend, 8, Word),
+            elf::R_AARCH64_RELATIVE => (A::Relative, 8, Word),
+            elf::R_AARCH64_IRELATIVE => (A::Resolver, 8, Word),
             elf::R_AARCH64_TLS_DTPMOD | elf::R_AARCH64_TLS_DTPREL | elf::R_AARCH64_TLS_TPREL => {
-                (A::ThreadLocal, 8)
+                (A::ThreadLocal, 8, Word)
             }
-            elf::R_AARCH64_TLSDESC => (A::ThreadLocal, 16),
-            _ => (A::Unknown, pointer),
+            elf::R_AARCH64_TLSDESC => (A::ThreadLocal, 16, Word),
+            _ => (A::Unknown, pointer, Word),
         },
         elf::EM_ARM => match ntype {
-            elf::R_ARM_ABS32 => (A::SymbolPlusAddend, 4),
-            elf::R_ARM_COPY => (A::Copy, 4),
-            elf::R_ARM_GLOB_DAT | elf::R_ARM_JUMP_SLOT => (A::Symbol, 4),
-            elf::R_ARM_RELATIVE => (A::Relative, 4),
-            elf::R_ARM_IRELATIVE => (A::Resolver, 4),
+            elf::R_ARM_ABS32 | elf::R_ARM_TARGET1 => (A::SymbolPlusAddend, 4, Word),
+            elf::R_ARM_REL32 => (A::PcRelative, 4, FromPlace),
+            elf::R_ARM_CALL
+            | elf::R_ARM_JUMP24
+            | elf::R_ARM_PC24
+            | elf::R_ARM_THM_PC22
+            | elf::R_ARM_THM_JUMP24
+            | elf::R_ARM_THM_JUMP19
+            | elf::R_ARM_PREL31
+            | elf::R_ARM_MOVW_ABS_NC
+            | elf::R_ARM_MOVT_ABS
+            | elf::R_ARM_MOVW_PREL_NC
+            | elf::R_ARM_MOVT_PREL
+            | elf::R_ARM_THM_MOVW_ABS_NC
+            | elf::R_ARM_THM_MOVT_ABS
+            | elf::R_ARM_THM_MOVW_PREL_NC
+            | elf::R_ARM_THM_MOVT_PREL => (A::Field, 4, Typed),
+            elf::R_ARM_THM_PC11 | elf::R_ARM_THM_PC9 => (A::Field, 2, Typed),
+            elf::R_ARM_GOT_PREL => (A::GotRelative, 4, FromPlace),
+            // A marker that `bx` may be rewritten for ARMv4: it states no value.
+            elf::R_ARM_V4BX => return None,
+            elf::R_ARM_COPY => (A::Copy, 4, Word),
+            elf::R_ARM_GLOB_DAT | elf::R_ARM_JUMP_SLOT => (A::Symbol, 4, Word),
+            elf::R_ARM_RELATIVE => (A::Relative, 4, Word),
+            elf::R_ARM_IRELATIVE => (A::Resolver, 4, Word),
             elf::R_ARM_TLS_DTPMOD32 | elf::R_ARM_TLS_DTPOFF32 | elf::R_ARM_TLS_TPOFF32 => {
-                (A::ThreadLocal, 4)
+                (A::ThreadLocal, 4, Word)
             }
-            elf::R_ARM_TLS_DESC => (A::ThreadLocal, 8),
-            _ => (A::Unknown, 4),
+            elf::R_ARM_TLS_DESC => (A::ThreadLocal, 8, Word),
+            _ => (A::Unknown, 4, Word),
         },
         elf::EM_RISCV => match ntype {
-            elf::R_RISCV_32 => (A::SymbolPlusAddend, 4),
-            elf::R_RISCV_64 => (A::SymbolPlusAddend, 8),
-            elf::R_RISCV_COPY => (A::Copy, pointer),
-            elf::R_RISCV_JUMP_SLOT => (A::Symbol, pointer),
-            elf::R_RISCV_RELATIVE => (A::Relative, pointer),
-            elf::R_RISCV_IRELATIVE => (A::Resolver, pointer),
+            elf::R_RISCV_32 => (A::SymbolPlusAddend, 4, Word),
+            elf::R_RISCV_64 => (A::SymbolPlusAddend, 8, Word),
+            elf::R_RISCV_COPY => (A::Copy, pointer, Word),
+            elf::R_RISCV_JUMP_SLOT => (A::Symbol, pointer, Word),
+            elf::R_RISCV_RELATIVE => (A::Relative, pointer, Word),
+            elf::R_RISCV_IRELATIVE => (A::Resolver, pointer, Word),
             elf::R_RISCV_TLS_DTPMOD32 | elf::R_RISCV_TLS_DTPREL32 | elf::R_RISCV_TLS_TPREL32 => {
-                (A::ThreadLocal, 4)
+                (A::ThreadLocal, 4, Word)
             }
             elf::R_RISCV_TLS_DTPMOD64 | elf::R_RISCV_TLS_DTPREL64 | elf::R_RISCV_TLS_TPREL64 => {
-                (A::ThreadLocal, 8)
+                (A::ThreadLocal, 8, Word)
             }
-            _ => (A::Unknown, pointer),
+            _ => (A::Unknown, pointer, Word),
         },
-        _ => (A::Unknown, pointer),
+        _ => (A::Unknown, pointer, Word),
     };
-    Some((applies, width))
+    Some((applies, width, encoding))
 }
 
 /// As many whole entries as the bytes hold.
