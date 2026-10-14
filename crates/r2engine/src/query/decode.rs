@@ -131,10 +131,11 @@ fn decoded(
         (None, None) => 0,
     };
     if size == 0 || size > available {
+        let stepped = usize::try_from(step).map_or(1, |step| step.clamp(1, available.max(1)));
         return Some(Decoded {
             line: Line {
                 address: pc,
-                bytes: fetch[..1].to_vec(),
+                bytes: fetch[..stepped].to_vec(),
                 syntax: None,
                 flow: None,
                 annotations: Vec::new(),

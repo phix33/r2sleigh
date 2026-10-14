@@ -173,6 +173,12 @@ std::unique_ptr<std::vector<std::string>> SleighProxy::getUserOpNamesProxy() con
     return names;
 }
 
+/// The byte modulo every instruction begins on, as the specification's
+/// `define alignment` states it (1 where it states none).
+int32_t SleighProxy::getAlignmentProxy() const {
+    return getAlignment();
+}
+
 /// Discard every parser context cached by instruction address while retaining
 /// the decoded Sleigh specification. Context no decode committed is still the
 /// specification's, so only the parses go; otherwise the context is rebuilt too.

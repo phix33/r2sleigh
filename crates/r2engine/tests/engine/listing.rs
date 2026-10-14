@@ -49,6 +49,41 @@ fn pdf(entry: u64) -> Vec<(u64, Option<u64>)> {
     )
 }
 
+/// `.word 0xffffffff` (no AArch64 instruction), `nop`, `ret`.
+const A64_UNDECODABLE: &[u8] = &[
+    0xff, 0xff, 0xff, 0xff, 0x1f, 0x20, 0x03, 0xd5, 0xc0, 0x03, 0x5f, 0xd6,
+];
+
+/// An undecodable word is stepped over by the specification's instruction alignment (audit W25),
+/// so the listing resumes on the next word, where it used to resume one byte in.
+#[test]
+fn a_listing_steps_an_undecodable_aarch64_word_whole() {
+    let mut program =
+        OpenProgram::of(Literal::of_code(A64_UNDECODABLE, &[("f", BASE, 12)]).in_aarch64());
+    let lines = program
+        .listing(Listing {
+            start: BASE,
+            stop: Stop::After(3),
+        })
+        .expect("it lists")
+        .value;
+    let listed: Vec<_> = lines
+        .iter()
+        .map(|line| {
+            let text = line.syntax.as_ref().map(|syntax| syntax.text());
+            (line.address, line.bytes.len(), text)
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (BASE, 4, None),
+            (BASE + 4, 4, Some("nop".to_owned())),
+            (BASE + 8, 4, Some("ret".to_owned())),
+        ]
+    );
+}
+
 #[test]
 fn an_address_built_on_past_a_branch_is_not_claimed_a_result() {
     // The overwrite is skipped on the taken path, and the add at L builds on the address.

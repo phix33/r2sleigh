@@ -189,8 +189,8 @@ pub enum Stop {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     pub address: u64,
-    /// The bytes this line accounts for: the whole instruction, or the single
-    /// byte that did not begin one.
+    /// The bytes this line accounts for: the whole instruction, or where none
+    /// began, one instruction alignment's worth (one byte on x86).
     pub bytes: Vec<u8>,
     /// How the decoder spells it. Absent where the bytes are not an instruction.
     pub syntax: Option<Syntax>,

@@ -14,7 +14,9 @@ list packages; a refresh copies the fork again and re-applies the trims.
 
 Carried in this tree, not yet in the fork: AArch64 `casp` X form compares and
 stores Xs and Xt at `[Xn]` in either byte order, where Ghidra swapped the pairs
-on little-endian (`AARCH64base.sinc`).
+on little-endian (`AARCH64base.sinc`); `libsla-sys` passes `getAlignment`
+through (`getAlignmentProxy`) and `libsla` states it as
+`Sleigh::instruction_alignment` (audit W25).
 
 Licences: Apache-2.0 (each crate's `LICENSE`), with Ghidra's `NOTICE`,
 `DISCLAIMER.md` and `licenses/` kept beside its sources.

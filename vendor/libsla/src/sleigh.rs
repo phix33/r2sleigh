@@ -89,6 +89,11 @@ pub trait Sleigh {
     #[must_use]
     fn user_op_names(&self) -> Vec<String>;
 
+    /// The byte modulo every instruction begins on, as the specification's
+    /// `define alignment` states it; 1 where it states none.
+    #[must_use]
+    fn instruction_alignment(&self) -> u32;
+
     /// The name of the user-defined p-code operation at `index`, or `None` when
     /// the language declares no operation there.
     #[must_use]
@@ -891,6 +896,14 @@ impl Sleigh for GhidraSleigh {
             .into_iter()
             .map(|data| (data.register().into(), data.name().to_string()))
             .collect()
+    }
+
+    fn instruction_alignment(&self) -> u32 {
+        // Ghidra stores a positive modulo; anything else states no alignment.
+        u32::try_from(self.sleigh.alignment())
+            .ok()
+            .filter(|alignment| *alignment > 0)
+            .unwrap_or(1)
     }
 
     fn user_op_names(&self) -> Vec<String> {

@@ -400,6 +400,8 @@ pub(crate) fn extract_architecture(
     // A CALLOTHER names one by index, and the index means nothing without this.
     ctx.arch.user_ops = sleigh.user_op_names();
     ctx.arch.supervisor_calls = supervisor_calls(&ctx.arch.user_ops);
+    // Where an instruction can begin: an undecodable word is stepped over by this, not a byte.
+    ctx.arch.alignment = sleigh.instruction_alignment();
 
     let arch = validate_extracted_register_geometry(ctx.finish())?;
 
