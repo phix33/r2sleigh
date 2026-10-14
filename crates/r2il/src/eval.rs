@@ -682,6 +682,34 @@ fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> 
             let value = state.load(address, dst.size)?;
             state.write(dst, value)?;
         }
+        // A guarded access happens where its guard holds and is no access at all where it fails;
+        // one thread orders nothing, so the ordering it states changes no value.
+        R2ILOp::StoreGuarded {
+            space: SpaceId::Ram,
+            addr,
+            val,
+            guard,
+            ..
+        } => {
+            if state.word(guard)?.boolean()? == 1 {
+                let address = state.address(addr)?;
+                let value = state.read(val)?;
+                state.store(address, val.size, value)?;
+            }
+        }
+        R2ILOp::LoadGuarded {
+            dst,
+            space: SpaceId::Ram,
+            addr,
+            guard,
+            ..
+        } => {
+            if state.word(guard)?.boolean()? == 1 {
+                let address = state.address(addr)?;
+                let value = state.load(address, dst.size)?;
+                state.write(dst, value)?;
+            }
+        }
         R2ILOp::BlockTransfer(transfer) if transfer.space == SpaceId::Ram => {
             block(transfer, state)?;
         }
@@ -951,6 +979,49 @@ fn block<M: Mapped>(transfer: &BlockTransfer, state: &mut State<M>) -> Result<()
 
 #[cfg(test)]
 mod tests {
+
+    /// A guarded store writes and a guarded load reads only where the guard holds; a guard that is
+    /// no boolean is undefined.
+    #[test]
+    fn a_guarded_access_happens_exactly_where_its_guard_holds() {
+        let (guard, addr, val) = (
+            Varnode::register(0x10, 1),
+            Varnode::register(0x20, 8),
+            Varnode::register(0x28, 4),
+        );
+        let ops = [
+            R2ILOp::StoreGuarded {
+                space: SpaceId::Ram,
+                addr: addr.clone(),
+                val: val.clone(),
+                guard: guard.clone(),
+                ordering: crate::MemoryOrdering::Relaxed,
+            },
+            R2ILOp::LoadGuarded {
+                dst: val.clone(),
+                space: SpaceId::Ram,
+                addr: Varnode::constant(0x100, 8),
+                guard: guard.clone(),
+                ordering: crate::MemoryOrdering::Relaxed,
+            },
+        ];
+        for (held, stored, loaded) in [(1, 0xdead_beef, 0x0303_0303), (0, 0x0101_0101, 0xdead_beef)]
+        {
+            let mut state = State::new(Endianness::Little, |_| Some(1u8), 64).expect("state");
+            state.set_register(guard.offset, 1, held).expect("guard");
+            state.set_register(addr.offset, 8, 0x200).expect("addr");
+            state.set_register(val.offset, 4, 0xdead_beef).expect("val");
+            state.store(0x100, 4, 0x0303_0303).expect("stored");
+            for op in &ops {
+                assert_eq!(step(op, &mut state), Flow::Next, "{op:?}");
+            }
+            assert_eq!(state.load(0x200, 4), Ok(stored), "guard {held}");
+            assert_eq!(state.register(val.offset, 4), Some(loaded), "guard {held}");
+        }
+        let mut state = State::new(Endianness::Little, |_| Some(1u8), 64).expect("state");
+        state.set_register(guard.offset, 1, 2).expect("guard");
+        assert_eq!(step(&ops[0], &mut state), Flow::Stop(Stop::Undefined));
+    }
 
     /// A lane at bit 128 of a 256-bit register lies outside the carried word: unmodelled, not a panic.
     #[test]
