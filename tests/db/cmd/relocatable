@@ -1,0 +1,20 @@
+# An x86-64 relocatable object: each record at its placed section, spelled as radare2 lists ET_REL
+# relocations (crates/r2image/tests/data/relocated.py writes the fixture).
+
+NAME=relocatable object records
+FILE=crates/r2image/tests/data/relocated.elf
+CMDS=ir
+EXPECT=<<EOF
+vaddr      paddr      type   ntype name
+----------------------------------------
+0x08000041 0x00000041 ADD_32 4     ext - 0x08000045
+0x08000046 0x00000046 ADD_32 4     g - 0x0800004a
+0x0800004d 0x0000004d ADD_32 2     .data - 0x08000049
+0x08000054 0x00000054 ADD_32 42    ext - 0x08000058
+0x0800005a 0x0000005a ADD_32 2     counter - 0x0800005e
+0x08000060 0x00000060 ADD_64 1     g
+0x08000090 0x00000090 ADD_32 2     .text - 0x08000090
+0x080000a4 0x000000a4 ADD_32 2     .text - 0x08000085
+0x080000b8 0x000000b8 ADD_32 2     ext - 0x080000b8
+EOF
+RUN

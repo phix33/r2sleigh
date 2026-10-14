@@ -7,7 +7,7 @@
 //! states each of its records once. The dynamic table's route is the loader's
 //! own, so its order is the order of application.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use object::read::elf::{
@@ -17,8 +17,8 @@ use object::read::elf::{
 use object::{Object, elf};
 
 use r2abi::statement::{
-    Applies, Binding, Encoding, EntryKind, LoaderWrite, Record, Relocation, RelocationSymbol,
-    StatedAt, Visibility, WriteKind,
+    Applies, Binding, Encoding, EntryKind, ImportStub, LoaderWrite, Record, Relocation,
+    RelocationSymbol, StatedAt, Visibility, WriteKind,
 };
 
 use super::written;
@@ -60,6 +60,8 @@ enum Form {
     Packed {
         addend: bool,
     },
+    /// An object's compact stream, `SHT_CREL`.
+    Crel,
 }
 
 /// Where a table's symbol indices point.
@@ -426,6 +428,24 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                     })
                     .collect()
             }
+            Form::Crel => {
+                let Ok(entries) = object::read::elf::CrelIterator::new(bytes) else {
+                    return Vec::new();
+                };
+                let rela = entries.is_rela();
+                entries
+                    .map_while(Result::ok)
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        let record = Record {
+                            table: view.offset,
+                            index: index as u64,
+                        };
+                        let addend = rela.then_some(entry.r_addend);
+                        (record, entry.r_offset, entry.r_type, entry.r_sym, addend)
+                    })
+                    .collect()
+            }
             Form::Packed { addend } => {
                 let is_64 = self.file.is_64();
                 android_packed(bytes, addend)
@@ -516,6 +536,346 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
         };
         let start = got.wrapping_add(first * pointer);
         Some(written(start, count.saturating_mul(pointer)))
+    }
+}
+
+/// What a relocatable object's records state once its sections are placed.
+pub(super) struct Linked {
+    /// Every record of every relocation section, in section order.
+    pub relocations: Vec<Relocation>,
+    /// What the records into loaded sections write, and each slot of the linkage.
+    pub writes: Vec<LoaderWrite>,
+    pub stubs: Vec<ImportStub>,
+}
+
+/// A relocatable object's records, each at the place `at` gives its section, and what a static link puts at `linkage` for them.
+pub(super) fn linked(
+    file: &object::File<'_>,
+    at: &dyn Fn(object::SectionIndex) -> Option<u64>,
+    linkage: u64,
+    pointer: u64,
+) -> Linked {
+    match file {
+        object::File::Elf32(file) => Elf::of(file, pointer).linked(at, linkage),
+        object::File::Elf64(file) => Elf::of(file, pointer).linked(at, linkage),
+        _ => Linked {
+            relocations: Vec::new(),
+            writes: Vec::new(),
+            stubs: Vec::new(),
+        },
+    }
+}
+
+/// What a relocatable object's symbol is once its sections are placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Bound {
+    /// A definition, at its placed address; weak where another object's may replace it.
+    At { address: u64, weak: bool },
+    /// Undefined: another object or image defines it. Keyed by symbol table and index.
+    Import(usize, u32),
+    /// A common symbol, or one in a section with no place: the static linker gives it its address.
+    Unplaced,
+}
+
+/// One record of an object, with what its symbol is.
+struct Bind {
+    record: Relocation,
+    bound: Bound,
+    /// The addend the record states, or for `REL` the one its place holds.
+    addend: Option<i64>,
+    loaded: bool,
+}
+
+impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
+    /// Every record of every relocation section, the stub and slot each import and table read needs, and what each writes.
+    fn linked(&self, at: &dyn Fn(object::SectionIndex) -> Option<u64>, linkage: u64) -> Linked {
+        let endian = self.endian;
+        let table = self.file.elf_section_table();
+        let machine = self.file.elf_header().e_machine(endian);
+        let mut binds = Vec::new();
+        for header in table.iter() {
+            let form = match header.sh_type(endian) {
+                elf::SHT_REL => Form::Rel,
+                elf::SHT_RELA => Form::Rela,
+                elf::SHT_CREL => Form::Crel,
+                _ => continue,
+            };
+            let target = object::SectionIndex(header.sh_info(endian) as usize);
+            let (Ok(into), Some(base)) = (table.section(target), at(target)) else {
+                continue;
+            };
+            let symbols = object::SectionIndex(header.sh_link(endian) as usize);
+            let view = View {
+                offset: header.sh_offset(endian).into(),
+                size: header.sh_size(endian).into(),
+                form,
+                phase: 0,
+                symbols: Symbols::Section(symbols),
+            };
+            let loaded = into.sh_flags(endian).contains(elf::SHF_ALLOC);
+            let held =
+                (into.sh_type(endian) != elf::SHT_NOBITS).then(|| into.sh_offset(endian).into());
+            // Parsed once per relocation section: parsing looks its extended indices up across the section table.
+            let parsed = table
+                .symbol_table_by_index(endian, self.file.data(), symbols)
+                .ok();
+            let symbols = (symbols.0, parsed.as_ref());
+            for (record, offset, ntype, index, addend) in self.encoded(&view) {
+                let Some((applies, width, encoding)) = applies(machine, ntype, self.pointer) else {
+                    continue;
+                };
+                // A type this reader does not decode holds no value its bytes state.
+                let encoding = match applies {
+                    Applies::Unknown => Encoding::Typed,
+                    _ => encoding,
+                };
+                let (symbol, bound) = self.bound(symbols, index, at);
+                let implicit = || {
+                    let word = held?.checked_add(offset)?;
+                    (encoding != Encoding::Typed)
+                        .then(|| self.implicit(word, width))
+                        .flatten()
+                };
+                binds.push(Bind {
+                    record: Relocation {
+                        vaddr: base.wrapping_add(offset),
+                        record,
+                        ntype: ntype.0,
+                        width,
+                        addend,
+                        symbol: symbol.map(Box::new),
+                        applies,
+                        encoding,
+                    },
+                    bound,
+                    addend: addend.or_else(implicit),
+                    loaded,
+                });
+            }
+        }
+        self.linkage(binds, linkage)
+    }
+
+    /// The linkage a static link adds -- a stub per import a loaded record branches or points to, a slot per symbol it reads through the global offset table -- and what every record writes.
+    fn linkage(&self, binds: Vec<Bind>, linkage: u64) -> Linked {
+        let pointer = self.pointer;
+        let named = |bind: &Bind| {
+            let symbol = bind.record.symbol.as_ref();
+            symbol.map_or_else(String::new, |symbol| symbol.name.to_string())
+        };
+        // Each import and each slot once, with the name of the first record naming it.
+        let mut stubs: BTreeMap<(usize, u32), (u64, String)> = BTreeMap::new();
+        let mut slots: BTreeMap<Bound, (u64, String)> = BTreeMap::new();
+        for bind in binds.iter().filter(|bind| bind.loaded) {
+            match (bind.record.applies, bind.bound) {
+                (Applies::GotRelative, bound) => {
+                    slots.entry(bound).or_insert_with(|| (0, named(bind)));
+                }
+                (
+                    Applies::PcRelative | Applies::PltRelative | Applies::Field,
+                    Bound::Import(table, index),
+                ) => {
+                    stubs
+                        .entry((table, index))
+                        .or_insert_with(|| (0, named(bind)));
+                }
+                _ => {}
+            }
+        }
+        let mut next = linkage;
+        let mut stated = Vec::with_capacity(stubs.len());
+        for (place, name) in stubs.values_mut() {
+            *place = next;
+            next += pointer;
+            stated.push(ImportStub {
+                vaddr: *place,
+                size: pointer,
+                symbol: name.clone(),
+            });
+        }
+        let mut writes = Vec::with_capacity(binds.len() + slots.len());
+        for (bound, (place, name)) in slots.iter_mut() {
+            *place = next;
+            next += pointer;
+            let kind = match *bound {
+                Bound::At {
+                    address,
+                    weak: false,
+                } => WriteKind::Absolute(address),
+                Bound::At {
+                    address,
+                    weak: true,
+                } => WriteKind::Preemptible {
+                    symbol: name.clone(),
+                    default: address,
+                },
+                Bound::Import(..) => WriteKind::Import {
+                    symbol: name.clone(),
+                    library: None,
+                },
+                Bound::Unplaced => WriteKind::Unknown,
+            };
+            writes.push(LoaderWrite {
+                place: *place,
+                width: pointer,
+                kind,
+                encoding: Encoding::Word,
+            });
+        }
+        let mask = match pointer {
+            4 => u64::from(u32::MAX),
+            _ => u64::MAX,
+        };
+        let mut relocations = Vec::with_capacity(binds.len());
+        for bind in binds {
+            let record = &bind.record;
+            let plus = |address: u64| {
+                bind.addend
+                    .map(|addend| address.wrapping_add(addend as u64) & mask)
+            };
+            if bind.loaded {
+                let name = || named(&bind);
+                let kind = match (record.applies, bind.bound) {
+                    (Applies::ThreadLocal, _) => WriteKind::NotAnAddress,
+                    (Applies::GotRelative, bound) => slots
+                        .get(&bound)
+                        .and_then(|(slot, _)| plus(*slot))
+                        .map_or(WriteKind::Unknown, WriteKind::Absolute),
+                    (Applies::Symbol | Applies::SymbolPlusAddend, Bound::Import(..))
+                        if bind.addend == Some(0) =>
+                    {
+                        WriteKind::Import {
+                            symbol: name(),
+                            library: None,
+                        }
+                    }
+                    (
+                        Applies::PcRelative | Applies::PltRelative | Applies::Field,
+                        Bound::Import(table, index),
+                    ) => stubs
+                        .get(&(table, index))
+                        .and_then(|(stub, _)| plus(*stub))
+                        .map_or(WriteKind::Unknown, WriteKind::Absolute),
+                    (
+                        Applies::Symbol
+                        | Applies::SymbolPlusAddend
+                        | Applies::PcRelative
+                        | Applies::PltRelative
+                        | Applies::Field,
+                        Bound::At { address, weak },
+                    ) => match (plus(address), weak) {
+                        (Some(value), false) => WriteKind::Absolute(value),
+                        (Some(value), true) => WriteKind::Preemptible {
+                            symbol: name(),
+                            default: value,
+                        },
+                        (None, _) => WriteKind::Unknown,
+                    },
+                    _ => WriteKind::Unknown,
+                };
+                writes.push(LoaderWrite {
+                    place: record.vaddr,
+                    width: record.width,
+                    kind,
+                    encoding: record.encoding,
+                });
+            }
+            relocations.push(bind.record);
+        }
+        Linked {
+            relocations,
+            writes,
+            stubs: stated,
+        }
+    }
+
+    /// What one symbol of an object is: its name as a record spells it, and where it is once placed.
+    fn bound(
+        &self,
+        (symbols, table): (usize, Option<&object::read::elf::SymbolTable<'data, E, R>>),
+        index: u32,
+        at: &dyn Fn(object::SectionIndex) -> Option<u64>,
+    ) -> (Option<RelocationSymbol>, Bound) {
+        let endian = self.endian;
+        let sections = self.file.elf_section_table();
+        // Symbol index zero is the value zero: the addend alone.
+        let absolute = Bound::At {
+            address: 0,
+            weak: false,
+        };
+        if index == 0 {
+            return (None, absolute);
+        }
+        let Some(table) = table else {
+            return (None, Bound::Unplaced);
+        };
+        let at_index = object::SymbolIndex(index as usize);
+        let Ok(symbol) = table.symbol(at_index) else {
+            return (None, Bound::Unplaced);
+        };
+        let section = table
+            .symbol_section(endian, symbol, at_index)
+            .ok()
+            .flatten();
+        let name = match (symbol.st_type(), section) {
+            // A section's symbol is spelled by the section's name.
+            (elf::STT_SECTION, Some(section)) => sections
+                .section(section)
+                .ok()
+                .and_then(|header| sections.section_name(endian, header).ok()),
+            _ => table.symbol_name(endian, symbol).ok(),
+        };
+        let name = name
+            .and_then(|name| core::str::from_utf8(name).ok())
+            .unwrap_or_default();
+        let weak = symbol.st_bind() == elf::STB_WEAK;
+        let value: u64 = symbol.st_value(endian).into();
+        let bound = if symbol.is_undefined(endian) {
+            Bound::Import(symbols, index)
+        } else if symbol.is_absolute(endian) {
+            Bound::At {
+                address: value,
+                weak,
+            }
+        } else {
+            match section.and_then(at) {
+                Some(base) => Bound::At {
+                    address: base.wrapping_add(value),
+                    weak,
+                },
+                None => Bound::Unplaced,
+            }
+        };
+        let defined = match bound {
+            Bound::At { address, .. } => Some(address),
+            _ => None,
+        };
+        let stated = RelocationSymbol {
+            name: name.into(),
+            defined,
+            size: symbol.st_size(endian).into(),
+            binding: binding(symbol.st_bind()),
+            visibility: visibility(symbol.st_visibility()),
+        };
+        (Some(stated), bound)
+    }
+
+    /// The addend a `REL` record leaves in the bytes it relocates: the word there, sign-extended from its width.
+    fn implicit(&self, offset: u64, width: u64) -> Option<i64> {
+        let bytes = self.bytes(offset, width);
+        if bytes.len() as u64 != width || !(1..=8).contains(&width) {
+            return None;
+        }
+        let little = self.file.is_little_endian();
+        let word = bytes.iter().enumerate().fold(0u64, |value, (at, byte)| {
+            let shift = match little {
+                true => 8 * at,
+                false => 8 * (bytes.len() - 1 - at),
+            };
+            value | u64::from(*byte) << shift
+        });
+        let unused = 64 - 8 * width as u32;
+        Some(((word << unused) as i64) >> unused)
     }
 }
 

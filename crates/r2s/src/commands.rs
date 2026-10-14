@@ -1347,7 +1347,15 @@ pub(crate) fn relocations(session: &Session) -> Table {
             .as_ref()
             .map(|symbol| symbol.name.to_string())
             .unwrap_or_default();
+        // A field holding the target less its place is spelled as radare2 spells it: less the place, net of the addend.
+        let from_place = relocation.encoding == r2image::Encoding::FromPlace;
         match relocation.addend {
+            _ if from_place => {
+                let less = relocation
+                    .vaddr
+                    .wrapping_sub(relocation.addend.unwrap_or(0) as u64);
+                name.push_str(&format!(" - {less:#010x}"));
+            }
             Some(addend) if addend < 0 => name.push_str(&format!(" - {:#010x}", -addend)),
             Some(addend) if addend > 0 && !name.is_empty() => {
                 name.push_str(&format!(" + {addend:#010x}"));
@@ -1443,7 +1451,17 @@ fn obligations(session: &mut Session, argument: &str) -> Result<String, String> 
 /// The offset in the file of what `vaddr` holds: in a fat Mach-O, past the slice's own start.
 fn file_offset_of(session: &Session, vaddr: u64) -> Option<u64> {
     let image = session.image();
-    let segment = image.segment_at(vaddr)?;
+    let Some(segment) = image.segment_at(vaddr) else {
+        // An object's unloaded sections have the place this reader gave them; a linked image's none.
+        let section = image.sections().iter().find(|section| {
+            image.relocatable()
+                && !section.loaded
+                && section.vaddr != 0
+                && (section.vaddr..section.vaddr + section.vsize).contains(&vaddr)
+        })?;
+        let into = vaddr - section.vaddr;
+        return (into < section.file_size).then(|| image.file_base() + section.file_offset + into);
+    };
     let offset_in_segment = vaddr - segment.vaddr;
     (offset_in_segment < segment.file_size)
         .then(|| image.file_base() + segment.file_offset + offset_in_segment)

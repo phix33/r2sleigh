@@ -33,6 +33,8 @@ pub enum ImageError {
     Parse(String),
     #[error("no architecture mapping for {0:?}")]
     UnsupportedArchitecture(object::Architecture),
+    #[error("an object's sections need more address space than there is")]
+    Unplaceable,
 }
 
 pub use r2abi::statement::*;
@@ -306,6 +308,68 @@ where
 ///
 /// ELF says so outright with `SHF_ALLOC`. The other formats have no section a
 /// loader ignores in the same way, so a section they declare is mapped.
+/// Where each section of the image is: the address a linked image states, or the place this reader gives a relocatable object's.
+///
+/// An object states no addresses, so each section the file holds is put at
+/// its own file offset above one base, as radare2 puts it; one it holds no
+/// bytes for (`.bss`) is put after the file's end, at its alignment, so no two
+/// sections share an address. What a static link adds for the object's
+/// references -- a stub per import it branches to, a slot per symbol it reads
+/// through the global offset table -- begins at `linkage`, past them all.
+struct Placement {
+    relocatable: bool,
+    /// Each unbacked section, by index.
+    unbacked: BTreeMap<usize, u64>,
+    linkage: u64,
+}
+
+impl Placement {
+    const BASE: u64 = 0x0800_0000;
+
+    /// Fails where the sections, placed one after another, run past the address space.
+    fn of(file: &object::File<'_>, length: u64) -> Result<Self, ImageError> {
+        let relocatable = file.kind() == object::ObjectKind::Relocatable;
+        let mut unbacked = BTreeMap::new();
+        let mut end = Self::BASE
+            .checked_add(length)
+            .ok_or(ImageError::Unplaceable)?;
+        if relocatable {
+            for section in file.sections() {
+                if section.file_range().is_some() || section.size() == 0 {
+                    continue;
+                }
+                let align = section.align().clamp(1, 1 << 16);
+                let at = end.checked_next_multiple_of(align);
+                let at = at.ok_or(ImageError::Unplaceable)?;
+                unbacked.insert(section.index().0, at);
+                end = at
+                    .checked_add(section.size())
+                    .ok_or(ImageError::Unplaceable)?;
+            }
+        }
+        let linkage = end.checked_next_multiple_of(0x1000);
+        Ok(Self {
+            relocatable,
+            unbacked,
+            linkage: linkage.ok_or(ImageError::Unplaceable)?,
+        })
+    }
+
+    fn at(&self, section: &object::read::Section<'_, '_>) -> u64 {
+        if !self.relocatable {
+            return section.address();
+        }
+        match section.file_range() {
+            Some((offset, _)) => Self::BASE + offset,
+            None => self
+                .unbacked
+                .get(&section.index().0)
+                .copied()
+                .unwrap_or(Self::BASE),
+        }
+    }
+}
+
 fn section_is_loaded<'a>(section: &impl object::read::ObjectSection<'a>) -> bool {
     match section.flags() {
         object::SectionFlags::Elf { sh_flags, .. } => sh_flags.contains(object::elf::SHF_ALLOC),
@@ -415,18 +479,9 @@ impl Image {
             (offset, size.min(len.saturating_sub(offset)))
         };
 
-        // A relocatable object states no addresses: every section says zero, so
-        // each is placed at its own file offset above one base, which is the
-        // only placement the file itself derives and the one radare2 uses too.
-        const RELOCATABLE_BASE: u64 = 0x0800_0000;
-        let relocatable = file.kind() == object::ObjectKind::Relocatable;
-        let placed = |section: &object::read::Section<'_, '_>| {
-            if relocatable {
-                RELOCATABLE_BASE + section.file_range().map_or(0, |(offset, _)| offset)
-            } else {
-                section.address()
-            }
-        };
+        let placement = Placement::of(&file, data.len() as u64)?;
+        let relocatable = placement.relocatable;
+        let placed = |section: &object::read::Section<'_, '_>| placement.at(section);
 
         let mut segments: Vec<Segment> = file
             .segments()
@@ -660,7 +715,13 @@ impl Image {
             relocations,
             writes: loader_writes,
             import_stubs,
-        } = loader::read(&file, &data[..], &placed, u64::from(arch.bits / 8));
+        } = loader::read(
+            &file,
+            &data[..],
+            &placed,
+            placement.linkage,
+            u64::from(arch.bits / 8),
+        );
 
         let sealed = loader::sealed(&file);
         let platform = platform::evidence(&file);
@@ -758,6 +819,7 @@ impl Image {
                 format,
                 arch,
                 base_address,
+                relocatable,
                 segments,
                 sections,
                 symbols,
@@ -793,6 +855,11 @@ impl Image {
 
     pub fn base_address(&self) -> u64 {
         self.container.base_address
+    }
+
+    /// Whether this reader placed the sections, the image being an object that states no addresses.
+    pub fn relocatable(&self) -> bool {
+        self.container.relocatable
     }
 
     pub fn segments(&self) -> &[Segment] {

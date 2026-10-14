@@ -26,13 +26,28 @@ pub(crate) fn read(
     file: &object::File<'_>,
     data: &[u8],
     placed: &dyn Fn(&object::read::Section<'_, '_>) -> u64,
+    linkage: u64,
     pointer: u64,
 ) -> Loaded {
+    let relocatable = file.kind() == object::ObjectKind::Relocatable;
     let (relocations, writes, ranges, import_stubs) = match file {
-        _ if file.kind() == object::ObjectKind::Relocatable => (
-            Vec::new(),
+        object::File::Elf32(_) | object::File::Elf64(_) if relocatable => {
+            let at = |index| {
+                file.section_by_index(index)
+                    .ok()
+                    .map(|section| placed(&section))
+            };
+            let linked = elf::linked(file, &at, linkage, pointer);
+            return Loaded {
+                relocations: linked.relocations,
+                writes: composed(linked.writes, Vec::new()),
+                import_stubs: linked.stubs,
+            };
+        }
+        _ if relocatable => (
             Vec::new(),
             linked(file, placed, pointer),
+            Vec::new(),
             Vec::new(),
         ),
         object::File::Elf32(_) | object::File::Elf64(_) => {
@@ -193,18 +208,23 @@ fn width(bits: u8, pointer: u64) -> u64 {
     }
 }
 
-/// An object file's own relocations, each at the place its section was put.
+/// A non-ELF object file's own relocations, each at the place its section was put, written as the type states and with no value read.
 fn linked(
     file: &object::File<'_>,
     placed: &dyn Fn(&object::read::Section<'_, '_>) -> u64,
     pointer: u64,
-) -> Vec<Range<u64>> {
+) -> Vec<LoaderWrite> {
     let at = |section: object::read::Section<'_, '_>| {
         let base = placed(&section);
         let relocations = section.relocations().collect::<Vec<_>>();
-        relocations.into_iter().map(move |(offset, relocation)| {
-            written(base.wrapping_add(offset), width(relocation.size(), pointer))
-        })
+        relocations
+            .into_iter()
+            .map(move |(offset, relocation)| LoaderWrite {
+                place: base.wrapping_add(offset),
+                width: width(relocation.size(), pointer),
+                kind: WriteKind::Unknown,
+                encoding: Encoding::Typed,
+            })
     };
     file.sections().flat_map(at).collect()
 }
