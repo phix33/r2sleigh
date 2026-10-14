@@ -715,6 +715,7 @@ impl Image {
             relocations,
             writes: loader_writes,
             import_stubs,
+            targets,
         } = loader::read(
             &file,
             &data[..],
@@ -729,7 +730,11 @@ impl Image {
         // Read while the parsed view is alive; the bytes it borrows move into
         // the image below.
         let declarations = debug::read(&file);
-        let unwind = unwind::read(&file);
+        let relocated = unwind::Relocated {
+            placed: &placed,
+            targets: &targets,
+        };
+        let unwind = unwind::read(&file, relocatable.then_some(&relocated));
         let languages = language::read(&file, &symbols);
 
         let mut entries = Vec::new();

@@ -166,3 +166,21 @@ fn an_object_whose_sections_overrun_the_address_space_is_refused() {
         "{refused:?}"
     );
 }
+
+/// Each FDE starts where the record at its `pc_begin` resolves; one resolving to an import is refused, never a frame at a raw offset.
+#[test]
+fn frames_start_where_their_relocations_resolve_and_an_unresolved_one_is_refused() {
+    let image = image();
+    let unwind = &image.container().unwind;
+    let frames: Vec<(u64, u64)> = unwind
+        .frames()
+        .map(|frame| (frame.start, frame.end))
+        .collect();
+    assert_eq!(frames, [(TEXT, TEXT + 0x1f), (G, G + 1)]);
+    let saves = unwind.at(TEXT).map(|frame| frame.saves.get(&16).copied());
+    assert_eq!(
+        saves,
+        Some(Some(0)),
+        "the return address at the entry stack pointer"
+    );
+}

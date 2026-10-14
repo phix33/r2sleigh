@@ -19,6 +19,8 @@ pub(crate) struct Loaded {
     /// What the loader writes, sorted by place and disjoint.
     pub writes: Vec<LoaderWrite>,
     pub import_stubs: Vec<ImportStub>,
+    /// Where each record of a relocatable object resolves, by its place, sorted: what the call-frame reader relocates through.
+    pub targets: Vec<(u64, u64)>,
 }
 
 /// Every record the loader applies to the image, what it writes, and the stubs the format declares.
@@ -42,6 +44,7 @@ pub(crate) fn read(
                 relocations: linked.relocations,
                 writes: composed(linked.writes, Vec::new()),
                 import_stubs: linked.stubs,
+                targets: linked.targets,
             };
         }
         _ if relocatable => (
@@ -76,6 +79,7 @@ pub(crate) fn read(
         relocations,
         writes: composed(writes, ranges),
         import_stubs,
+        targets: Vec::new(),
     }
 }
 

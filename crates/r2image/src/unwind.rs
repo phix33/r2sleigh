@@ -20,6 +20,10 @@
 //!
 //! It fails closed per entry. An FDE that does not parse is skipped; the rest
 //! of the section is still read.
+//!
+//! A relocatable object's frames are read at the placed section base, and an
+//! FDE's start is where the record at its `pc_begin` field resolves: the field
+//! holds zero until a static link fills it. An FDE no record resolves is refused.
 
 use std::collections::BTreeMap;
 
@@ -54,8 +58,14 @@ pub(crate) fn call_state(architecture: object::Architecture) -> Option<CallState
     })
 }
 
+/// What relocates a relocatable object's frames: where each section is placed, and where each record resolves, by its place, sorted.
+pub(crate) struct Relocated<'a> {
+    pub placed: &'a dyn Fn(&object::read::Section<'_, '_>) -> u64,
+    pub targets: &'a [(u64, u64)],
+}
+
 /// Read every frame `.eh_frame` and `.debug_frame` describe.
-pub(crate) fn read(file: &object::File<'_>) -> UnwindFrames {
+pub(crate) fn read(file: &object::File<'_>, relocated: Option<&Relocated<'_>>) -> UnwindFrames {
     use object::{Object as _, ObjectSection as _};
     let endian = match file.endianness() {
         object::Endianness::Little => gimli::RunTimeEndian::Little,
@@ -64,9 +74,15 @@ pub(crate) fn read(file: &object::File<'_>) -> UnwindFrames {
     let call = call_state(file.architecture());
     let address_size = if file.is_64() { 8 } else { 4 };
     let section = |name: &str| {
-        file.section_by_name(name)
-            .and_then(|section| Some((section.address(), section.data().ok()?)))
+        file.section_by_name(name).and_then(|section| {
+            let address = match relocated {
+                Some(relocated) => (relocated.placed)(&section),
+                None => section.address(),
+            };
+            Some((address, section.data().ok()?))
+        })
     };
+    let targets = relocated.map(|relocated| relocated.targets);
     let mut bases = gimli::BaseAddresses::default();
     if let Some((address, _)) = section(".eh_frame_hdr") {
         bases = bases.set_eh_frame_hdr(address);
@@ -82,12 +98,22 @@ pub(crate) fn read(file: &object::File<'_>) -> UnwindFrames {
         let mut eh_frame = gimli::EhFrame::new(data, endian);
         eh_frame.set_address_size(address_size);
         let bases = bases.clone().set_eh_frame(address);
-        read_section(&eh_frame, &bases, call, &mut frames);
+        let at = targets.map(|targets| Placed {
+            base: address,
+            data,
+            targets,
+        });
+        read_section(&eh_frame, &bases, call, at, &mut frames);
     }
-    if let Some((_, data)) = section(".debug_frame") {
+    if let Some((address, data)) = section(".debug_frame") {
         let mut debug_frame = gimli::DebugFrame::new(data, endian);
         debug_frame.set_address_size(address_size);
-        read_section(&debug_frame, &bases, call, &mut frames);
+        let at = targets.map(|targets| Placed {
+            base: address,
+            data,
+            targets,
+        });
+        read_section(&debug_frame, &bases, call, at, &mut frames);
     }
     frames
 }
@@ -96,6 +122,7 @@ fn read_section<'a, S>(
     section: &S,
     bases: &gimli::BaseAddresses,
     call: Option<CallState>,
+    relocated: Option<Placed<'_>>,
     frames: &mut UnwindFrames,
 ) where
     S: gimli::UnwindSection<gimli::EndianSlice<'a, gimli::RunTimeEndian>>,
@@ -121,7 +148,15 @@ fn read_section<'a, S>(
         if fde.len() == 0 {
             continue;
         }
-        let start = fde.initial_address();
+        let start = match relocated {
+            Some(placed) => {
+                let Some(start) = placed.start(fde.offset()) else {
+                    continue;
+                };
+                start
+            }
+            None => fde.initial_address(),
+        };
         let Some(end) = start.checked_add(fde.len()) else {
             continue;
         };
@@ -134,6 +169,33 @@ fn read_section<'a, S>(
             saves,
             entry,
         });
+    }
+}
+
+/// One section of a relocatable object's frames, at its placed address, with where each record resolves.
+#[derive(Clone, Copy)]
+struct Placed<'a> {
+    base: u64,
+    data: &'a [u8],
+    targets: &'a [(u64, u64)],
+}
+
+impl Placed<'_> {
+    /// Where the record at the `pc_begin` field of the FDE at `offset` resolves, or `None` where no record does.
+    ///
+    /// The field follows the entry's length and its CIE pointer, each four bytes
+    /// in the 32-bit format and eight past a length of `0xffffffff`.
+    fn start(&self, offset: usize) -> Option<u64> {
+        let length = self.data.get(offset..offset.checked_add(4)?)?;
+        let field = match length {
+            [0xff, 0xff, 0xff, 0xff] => offset + 12 + 8,
+            _ => offset + 4 + 4,
+        };
+        let place = self.base.checked_add(field as u64)?;
+        let at = (self.targets)
+            .binary_search_by_key(&place, |(place, _)| *place)
+            .ok()?;
+        Some(self.targets[at].1)
     }
 }
 
@@ -273,7 +335,7 @@ mod tests {
 
     fn frames_of(bytes: &[u8]) -> UnwindFrames {
         let file = object::File::parse(bytes).expect("an object");
-        read(&file)
+        read(&file, None)
     }
 
     /// The DWARF fixture is a clang x86-64 ELF; its `.eh_frame` describes every

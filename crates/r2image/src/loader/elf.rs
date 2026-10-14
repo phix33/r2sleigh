@@ -546,6 +546,8 @@ pub(super) struct Linked {
     /// What the records into loaded sections write, and each slot of the linkage.
     pub writes: Vec<LoaderWrite>,
     pub stubs: Vec<ImportStub>,
+    /// Where each record's symbol plus addend is, by its place, sorted.
+    pub targets: Vec<(u64, u64)>,
 }
 
 /// A relocatable object's records, each at the place `at` gives its section, and what a static link puts at `linkage` for them.
@@ -562,6 +564,7 @@ pub(super) fn linked(
             relocations: Vec::new(),
             writes: Vec::new(),
             stubs: Vec::new(),
+            targets: Vec::new(),
         },
     }
 }
@@ -726,6 +729,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
             4 => u64::from(u32::MAX),
             _ => u64::MAX,
         };
+        let mut targets = Vec::new();
         let mut relocations = Vec::with_capacity(binds.len());
         for bind in binds {
             let record = &bind.record;
@@ -733,6 +737,9 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                 bind.addend
                     .map(|addend| address.wrapping_add(addend as u64) & mask)
             };
+            if let (Bound::At { address, .. }, Some(target)) = (bind.bound, plus(0)) {
+                targets.push((record.vaddr, address.wrapping_add(target) & mask));
+            }
             if bind.loaded {
                 let name = || named(&bind);
                 let kind = match (record.applies, bind.bound) {
@@ -782,10 +789,12 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
             }
             relocations.push(bind.record);
         }
+        targets.sort_unstable();
         Linked {
             relocations,
             writes,
             stubs: stated,
+            targets,
         }
     }
 
