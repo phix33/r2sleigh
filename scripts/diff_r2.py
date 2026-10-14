@@ -20,7 +20,12 @@ Two comparison modes, because the two tools do not yet fill the same columns:
 Every disagreement is either judged in `diff_r2_judged.toml` (who is right,
 and why) or fails the run; a judgment nothing matches any more is reported, so
 the table cannot outlive what it judged (ROADMAP P11). The judgments were made
-against one radare2 release, which the table names and the run refuses any other.
+against one radare2 release, which the table names and the run refuses any other,
+as an x86-64 host runs it: radare2 picks a fat file's slice, and the architecture
+of a machine it does not know, by its host's, so the run fixes both to x86-64
+(CI's runner) and gives the file back its own architecture once it is loaded.
+The corpora are radare2-testbins at CI's TESTBINS_REF; a newer checkout holds
+binaries no judgment has seen.
 
 Usage:
   scripts/diff_r2.py                        # default corpus and commands
@@ -372,6 +377,14 @@ def spelled(difference):
     )
 
 
+def radare2_argv(r2, script, binary):
+    """radare2 answering `script`, loading `binary` as an x86-64 host does."""
+    # `-e` holds through the load, so the file's own architecture and bits are put back after it.
+    restore = "e asm.arch=`i~^arch[1]`;e asm.bits=`i~^bits[1]`;"
+    return [str(r2), "-N", "-q", "-e", "asm.arch=x86", "-e", "asm.bits=64", "-e", "scr.color=0",
+            "-c", restore + script, str(binary)]
+
+
 def answers(binary, commands, r2, r2s, timeout):
     """Both tools' output for each command on one binary, or r2s's refusal to open it."""
     # A refusal to open is a capability gap, not a disagreement about a
@@ -387,9 +400,7 @@ def answers(binary, commands, r2, r2s, timeout):
             said[command] = None
             continue
         script = "s entry0;{}".format(command)
-        right, _, right_code = run(
-            [str(r2), "-N", "-q", "-e", "scr.color=0", "-c", script, str(binary)], timeout
-        )
+        right, _, right_code = run(radare2_argv(r2, script, binary), timeout)
         left, _, left_code = run([str(r2s), "-q", "-c", script, str(binary)], timeout)
         said[command] = None if right_code is None or left_code is None else (left, right)
     return None, said

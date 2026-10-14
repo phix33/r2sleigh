@@ -22,8 +22,9 @@
 #           unfilled: r2s does not yet state what radare2 does
 #           deliberate: r2s spells it otherwise on purpose
 
-# The radare2 release every judgment was made against; CI installs it, and the
-# harness refuses any other (a newer radare2 moves what the judgments match).
+# The radare2 release every judgment was made against, as an x86-64 host runs
+# it (a fat file's slice follows the host); CI installs it, and the harness
+# refuses any other (a newer radare2 moves what the judgments match).
 radare2 = "6.2.4"
 
 # ── Single binaries, ahead of the classes below that would otherwise take their rows ──
@@ -43,6 +44,20 @@ binaries = ["TestRTTI-armv7-dSYM", "core.dwarf"]
 r2s = '^0x[0-9a-f]+ +(0000 0000 0000 0000 0000 0000 0000 0000 |0x0 +(udf 0x0|andeq r0, r0, r0)$)'
 verdict = "r2-right"
 reason = "a dSYM's __TEXT holds no bytes (TestRTTI: filesize 0; core.dwarf: 1,736 of 0x98000): radare2 shows unrelated file bytes at the section offsets, r2s zeros, where it should say nothing is there; owner r2image dSYM file ranges (ROADMAP I, audit W39)"
+
+[[judged]]
+command = ["px", "pd", "ie", "iS", "is"]
+binaries = ["a.out", "AppIOSEntitlements.ios", "BatteryLife", "cat-macos-arm64", "ired", "ls-m1", "ls-sequoia", "mac-ls3", "mac-ls4", "modernobjc-noarm64", "TestApp.ios", "TestApp.ios.stripped"]
+corpus = "mach0"
+verdict = "deliberate"
+reason = "a fat file: r2s reads its arm64 slice whatever the host; radare2 picks by the host, on x86-64 the x86-64 slice (ls-m1, mac-ls3) or else the first, armv7 (TestApp.ios, ired), so their entries, sections and symbols differ"
+
+[[judged]]
+command = "is"
+binaries = "TrollStore"
+values = ["0x19fe0", "0x100015fe0"]
+verdict = "r2-right"
+reason = "0x100015fe0 begins __objc_stubs: it loads a selector into x1, then jumps through objc_msgSend's slot (0x100020270), so it is objc_msgSend$<selector>, yet r2s names it imp.objc_msgSend and names the stubs after it nothing; owner r2engine stub naming (ROADMAP P11, audit W10)"
 
 [[judged]]
 command = "ie"
@@ -154,7 +169,7 @@ command = ["px", "pd", "ie", "iS"]
 binaries = ["nullvirt.exe", "foldedhdr.exe", "foldedhdrW7.exe", "quine.exe", "maxsec_lowaligW7.exe", "maxsecXP.exe", "no0code.exe", "duphead.exe", "unaligned_sec_paddr.exe", "weirdsord.exe"]
 corpus = "pe"
 verdict = "r2-right"
-reason = "the loader maps what r2s does not: VirtualSize 0 means SizeOfRawData (nullvirt, foldedhdr, quine), a SectionAlignment below the page maps the file flat, header and entry included (maxsec*, quine, no0code), and PointerToRawData rounds down to 0x200 (duphead's 0x1ff, unaligned_sec_paddr, weirdsord); r2s finds no entry or reads the wrong bytes; owner r2image PE mapping (ROADMAP I, audit W35). radare2 decodes no0code as AArch64"
+reason = "the loader maps what r2s does not: VirtualSize 0 means SizeOfRawData (nullvirt, foldedhdr, quine), a SectionAlignment below the page maps the file flat, header and entry included (maxsec*, quine, no0code), and PointerToRawData rounds down to 0x200 (duphead's 0x1ff, unaligned_sec_paddr, weirdsord); r2s finds no entry or reads the wrong bytes; owner r2image PE mapping (ROADMAP I, audit W35)"
 
 [[judged]]
 command = ["px", "pd", "iS"]
@@ -235,18 +250,6 @@ r2 = 'sym\.imp\.'
 r2s = 'sym\.imp\.'
 verdict = "r2-right"
 reason = "an import's flag keeps characters radare2's flag filter rewrites (spaces, dashes, slashes, controls); owner r2engine names (ROADMAP P11, symbol flags filtered as radare2 filters them)"
-
-[[judged]]
-command = ["px", "ie", "iS"]
-binaries = ["fat-intel", "hellocxx-osx-fat-intel", "libexpat.1.dylib"]
-verdict = "deliberate"
-reason = "a fat file of i386 and x86-64: r2s reads the 64-bit slice, radare2 the first, so their entries and sections differ"
-
-[[judged]]
-command = ["px", "ie", "iS"]
-binaries = "TrollStore"
-verdict = "deliberate"
-reason = "a fat file of arm64 and arm64e: r2s reads the arm64 slice, radare2 the arm64e one, so their entries and sections differ"
 
 [[judged]]
 command = "pd"
@@ -563,37 +566,11 @@ reason = "ARMv7 (ungraded): r2s decodes ARM at a Mach-O entry radare2 reads as T
 
 [[judged]]
 command = "pd"
-binaries = ["fat-intel", "hellocxx-osx-fat-intel", "libexpat.1.dylib"]
-verdict = "deliberate"
-reason = "a fat file of i386 and x86-64: r2s reads the 64-bit slice, radare2 the first"
-
-[[judged]]
-command = "pd"
 binaries = ["ansi", "emoji"]
 r2 = 'call sym\.'
 r2s = 'call sym\.'
 verdict = "r2-right"
 reason = "a symbol's flag keeps characters radare2's flag filter drops (#, an emoji); owner r2engine names"
-
-[[judged]]
-command = "is"
-binaries = ["fat-intel", "hellocxx-osx-fat-intel", "libexpat.1.dylib"]
-verdict = "deliberate"
-reason = "a fat file of i386 and x86-64: r2s reads the 64-bit slice, radare2 the first, so their symbols' addresses differ"
-
-[[judged]]
-command = "is"
-binaries = "TrollStore"
-verdict = "deliberate"
-reason = "a fat file of arm64 and arm64e: r2s reads the arm64 slice, radare2 the arm64e one"
-
-[[judged]]
-command = "pd"
-binaries = "TrollStore"
-verdict = "deliberate"
-reason = "a fat file of arm64 and arm64e: r2s reads the arm64 slice, radare2 the arm64e one, so their entries differ"
-
-# ── Judged against 6.2.4 over elf, mach0 and pe at TESTBINS_REF ──
 
 [[judged]]
 command = "px"

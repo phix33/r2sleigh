@@ -159,6 +159,14 @@ class Judged(unittest.TestCase):
         self.assertEqual(diff_r2.dumped("pd", "0x412c9      ff             invalid"), ("0x412c9", "ff"))
         self.assertEqual(diff_r2.dumped("px", "0x10  6162 6364                                abcd"), ("0x10", "61626364"))
 
+    def test_radare2_loads_as_an_x86_64_host_then_takes_the_files_architecture(self):
+        argv = diff_r2.radare2_argv("/usr/bin/radare2", "s entry0;pd 8", "bin")
+        self.assertEqual(argv[argv.index("asm.arch=x86") - 1], "-e")
+        script = argv[argv.index("-c") + 1]
+        self.assertTrue(script.startswith("e asm.arch=`i~^arch[1]`;e asm.bits=`i~^bits[1]`;"))
+        self.assertTrue(script.endswith("s entry0;pd 8"))
+        self.assertEqual(argv[-1], "bin")
+
     def test_two_different_invalid_bytes_stay_different(self):
         def out(byte):
             script = "import sys; sys.stdout.buffer.write(bytes([{}]))".format(byte)
