@@ -25,22 +25,24 @@ const HANDED_ON: &[u8] = &[
 ];
 
 /// The caller's call to `f` was written `f()`, dropping the 5 `g` reads. `f` hands its `rdi` to `g`
-/// unwritten, so `f` is resolved again with `g`, which states what it reads: `f(5)`.
+/// unwritten, so under `aa` `f` is resolved again with `g`, which states what it reads: `f(5)`.
 #[test]
 fn a_call_to_a_body_that_hands_on_its_argument_passes_it() {
-    let text = OpenProgram::of(Literal::of_code(
+    let mut open = OpenProgram::of(Literal::of_code(
         HANDED_ON,
         &[
             ("f", BASE, 0x0b),
             ("g", BASE + 0x10, 0x03),
             ("caller", BASE + 0x20, 0x0b),
         ],
-    ))
-    .rendered(BASE + 0x20)
-    .expect("it renders")
-    .response
-    .output
-    .into_text();
+    ));
+    open.analyse_program().expect("it surveys");
+    let text = open
+        .rendered(BASE + 0x20)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
     assert!(
         text.contains("f(5)") || text.contains("f((uint64_t)5U)"),
         "{text}"
@@ -72,9 +74,10 @@ const KEPT_FOR_AN_UNPROVEN_CALL: &[u8] = &[
 ];
 
 /// `f` reads `rsi` only to compute what it hands a call of unproven arity, which no obligation
-/// observes: its parameters are a floor, and the caller passes the 5 it wrote.
+/// observes: its parameters are a floor, so the 3 and 5 the caller wrote past it are residuals,
+/// never arguments (audit W7) until the prefix reaches past an unread slot (W12).
 #[test]
-fn a_register_kept_for_a_call_of_unproven_arity_is_passed() {
+fn a_register_kept_for_a_call_of_unproven_arity_is_shown_unproven() {
     let text = OpenProgram::of(Literal::of_code(
         KEPT_FOR_AN_UNPROVEN_CALL,
         &[("f", BASE, 0x1f), ("caller", BASE + 0x20, 0x10)],
@@ -84,10 +87,8 @@ fn a_register_kept_for_a_call_of_unproven_arity_is_passed() {
     .response
     .output
     .into_text();
-    assert!(
-        text.contains("f(3, 5)") || text.contains("f((uint64_t)3U, (uint64_t)5U)"),
-        "{text}"
-    );
+    assert!(!text.contains("f(3, 5)"), "{text}");
+    assert!(text.contains("r2sleigh_residual"), "{text}");
 }
 
 /// AArch64: `stash` is `str x1, [x0]; ret`, leaving its argument slot x0 untouched (an unproven

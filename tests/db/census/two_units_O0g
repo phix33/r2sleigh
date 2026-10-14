@@ -172,7 +172,6 @@ CMDS=aa; pdd @ 0x00001100
 EXPECT=<<EOF
 uint64_t __do_global_dtors_aux(void)
 {
-    void __cxa_finalize(uint64_t);
     extern char __dso_handle[];
     extern char __TMC_END__[];
 
@@ -180,7 +179,7 @@ uint64_t __do_global_dtors_aux(void)
     uint64_t tmp_3ea80_1;
     uint64_t rdi_1;
 
-    /* r2dec proof: 3 constructs are marked below; 40 source obligations: 16 rendered, 17 elided, 0 refused, 7 residual; 9 statements rendered; 2 data object types refused */
+    /* r2dec proof: 4 constructs are marked below; 41 source obligations: 14 rendered, 17 elided, 0 refused, 10 residual; 8 statements rendered; 2 data object types refused */
     {
         tmp_3e180_1 = r2sleigh_load_u8((void*)&__TMC_END__);
         if ((uint8_t)((uint8_t)tmp_3e180_1 != (uint8_t)0U)) {
@@ -190,12 +189,12 @@ uint64_t __do_global_dtors_aux(void)
             if ((uint8_t)((uint64_t)tmp_3ea80_1 == (uint64_t)0U)) {
             } else {
                 rdi_1 = r2sleigh_load_u64((void*)&__dso_handle);
-                __cxa_finalize(rdi_1);
+                r2sleigh_residual_void(2); /* r2dec gap: UnsupportedInstruction at 0x111b:4 covering 1 op (render::values) */
             }
             {
-                r2sleigh_residual_void(2); /* r2dec gap: UnsupportedInstruction at 0x1127:17 covering 1 op (render::values) */
+                r2sleigh_residual_void(3); /* r2dec gap: UnsupportedInstruction at 0x1127:17 covering 1 op (render::values) */
                 r2sleigh_store_u8((void*)&__TMC_END__, (uint8_t)1U);
-                return r2sleigh_residual_u64(3);
+                return r2sleigh_residual_u64(4);
             }
         }
     }

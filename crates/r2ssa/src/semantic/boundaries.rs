@@ -895,6 +895,18 @@ pub(crate) fn convention_call_boundary(
         }
         None
     };
+    // A call's result in an argument slot, with a later slot written: the result may be passed on
+    // (an accumulator), so the count is unproven.
+    let passes_result_on = |slot: CanonicalStorageId, position: usize| {
+        let written = result_slot(slot).then(|| written_later(position)).flatten();
+        if let Some(written) = written {
+            r2il::refusal_evidence!(
+                "convention-arity-unproven",
+                "callsite ({block_addr:#x}, {op_index}) holds a call's result in argument slot {position}, yet the body writes {written:?}"
+            );
+        }
+        written.is_some()
+    };
     let mut arguments = Vec::new();
     let mut arguments_proven = true;
     for (position, slot) in convention.argument_slots().iter().enumerate() {
@@ -920,16 +932,7 @@ pub(crate) fn convention_call_boundary(
             Some(ReachingAbiState::Value(value))
                 if value_is_call_clobber(graph, value) && position >= at_least =>
             {
-                if result_slot(*slot)
-                    && let Some(written) = written_later(position)
-                {
-                    r2il::refusal_evidence!(
-                        "convention-arity-unproven",
-                        "callsite ({block_addr:#x}, {op_index}) holds a call's result in argument slot {position}, yet the body writes {written:?}"
-                    );
-                    arguments_proven = false;
-                    break;
-                }
+                arguments_proven &= !passes_result_on(*slot, position);
                 break;
             }
             Some(ReachingAbiState::Value(value)) if graph.written_by_body(value) => {
@@ -1050,10 +1053,19 @@ pub(crate) fn convention_call_boundary(
         }
     }
 
+    // A floor is no call's contract: a slot the count found past it is shown, never proven (W7).
+    let past_floor = arity.is_some() && arguments.len() > at_least;
+    if past_floor && arguments_proven {
+        r2il::refusal_evidence!(
+            "convention-arity-floor",
+            "callsite ({block_addr:#x}, {op_index}) calls a callee that takes at least {at_least} arguments; this body wrote {}",
+            arguments.len()
+        );
+    }
     Some(ConventionCallBoundary {
         calling_convention: convention.calling_convention().to_string(),
         arguments,
-        arguments_proven,
+        arguments_proven: arguments_proven && !past_floor,
         results: results(convention),
     })
 }

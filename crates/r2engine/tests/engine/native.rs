@@ -5139,10 +5139,11 @@ const READS_PAST_ITS_PARAMETERS: &[u8] = &[
     0xc3, // 0x101f ret
 ];
 
-/// A callee whose parameters are a floor mints no contract; a call to it takes what the caller
-/// provably wrote, at least the floor: `past(3, 5)` (doc/adr-resolved-bodies.md, "Demand").
+/// A callee whose parameters are a floor mints no contract, and what its caller wrote past the floor
+/// is no argument the callee is shown to take: `past(3, 5)` was the caller's registers, so the call
+/// is a residual (audit W7; `past` reads `rsi` and hands `rdi` to a call nothing describes).
 #[test]
-fn a_callee_whose_parameters_are_a_floor_takes_what_its_caller_wrote() {
+fn a_call_past_its_callees_floor_is_a_residual() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = Fixture {
@@ -5151,7 +5152,8 @@ fn a_callee_whose_parameters_are_a_floor_takes_what_its_caller_wrote() {
     };
     let response = decompile(&target, &program, BASE + 0x10).expect("decompile");
     let text = response.output.text();
-    assert!(text.contains("past(3, 5)"), "{text}");
+    assert!(!text.contains("past(3, 5)"), "{text}");
+    assert!(text.contains("r2sleigh_residual"), "{text}");
 }
 
 /// `f` hands every argument register on unread to a call through memory; the caller writes `edi`

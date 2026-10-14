@@ -188,13 +188,11 @@ CMDS=aa; pdd @ 0x00001160
 EXPECT=<<EOF
 uint64_t entry_fini0(void)
 {
-    void __cxa_finalize(uint64_t);
-
     uint8_t tmp_3e180_1;
     uint64_t tmp_3ea80_1;
     uint64_t rdi_1;
 
-    /* r2dec proof: 3 constructs are marked below; 40 source obligations: 16 rendered, 17 elided, 0 refused, 7 residual; 9 statements rendered */
+    /* r2dec proof: 4 constructs are marked below; 41 source obligations: 14 rendered, 17 elided, 0 refused, 10 residual; 8 statements rendered */
     {
         tmp_3e180_1 = r2sleigh_load_u8((void*)(uint64_t)0x4020U);
         if ((uint8_t)((uint8_t)tmp_3e180_1 != (uint8_t)0U)) {
@@ -204,12 +202,12 @@ uint64_t entry_fini0(void)
             if ((uint8_t)((uint64_t)tmp_3ea80_1 == (uint64_t)0U)) {
             } else {
                 rdi_1 = r2sleigh_load_u64((void*)(uint64_t)0x4008U);
-                __cxa_finalize(rdi_1);
+                r2sleigh_residual_void(2); /* r2dec gap: UnsupportedInstruction at 0x117b:4 covering 1 op (render::values) */
             }
             {
-                r2sleigh_residual_void(2); /* r2dec gap: UnsupportedInstruction at 0x1187:17 covering 1 op (render::values) */
+                r2sleigh_residual_void(3); /* r2dec gap: UnsupportedInstruction at 0x1187:17 covering 1 op (render::values) */
                 r2sleigh_store_u8((void*)(uint64_t)0x4020U, (uint8_t)1U);
-                return r2sleigh_residual_u64(3);
+                return r2sleigh_residual_u64(4);
             }
         }
     }
@@ -781,7 +779,6 @@ uint32_t fcn_1549(uint32_t arg0, uint64_t* arg1)
     uint32_t fcn_1277(uint64_t);
     uint64_t fcn_12a8(uint64_t, uint64_t);
     double fcn_12ef(uint64_t, uint32_t);
-    uint64_t fcn_1362(uint64_t, uint64_t);
     uint32_t fcn_1391(uint32_t);
     uint64_t fcn_13e3(uint64_t, uint64_t, uint64_t);
     uint32_t fcn_144c(uint32_t);
@@ -806,8 +803,8 @@ uint32_t fcn_1549(uint32_t arg0, uint64_t* arg1)
     uint32_t tmp_6a80_27;
     __uint128_t xmm0_7;
     uint64_t tmp_lane_1549_e1_21_1;
+    uint32_t tmp_lane_1549_e1_22_1;
     uint32_t tmp_6a80_34;
-    uint64_t rax_21;
     uint32_t tmp_6a80_41;
     uint32_t tmp_11f00_5;
     uint32_t tmp_11f00_6;
@@ -831,7 +828,7 @@ uint32_t fcn_1549(uint32_t arg0, uint64_t* arg1)
     uint32_t tmp_lane_16f0_94_4d_1;
     _Alignas(16) uint8_t frame[248];
 
-    /* r2dec proof: 1 construct is marked below; 364 source obligations: 197 rendered, 95 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 66 assumed (frame extent unproven), 1 residual; 106 statements rendered; 1 callee prototype supplied by the source; the result's second register is open: no call read decides it */
+    /* r2dec proof: 4 constructs are marked below; 369 source obligations: 190 rendered, 98 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 66 assumed (frame extent unproven), 10 residual; 106 statements rendered; 1 never assigned, read as residuals (RAX_21); 1 callee prototype supplied by the source; the result's second register is open: no call read decides it */
     {
         r2sleigh_store_u32((void*)(uint64_t)(frame + 28U), (uint32_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)arg1);
@@ -886,18 +883,20 @@ uint32_t fcn_1549(uint32_t arg0, uint64_t* arg1)
         (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         xmm0_7 = (__uint128_t)r2sleigh_float_to_bits_64(fcn_12ef((uint64_t)((uint64_t)(frame + 48U) + (uint64_t)112U), 3));
         tmp_lane_1549_e1_21_1 = (uint64_t)((__uint128_t)xmm0_7 >> 0U);
+        tmp_lane_1549_e1_22_1 = (uint32_t)(r2sleigh_float_from_bits_64(tmp_lane_1549_e1_21_1) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_lane_1549_e1_21_1) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_lane_1549_e1_21_1) : r2sleigh_residual_i32(1));
         (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         tmp_6a80_34 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
-        r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)(r2sleigh_float_from_bits_64(tmp_lane_1549_e1_21_1) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_lane_1549_e1_21_1) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_lane_1549_e1_21_1) : r2sleigh_residual_i32(1)) + (uint32_t)tmp_6a80_34));
+        r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)tmp_6a80_34 + (uint32_t)tmp_lane_1549_e1_22_1));
         (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
-        rax_21 = fcn_1362(5, 3);
+        r2sleigh_residual_void(2); /* r2dec gap: UnsupportedInstruction at 0x1549:372 covering 1 op (render::values) */
+        r2sleigh_residual_void(3); /* r2dec gap: ValueNotComputed at 0x1549:378 covering 1 op (render::values) */
         (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         tmp_6a80_41 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
-        r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)((uint64_t)rax_21 >> 0U) + (uint32_t)tmp_6a80_41));
+        r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)((uint64_t)r2sleigh_residual_u64(4) >> 0U) + (uint32_t)tmp_6a80_41));
         (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
