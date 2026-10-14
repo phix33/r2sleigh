@@ -1483,3 +1483,57 @@ fn help_lists_the_verbs_dispatch_runs_and_each_answers_its_own_usage() {
     let unknown = r2s("zz");
     assert!(!unknown.ok);
 }
+
+/// A reader that stops reading ends the shell as SIGPIPE ends radare2 (status 141), with no
+/// panic: printing past a closed pipe used to exit 101 (audit W52).
+#[test]
+fn a_closed_pipe_ends_the_shell_quietly() {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_r2s"))
+        // Twenty listings, past any pipe's buffer, so a write meets the closed end.
+        .args(["-q", "-c", &["pd 20000"; 20].join(";")])
+        .arg(fixture())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the shell runs");
+    let mut first = [0; 64];
+    let mut stdout = child.stdout.take().expect("piped");
+    stdout.read_exact(&mut first).expect("the listing starts");
+    drop(stdout);
+    let done = child.wait_with_output().expect("the shell is waited for");
+    let stderr = String::from_utf8_lossy(&done.stderr);
+    assert_eq!(done.status.code(), Some(141), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+/// A reader gone between prompts ends the shell when the prompt is flushed, not at the next line.
+#[test]
+fn a_pipe_closed_between_prompts_ends_the_shell_at_the_prompt() {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_r2s"))
+        .arg(fixture())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the shell runs");
+    let mut stdout = child.stdout.take().expect("piped");
+    let mut seen = Vec::new();
+    while !seen.ends_with(b"]> ") {
+        let mut byte = [0];
+        stdout
+            .read_exact(&mut byte)
+            .expect("the first prompt is printed");
+        seen.push(byte[0]);
+    }
+    drop(stdout);
+    let mut stdin = child.stdin.take().expect("piped");
+    stdin.write_all(b"\n").expect("the shell reads");
+    drop(stdin);
+    let done = child.wait_with_output().expect("the shell is waited for");
+    let stderr = String::from_utf8_lossy(&done.stderr);
+    assert_eq!(done.status.code(), Some(141), "{stderr}");
+}
