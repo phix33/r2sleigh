@@ -61,3 +61,27 @@ fn mach_o_states_thumb_in_n_desc_and_in_a_function_start_s_low_bit() {
         .map(|entry| (entry.vaddr, entry.thumb));
     assert_eq!(declared, Some((0x2800, true)));
 }
+
+#[test]
+fn a_dsym_maps_only_the_section_bytes_it_holds() {
+    const TEXT: u64 = 0x1_0000_0000;
+    let image = image(include_bytes!("data/macho_dsym"));
+    let text = (image.sections().iter())
+        .find(|section| section.name == "__text")
+        .expect("the fixture states __text");
+    assert_eq!(text.file_size, 0, "offset 0 in a dSYM is no bytes");
+    assert_eq!(
+        image.read(TEXT + 0x1000, 4),
+        None,
+        "nothing is there, not zeros"
+    );
+    assert_eq!(
+        image.read(TEXT, 4),
+        None,
+        "__TEXT's file range is not its start's"
+    );
+    let frame = image
+        .read(TEXT + 0x1800, 4)
+        .expect("__eh_frame's bytes are held");
+    assert_eq!(&*frame, &[1, 2, 3, 4]);
+}

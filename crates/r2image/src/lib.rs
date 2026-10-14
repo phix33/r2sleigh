@@ -571,6 +571,15 @@ impl Image {
             (offset, size.min(len.saturating_sub(offset)))
         };
 
+        // A dSYM keeps the image's load commands but only its debug sections' bytes: a section at
+        // offset 0 holds none, and a segment's file range is whatever was kept (audit W39).
+        let dsym = macho_filetype(&file) == Some(object::macho::MH_DSYM);
+        let section_bytes = |section: &object::read::Section<'_, '_>| {
+            (section.file_range())
+                .filter(|(offset, _)| !dsym || *offset != 0)
+                .map_or((0, 0), held)
+        };
+
         let placement = Placement::of(&file, data.len() as u64)?;
         let relocatable = placement.relocatable;
         let placed = |section: &object::read::Section<'_, '_>| placement.at(section);
@@ -600,7 +609,7 @@ impl Image {
                 .filter(|section| placed(section) != 0 || section.size() != 0)
                 .filter(section_is_loaded)
                 .map(|section| {
-                    let (file_offset, file_size) = held(section.file_range().unwrap_or((0, 0)));
+                    let (file_offset, file_size) = section_bytes(&section);
                     Segment {
                         vaddr: placed(&section),
                         vsize: section.size(),
@@ -619,7 +628,7 @@ impl Image {
         let sections: Vec<Section> = file
             .sections()
             .map(|section| {
-                let (file_offset, file_size) = held(section.file_range().unwrap_or((0, 0)));
+                let (file_offset, file_size) = section_bytes(&section);
                 let vaddr = placed(&section);
                 let loaded = section_is_loaded(&section);
                 let stated = section_statement(&section);
@@ -649,6 +658,23 @@ impl Image {
                 }
             })
             .collect();
+
+        // Nothing is mapped in a dSYM but the sections whose bytes it holds, each at its address.
+        if dsym {
+            let mut held_sections: Vec<Segment> = (sections.iter())
+                .filter(|section| section.file_size > 0)
+                .map(|section| Segment {
+                    vaddr: section.vaddr,
+                    vsize: section.file_size,
+                    file_offset: section.file_offset,
+                    file_size: section.file_size,
+                    permissions: section.permissions,
+                    name: Some(section.name.clone()),
+                })
+                .collect();
+            held_sections.sort_by_key(|segment| segment.vaddr);
+            segments = disjoint(held_sections);
+        }
 
         // Code lives in code sections, not merely in executable segments: Mach-O
         // puts __cstring and __const inside __TEXT, and the header itself starts it.
@@ -1309,6 +1335,32 @@ fn select_fat_slice(data: &[u8]) -> Result<Option<std::ops::Range<usize>>, Image
 /// assembler symbol with no C name, and is stated as it is.
 pub(crate) fn macho_identifier(linked: &str) -> &str {
     linked.strip_prefix('_').unwrap_or(linked)
+}
+
+/// A Mach-O image's file type (`MH_EXECUTE`, `MH_OBJECT`, `MH_DSYM`, ...).
+fn macho_filetype(file: &object::File<'_>) -> Option<object::macho::FileType> {
+    use object::read::macho::MachHeader as _;
+    match file {
+        object::File::MachO32(macho) => Some(macho.macho_header().filetype(macho.endian())),
+        object::File::MachO64(macho) => Some(macho.macho_header().filetype(macho.endian())),
+        _ => None,
+    }
+}
+
+/// Sorted segments with each one's end clipped to the next one's start, so an address has one segment.
+fn disjoint(sorted: Vec<Segment>) -> Vec<Segment> {
+    let mut out: Vec<Segment> = Vec::with_capacity(sorted.len());
+    for segment in sorted {
+        if let Some(last) = out.last_mut()
+            && last.vaddr.saturating_add(last.vsize) > segment.vaddr
+        {
+            last.vsize = segment.vaddr - last.vaddr;
+            last.file_size = last.file_size.min(last.vsize);
+        }
+        out.push(segment);
+    }
+    out.retain(|segment| segment.vsize > 0);
+    out
 }
 
 /// Virtual address a file offset maps to, for a format that states one.

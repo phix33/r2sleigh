@@ -41,9 +41,17 @@ reason = "a dSYM's symbol table states these (nm lists GCC_except_table97 at 0x1
 [[judged]]
 command = ["px", "pd"]
 binaries = ["TestRTTI-armv7-dSYM", "core.dwarf"]
-r2s = '^0x[0-9a-f]+ +(0000 0000 0000 0000 0000 0000 0000 0000 |0x0 +(udf 0x0|andeq r0, r0, r0)$)'
-verdict = "r2-right"
-reason = "a dSYM's __TEXT holds no bytes (TestRTTI: filesize 0; core.dwarf: 1,736 of 0x98000): radare2 shows unrelated file bytes at the section offsets, r2s zeros, where it should say nothing is there; owner r2image dSYM file ranges (ROADMAP I, audit W39)"
+r2s = '^<missing>$'
+verdict = "r2s-right"
+reason = "a dSYM holds no bytes for __text (its section offset is 0; only the debug sections and core.dwarf's __eh_frame are kept): r2s says nothing is mapped there, radare2 dumps the file's first bytes (DWARF strings) as if they were the code"
+
+[[judged]]
+command = "iS"
+binaries = ["TestRTTI-armv7-dSYM", "core.dwarf"]
+columns = ["size"]
+values = ["0x0"]
+verdict = "r2s-right"
+reason = "a dSYM section at offset 0 holds no bytes (MH_DSYM keeps only the debug sections'): r2s states 0, radare2 the header's size, which no file byte backs"
 
 [[judged]]
 command = ["px", "pd", "ie", "iS", "is"]
@@ -64,14 +72,6 @@ command = ["px", "pd"]
 binaries = "watchos-relocs.obj"
 verdict = "r2s-right"
 reason = "an MH_OBJECT states no entry: radare2 seeks entry0 to __text's file offset 0x264, used as an address no section holds, and dumps its fill; r2s has none and stays at 0, where __text is"
-
-[[judged]]
-command = "iS"
-binaries = "core.dwarf"
-columns = ["size"]
-values = ["0x74037"]
-verdict = "r2-right"
-reason = "a dSYM's __text states offset 0, which in MH_DSYM means no bytes; r2s reads it as the file's first 0x74037 bytes (the file's length) while dumping zeros there; owner r2image dSYM file ranges (ROADMAP I, audit W39)"
 
 [[judged]]
 command = "iS"
