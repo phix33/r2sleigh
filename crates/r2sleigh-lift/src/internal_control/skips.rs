@@ -229,6 +229,53 @@ fn is_access(op: &R2ILOp) -> bool {
 }
 
 fn if_converted(blocks: &[Block], allocator: &mut InstructionTempAllocator) -> Vec<(R2ILOp, Meta)> {
+    let predicates = predicates(blocks);
+    let poisoned = refused_runs(blocks, &predicates);
+    let live_after = live_after(blocks, &predicates);
+    let mut emitted = Vec::new();
+    // The term each edge into a computed block contributes, made at the end of its source.
+    let mut terms: Vec<Vec<Varnode>> = (0..blocks.len()).map(|_| Vec::new()).collect();
+    for (at, block) in blocks.iter().enumerate() {
+        let always = matches!(predicates[at], Predicate::Always);
+        if poisoned[at] && !always {
+            poison(&mut emitted, block.ops.iter().map(|(_, meta)| meta));
+            poison(&mut emitted, block.exit.iter().map(|exit| &exit.meta));
+            continue;
+        }
+        if matches!(predicates[at], Predicate::Never) {
+            continue;
+        }
+        let mut region = Vec::new();
+        let mut predicated = Predicated {
+            emitted: &mut region,
+            allocator: &mut *allocator,
+            candidates: HashMap::new(),
+            preserved: Vec::new(),
+            cond: None,
+            value: None,
+        };
+        let entering = std::mem::take(&mut terms[at]);
+        let made = predicated
+            .block(block, &predicates[at], entering, &live_after[at])
+            .and_then(|()| match poisoned[at] {
+                false => predicated.edges(at, block, &predicates, &mut terms),
+                true => Some(()),
+            });
+        match made {
+            Some(()) => emitted.append(&mut region),
+            // Out of temporaries: nothing short of refusing is honest.
+            None => poison(&mut emitted, block.ops.iter().map(|(_, meta)| meta)),
+        }
+        // The branch into a refused run refuses with it.
+        if made.is_none() || poisoned[at] {
+            poison(&mut emitted, block.exit.iter().map(|exit| &exit.meta));
+        }
+    }
+    emitted
+}
+
+/// When each block runs, in block order, which is topological: every edge is forward.
+fn predicates(blocks: &[Block]) -> Vec<Predicate> {
     let count = blocks.len();
     let mut incoming: Vec<Vec<Edge>> = (0..count).map(|_| Vec::new()).collect();
     // How many edges jump over each block; one nothing jumps over runs on every path.
@@ -272,8 +319,13 @@ fn if_converted(blocks: &[Block], allocator: &mut InstructionTempAllocator) -> V
         };
         predicates.push(predicate);
     }
+    predicates
+}
 
-    // A run is a maximal stretch of blocks that do not run on every path; each is independent.
+/// The blocks that refuse: every block of a run (a maximal stretch that does not run on every
+/// path, independent of any other) holding an operation it cannot predicate, and the branch into it.
+fn refused_runs(blocks: &[Block], predicates: &[Predicate]) -> Vec<bool> {
+    let count = blocks.len();
     let mut poisoned = vec![false; count];
     let mut at = 0;
     while at < count {
@@ -295,45 +347,19 @@ fn if_converted(blocks: &[Block], allocator: &mut InstructionTempAllocator) -> V
         }
         at = run.end.max(at + 1);
     }
-
-    let live_after = live_after(blocks, &predicates);
-    let mut emitted = Vec::new();
-    // The term each edge into a computed block contributes, made at the end of its source.
-    let mut terms: Vec<Vec<Varnode>> = (0..count).map(|_| Vec::new()).collect();
-    for (at, block) in blocks.iter().enumerate() {
-        let always = matches!(predicates[at], Predicate::Always);
-        if poisoned[at] && !always {
-            poison(&mut emitted, block.ops.iter().map(|(_, meta)| meta));
-            poison(&mut emitted, block.exit.iter().map(|exit| &exit.meta));
-            continue;
-        }
-        if matches!(predicates[at], Predicate::Never) {
-            continue;
-        }
-        let mut predicated = Predicated {
-            emitted: &mut emitted,
-            allocator: &mut *allocator,
-            candidates: HashMap::new(),
-            preserved: Vec::new(),
-            cond: None,
-            value: None,
-        };
-        let made = predicated
-            .block(at, block, &predicates[at], &mut terms, &live_after[at])
-            .and_then(|()| match poisoned[at] {
-                false => predicated.edges(at, block, &predicates, &mut terms),
-                true => Some(()),
-            });
-        // Out of temporaries, or the branch into a refused run: it refuses.
-        if made.is_none() || poisoned[at] {
-            poison(&mut emitted, block.exit.iter().map(|exit| &exit.meta));
-        }
-    }
-    emitted
+    poisoned
 }
 
 fn poison<'m>(emitted: &mut Vec<(R2ILOp, Meta)>, metas: impl Iterator<Item = &'m Meta>) {
     emitted.extend(metas.map(|meta| (R2ILOp::Unimplemented, meta.clone())));
+}
+
+/// What is live before `op`, from what is live after it.
+fn live_before(live: &mut HashSet<Varnode>, op: &R2ILOp) {
+    if let Some(output) = op.output() {
+        live.remove(output);
+    }
+    live.extend(op.inputs().into_iter().cloned());
 }
 
 /// What each block leaves read later. A predicated block reads a name only where it did not
@@ -342,18 +368,17 @@ fn live_after(blocks: &[Block], predicates: &[Predicate]) -> Vec<HashSet<Varnode
     let mut live = HashSet::new();
     let mut after = vec![HashSet::new(); blocks.len()];
     for (at, block) in blocks.iter().enumerate().rev() {
-        after[at] = live.clone();
+        after[at].clone_from(&live);
         let cond = block.exit.as_ref().and_then(|exit| exit.cond.as_ref());
         match &predicates[at] {
             Predicate::Never => {}
             Predicate::Always => {
                 live.extend(cond.cloned());
-                for (op, _) in block.ops.iter().rev() {
-                    if let Some(output) = op.output() {
-                        live.remove(output);
-                    }
-                    live.extend(op.inputs().into_iter().cloned());
-                }
+                block
+                    .ops
+                    .iter()
+                    .rev()
+                    .for_each(|(op, _)| live_before(&mut live, op));
             }
             predicate => {
                 let mut written = HashSet::new();
@@ -392,10 +417,9 @@ impl Predicated<'_> {
     /// Emits one block under its predicate.
     fn block(
         &mut self,
-        at: usize,
         block: &Block,
         predicate: &Predicate,
-        terms: &mut [Vec<Varnode>],
+        terms: Vec<Varnode>,
         live: &HashSet<Varnode>,
     ) -> Option<()> {
         let first = block
@@ -421,7 +445,7 @@ impl Predicated<'_> {
                 Some((cond, !*negated))
             }
             Predicate::Computed => {
-                let mut terms = std::mem::take(&mut terms[at]).into_iter();
+                let mut terms = terms.into_iter();
                 let mut disjunction = terms.next()?;
                 for term in terms {
                     let either = self.allocator.allocate(1)?;
@@ -533,6 +557,36 @@ impl Predicated<'_> {
         Some(copy)
     }
 
+    /// Where the block does not run a division's quotient is discarded, so it divides by one there
+    /// and cannot trap ahead of the test that guarded it (audit W22).
+    fn guard_divisor(&mut self, op: &mut R2ILOp, meta: &Meta) -> Option<()> {
+        let (R2ILOp::IntDiv { b: divisor, .. }
+        | R2ILOp::IntSDiv { b: divisor, .. }
+        | R2ILOp::IntRem { b: divisor, .. }
+        | R2ILOp::IntSRem { b: divisor, .. }) = op
+        else {
+            return Some(());
+        };
+        let (cond, holds) = self.cond.clone()?;
+        let safe = self.allocator.allocate(divisor.size)?;
+        let one = Varnode::constant(1, divisor.size);
+        let (if_true, if_false) = match holds {
+            true => (divisor.clone(), one),
+            false => (one, divisor.clone()),
+        };
+        self.emitted.push((
+            R2ILOp::Select {
+                dst: safe.clone(),
+                cond,
+                if_true,
+                if_false,
+            },
+            meta.clone(),
+        ));
+        *divisor = safe;
+        Some(())
+    }
+
     /// One operation under the block's predicate: a value into a candidate, an access guarded.
     fn op(&mut self, mut op: R2ILOp, meta: &Meta) -> Option<()> {
         for input in op.inputs_mut() {
@@ -540,31 +594,7 @@ impl Predicated<'_> {
                 *input = candidate.clone();
             }
         }
-        if let R2ILOp::IntDiv { b: divisor, .. }
-        | R2ILOp::IntSDiv { b: divisor, .. }
-        | R2ILOp::IntRem { b: divisor, .. }
-        | R2ILOp::IntSRem { b: divisor, .. } = &mut op
-        {
-            // Where the block does not run its quotient is discarded, so it divides by one there
-            // and cannot trap ahead of the test that guarded it (audit W22).
-            let (cond, holds) = self.cond.clone()?;
-            let safe = self.allocator.allocate(divisor.size)?;
-            let one = Varnode::constant(1, divisor.size);
-            let (if_true, if_false) = match holds {
-                true => (divisor.clone(), one),
-                false => (one, divisor.clone()),
-            };
-            self.emitted.push((
-                R2ILOp::Select {
-                    dst: safe.clone(),
-                    cond,
-                    if_true,
-                    if_false,
-                },
-                meta.clone(),
-            ));
-            *divisor = safe;
-        }
+        self.guard_divisor(&mut op, meta)?;
         let guard = match is_access(&op) {
             true => self.value(meta)??,
             false => Varnode::constant(1, 1),
@@ -588,7 +618,7 @@ impl Predicated<'_> {
                         dst: read.clone(),
                         space,
                         addr,
-                        guard: guard.clone(),
+                        guard,
                         // A predicated access orders nothing; a barrier is spelled beside it.
                         ordering: MemoryOrdering::Relaxed,
                     },
@@ -602,7 +632,7 @@ impl Predicated<'_> {
                         space,
                         addr,
                         val,
-                        guard: guard.clone(),
+                        guard,
                         ordering: MemoryOrdering::Relaxed,
                     },
                     meta.clone(),
@@ -620,7 +650,7 @@ impl Predicated<'_> {
                     R2ILOp::BoolAnd {
                         dst: both.clone(),
                         a: inner.clone(),
-                        b: guard.clone(),
+                        b: guard,
                     },
                     meta.clone(),
                 ));
@@ -920,20 +950,20 @@ mod tests {
                     .any(|op| op.is_integer_division() && op.inputs().contains(&&Y)),
                 "{ops:?}"
             );
-            for (x, y, expected) in [(7u128, 0u128, 0u128), (7, 2, if division { 3 } else { 1 })] {
-                let mut state = State::new(Endianness::Little, |_| None, 1 << 10).expect("state");
-                state.set_register(X.offset, 8, x).expect("x");
-                state.set_register(Y.offset, 8, y).expect("y");
-                for op in &ops {
-                    assert_eq!(step(op, &mut state), Flow::Next, "{op:?}");
-                }
-                assert_eq!(
-                    state.register(X.offset, 8),
-                    Some(expected),
-                    "{x}/{y}: {ops:?}"
-                );
-            }
+            assert_eq!(divided_by(&ops, 0), 0, "{ops:?}");
+            assert_eq!(divided_by(&ops, 2), if division { 3 } else { 1 }, "{ops:?}");
         }
+    }
+
+    /// `x` after running `ops` from `x = 7` and `y = divisor`.
+    fn divided_by(ops: &[R2ILOp], divisor: u128) -> u128 {
+        let mut state = State::new(Endianness::Little, |_| None, 1 << 10).expect("state");
+        state.set_register(X.offset, 8, 7).expect("x");
+        state.set_register(Y.offset, 8, divisor).expect("y");
+        for op in ops {
+            assert_eq!(step(op, &mut state), Flow::Next, "{op:?}");
+        }
+        state.register(X.offset, 8).expect("x")
     }
 
     /// A skip over what can be neither speculated nor guarded refuses with all it skips, and the
