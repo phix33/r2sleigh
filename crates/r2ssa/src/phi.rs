@@ -159,10 +159,9 @@ impl PhiPlacement {
     }
 
     /// Keep only the merges whose identity is live on entry to their block.
-    pub fn retain_live(mut self, live_in: &HashMap<u64, BTreeSet<RenameIdentity>>) -> Self {
+    pub fn retain_live(mut self, live_in: &LiveIn) -> Self {
         for (block, phis) in &mut self.phis {
-            let live = live_in.get(block);
-            phis.retain(|phi| live.is_some_and(|live| live.contains(&phi.identity)));
+            phis.retain(|phi| live_in.is_live(*block, &phi.identity));
         }
         self.phis.retain(|_, phis| !phis.is_empty());
         self
@@ -369,7 +368,7 @@ pub fn live_in_by_block(
     call_boundaries: &crate::rename::CallBoundaryConfig,
     naming: IdentityNaming<'_>,
     defs: &DefinitionSitesByIdentity,
-) -> HashMap<u64, BTreeSet<RenameIdentity>> {
+) -> LiveIn {
     let IdentityNaming {
         reg_names,
         families,
@@ -430,7 +429,7 @@ pub fn live_in_by_block(
     let argument_bytes = wholes(&arguments);
     let returned_bytes = wholes(&returned);
     let IdentityNumbers {
-        identities,
+        numbers,
         bases,
         bits,
         ..
@@ -504,23 +503,39 @@ pub fn live_in_by_block(
         }
     }
 
-    let mut live_in = HashMap::with_capacity(addrs.len());
-    for (index, addr) in addrs.iter().enumerate() {
-        if !present[index] {
-            continue;
-        }
-        let base = index * words;
-        let row = &live[base..base + words];
-        // An identity is live where any byte of it is.
-        let set = identities
-            .iter()
-            .zip(&bases)
-            .filter(|(_, bytes)| any_bit(row, bytes))
-            .map(|(identity, _)| identity.clone())
-            .collect();
-        live_in.insert(*addr, set);
+    LiveIn {
+        live,
+        words,
+        position,
+        numbers,
+        bases,
     }
-    live_in
+}
+
+/// Which bytes of each numbered identity are live on entry to each block: the fixpoint's own
+/// bit matrix, asked one identity at one block, rather than a set built for every block.
+pub struct LiveIn {
+    live: Vec<u64>,
+    words: usize,
+    position: HashMap<u64, usize>,
+    numbers: HashMap<RenameIdentity, u32>,
+    bases: Vec<std::ops::Range<u32>>,
+}
+
+impl LiveIn {
+    /// Whether any byte of `identity` is live on entry to `block`; an identity no operation
+    /// names, or a block the walk never reached, is not.
+    pub fn is_live(&self, block: u64, identity: &RenameIdentity) -> bool {
+        let (Some(index), Some(number)) = (self.position.get(&block), self.numbers.get(identity))
+        else {
+            return false;
+        };
+        let base = index * self.words;
+        any_bit(
+            &self.live[base..base + self.words],
+            &self.bases[*number as usize],
+        )
+    }
 }
 
 /// How a varnode is named as a rename identity: the register names and the
