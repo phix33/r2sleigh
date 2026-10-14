@@ -344,6 +344,22 @@ fn a_callee_whose_walk_stops_at_an_indirect_branch_may_return() {
     assert!(!extent(&mut program, ind).1);
 }
 
+/// `trap: ud2`, then `caller: call trap; mov eax, 1; ret`.
+const TRAPS: &[u8] = &[
+    0x0f, 0x0b, 0xe8, 0xf9, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3,
+];
+
+/// `ud2` raises an invalid-opcode exception and does not come back (audit W23): its callee never
+/// returns, where its `goto [target]` used to read as an unresolved indirect branch.
+#[test]
+fn a_call_to_a_function_that_executes_ud2_ends_its_caller() {
+    let (trap, caller) = (BASE, BASE + 2);
+    let functions = [("trap", trap, 2), ("caller", caller, 11)];
+    let mut program = OpenProgram::of(Literal::of_code(TRAPS, &functions));
+    assert_eq!(extent(&mut program, trap), (caller, true));
+    assert_eq!(extent(&mut program, caller), (caller + 5, true));
+}
+
 /// `spin: b spin`, then `caller: cmp r0, #0; blne spin; bx lr`.
 const PREDICATED: &[u8] = &[
     0xfe, 0xff, 0xff, 0xea, 0x00, 0x00, 0x50, 0xe3, 0xfc, 0xff, 0xff, 0x1b, 0x1e, 0xff, 0x2f, 0xe1,

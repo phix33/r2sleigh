@@ -362,7 +362,7 @@ const WORD_SHUFFLES: [(&str, ShuffledQuadword, EncodingForm); 11] = [
 
 /// The operations outside the packed-extension family, by the exact name the
 /// specification declares.
-const NAMED: [(&str, ModelledUserOperation); 12] = [
+const NAMED: [(&str, ModelledUserOperation); 13] = [
     ("NEON_ext", ModelledUserOperation::NeonExt),
     ("NEON_ushl", ModelledUserOperation::NeonUshl),
     ("NEON_rev64", ModelledUserOperation::NeonRev64),
@@ -383,6 +383,8 @@ const NAMED: [(&str, ModelledUserOperation); 12] = [
     ("a64_TBL", ModelledUserOperation::A64Tbl),
     ("SoftwareBreakpoint", ModelledUserOperation::Trap),
     ("UndefinedInstructionException", ModelledUserOperation::Trap),
+    // x86 `ud0`, `ud1` and `ud2`.
+    ("invalidInstructionException", ModelledUserOperation::Trap),
     ("setISAMode", ModelledUserOperation::SetIsaMode),
 ];
 
