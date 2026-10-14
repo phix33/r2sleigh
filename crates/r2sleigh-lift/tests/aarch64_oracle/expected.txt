@@ -1,7 +1,5 @@
 sdiv_x: stop Undefined
 sdiv_w: stop Undefined
-udiv_x: stop Undefined
-udiv_w: stop Undefined
 crc32b: stop unmodelled CALLOTHER crc32b
 crc32cx: stop unmodelled CALLOTHER crc32x
 sminv_8h: stop unmodelled CALLOTHER NEON_sminv

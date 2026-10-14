@@ -862,7 +862,7 @@ mod tests {
                 target: Varnode::constant(2, 8),
                 cond: cond.clone(),
             },
-            R2ILOp::IntSDiv {
+            R2ILOp::IntAdd {
                 dst: result.clone(),
                 a: dividend,
                 b: divisor,

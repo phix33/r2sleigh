@@ -208,9 +208,11 @@ CMDS=aa; pdd @ 0x1000005dc
 EXPECT=<<EOF
 uint64_t _sparse_switch(uint32_t arg0, uint32_t arg1, uint32_t arg2)
 {
+    uint8_t tmp_38d00_1;
     uint32_t tmp_38d08_1;
+    uint32_t tmp_38d10_1;
 
-    /* r2dec proof: 1 construct is marked below; 57 source obligations: 55 rendered, 0 elided, 0 refused, 2 residual; 15 statements rendered */
+    /* r2dec proof: 1 construct is marked below; 58 source obligations: 56 rendered, 0 elided, 0 refused, 2 residual; 17 statements rendered */
     {
         if ((uint8_t)((int32_t)arg0 <= (int32_t)2U)) {
             if ((uint8_t)((uint32_t)((uint32_t)arg0 + (uint32_t)7U) == (uint32_t)0U)) {
@@ -233,8 +235,10 @@ uint64_t _sparse_switch(uint32_t arg0, uint32_t arg1, uint32_t arg2)
                         if ((uint8_t)((uint32_t)arg2 == (uint32_t)0U)) {
                             return (uint64_t)0xffffffffU;
                         } else {
-                            tmp_38d08_1 = (uint32_t)arg1 == (uint32_t)0x80000000U && (uint32_t)arg2 == (uint32_t)0xffffffffU ? r2sleigh_residual_u32(1) : (uint32_t)((int32_t)arg1 / (int32_t)arg2);
-                            return (uint64_t)(uint32_t)((uint8_t)((uint32_t)arg2 == (uint32_t)0U) ? (uint32_t)0U : (uint32_t)tmp_38d08_1);
+                            tmp_38d00_1 = (uint8_t)((uint32_t)arg2 == (uint32_t)0U);
+                            tmp_38d08_1 = tmp_38d00_1 ? (uint32_t)1U : (uint32_t)arg2;
+                            tmp_38d10_1 = (uint32_t)arg1 == (uint32_t)0x80000000U && (uint32_t)tmp_38d08_1 == (uint32_t)0xffffffffU ? r2sleigh_residual_u32(1) : (uint32_t)((int32_t)arg1 / (int32_t)tmp_38d08_1);
+                            return (uint64_t)(uint32_t)(tmp_38d00_1 ? (uint32_t)0U : (uint32_t)tmp_38d10_1);
                         }
                     }
                 }

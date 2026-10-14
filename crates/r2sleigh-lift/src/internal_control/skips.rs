@@ -215,7 +215,7 @@ fn blocks(nodes: Vec<Node>) -> Vec<Block> {
 }
 
 fn predicable(op: &R2ILOp) -> bool {
-    op.is_speculatable_value() || is_access(op)
+    op.is_speculatable_value() || is_access(op) || op.is_integer_division()
 }
 
 fn is_access(op: &R2ILOp) -> bool {
@@ -540,6 +540,31 @@ impl Predicated<'_> {
                 *input = candidate.clone();
             }
         }
+        if let R2ILOp::IntDiv { b: divisor, .. }
+        | R2ILOp::IntSDiv { b: divisor, .. }
+        | R2ILOp::IntRem { b: divisor, .. }
+        | R2ILOp::IntSRem { b: divisor, .. } = &mut op
+        {
+            // Where the block does not run its quotient is discarded, so it divides by one there
+            // and cannot trap ahead of the test that guarded it (audit W22).
+            let (cond, holds) = self.cond.clone()?;
+            let safe = self.allocator.allocate(divisor.size)?;
+            let one = Varnode::constant(1, divisor.size);
+            let (if_true, if_false) = match holds {
+                true => (divisor.clone(), one),
+                false => (one, divisor.clone()),
+            };
+            self.emitted.push((
+                R2ILOp::Select {
+                    dst: safe.clone(),
+                    cond,
+                    if_true,
+                    if_false,
+                },
+                meta.clone(),
+            ));
+            *divisor = safe;
+        }
         let guard = match is_access(&op) {
             true => self.value(meta)??,
             false => Varnode::constant(1, 1),
@@ -848,6 +873,66 @@ mod tests {
                 assert_eq!(step(op, &mut state), Flow::Next, "{op:?}");
             }
             assert_eq!(state.value(&guard), Ok(u128::from(!a && !b)), "a={a} b={b}");
+        }
+    }
+
+    /// AArch64 `sdiv`'s shape, `q = 0; if (b == 0) goto E; q = a / b; E: x = q`: a zero divisor
+    /// leaves nought, and the division never runs on it, where it used to be hoisted unguarded.
+    #[test]
+    fn a_division_skipped_at_a_zero_divisor_never_divides_by_it() {
+        let (zero, quotient) = (Varnode::unique(0x100, 1), Varnode::unique(0x108, 8));
+        let (dst, a, b) = (quotient.clone(), X.clone(), Y.clone());
+        for (divided, division) in [
+            (R2ILOp::IntSDiv { dst, a, b }, true),
+            (
+                R2ILOp::IntDiv {
+                    dst: quotient.clone(),
+                    a: X.clone(),
+                    b: Y.clone(),
+                },
+                true,
+            ),
+            (
+                R2ILOp::IntSRem {
+                    dst: quotient.clone(),
+                    a: X.clone(),
+                    b: Y.clone(),
+                },
+                false,
+            ),
+        ] {
+            let ops = normalized(vec![
+                set(&quotient, 0),
+                R2ILOp::IntEqual {
+                    dst: zero.clone(),
+                    a: Y.clone(),
+                    b: Varnode::constant(0, 8),
+                },
+                skip(Some(&zero), 2),
+                divided,
+                R2ILOp::Copy {
+                    dst: X.clone(),
+                    src: quotient.clone(),
+                },
+            ]);
+            assert!(
+                !ops.iter()
+                    .any(|op| op.is_integer_division() && op.inputs().contains(&&Y)),
+                "{ops:?}"
+            );
+            for (x, y, expected) in [(7u128, 0u128, 0u128), (7, 2, if division { 3 } else { 1 })] {
+                let mut state = State::new(Endianness::Little, |_| None, 1 << 10).expect("state");
+                state.set_register(X.offset, 8, x).expect("x");
+                state.set_register(Y.offset, 8, y).expect("y");
+                for op in &ops {
+                    assert_eq!(step(op, &mut state), Flow::Next, "{op:?}");
+                }
+                assert_eq!(
+                    state.register(X.offset, 8),
+                    Some(expected),
+                    "{x}/{y}: {ops:?}"
+                );
+            }
         }
     }
 
