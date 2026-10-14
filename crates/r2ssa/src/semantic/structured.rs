@@ -150,13 +150,8 @@ pub(crate) fn member_run_slices(
     (members.len() > 1).then_some(members)
 }
 
-#[cfg_attr(
-    dylint_lib = "r2sleigh_lints",
-    allow(
-        entity_keyed_map,
-        reason = "a walk guard of one query: the few ids one walk visits, where a bitset would cost O(values) per query"
-    )
-)]
+/// The blocks on a cycle no structured loop covers: a strongly connected component of several
+/// blocks, or a block that is its own successor. O(B + E), where a walk per block cost O(B · (B + E)).
 pub(crate) fn collect_unstructured_cycle_blocks(
     graph: &SsaGraph,
     loops: &BTreeMap<LoopId, StructuredLoopFact>,
@@ -165,26 +160,23 @@ pub(crate) fn collect_unstructured_cycle_blocks(
         .values()
         .flat_map(|loop_fact| loop_fact.body.iter().copied())
         .collect::<BTreeSet<_>>();
-    graph
-        .blocks
-        .iter()
-        .filter(|block| !covered.contains(&block.addr))
-        .filter(|block| {
-            let mut visited = BTreeSet::new();
-            let mut pending = block.successors.clone();
-            while let Some(candidate) = pending.pop() {
-                if candidate == block.id {
-                    return true;
-                }
-                if !visited.insert(candidate) {
-                    continue;
-                }
-                if let Some(candidate) = graph.block(candidate) {
-                    pending.extend(candidate.successors.iter().copied());
-                }
-            }
-            false
+    let count = graph.blocks.len();
+    let successors = (graph.blocks.iter())
+        .map(|block| {
+            (block.successors.iter())
+                .map(|successor| successor.0 as usize)
+                .filter(|successor| *successor < count)
+                .collect::<Vec<_>>()
         })
+        .collect::<Vec<_>>();
+    let mut cyclic = vec![false; count];
+    for component in crate::view::strongly_connected_components(&successors) {
+        if component.len() > 1 || successors[component[0]].contains(&component[0]) {
+            component.into_iter().for_each(|block| cyclic[block] = true);
+        }
+    }
+    (graph.blocks.iter())
+        .filter(|block| cyclic[block.id.0 as usize] && !covered.contains(&block.addr))
         .map(|block| block.addr)
         .collect()
 }
@@ -521,4 +513,52 @@ pub(crate) fn collect_structured_recursive_call_facts(
         );
     }
     recursive_calls
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use r2il::{ArchSpec, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
+
+    fn block(addr: u64, op: R2ILOp) -> R2ILBlock {
+        let mut block = R2ILBlock::new(addr, 4);
+        block.push(op);
+        block
+    }
+
+    fn cbranch(target: u64) -> R2ILOp {
+        R2ILOp::CBranch {
+            target: Varnode::constant(target, 8),
+            cond: Varnode::new(SpaceId::Register, 32, 1),
+        }
+    }
+
+    #[test]
+    fn a_block_is_on_a_cycle_through_a_component_or_its_own_edge() {
+        let mut arch = ArchSpec::new("cycles");
+        arch.add_register(RegisterDef::new("cond", 32, 1));
+        arch.add_register(RegisterDef::new("pc", 0x80, 8));
+        let blocks = [
+            block(0x1000, cbranch(0x100c)),
+            block(
+                0x1004,
+                R2ILOp::Branch {
+                    target: Varnode::constant(0x1008, 8),
+                },
+            ),
+            block(0x1008, cbranch(0x1004)),
+            block(0x100c, cbranch(0x100c)),
+            block(
+                0x1010,
+                R2ILOp::Return {
+                    target: Varnode::new(SpaceId::Register, 0x80, 8),
+                },
+            ),
+        ];
+        let function = SSAFunction::from_blocks_raw(&blocks, Some(&crate::Arch::from(arch)))
+            .expect("fixture SSA");
+        let graph = SsaGraph::from_function_with_storage(&function);
+        let cycles = collect_unstructured_cycle_blocks(&graph, &BTreeMap::new());
+        assert_eq!(cycles, BTreeSet::from([0x1004, 0x1008, 0x100c]));
+    }
 }
