@@ -132,7 +132,7 @@ void __libc_csu_init(int32_t argc, char** argv, char** envp)
     uint64_t x22_2;
     uint64_t x23_2;
     uint64_t x8_4;
-    uint64_t tmp_3e280_1;
+    uint64_t tmp_3e300_1;
 
     /* r2dec proof: no individual construct is marked; 45 source obligations: 30 rendered, 15 elided, 0 refused; 12 statements rendered */
     {
@@ -143,10 +143,10 @@ void __libc_csu_init(int32_t argc, char** argv, char** envp)
             for (; ; ) {
                 x8_4 = r2sleigh_load_u64((void*)x22_2);
                 ((uint64_t(*)(uint64_t, uint64_t, uint64_t))(uint64_t)r2sleigh_load_u64((void*)x22_2))((uint64_t)(uint32_t)argc, (uint64_t)argv, (uint64_t)envp);
-                tmp_3e280_1 = (uint64_t)((uint64_t)x23_2 - (uint64_t)1U);
-                if ((uint8_t)((uint64_t)tmp_3e280_1 != (uint64_t)0U)) {
+                tmp_3e300_1 = (uint64_t)((uint64_t)x23_2 - (uint64_t)1U);
+                if ((uint8_t)((uint64_t)tmp_3e300_1 != (uint64_t)0U)) {
                     x22_2 = (uint64_t)((uint64_t)x22_2 + (uint64_t)8U);
-                    x23_2 = tmp_3e280_1;
+                    x23_2 = tmp_3e300_1;
                 } else {
                     break;
                 }
