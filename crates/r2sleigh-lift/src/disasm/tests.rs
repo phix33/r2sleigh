@@ -57,6 +57,48 @@ fn x86_32_bit_register_write_explicitly_zero_extends_its_declared_carrier() {
     );
 }
 
+/// `stlxp w0, x1, x2, [x3]` and `stxp w0, x1, x2, [x3]` store Rt2 at [Xn + 8] (Arm ARM: one
+/// 16-byte access), read off the specification's p-code. Their skip guards the stores by the
+/// unmodelled monitor, so the lift refuses every store it guards rather than run it.
+#[cfg(feature = "arm")]
+#[test]
+fn aarch64_store_exclusive_pair_stores_eight_bytes_up_and_the_lift_refuses_it_whole() {
+    let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::Aarch64Le)
+        .expect("trusted AArch64 specification");
+    for (name, word) in [("stlxp", 0xc820_8861u32), ("stxp", 0xc820_0861)] {
+        let bytes = padded_instruction(word.to_le_bytes());
+        disassembler.clear_decode_cache().expect("fresh decode");
+        let pcode = disassembler.pcode(&bytes, 0x1000).expect("p-code");
+        let raw = disassembler
+            .translate_pcode(pcode, 0x1000)
+            .expect("translation");
+        let added = |address: &Varnode| {
+            raw.ops.iter().find_map(|op| match op {
+                R2ILOp::IntAdd { dst, b, .. } if dst == address => b.const_value(),
+                _ => None,
+            })
+        };
+        let offsets: Vec<u64> = raw
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                R2ILOp::Store { addr, .. } => Some(added(addr).unwrap_or(0)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(offsets, vec![0, 8], "{name}");
+
+        let lifted = disassembler
+            .lift_genuine_block(&bytes, 0x1000, 4)
+            .expect("lift");
+        let ops = &lifted.block().ops;
+        assert!(
+            !ops.iter().any(|op| op.is_memory_write()) && ops.contains(&R2ILOp::Unimplemented),
+            "{name}: {ops:?}"
+        );
+    }
+}
+
 #[cfg(feature = "arm")]
 #[test]
 fn aarch64_w_register_write_explicitly_zero_extends_its_declared_carrier() {
