@@ -220,7 +220,8 @@ def summarize(records: list[gate.Record]) -> str:
         if record.status in ("equal",):
             continue
         cause = record.evidence.get("cause") or record.evidence.get("field") or \
-            record.evidence.get("detector") or record.evidence.get("variant") or ""
+            record.evidence.get("detector") or record.evidence.get("variant") or \
+            record.evidence.get("residual_cause") or ""
         lines.append(f"  {record.status:13} {record.key}: {str(cause)[:160]}")
     return "\n".join(lines)
 
@@ -322,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         baseline = gate.load_baseline(args.baseline)
         selected = selected_predicate(args, sources, target)
         held = {key for key in baseline["records"] if selected(key)}
-        graded = {r.key: (r.status, gate.reason(r.status, r.evidence)) for r in records}
+        graded = {r.key: gate.graded(r) for r in records}
         problems = gate.ratchet(baseline, graded, held)
         for line in problems:
             print(f"ratchet: {line}")
@@ -337,8 +338,8 @@ def main(argv: list[str] | None = None) -> int:
                        sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        print(f"baseline written: {args.write_baseline} (fill in a cause for every non-equal "
-              "record before gating on it)")
+        print(f"baseline written: {args.write_baseline} (fill in a cause, owner and site for every "
+              "non-equal record before gating on it)")
     return status
 
 

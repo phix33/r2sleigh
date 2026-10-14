@@ -90,6 +90,27 @@ The return is compared at the source's width and class (two NaNs agree); the
 arena, the writable segments, stdout and stderr byte for byte. A vector the
 original does not return or exit from lies outside its domain and is dropped.
 
+**State at a residual trap.** A rendering that traps in its own code is
+snapshotted in the fault handler: its stdio is flushed, the arena and the
+writable segments are copied, how much fd 1 and fd 2 held is noted (qemu-user
+reports the signal on fd 2 after it), and the trap's site (the residual helper's
+`site` argument, still in the first argument register at `-O0`) and depth are
+recorded. The depth says whether the trapping activation of the rendering is
+the one the thunk called (`outermost`), one the rendering or the program
+reached again (`nested`), or one the unwinder could not place (`unknown`).
+`gate.py` then grades the trap against the original's end:
+
+| compared | when | `differs` if |
+|---|---|---|
+| stdout, stderr | every trap at a residual | what the rendering wrote is not a prefix of what the original wrote |
+| arena, writable segments | the site's `pddj` cause is `unproven-return` (a whole return statement), the trap is `outermost`, and the original returned | any byte differs |
+
+A residual of any other cause may stand anywhere in the body, so the original
+may still write after the point the rendering stopped at: its memory is not
+compared, and the evidence says the output was. A trap the gate could not
+snapshot compares nothing, and a vector that compared nothing does not count
+towards the floor (below).
+
 Records
 -------
 
@@ -101,8 +122,8 @@ target (`aarch64-gcc-O0`):
 | status | graded by | meaning |
 |---|---|---|
 | `equal` | engine | every surviving vector agreed |
-| `residual-trap` | engine | agreed wherever it ran; some vector reached a counted residual |
-| `differs` | engine | a vector returned, wrote, printed or ended differently |
+| `residual-trap` | engine | agreed wherever it ran; some vector reached a counted residual, and the state before it agreed |
+| `differs` | engine | a vector returned, wrote, printed or ended differently, or had written or printed differently by a residual trap |
 | `uninit` | engine | the rendering read a value nothing wrote |
 | `ub` | engine | UBSan reported, or `-O0` and `-O2` disagree |
 | `compile-error` | engine | a build or load failed; the diagnostic is kept |
@@ -113,7 +134,10 @@ target (`aarch64-gcc-O0`):
 | `harness-error` | harness | the gate itself failed, never asked r2s, or cannot bind an object link on this target |
 
 Each record carries the first vector that shows its status (inputs, the field,
-the first differing address and bytes), the vector counts, the proof counters
+the first differing address and bytes; for a trap, the helper, the site and its
+`pddj` cause), the vector counts (`compared`: vectors compared with the
+original; `trap_compared` and `trap_memory`: traps whose output, and whose
+memory too, were compared), the proof counters
 from `pddj`, and whether the rendering also compiles under
 `-std=c11 -Wall -Wextra -Werror -O2` (`strict`, evidence only).
 
@@ -129,6 +153,12 @@ overflow `ub`; a write to the wrong global and a wrong byte through a pointer
 `differs` (memory, arena); swapped printf arguments `differs` (stdout); a
 reached residual `residual-trap`, also in a function that prints on every
 vector and traps on some, but a trap outside every residual helper `differs`;
+a wrong global written before a returned residual (on every vector, or only
+where it traps) and a wrong value printed before any residual `differs`, a
+right global before a returned residual `residual-trap` with its memory
+compared, and a residual before a write the original makes, or a returned
+residual in an inner activation, `residual-trap` with only its output
+compared;
 a function that writes to stderr and faults on its NULL vector `equal` on the
 vectors after it; a libm call `equal` (the rendering links against the
 original's `DT_NEEDED`); a recursion through a link to the function's own
@@ -154,10 +184,14 @@ The ratchet
 
 `tests/equiv/baseline.json` (x86-64) and `tests/equiv/baseline-aarch64.json`
 hold, per key, a status and -- for every record
-that is not `equal` -- the person's recorded cause and the machine's reason
-(`gate.reason`: the refusal cause, the differing field, the residual helper,
-with addresses, generated names and source line numbers erased). It also
-names the compilers it was blessed on. With `--baseline` the ratchet is exact:
+that is not `equal` -- the person's recorded `cause`, its `owner` (the
+ROADMAP.md item that owns the fix) and `site` (the repository path where it
+lands, or that states the limitation), and the machine's `reason`
+(`gate.reason`: the refusal cause, the differing field, the residual helper and
+its site's `pddj` cause, with addresses, generated names and source line
+numbers erased); a `residual-trap` also holds what it `compared` before its
+traps (`memory`, `output` or `none`). It also names the compilers it was
+blessed on. With `--baseline` the ratchet is exact:
 
 - every function's status must be the baseline's. Falling short blocks, and
   so does an improvement the baseline does not hold yet: the next change could
@@ -167,9 +201,14 @@ names the compilers it was blessed on. With `--baseline` the ratchet is exact:
   `new` under its own message, the worst departure;
 - a non-`equal` record must fail for the baseline's reason, where the baseline
   records one;
+- a `residual-trap` must compare what the baseline says it compared, so a
+  record cannot silently go back to comparing nothing before its traps;
 - a function the baseline knows, inside the run's selection, must still be
   graded, and one it does not know must be blessed;
-- a non-`equal` baseline record without a cause is itself a failure;
+- a non-`equal` baseline record whose cause does not stand is itself a
+  failure: a cause that is missing, shorter than six words or a placeholder
+  (`gate.PLACEHOLDER_CAUSES`: "not yet triaged", "TODO", ...), an owner that is
+  no item ROADMAP.md names, or a site that is no path in the repository;
 - a run built by other compilers than the baseline names is refused before
   anything is graded, since another compiler makes other binaries.
 
@@ -179,9 +218,9 @@ full run on an x86-64 Linux host under qemu-user, and is held by running
 `run_equiv.py --target aarch64 --baseline tests/equiv/baseline-aarch64.json`
 there.
 The baseline is written only with `--write-baseline PATH`, which keeps any
-cause already recorded for an unchanged status and reason, records each
-reason and the toolchain, and leaves the other causes `null` for a person to
-fill in after reading the records.
+cause, owner and site already recorded for an unchanged status and reason,
+records each reason, what each trap compared and the toolchain, and leaves the
+others `null` for a person to fill in after reading the records.
 
 Targets
 -------
@@ -264,8 +303,9 @@ Limits, stated
 - Aggregates passed or returned by value, `long double`, and variadic
   definitions are `unsupported`, with the reason.
 - Equal on the vectors is evidence, not proof. An `equal` or `residual-trap`
-  rests on at least a quarter of the vectors graded (`Config.floor`; every
-  function of the default population grades 13 or more of 48), fewer is
-  `untested`, and the counts are in every record. A defect one vector shows
+  rests on at least a quarter of the vectors compared with the original
+  (`Config.floor`; every function of the default population grades 13 or more
+  of 48; a trap counts when its state was compared), fewer is `untested`, and
+  the counts are in every record. A defect one vector shows
   stands however few were graded. A vector a rendering run could not be made
   on is not graded, and leaves the record `harness-error`.

@@ -1,5 +1,5 @@
 {
- "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported. Re-blessed after 91f14102 (callee reach without a symbol name): shape_pointer_to_pointer clang-O0 and shape_struct_pointer clang-O1/O2 are equal; manual_limits main clang-O0/O2 change class on the split items array (P4). Re-blessed after P4.1 and the variadic contract (9a45bf0e): eleven records equal (printf tails counted from their format literals; frame objects bounded by save slots); review.c main clang-O0/O1/O2 and branchy main clang-O0 now reach counted residuals instead of silent wrong output; manual_limits clang-O2 main is graded ub on its narrowed result (PE). Re-blessed after R4 (parameter homes promoted, preserved-register saves kept; the value view refreshed after entry lanes are minted; a formal's declaration accounts its entry value; recovered interfaces carry the roles' register names): gcc-O0 classify resolves its jump table through the promoted home and is equal, and clang-O2 shape_pointer_to_pointer is equal. 590 equal. Every non-equal record now also carries its reason: the machine evidence behind its status, normalised (gate.reason). The ratchet holds status and reason exactly; any change, an improvement included, is blessed with its cause. Re-blessed after the demanded-bytes release (an INSERT whose demanded bytes lie in its lane no longer reads its base) and the lone-PLT-stub start: bool_relay and sign_xor gcc-O1/O2 are equal; branchy main clang-O1/O2 now call printf by name and stop at the unplaced stack argument. 582 equal. Re-blessed after 63e6300e and fec919f7 (run at fec919f7 on contabo, 604 equal): classify clang-O1/O2 and gcc-O2 equal (a number an operation computes with is no string literal), shape_call_chain clang-O1/O2 equal (a frame base survives every call and ends at its block's rewrite); no other record moved. shape_stack_buffer gcc-O0's residual reads as r2sleigh_residual_u64 since f9111a28 (bisected: i64 at f9111a28^): a merge no storage keeps live is no longer placed, and the residual takes the canary load's unsigned type instead of the merge's; still the SSP canary trap. Re-blessed at P4's exit (9da018ab; one frame model, the canary decided under UbFreeSource, promotion as an SSA rewrite, the merged-reach extent rule): 629 equal. The canary's residual trap had hidden defects; each record that left it names its owner, and the calls whose arity the registers leave unproven refuse (decided 2026-10-07). Re-blessed at the result-carrier stack (#85 to #87, gated at 610286e8 on gcc 13.3.0 / clang 18.1.3): 638 equal. A body writing both result registers is unproven unless the program's calls read one; a parameter handed on untouched, or read only for a call of unproven arity, leaves the arity a floor its callers fill. Gained: avg at clang-O0 and gcc-O0 (it returned the loop counter from rax), hashes gcc-O2 main (it called combined() without the buffer), shapes main at clang-O1, clang-O2, gcc-O1 and gcc-O2, and five mains whose calls now take what the caller wrote. Lost to an honest residual: crc32_init twice and fill (void, unread), manual_limits gcc-O2 main (no caller in the program). Re-blessed at the D switch (#122): pdd renders through the staged decompiler, every move judged; equal rises x86-64 635 to 659 and aarch64 606 to 631, with no differs, ub, uninit or compile error on either. Re-blessed at #201 from its CI run (38331907688): value_count_bits is equal at gcc and clang -O0/-O1/-O2, LZCOUNT being spelled (r2sleigh_lzcount_<bits>). Re-blessed at #228 from its CI run (38488342021): shape_multiword_return at all six cells, and shape_struct_pointer and shape_struct_value at -O0, are equal, a value returned in RDX:RAX being one result where a caller reads RDX (#206).",
+ "note": "Blessed at P0 (b1c6b637) after triage of every non-equal record; the bracket names the plan phase that owns the fix. Re-blessed after the core-lowering merge (902cd724, gated at c50fcc57 on gcc 13.3.0 / clang 18.1.3): siphash24 gcc-O1/O2 and typed_compete clang/gcc-O0 are equal. Re-blessed after the p1-identity merge (8527b472, gated at a9774f90): mul_div gcc/clang-O0, value_div_pow2 clang-O0, value_mul_high gcc-O0 and classify clang-O0 are equal; the three review.c main records change class (P4); vfold is now rendered and graded unsupported. Re-blessed after 91f14102 (callee reach without a symbol name): shape_pointer_to_pointer clang-O0 and shape_struct_pointer clang-O1/O2 are equal; manual_limits main clang-O0/O2 change class on the split items array (P4). Re-blessed after P4.1 and the variadic contract (9a45bf0e): eleven records equal (printf tails counted from their format literals; frame objects bounded by save slots); review.c main clang-O0/O1/O2 and branchy main clang-O0 now reach counted residuals instead of silent wrong output; manual_limits clang-O2 main is graded ub on its narrowed result (PE). Re-blessed after R4 (parameter homes promoted, preserved-register saves kept; the value view refreshed after entry lanes are minted; a formal's declaration accounts its entry value; recovered interfaces carry the roles' register names): gcc-O0 classify resolves its jump table through the promoted home and is equal, and clang-O2 shape_pointer_to_pointer is equal. 590 equal. Every non-equal record now also carries its reason: the machine evidence behind its status, normalised (gate.reason). The ratchet holds status and reason exactly; any change, an improvement included, is blessed with its cause. Re-blessed after the demanded-bytes release (an INSERT whose demanded bytes lie in its lane no longer reads its base) and the lone-PLT-stub start: bool_relay and sign_xor gcc-O1/O2 are equal; branchy main clang-O1/O2 now call printf by name and stop at the unplaced stack argument. 582 equal. Re-blessed after 63e6300e and fec919f7 (run at fec919f7 on contabo, 604 equal): classify clang-O1/O2 and gcc-O2 equal (a number an operation computes with is no string literal), shape_call_chain clang-O1/O2 equal (a frame base survives every call and ends at its block's rewrite); no other record moved. shape_stack_buffer gcc-O0's residual reads as r2sleigh_residual_u64 since f9111a28 (bisected: i64 at f9111a28^): a merge no storage keeps live is no longer placed, and the residual takes the canary load's unsigned type instead of the merge's; still the SSP canary trap. Re-blessed at P4's exit (9da018ab; one frame model, the canary decided under UbFreeSource, promotion as an SSA rewrite, the merged-reach extent rule): 629 equal. The canary's residual trap had hidden defects; each record that left it names its owner, and the calls whose arity the registers leave unproven refuse (decided 2026-10-07). Re-blessed at the result-carrier stack (#85 to #87, gated at 610286e8 on gcc 13.3.0 / clang 18.1.3): 638 equal. A body writing both result registers is unproven unless the program's calls read one; a parameter handed on untouched, or read only for a call of unproven arity, leaves the arity a floor its callers fill. Gained: avg at clang-O0 and gcc-O0 (it returned the loop counter from rax), hashes gcc-O2 main (it called combined() without the buffer), shapes main at clang-O1, clang-O2, gcc-O1 and gcc-O2, and five mains whose calls now take what the caller wrote. Lost to an honest residual: crc32_init twice and fill (void, unread), manual_limits gcc-O2 main (no caller in the program). Re-blessed at the D switch (#122): pdd renders through the staged decompiler, every move judged; equal rises x86-64 635 to 659 and aarch64 606 to 631, with no differs, ub, uninit or compile error on either. Re-blessed at #201 from its CI run (38331907688): value_count_bits is equal at gcc and clang -O0/-O1/-O2, LZCOUNT being spelled (r2sleigh_lzcount_<bits>). Re-blessed at #228 from its CI run (38488342021): shape_multiword_return at all six cells, and shape_struct_pointer and shape_struct_value at -O0, are equal, a value returned in RDX:RAX being one result where a caller reads RDX (#206). Re-blessed at GT T1/T20 (schema 2): a residual trap is graded on the state it reached, so every residual-trap record now compares its output before the trap (and its memory, for a returned residual in the outermost activation; `compared`), and its reason names the trapping site's pddj cause; no record moved status. Every non-equal record names its ROADMAP.md owner and its site; causes that no longer described their record were rewritten from its rendering (sext, which carried gate_three's setcc cause, and the records whose trap had moved to another site), and the placeholders replaced.",
  "records": {
   "tests/corpus/branchy.c::clang-O0::addr_chain": {
    "status": "equal"
@@ -12,7 +12,10 @@
   },
   "tests/corpus/branchy.c::clang-O0::and_chain_effect": {
    "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O0::bool_relay": {
@@ -50,12 +53,18 @@
   },
   "tests/corpus/branchy.c::clang-O0::inverted_void": {
    "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O0::main": {
-   "cause": "[P7] The run reaches a counted residual (r2sleigh_residual_void). Was ub.",
-   "reason": "r2sleigh_residual_void",
+   "cause": "The first six-argument printf passes its last argument on the stack, which the call cannot place yet: the store of that word is an UnsupportedInstruction gap and the call an EffectNotRendered gap, so main traps there, between bounded_fetch and narrow64, having printed nothing the original did not. The same printf as the clang-O1 and clang-O2 records; it replaces a cause that said only 'Was ub.'",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnsupportedInstruction",
+   "site": "crates/r2ssa/src/printf.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O0::mask_probe": {
@@ -156,12 +165,18 @@
   },
   "tests/corpus/branchy.c::clang-O1::inverted_void": {
    "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O1::main": {
    "cause": "printf@plt is named at its stub again (a lone PLT stub starts on the section's stated alignment, not at PLT0's nopl padding), so the six-argument printf calls get the format-proven count and the stack-passed argument they cannot yet place is a visible residual; the u128 XMM-zeroing residual before it is gone with the demanded-bytes release",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnsupportedInstruction",
+   "site": "crates/r2ssa/src/printf.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O1::mask_probe": {
@@ -259,12 +274,18 @@
   },
   "tests/corpus/branchy.c::clang-O2::inverted_void": {
    "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O2::main": {
    "cause": "printf@plt is named at its stub again (a lone PLT stub starts on the section's stated alignment, not at PLT0's nopl padding), so the six-argument printf calls get the format-proven count and the stack-passed argument they cannot yet place is a visible residual; the u128 XMM-zeroing residual before it is gone with the demanded-bytes release",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnsupportedInstruction",
+   "site": "crates/r2ssa/src/printf.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::clang-O2::mask_probe": {
@@ -326,7 +347,10 @@
   },
   "tests/corpus/branchy.c::gcc-O0::and_chain_effect": {
    "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O0::bool_relay": {
@@ -364,7 +388,10 @@
   },
   "tests/corpus/branchy.c::gcc-O0::inverted_void": {
    "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O0::main": {
@@ -453,7 +480,10 @@
   },
   "tests/corpus/branchy.c::gcc-O1::gate_three": {
    "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "output",
+   "owner": "B",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/demand.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O1::global_eq_guard": {
@@ -472,8 +502,11 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O1::main": {
-   "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "paired_sum_diff writes only DL (`sete %dl`) and then reads EDX whole (`and %edx,%eax`), though its result keeps only the low byte; its interface therefore admits EDX as a third parameter, and main passes it RDX, which nothing assigns (never-assigned), so the call's third argument is a residual. Demanded bytes across the call would leave EDX's upper bytes no parameter. Before, this record carried the SSP canary's cause, which no longer describes it.",
+   "compared": "output",
+   "owner": "B",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2ssa/src/demand.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O1::mask_probe": {
@@ -556,7 +589,10 @@
   },
   "tests/corpus/branchy.c::gcc-O2::gate_three": {
    "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "output",
+   "owner": "B",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/demand.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O2::global_eq_guard": {
@@ -575,8 +611,11 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O2::main": {
-   "cause": "[P4 memory (SSP elision); prerequisite P1 reads (P1.5 SystemReserved)] [G-FS] SSP canary: prologue `mov rax, fs:0x28` renders `*(uint64_t*)(r2sleigh_residual_u64(1) + 40)`. Entry FS_OFFSET_0 (thread pointer) is in no argument slot -> Held (r2dec/src/binding_plan/name_resolution.rs:249-250) -> residual (r2dec/src/lib.rs:536); it dominates every path. Missing facts: no SystemReserved thread-pointer class (SourceCallEffect two-valued, r2source/src/contracts.rs:3843-3845, so calls also CallDefine FS_OFFSET_n) and no structural SSP elision.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "paired_sum_diff writes only DL (`sete %dl`) and then reads EDX whole (`and %edx,%eax`), though its result keeps only the low byte; its interface therefore admits EDX as a third parameter, and main passes it RDX, which nothing assigns (never-assigned), so the call's third argument is a residual. Demanded bytes across the call would leave EDX's upper bytes no parameter. Before, this record carried the SSP canary's cause, which no longer describes it.",
+   "compared": "output",
+   "owner": "B",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2ssa/src/demand.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::gcc-O2::mask_probe": {
@@ -638,7 +677,10 @@
   },
   "tests/corpus/hashes.c::clang-O0::crc32_init": {
    "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/hashes.c::clang-O0::crc32_table": {
@@ -739,7 +781,10 @@
   },
   "tests/corpus/hashes.c::clang-O2::crc32_init": {
    "cause": "The source returns void; the vectorized body leaves both RAX and XMM0 written on its way out, so the result carrier is unproven (r2ssa recover_interface, #85), and no call reads either register to decide it (#86): the rendered return is a residual that traps where it would be read. Owner: P7, the result proof over the call graph that makes it void.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/hashes.c::clang-O2::crc32_table": {
@@ -789,7 +834,10 @@
   },
   "tests/corpus/hashes.c::gcc-O0::crc32_init": {
    "cause": "The source returns void, and rax is written on some paths only; the caller never fills it, so the result is unproven and the rendered return is a residual that traps where it would be read (r2ssa recover_interface, fe7698e8). Owner: P7, the result proof over the call graph that makes it void.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/hashes.c::gcc-O0::crc32_table": {
@@ -890,7 +938,10 @@
   },
   "tests/corpus/hashes.c::gcc-O2::crc32_init": {
    "cause": "The source returns void; the vectorized body leaves both RAX and XMM0 written on its way out, so the result carrier is unproven (r2ssa recover_interface, #85), and no call reads either register to decide it (#86): the rendered return is a residual that traps where it would be read. Owner: P7, the result proof over the call graph that makes it void.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/hashes.c::gcc-O2::crc32_table": {
@@ -940,12 +991,16 @@
   },
   "tests/corpus/shapes.c::clang-O0::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value. `struct mixed` is 16 bytes laid out as byte@0, half@2, word@4, quad@8. Both eightbytes are INTEGER class, so it is passed in RDI:RSI. tests/equiv/spec.py:175-176 marks every by-value aggregate unsupported. The engine already renders the function register-equivalently as `uint64_t fcn_4016a0(uint64_t RDI_0, uint64_t RSI_0)`, with the field shifts applied to RDI and `^ RSI_0`. The GATE should lift this limitation. CORRECTION: spec.py does not compute a SysV class for aggregates today (grep finds no eightbyte or classification code). The gate firs...",
+   "owner": "GT",
    "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O0::mixed_from": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return. `struct mixed` has two INTEGER eightbytes and comes back in RAX:RDX. The gate cannot lift it yet, because the ENGINE drops the second eightbyte. The machine code does `mov rdx,[rbp-0x8]` (value.quad = a^b), but pdd @0x401730 declares `uint64_t` and returns only `*(uint64_t*)stack_m24` (RAX), so the computed `stack_m16 = a ^ b` is dead. Order: first the engine models the RAX:RDX result (P7 result classes). Then the gate classifies the aggregate return (it needs the same SysV classifier as mixed_fold) and reuses its int128 (RAX:RDX) compare (spec.py:119-1...",
+   "owner": "P7",
    "reason": "an aggregate return (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O0::mixed_touch": {
@@ -974,7 +1029,10 @@
   },
   "tests/corpus/shapes.c::clang-O0::shape_function_pointer": {
    "cause": "[#122] The call through the function table has unproven arity (r2ssa: the call site may hand on an argument slot the body does not write), so staged writes it as a residual call; decision 2026-10-07: refuse an unproven arity. Legacy refused the function, or at clang-O0 guessed the arity and matched. Owner: an indirect call's arity from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/call_sites.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O0::shape_multiword_return": {
@@ -1024,12 +1082,16 @@
   },
   "tests/corpus/shapes.c::clang-O0::vfold": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: a variadic definition (spec.py:110-111). The engine must lift first. It renders `uint64_t fcn_4012e0(uint32_t EDI_0, uint64_t RSI_0, ..., uint64_t R9_0)`: the va_start spills of RSI..R9 are taken as 6 fixed parameters. The register-save area is split into frame scalars, AL (the SysV vector count) and XMM are read as residuals, and overflow_arg_area points into the rendering's own frame, not the caller's stack. Lifting the gate now would give ub/differs. Order: engine P7 first (a `variadic` interface bit, AtLeast arity, and the va_list save-area idiom rendered as `...`/va_ar...",
+   "owner": "P7",
    "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O0::wide_make": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return. `struct wide` is two u64 returned in RAX:RDX. The engine drops RDX (value.high = (a^b)*0xc2b2ae3d27d4eb4f) and declares `uint64_t fcn_401c30(uint64_t,uint64_t)`. The engine must lift first (P7 result classes RAX+RDX). The gate then compares both halves through its int128 path.",
+   "owner": "P7",
    "reason": "an aggregate return (struct wide)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O1::indirect_load": {
@@ -1043,7 +1105,9 @@
   },
   "tests/corpus/shapes.c::clang-O1::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value (struct mixed in RDI:RSI). VERIFIED: pdd renders `return RSI_0 ^ ((RDI_0 >> 24 & (uint64_t)-0x100) | (RDI_0 << 56 | (uint64_t)((uint32_t)RDI_0 & 0xffff0000) << 24));`. RDI<<56 is byte<<56. (RDI&0xffff0000)<<24 is half<<40. (RDI>>24)&~0xff is word<<8. The bit ranges 56-63, 40-55 and 8-39 are disjoint, so OR equals XOR, and the result is bit-exact to the source. The gate should lift this once it has a SysV aggregate classifier (spec.py has none yet) and can pass the two eightbytes.",
+   "owner": "GT",
    "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O1::mixed_touch": {
@@ -1066,7 +1130,10 @@
   },
   "tests/corpus/shapes.c::clang-O1::shape_byte_indexed_buffer": {
    "cause": "[#122] The vectorised byte loop loads its constants from a constant pool and stores 128-bit lanes, terms and stores staged does not spell yet (TermNotSpelled, StoreNotSpelled), so the loop is residual where legacy refused it or, at x86 clang-O2 and AArch64 clang-O2 and gcc-O1, matched. Owner: staged spelling of constant-pool vector loads.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "D",
+   "reason": "r2sleigh_residual_void gap:StoreNotSpelled",
+   "site": "crates/r2dec/src/render/terms.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O1::shape_call_chain": {
@@ -1074,7 +1141,10 @@
   },
   "tests/corpus/shapes.c::clang-O1::shape_function_pointer": {
    "cause": "[#122] The call through the function table has unproven arity (r2ssa: the call site may hand on an argument slot the body does not write), so staged writes it as a residual call; decision 2026-10-07: refuse an unproven arity. Legacy refused the function, or at clang-O0 guessed the arity and matched. Owner: an indirect call's arity from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnsupportedInstruction",
+   "site": "crates/r2ssa/src/semantic/call_sites.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O1::shape_multiword_return": {
@@ -1121,17 +1191,24 @@
   },
   "tests/corpus/shapes.c::clang-O1::shape_variadic_local": {
    "cause": "[P7 calls (variadic + arity AtLeast; body proof of variadicness)] [G-VARARG] Local variadic callee vfold(unsigned, ...) is recovered as 6 fixed params: its prologue spills RSI..R9 into the va_list save area (XMM0-7 under `test al,al`), so the 'longest prefix read before written' rule (r2ssa/src/recover_interface.rs:1028-1045) admits all six slots; no variadic bit / AtLeast arity exists. Every call mints six args; RCX/R8/R9 the caller never wrote become residuals (`RAX_4 = fcn_401240(2, RDI_0, RSI_0, r2sleigh_residual_u64(1), r2sleigh_residual_u64(2), R9_0);`). passed_through_entry_storages (recover_interface.rs:1015-1026) also inflates the caller itself t...",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O1::vfold": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: a variadic definition. VERIFIED: the engine renders 6 fixed parameters (EDI_0, RSI_0..R9_0) and `__uint128_t stack_m88` for the save area, addressed as `(uint64_t)&stack_m88 - 96` and `+ 96`. Those are out-of-object pointers, which is UB in C. RAX_0 (AL) and XMM3_0 are read as residuals. The engine must lift first (P7), then the gate.",
+   "owner": "P7",
    "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O1::wide_make": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return. VERIFIED: the machine code computes `movabs rdx,0xc2b2ae3d27d4eb4f; imul rdx,rsi` into RDX (value.high). pdd renders `return RSI_0 - RDI_0 * 0x61c8864680b583eb;` with a uint64_t result. That is exactly the low half, since 2^64 - 0x9e3779b97f4a7c15 = 0x61c8864680b583eb. The high half is lost. The engine must lift first (P7), then the gate.",
+   "owner": "P7",
    "reason": "an aggregate return (struct wide)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O2::indirect_load": {
@@ -1145,7 +1222,9 @@
   },
   "tests/corpus/shapes.c::clang-O2::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value (struct mixed in RDI:RSI). The engine renders `uint64_t (uint64_t RDI_0, uint64_t RSI_0)`, which is register-equivalent. The gate should lift this by passing the two eightbytes, which first needs a SysV aggregate classifier in spec.py.",
+   "owner": "GT",
    "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O2::mixed_touch": {
@@ -1168,7 +1247,10 @@
   },
   "tests/corpus/shapes.c::clang-O2::shape_byte_indexed_buffer": {
    "cause": "[#122] The vectorised byte loop loads its constants from a constant pool and stores 128-bit lanes, terms and stores staged does not spell yet (TermNotSpelled, StoreNotSpelled), so the loop is residual where legacy refused it or, at x86 clang-O2 and AArch64 clang-O2 and gcc-O1, matched. Owner: staged spelling of constant-pool vector loads.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "output",
+   "owner": "D",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2dec/src/render/terms.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O2::shape_call_chain": {
@@ -1176,7 +1258,10 @@
   },
   "tests/corpus/shapes.c::clang-O2::shape_function_pointer": {
    "cause": "[#122] The call through the function table has unproven arity (r2ssa: the call site may hand on an argument slot the body does not write), so staged writes it as a residual call; decision 2026-10-07: refuse an unproven arity. Legacy refused the function, or at clang-O0 guessed the arity and matched. Owner: an indirect call's arity from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnsupportedInstruction",
+   "site": "crates/r2ssa/src/semantic/call_sites.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O2::shape_multiword_return": {
@@ -1223,17 +1308,24 @@
   },
   "tests/corpus/shapes.c::clang-O2::shape_variadic_local": {
    "cause": "[P7 calls (variadic + arity AtLeast; body proof of variadicness)] [G-VARARG] Local variadic callee vfold(unsigned, ...) is recovered as 6 fixed params: its prologue spills RSI..R9 into the va_list save area (XMM0-7 under `test al,al`), so the 'longest prefix read before written' rule (r2ssa/src/recover_interface.rs:1028-1045) admits all six slots; no variadic bit / AtLeast arity exists. Every call mints six args; RCX/R8/R9 the caller never wrote become residuals (`RAX_4 = fcn_401240(2, RDI_0, RSI_0, r2sleigh_residual_u64(1), r2sleigh_residual_u64(2), r2sleigh_residual_u64(3));`). passed_through_entry_storages (recover_interface.rs:1015-1026) also inflates...",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O2::vfold": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: a variadic definition. The engine renders a 6-fixed-parameter prototype built from the va_start spills, with residual AL/XMM reads. The engine must lift first (P7 variadic + va_list model), then the gate.",
+   "owner": "P7",
    "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::clang-O2::wide_make": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return in RAX:RDX. The engine renders only RAX (uint64_t) and loses value.high. The engine must lift first (P7 multi-register result), then the gate uses its int128 path.",
+   "owner": "P7",
    "reason": "an aggregate return (struct wide)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O0::indirect_load": {
@@ -1247,12 +1339,16 @@
   },
   "tests/corpus/shapes.c::gcc-O0::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value. The engine spills RDI/RSI to stack_m24/stack_m16 and reads byte/half/word at offsets 0/2/4 and quad from RSI. That is correct at the register level, so the gate should lift this, once it has a SysV aggregate classifier. Separately, the parameter home split into two frame scalars is the known P4 partition issue, not an equivalence problem here.",
+   "owner": "GT",
    "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O0::mixed_from": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return in RAX:RDX. The engine renders a `uint64_t` result from RAX only and drops value.quad in RDX. The engine must lift first: P7 needs a multi-register result class. The gate then classifies the struct return and reuses its int128 compare.",
+   "owner": "P7",
    "reason": "an aggregate return (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O0::mixed_touch": {
@@ -1326,17 +1422,24 @@
   },
   "tests/corpus/shapes.c::gcc-O0::shape_variadic_local": {
    "cause": "[P7 calls (variadic + arity AtLeast; body proof of variadicness)] [G-VARARG] Local variadic callee vfold(unsigned, ...) is recovered as 6 fixed params: its prologue spills RSI..R9 into the va_list save area (XMM0-7 under `test al,al`), so the 'longest prefix read before written' rule (r2ssa/src/recover_interface.rs:1028-1045) admits all six slots; no variadic bit / AtLeast arity exists. Every call mints six args; RCX/R8/R9 the caller never wrote become residuals (`uint64_t RAX_6 = fcn_4013c9(1, tmp_11f80_2, tmp_11f80_1, r2sleigh_residual_u64(1), r2sleigh_residual_u64(2), r2sleigh_residual_u64(3));`). Here the caller keeps its 2 parameters, so the first ca...",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unadmitted-argument",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O0::vfold": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: a variadic definition. The engine renders 6 fixed parameters from the save-area spills, with 5 residual reads. The engine must lift first (P7), then the gate.",
+   "owner": "P7",
    "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O0::wide_make": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return. The engine computes `stack_m16 = (a^b)*0xc2b2ae3d27d4eb4f` (value.high, which the epilogue loads into RDX) but returns only `stack_m24`, so the RDX result is dropped. The engine must lift first (P7), then the gate.",
+   "owner": "P7",
    "reason": "an aggregate return (struct wide)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O1::indirect_load": {
@@ -1350,7 +1453,9 @@
   },
   "tests/corpus/shapes.c::gcc-O1::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value in RDI:RSI. The engine renders `uint64_t (uint64_t RDI_0, uint64_t RSI_0)`. The gate should lift this, which needs a SysV aggregate classifier plus an eightbyte thunk.",
+   "owner": "GT",
    "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O1::mixed_touch": {
@@ -1373,7 +1478,10 @@
   },
   "tests/corpus/shapes.c::gcc-O1::shape_byte_indexed_buffer": {
    "cause": "[#122] The vectorised byte loop loads its constants from a constant pool and stores 128-bit lanes, terms and stores staged does not spell yet (TermNotSpelled, StoreNotSpelled), so the loop is residual where legacy refused it or, at x86 clang-O2 and AArch64 clang-O2 and gcc-O1, matched. Owner: staged spelling of constant-pool vector loads.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "D",
+   "reason": "r2sleigh_residual_void gap:StoreNotSpelled",
+   "site": "crates/r2dec/src/render/terms.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_call_chain": {
@@ -1381,7 +1489,10 @@
   },
   "tests/corpus/shapes.c::gcc-O1::shape_function_pointer": {
    "cause": "[#122] The call through the function table has unproven arity (r2ssa: the call site may hand on an argument slot the body does not write), so staged writes it as a residual call; decision 2026-10-07: refuse an unproven arity. Legacy refused the function, or at clang-O0 guessed the arity and matched. Owner: an indirect call's arity from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnsupportedInstruction",
+   "site": "crates/r2ssa/src/semantic/call_sites.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_multiword_return": {
@@ -1389,17 +1500,26 @@
   },
   "tests/corpus/shapes.c::gcc-O1::shape_mutual_even": {
    "cause": "[P6 body (callee facts bottom-up over call-graph SCCs, memoised per Revision) + P7 calls (optimistic result fixpoint over the SCC; result state separate from the parameter contract so that an Unproven result keeps its proven interface, per F15)] [G-SCC] Mutual recursion through `call partner; add rsp,8; ret`. r2engine prepare_callee prepares the partner against imports only (r2engine/src/native.rs:609-657: declare_imports, then prepare_restated with an empty callee-facts list), so the partner's call back to the root gets the convention-fallback boundary with no result (boundaries.rs:1128 'interface=false ... results=0') -> Unstated (r2ssa/src/recover_interface.rs:629) -> the partner's result is Unproven (:749; evidence :620/:714). At the root, mint_recovered_call_site_interface refuses a callee whose result is Unproven (recover_int...",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_mutual_odd": {
    "cause": "[P6 body (callee facts bottom-up over call-graph SCCs, memoised per Revision) + P7 calls (optimistic result fixpoint over the SCC; result state separate from the parameter contract, per F15)] [G-SCC] Mutual recursion through `call partner; add rsp,8; ret`. r2engine prepare_callee prepares the partner (even, 0x401845) against imports only (r2engine/src/native.rs:609-657), so its call back to odd has the convention-fallback boundary with no result -> Unstated (r2ssa/src/recover_interface.rs:629) -> even's result is Unproven (:749). At odd's call site, mint_recovered_call_site_interface refuses the Unproven callee (recover_interface.rs:1505-1511, the critique:calls F15 proxy). The r2engine body_proven_return upgrade (lib.rs:1365-1376) cannot fire for an Unproven interface (machine_...",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_pointer_to_pointer": {
    "cause": "[#122] Three of the stores that fill the rows array with frame addresses are not spelled yet (StoreNotSpelled), so they are residual stores where legacy refused the function.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "D",
+   "reason": "r2sleigh_residual_void gap:StoreNotSpelled",
+   "site": "crates/r2dec/src/render/terms.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_recurse_direct": {
@@ -1434,17 +1554,24 @@
   },
   "tests/corpus/shapes.c::gcc-O1::shape_variadic_local": {
    "cause": "[P7 calls (variadic + arity AtLeast; body proof of variadicness)] [G-VARARG] Local variadic callee vfold(unsigned, ...) is recovered as 6 fixed params: its prologue spills RSI..R9 into the va_list save area (XMM0-7 under `test al,al`), so the 'longest prefix read before written' rule (r2ssa/src/recover_interface.rs:1028-1045) admits all six slots; no variadic bit / AtLeast arity exists. Every call mints six args; RCX/R8/R9 the caller never wrote become residuals (`uint64_t RAX_4 = fcn_401303(2, RDI_0, RSI_0, r2sleigh_residual_u64(1), r2sleigh_residual_u64(2), r2sleigh_residual_u64(3));`). passed_through_entry_storages (recover_interface.rs:1015-1026) also...",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::vfold": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: a variadic definition. The engine renders 6 fixed parameters with residual AL/XMM reads. The engine must lift first (P7), then the gate.",
+   "owner": "P7",
    "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O1::wide_make": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return in RAX:RDX. The engine keeps one result register (RAX). The engine must lift first (P7), then the gate.",
+   "owner": "P7",
    "reason": "an aggregate return (struct wide)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O2::indirect_load": {
@@ -1458,7 +1585,9 @@
   },
   "tests/corpus/shapes.c::gcc-O2::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value in RDI:RSI. The engine renders `uint64_t (uint64_t RDI_0, uint64_t RSI_0)`. The gate should lift this, which needs a SysV aggregate classifier plus an eightbyte thunk.",
+   "owner": "GT",
    "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O2::mixed_touch": {
@@ -1481,7 +1610,10 @@
   },
   "tests/corpus/shapes.c::gcc-O2::shape_byte_indexed_buffer": {
    "cause": "[#122] The vectorised byte loop loads its constants from a constant pool and stores 128-bit lanes, terms and stores staged does not spell yet (TermNotSpelled, StoreNotSpelled), so the loop is residual where legacy refused it or, at x86 clang-O2 and AArch64 clang-O2 and gcc-O1, matched. Owner: staged spelling of constant-pool vector loads.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "D",
+   "reason": "r2sleigh_residual_void gap:StoreNotSpelled",
+   "site": "crates/r2dec/src/render/terms.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_call_chain": {
@@ -1489,7 +1621,10 @@
   },
   "tests/corpus/shapes.c::gcc-O2::shape_function_pointer": {
    "cause": "[#122] The call through the function table has unproven arity (r2ssa: the call site may hand on an argument slot the body does not write), so staged writes it as a residual call; decision 2026-10-07: refuse an unproven arity. Legacy refused the function, or at clang-O0 guessed the arity and matched. Owner: an indirect call's arity from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnsupportedInstruction",
+   "site": "crates/r2ssa/src/semantic/call_sites.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_multiword_return": {
@@ -1536,17 +1671,24 @@
   },
   "tests/corpus/shapes.c::gcc-O2::shape_variadic_local": {
    "cause": "[P7 calls (variadic + arity AtLeast; body proof of variadicness)] [G-VARARG] Local variadic callee vfold(unsigned, ...) is recovered as 6 fixed params: its prologue spills RSI..R9 into the va_list save area (XMM0-7 under `test al,al`), so the 'longest prefix read before written' rule (r2ssa/src/recover_interface.rs:1028-1045) admits all six slots; no variadic bit / AtLeast arity exists. Every call mints six args; RCX/R8/R9 the caller never wrote become residuals (`uint64_t RAX_4 = fcn_401510(2, RDI_0, RSI_0, r2sleigh_residual_u64(1), r2sleigh_residual_u64(2), r2sleigh_residual_u64(3));`). passed_through_entry_storages (recover_interface.rs:1015-1026) also...",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::vfold": {
    "cause": "[P7 variadic] The engine now renders vfold (4 counted residuals; the signature drops `count`), and the gate does not grade a variadic definition: the count of its trailing arguments is unknown. Refused before p1-identity.",
+   "owner": "P7",
    "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::gcc-O2::wide_make": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: an aggregate return in RAX:RDX. The engine keeps RAX only. The engine must lift first (P7), then the gate.",
+   "owner": "P7",
    "reason": "an aggregate return (struct wide)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/values.c::clang-O0::main": {
@@ -1806,7 +1948,10 @@
   },
   "tests/gold/code_pointer_table.c::clang-O0::table_dispatch": {
    "cause": "[#122] The call through the function table has unproven arity (r2ssa: the call site may hand on an argument slot the body does not write), so staged writes it as a residual call; decision 2026-10-07: refuse an unproven arity. Legacy refused the function, or at clang-O0 guessed the arity and matched. Owner: an indirect call's arity from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnsupportedInstruction",
+   "site": "crates/r2ssa/src/semantic/call_sites.rs",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::clang-O0::table_op_add": {
@@ -1820,12 +1965,18 @@
   },
   "tests/gold/code_pointer_table.c::clang-O1::main": {
    "cause": "[P7 calls (closed-world target joins; assumed arity as residual), needing P6 closed-world proof, P2 immutable ranges and P5/P8 loads from an immutable table] [G-INDIRECT] The returned RAX is the CallDefine of the indirect call `call QWORD PTR [r14*8+0x402010]` at 0x401157 (reached through main's `jmp 0x401140`), whose convention-fallback boundary (r2ssa/src/semantic/boundaries.rs:1128) has result_kind None -> Unstated (r2ssa/src/recover_interface.rs:629) -> Unproven (:749), so the return renders `return r2sleigh_residual_u64(1)`. The loop body meanwhile consumes the same CallDefine as a uint64_t result under a fallback-assumed arity of 2 (two views of one call). Closing fact: the target set from the immutable .rodata table at 0x402010 = {table_o...",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::clang-O1::table_dispatch": {
    "cause": "[P7 calls (closed-world target joins; assumed arity as residual), needing P6 closed-world proof, P2 immutable ranges and P5/P8 loads from an immutable table] [G-INDIRECT] The returned RAX is the CallDefine of the indirect call `call QWORD PTR [r14*8+0x402010]` at 0x401157, whose convention-fallback boundary (r2ssa/src/semantic/boundaries.rs:1128) has result_kind None -> Unstated (r2ssa/src/recover_interface.rs:629) -> Unproven (:749), so the return renders `return r2sleigh_residual_u64(1)`. The loop body meanwhile consumes the same CallDefine as a uint64_t result under a fallback-assumed arity of 2 (two views of one call). Closing fact: the target set from the immutable .rodata table at 0x402010 = {table_op_add 0x401110, table_op_xor 0x401120, t...",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::clang-O1::table_op_add": {
@@ -1872,7 +2023,10 @@
   },
   "tests/gold/code_pointer_table.c::gcc-O1::table_dispatch": {
    "cause": "[#122] The call through the function table has unproven arity (r2ssa: the call site may hand on an argument slot the body does not write), so staged writes it as a residual call; decision 2026-10-07: refuse an unproven arity. Legacy refused the function, or at clang-O0 guessed the arity and matched. Owner: an indirect call's arity from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnsupportedInstruction",
+   "site": "crates/r2ssa/src/semantic/call_sites.rs",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::gcc-O1::table_op_add": {
@@ -1889,7 +2043,10 @@
   },
   "tests/gold/code_pointer_table.c::gcc-O2::table_dispatch": {
    "cause": "[#122] The call through the function table has unproven arity (r2ssa: the call site may hand on an argument slot the body does not write), so staged writes it as a residual call; decision 2026-10-07: refuse an unproven arity. Legacy refused the function, or at clang-O0 guessed the arity and matched. Owner: an indirect call's arity from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnsupportedInstruction",
+   "site": "crates/r2ssa/src/semantic/call_sites.rs",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::gcc-O2::table_op_add": {
@@ -2014,7 +2171,10 @@
   },
   "tests/gold/manual_limits.c::clang-O1::state_machine": {
    "cause": "[#122] The function reads a register it arrived with that its recovered interface admits as no parameter (state_machine's RAX on the empty-string path, table_walk's RCX), and the read is a residual (#90) where legacy refused the function. Owner: r2ssa's parameter recovery, which ends at the first unread slot.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/gold/manual_limits.c::clang-O1::struct_nested_array": {
@@ -2022,7 +2182,10 @@
   },
   "tests/gold/manual_limits.c::clang-O1::table_walk": {
    "cause": "[#122] The function reads a register it arrived with that its recovered interface admits as no parameter (state_machine's RAX on the empty-string path, table_walk's RCX), and the read is a residual (#90) where legacy refused the function. Owner: r2ssa's parameter recovery, which ends at the first unread slot.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unadmitted-argument",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/gold/manual_limits.c::clang-O2::fnv_fold": {
@@ -2101,8 +2264,11 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::gcc-O2::main": {
-   "cause": "main returns `manual_sink == 0` in eax and zeroes its structs through xmm0, so both result registers are written on its way out (#85); its only caller is __libc_start_main, through a pointer and outside the program, so no call read decides the carrier (#86): the return is a residual. Owner: r2abi, __libc_start_main's main stated as int (*)(int, char**, char**), spelled `func` today.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "main reads the call to fcn_401320 (declared uint32_t) as the 64-bit RAX, so the bits above the declared result are a residual (unspecified-above) in `rax_5 = fcn_401320(...) | r2sleigh_residual_u64(1) << 32`; main then stores only the low 32 bits of rax_5, so those bits are never demanded and the residual should not be evaluated. Before, this record carried the cause of main's unproven return, which is no longer the residual it reaches.",
+   "compared": "output",
+   "owner": "B",
+   "reason": "r2sleigh_residual_u64 unspecified-above",
+   "site": "crates/r2ssa/src/demand.rs",
    "status": "residual-trap"
   },
   "tests/gold/manual_limits.c::gcc-O2::mem_scan2": {
@@ -2140,7 +2306,10 @@
   },
   "tests/gold/review.c::clang-O0::dispatch": {
    "cause": "[P7 calls (closed-world target joins; assumed arity as residual), needing P6 closed-world proof] [G-INDIRECT] The returned RAX is the CallDefine of the indirect call through parameter fn (`mov rax,[rbp-0x8]; ...; call rax` at 0x4015ac), whose convention-fallback boundary (r2ssa/src/semantic/boundaries.rs:1128) has result_kind None -> Unstated (r2ssa/src/recover_interface.rs:629) -> Unproven (:749), so the return renders `return r2sleigh_residual_u64(1)`. The call itself is spelled through a `void(*)(...)` cast, so the value the source returns is dropped. Closing fact: the target set {add} from the only caller main (`dispatch(add, argc)`), a closed-world join over the proven call sites ...",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::clang-O0::fact": {
@@ -2187,7 +2356,10 @@
   },
   "tests/gold/review.c::clang-O1::dispatch": {
    "cause": "[#122] `dispatch` tail-jumps through its function-pointer parameter, an indirect branch with no resolved target, which staged writes as a residual transfer (UnresolvedIndirectBranch) where legacy refused the function. Owner: a tail jump through a parameter as a call through it, from the parameter's declared type.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnresolvedIndirectBranch",
+   "site": "crates/r2ssa/src/indirect.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::clang-O1::fact": {
@@ -2204,7 +2376,10 @@
   },
   "tests/gold/review.c::clang-O1::main": {
    "cause": "[#122] The value `main` stores is the same register value no statement assigns as before, now read at the XMM register's full 128 bits (residual_u128) where legacy read its low 64.",
-   "reason": "r2sleigh_residual_u128",
+   "compared": "output",
+   "owner": "B",
+   "reason": "r2sleigh_residual_u128 never-assigned",
+   "site": "crates/r2ssa/src/demand.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::clang-O1::mul_div": {
@@ -2236,17 +2411,25 @@
   },
   "tests/gold/review.c::clang-O2::dispatch": {
    "cause": "[#122] `dispatch` tail-jumps through its function-pointer parameter, an indirect branch with no resolved target, which staged writes as a residual transfer (UnresolvedIndirectBranch) where legacy refused the function. Owner: a tail jump through a parameter as a call through it, from the parameter's declared type.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnresolvedIndirectBranch",
+   "site": "crates/r2ssa/src/indirect.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::clang-O2::fact": {
    "cause": "[gate-limitation] The -O0 build of the rendering overruns its budget of 4 x timeout_ms. The original and the -O2 build return. Since 1e53fc79 the gate grades a timeout as `slow` instead of as an O0/O2 `ub` disagreement; it grades `slow` both inside the full run and alone (--jobs 1). The rendering is correct. It is slow at -O0 because the vectorised pmuludq loop is spelled as __uint128_t lane-merge chains, the known XMM lane noise (PE, and lane-induction recovery).",
+   "owner": "GT",
    "reason": "O0",
+   "site": "tests/equiv/gate.py",
    "status": "slow"
   },
   "tests/gold/review.c::clang-O2::fill": {
-   "cause": "[#117] The add rule of the byte relation (bytes.rs LowClosed) proves `lea eax, [rdi + 0xd]` reads only EDI, so the parameter is `uint32_t EDI_0`, as the source's `int v`. Legacy rebuilds the 64-bit RDI it reads as `(r2sleigh_residual_u64(1) & ~0xffffffff) | EDI_0`: the half above the parameter is no argument the convention delivers, so it is a residual. It traps in the first statement, before the unaligned `*(__uint128_t*)0x404054` store that made this ub. Was ub.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "The parameter is `uint32_t arg0` (EDI), yet the body is rendered over the 64-bit RDI, rebuilt as the entry value's upper half (unadmitted-argument: no argument the convention delivers) above arg0; every use of it (`mov %edi, g_table`, `movd %edi, %xmm0`) reads 32 bits, so the upper half is never demanded. It traps in the first statement, before the unaligned 128-bit stores that made the legacy rendering ub.",
+   "compared": "output",
+   "owner": "B",
+   "reason": "r2sleigh_residual_u64 unadmitted-argument",
+   "site": "crates/r2ssa/src/bytes.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::clang-O2::find": {
@@ -2257,7 +2440,10 @@
   },
   "tests/gold/review.c::clang-O2::main": {
    "cause": "[#122] The value `main` stores is the same register value no statement assigns as before, now read at the XMM register's full 128 bits (residual_u128) where legacy read its low 64.",
-   "reason": "r2sleigh_residual_u128",
+   "compared": "output",
+   "owner": "B",
+   "reason": "r2sleigh_residual_u128 never-assigned",
+   "site": "crates/r2ssa/src/demand.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::clang-O2::mul_div": {
@@ -2289,7 +2475,10 @@
   },
   "tests/gold/review.c::gcc-O0::dispatch": {
    "cause": "[P7 calls (closed-world target joins; assumed arity as residual), needing P6 closed-world proof] [G-INDIRECT] The returned RAX is the CallDefine of the indirect call `call rdx` at 0x401510, whose convention-fallback boundary (r2ssa/src/semantic/boundaries.rs:1128) has result_kind None -> Unstated (r2ssa/src/recover_interface.rs:629) -> Unproven (:749), so the return renders `return r2sleigh_residual_u64(1)`. The call itself is spelled through a `void(*)(...)` cast, so the value the source returns is dropped. Closing fact: the target set {add} from the only caller main, a closed-world join.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O0::fact": {
@@ -2335,8 +2524,11 @@
    "status": "equal"
   },
   "tests/gold/review.c::gcc-O1::dispatch": {
-   "cause": "[P7 calls (closed-world target joins; assumed arity as residual), needing P6 closed-world proof] [G-INDIRECT] The returned RAX is the CallDefine of the indirect call `call rax` at 0x4013a8, whose convention-fallback boundary (r2ssa/src/semantic/boundaries.rs:1128) has result_kind None -> Unstated (r2ssa/src/recover_interface.rs:629) -> Unproven (:749), so the return renders `return r2sleigh_residual_u64(1)`. The call itself is spelled through a `void(*)(...)` cast, so the value the source returns is dropped. Closing fact: the target set {add} from the only caller main, a closed-world join.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "dispatch computes fn's second argument as `lea 0x1(%rsi),%esi`, whose 32-bit destination keeps only the low half of RSI + 1; the rendering reads RSI at 64 bits, so its upper half is an argument slot no parameter admits (unadmitted-argument) and the call's argument is a residual. The byte relation's add rule proves this for `lea eax, [rdi + 0xd]` (clang-O2 fill) but not here. Before, this record carried the cause of the unproven returned RAX, a later site (2).",
+   "compared": "output",
+   "owner": "B",
+   "reason": "r2sleigh_residual_u64 unadmitted-argument",
+   "site": "crates/r2ssa/src/bytes.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O1::fact": {
@@ -2353,7 +2545,10 @@
   },
   "tests/gold/review.c::gcc-O1::main": {
    "cause": "[#122] The value `main` stores is the same register value no statement assigns as before, now read at the XMM register's full 128 bits (residual_u128) where legacy read its low 64.",
-   "reason": "r2sleigh_residual_u128",
+   "compared": "output",
+   "owner": "B",
+   "reason": "r2sleigh_residual_u128 never-assigned",
+   "site": "crates/r2ssa/src/demand.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O1::mul_div": {
@@ -2363,8 +2558,11 @@
    "status": "equal"
   },
   "tests/gold/review.c::gcc-O1::sext": {
-   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "`movsbw %dil,%ax` writes only AX and keeps RAX's upper bytes; `lea 0x0(,%rax,4),%edx; sub %edx,%eax` then computes EAX, whose bits 16..31 come from RAX's entry value. The source returns int16_t, so no caller reads them, but the recovered result is uint32_t, which demands them: the read is a residual held from entry. A written-lane result width (AX) would leave them undemanded. Before, this record carried gate_three's setcc cause (audit T20).",
+   "compared": "output",
+   "owner": "PE",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O1::sum_array": {
@@ -2375,7 +2573,10 @@
   },
   "tests/gold/review.c::gcc-O2::avg": {
    "cause": "[P7 calls (ABI classifier with float result class)] [G-FLOAT] avg returns double in XMM0, but the contract has one integer result slot: returned_result reads only RAX (r2ssa/src/recover_interface.rs:690), RAX is untouched on a path -> 'unresolved=1 -> Unproven' (:714), and body_proven_result's unique-carrier rule fails. Both returns render `return r2sleigh_residual_u64(n)` and the FP accumulation is elided as unobserved.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O2::bit_count": {
@@ -2389,7 +2590,10 @@
   },
   "tests/gold/review.c::gcc-O2::dispatch": {
    "cause": "[#122] `dispatch` tail-jumps through its function-pointer parameter, an indirect branch with no resolved target, which staged writes as a residual transfer (UnresolvedIndirectBranch) where legacy refused the function. Owner: a tail jump through a parameter as a call through it, from the parameter's declared type.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnresolvedIndirectBranch",
+   "site": "crates/r2ssa/src/indirect.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O2::fact": {
@@ -2397,7 +2601,10 @@
   },
   "tests/gold/review.c::gcc-O2::fill": {
    "cause": "The source returns void; the vectorized body leaves both RAX and XMM0 written on its way out, so the result carrier is unproven (r2ssa recover_interface, #85), and no call reads either register to decide it (#86): the rendered return is a residual that traps where it would be read. Owner: P7, the result proof over the call graph that makes it void.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O2::find": {
@@ -2408,7 +2615,10 @@
   },
   "tests/gold/review.c::gcc-O2::main": {
    "cause": "[#122] The value `main` stores is the same register value no statement assigns as before, now read at the XMM register's full 128 bits (residual_u128) where legacy read its low 64.",
-   "reason": "r2sleigh_residual_u128",
+   "compared": "output",
+   "owner": "B",
+   "reason": "r2sleigh_residual_u128 never-assigned",
+   "site": "crates/r2ssa/src/demand.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O2::mul_div": {
@@ -2418,15 +2628,18 @@
    "status": "equal"
   },
   "tests/gold/review.c::gcc-O2::sext": {
-   "cause": "[PE demanded bytes; p1-reads 080f53f0/00ad4c43 merged] A read of a value no statement assigns is now a residual or a refusal rather than C that happens to work. Here the value is a register's entry value in bytes nobody demands -- `setcc al` keeps RAX's upper bytes, and only the low byte is read -- so the read is dead. The demanded-bytes analysis (one backward O(V+E) pass) removes it and restores equal.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "`movsbw %dil,%ax` writes only AX and keeps RAX's upper bytes; `lea 0x0(,%rax,4),%edx; sub %edx,%eax` then computes EAX, whose bits 16..31 come from RAX's entry value. The source returns int16_t, so no caller reads them, but the recovered result is uint32_t, which demands them: the read is a residual held from entry. A written-lane result width (AX) would leave them undemanded. Before, this record carried gate_three's setcc cause (audit T20).",
+   "compared": "output",
+   "owner": "PE",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O2::sum_array": {
    "status": "equal"
   }
  },
- "schema": 1,
+ "schema": 2,
  "toolchain": {
   "clang": "Ubuntu clang version 18.1.3 (1ubuntu1)",
   "gcc": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"

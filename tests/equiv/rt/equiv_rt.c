@@ -21,7 +21,8 @@
  *     or anywhere inside its body ends the run, so a rendering is only ever
  *     graded on what its own code does;
  *     each child records how it ended, its return registers, the arena, the
- *     program's writable PT_LOAD bytes, and what it wrote to fd 1 and fd 2;
+ *     program's writable PT_LOAD bytes, and what it wrote to fd 1 and fd 2 --
+ *     a rendering that traps in its own code, at the trap, with its site;
  *     the parent compares the requested pairs of runs and writes one JSON
  *     line per vector to $EQUIV_OUT.
  *
@@ -46,6 +47,7 @@
 #include <dlfcn.h>
 #include <elf.h>
 #include <errno.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <link.h>
 #include <signal.h>
@@ -80,6 +82,8 @@ struct equiv_regs {
 
 #define RET_INT_NAME "rax"
 #define RET_FP_NAME "xmm0"
+/* What __builtin_trap raises: ud2. */
+#define TRAP_SIGNAL SIGILL
 
 static uint64_t context_pc(const ucontext_t *uc)
 {
@@ -89,6 +93,12 @@ static uint64_t context_pc(const ucontext_t *uc)
 static void context_set_pc(ucontext_t *uc, uint64_t pc)
 {
     uc->uc_mcontext.gregs[REG_RIP] = (greg_t)pc;
+}
+
+/* The first integer argument register. */
+static uint64_t context_arg0(const ucontext_t *uc)
+{
+    return (uint64_t)uc->uc_mcontext.gregs[REG_RDI];
 }
 
 /* int3 reports the byte after it. */
@@ -121,6 +131,8 @@ struct equiv_regs {
 
 #define RET_INT_NAME "x0"
 #define RET_FP_NAME "v0"
+/* What __builtin_trap raises: brk. */
+#define TRAP_SIGNAL SIGTRAP
 
 static uint64_t context_pc(const ucontext_t *uc)
 {
@@ -130,6 +142,12 @@ static uint64_t context_pc(const ucontext_t *uc)
 static void context_set_pc(ucontext_t *uc, uint64_t pc)
 {
     uc->uc_mcontext.pc = pc;
+}
+
+/* The first integer argument register. */
+static uint64_t context_arg0(const ucontext_t *uc)
+{
+    return (uint64_t)uc->uc_mcontext.regs[0];
 }
 
 /* brk reports its own address. */
@@ -249,8 +267,17 @@ struct slot_head {
     int32_t guard;               /* GUARD_*: how control reached the original's code */
     int32_t guard_error;         /* errno of a guard that could not be installed */
     uint64_t guard_caller;       /* return address at a delegated entry */
+    uint32_t trap_site;          /* arg 0 at a trap in the rendering: a residual's site */
+    int32_t trap_depth;          /* TRAP_*: which activation of the function trapped */
+    uint64_t out_at_capture;     /* bytes on fd 1 and fd 2 when the state was captured */
+    uint64_t err_at_capture;
     struct equiv_ret ret;
 };
+
+/* captured: what a child's state was snapshotted at. */
+enum capture { CAPTURE_NONE = 0, CAPTURE_RETURN = 1, CAPTURE_EXIT = 2, CAPTURE_TRAP = 3 };
+enum trap_depth { TRAP_UNKNOWN = 0, TRAP_OUTERMOST = 1, TRAP_NESTED = 2 };
+static const char *trap_depth_name[] = { "unknown", "outermost", "nested" };
 
 enum guard_hit { GUARD_NONE = 0, GUARD_DELEGATED = 1, GUARD_BODY = 2 };
 static const char *guard_name[] = { "none", "delegated", "body" };
@@ -288,6 +315,11 @@ static uint8_t *g_arena;
 /* Child-side state for the exit hook and the fault handler. */
 static struct slot_head *g_child_slot;
 static volatile int g_in_call;
+/* A rendering's child: its function, that function's extent, and the runtime's base. */
+static uintptr_t g_child_fn;
+static size_t g_child_fn_size;
+static uintptr_t g_child_own_base;
+static uintptr_t g_rt_base;
 /* Child-side state for the guard: where a redirected entry goes, and the
  * objects whose code may not enter the original (the rendering, this runtime). */
 static void *g_guard_target;
@@ -409,13 +441,44 @@ static void child_capture(int how)
         memcpy(dst, (const void *)(uintptr_t)g_segments[i].start, g_segments[i].length);
         dst += g_segments[i].length;
     }
+    /* What fd 1 and fd 2 held then (an emulator reports the signal on fd 2 after
+     * it); unknown means all of it, never nothing. */
+    struct stat st;
+    slot->out_at_capture = fstat(1, &st) == 0 ? (uint64_t)st.st_size : UINT64_MAX;
+    slot->err_at_capture = fstat(2, &st) == 0 ? (uint64_t)st.st_size : UINT64_MAX;
     slot->captured = how;
 }
 
 static void child_exit_hook(void)
 {
     if (g_in_call)
-        child_capture(2);
+        child_capture(CAPTURE_EXIT);
+}
+
+static uintptr_t object_base(const void *address)
+{
+    Dl_info where;
+    if (dladdr(address, &where) && where.dli_fbase)
+        return (uintptr_t)where.dli_fbase;
+    return 0;
+}
+
+/* Whether the trapping activation of the rendering is the one the thunk called:
+ * the first frame inside the function must return into this runtime. */
+static int trap_depth(void)
+{
+    void *frames[128];
+    int n = backtrace(frames, 128);
+    for (int i = 0; i < n; i++) {
+        uintptr_t at = (uintptr_t)frames[i] - 1;
+        if (at - g_child_fn >= g_child_fn_size)
+            continue;
+        if (i + 1 >= n)
+            return TRAP_UNKNOWN;
+        return object_base((const void *)((uintptr_t)frames[i + 1] - 1)) == g_rt_base
+            ? TRAP_OUTERMOST : TRAP_NESTED;
+    }
+    return TRAP_UNKNOWN;
 }
 
 static void child_fault(int sig, siginfo_t *info, void *context)
@@ -431,18 +494,17 @@ static void child_fault(int sig, siginfo_t *info, void *context)
             strncpy(slot->fault_object, where.dli_fname, sizeof slot->fault_object - 1);
             slot->fault_base = (uint64_t)(uintptr_t)where.dli_fbase;
         }
+        /* A trap in the rendering's own code: snapshot the state it reached. Its
+         * stdio is quiescent there, so flushing it from the handler is safe. */
+        if (sig == TRAP_SIGNAL && g_child_fn && slot->fault_base == g_child_own_base) {
+            slot->trap_site = (uint32_t)context_arg0(uc);
+            slot->trap_depth = trap_depth();
+            child_capture(CAPTURE_TRAP);
+        }
     }
     /* SA_RESETHAND restored the default action: returning re-executes the
      * faulting instruction, or abort() re-raises, and the child dies of the
      * same signal, which is what the parent reads. */
-}
-
-static uintptr_t object_base(const void *address)
-{
-    Dl_info where;
-    if (dladdr(address, &where) && where.dli_fbase)
-        return (uintptr_t)where.dli_fbase;
-    return 0;
 }
 
 /* SIGTRAP in a rendering's child: a trap of the guarded original. */
@@ -554,6 +616,13 @@ static void child_run(struct run_state *run, const struct job_vector *vec, int t
     g_child_slot = run->slot;
     atexit(child_exit_hook);
     if (run->spec->replaces) {
+        Dl_info where;
+        const ElfW(Sym) *symbol = NULL;
+        g_child_fn = (uintptr_t)run->fn;
+        if (dladdr1(run->fn, &where, (void **)&symbol, RTLD_DL_SYMENT) && symbol)
+            g_child_fn_size = symbol->st_size;
+        g_child_own_base = object_base(run->fn);
+        g_rt_base = object_base((const void *)child_run);
         int error = guard_install(run);
         if (error) {
             run->slot->guard_error = error;
@@ -576,7 +645,7 @@ static void child_run(struct run_state *run, const struct job_vector *vec, int t
     memset(&timer, 0, sizeof timer);
     setitimer(ITIMER_REAL, &timer, NULL);
     run->slot->ret = ret;
-    child_capture(1);
+    child_capture(CAPTURE_RETURN);
     _exit(0);
 }
 
@@ -640,9 +709,9 @@ static void run_one(struct run_state *run, const struct job_vector *vec, int tim
         run->status = sig;
     } else if (WIFEXITED(status)) {
         run->status = WEXITSTATUS(status);
-        if (run->slot->captured == 1 && run->status == 0)
+        if (run->slot->captured == CAPTURE_RETURN && run->status == 0)
             run->outcome = OUT_RETURN;
-        else if (run->slot->captured == 2)
+        else if (run->slot->captured == CAPTURE_EXIT)
             run->outcome = OUT_EXIT;
         else
             run->outcome = OUT_EXIT_RAW;
@@ -677,15 +746,77 @@ static long first_difference(const uint8_t *a, const uint8_t *b, size_t length)
     return -1;
 }
 
-static void emit_region_difference(const char *field, uint64_t address, const uint8_t *a,
-                                   const uint8_t *b, size_t available)
+/* Where two captured states first differ. */
+struct difference {
+    const char *field;
+    uint64_t address;
+    const uint8_t *a;
+    const uint8_t *b;
+    size_t available;
+};
+
+/* The first byte at which two captured states differ (the arena, then the
+ * writable segments): 1 with *out filled, or 0 when they agree. */
+static int state_difference(const struct run_state *a, const struct run_state *b,
+                            struct difference *out)
 {
-    size_t window = available < 16 ? available : 16;
-    fprintf(g_out, ",\"field\":\"%s\",\"address\":\"0x%llx\",\"a_bytes\":", field,
-            (unsigned long long)address);
-    json_hex(g_out, a, window);
+    const uint8_t *ba = (const uint8_t *)(a->slot + 1);
+    const uint8_t *bb = (const uint8_t *)(b->slot + 1);
+    long at = first_difference(ba, bb, g_head.arena_size);
+    if (at >= 0) {
+        *out = (struct difference){ "arena", g_head.arena_base + (uint64_t)at, ba + at, bb + at,
+                                    g_head.arena_size - (size_t)at };
+        return 1;
+    }
+    ba += g_head.arena_size;
+    bb += g_head.arena_size;
+    for (size_t i = 0; i < g_n_segments; i++) {
+        at = first_difference(ba, bb, g_segments[i].length);
+        if (at >= 0) {
+            *out = (struct difference){ "memory", g_segments[i].start + (uint64_t)at, ba + at,
+                                        bb + at, g_segments[i].length - (size_t)at };
+            return 1;
+        }
+        ba += g_segments[i].length;
+        bb += g_segments[i].length;
+    }
+    return 0;
+}
+
+static void emit_difference(const struct difference *d)
+{
+    size_t window = d->available < 16 ? d->available : 16;
+    fprintf(g_out, ",\"field\":\"%s\",\"address\":\"0x%llx\",\"a_bytes\":", d->field,
+            (unsigned long long)d->address);
+    json_hex(g_out, d->a, window);
     fputs(",\"b_bytes\":", g_out);
-    json_hex(g_out, b, window);
+    json_hex(g_out, d->b, window);
+}
+
+/* Whether the first min(part_len, at) bytes of part begin whole. */
+static int is_prefix(const char *part, size_t part_len, uint64_t at, const char *whole,
+                     size_t whole_len)
+{
+    size_t length = part_len < at ? part_len : (size_t)at;
+    return length <= whole_len && memcmp(part, whole, length) == 0;
+}
+
+/* A rendering that trapped, against the original's end: whether its output by the
+ * trap is a prefix of the original's, and where their states differ; gate.py decides. */
+static void emit_pre_trap(const struct run_state *a, const struct run_state *b)
+{
+    struct difference d;
+    int differs = state_difference(a, b, &d);
+    const struct slot_head *trap = b->slot;
+    fprintf(g_out, ",\"pre_trap\":{\"stdout\":%s,\"stderr\":%s,\"memory\":%s",
+            is_prefix(b->out_buf, b->out_len, trap->out_at_capture, a->out_buf, a->out_len)
+                ? "true" : "false",
+            is_prefix(b->err_buf, b->err_len, trap->err_at_capture, a->err_buf, a->err_len)
+                ? "true" : "false",
+            differs ? "false" : "true");
+    if (differs)
+        emit_difference(&d);
+    fputc('}', g_out);
 }
 
 /* Compare two runs. Writes the fields after "equal": into g_out. */
@@ -693,6 +824,9 @@ static void compare_runs(const struct run_state *a, const struct run_state *b)
 {
     if (a->outcome != b->outcome) {
         fputs("false,\"field\":\"exit\"", g_out);
+        if ((a->outcome == OUT_RETURN || a->outcome == OUT_EXIT) && a->slot->captured
+            && b->outcome == OUT_SIGNAL && b->slot->captured == CAPTURE_TRAP)
+            emit_pre_trap(a, b);
         return;
     }
     switch (a->outcome) {
@@ -758,27 +892,11 @@ static void compare_runs(const struct run_state *a, const struct run_state *b)
 
     if ((a->outcome == OUT_RETURN || a->outcome == OUT_EXIT) && a->slot->captured
         && b->slot->captured) {
-        const uint8_t *ba = (const uint8_t *)(a->slot + 1);
-        const uint8_t *bb = (const uint8_t *)(b->slot + 1);
-        long at = first_difference(ba, bb, g_head.arena_size);
-        if (at >= 0) {
+        struct difference d;
+        if (state_difference(a, b, &d)) {
             fputs("false", g_out);
-            emit_region_difference("arena", g_head.arena_base + (uint64_t)at, ba + at, bb + at,
-                                   g_head.arena_size - (size_t)at);
+            emit_difference(&d);
             return;
-        }
-        ba += g_head.arena_size;
-        bb += g_head.arena_size;
-        for (size_t i = 0; i < g_n_segments; i++) {
-            at = first_difference(ba, bb, g_segments[i].length);
-            if (at >= 0) {
-                fputs("false", g_out);
-                emit_region_difference("memory", g_segments[i].start + (uint64_t)at, ba + at,
-                                       bb + at, g_segments[i].length - (size_t)at);
-                return;
-            }
-            ba += g_segments[i].length;
-            bb += g_segments[i].length;
         }
     }
 
@@ -817,6 +935,9 @@ static void emit_run(size_t index, const struct run_state *run)
                 json_string(g_out, where.dli_fname, strlen(where.dli_fname));
             }
         }
+        if (run->slot->captured == CAPTURE_TRAP)
+            fprintf(g_out, ",\"trap_site\":%u,\"trap_depth\":\"%s\"", run->slot->trap_site,
+                    trap_depth_name[run->slot->trap_depth]);
     }
     if (run->outcome == OUT_RETURN) {
         fputs(",\"" RET_INT_NAME "\":", g_out);
@@ -879,6 +1000,9 @@ static int equiv_main(int argc, char **argv, char **envp)
     g_arena = arena;
 
     dl_iterate_phdr(collect_segments, NULL);
+    /* backtrace() loads its unwinder on first use: do it here, never in a handler. */
+    void *warm[1];
+    backtrace(warm, 1);
     if (g_n_segments == 0)
         return die("the main program has no writable segment");
 

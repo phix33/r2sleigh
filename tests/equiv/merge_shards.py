@@ -111,13 +111,14 @@ def main(argv: list[str] | None = None) -> int:
         return len(parts) == 3 and (parts[0], parts[1]) in ran
 
     selected = {key for key in baseline["records"] if not args.partial or held(key)}
-    graded = {r.key: (r.status, gate.reason(r.status, r.evidence)) for r in records}
+    graded = {r.key: gate.graded(r) for r in records}
     problems = gate.ratchet(baseline, graded, selected)
     for line in problems:
         print(f"ratchet: {line}")
     if problems:
         print(f"ratchet: to bless, read {args.out / 'records.json'}, fill in every empty "
-              f"cause in {args.out / 'baseline.proposed.json'} and commit it as the baseline")
+              f"cause, owner and site in {args.out / 'baseline.proposed.json'} and commit it "
+              "as the baseline")
         return EXIT_RATCHET
     print(f"ratchet: {len(selected)} baseline records held")
     return EXIT_OK

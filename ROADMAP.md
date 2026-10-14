@@ -27,7 +27,7 @@ today; GT closes it.
 
 | Gate | Question | Blind spot (audit) |
 |------|----------|--------------------|
-| Equivalence (`tests/equiv`) | Does the C compute what the machine code computes? The north star. | `residual-trap` compares no state before the trap (T1); stripped builds only, so the DWARF route is never run (T5) |
+| Equivalence (`tests/equiv`) | Does the C compute what the machine code computes? The north star. | before a residual inside the body, only the output is compared, not memory (T1's rest: `pddj` states no residual's position but `unproven-return`'s); stripped builds only, so the DWARF route is never run (T5) |
 | Census (`tests/db`, every coverage, pinned and stripped function) | Did any rendering move? A structural change is byte-identical or names each moved line. | — |
 | Certification (`scripts/certify_render.py`) | Does every rendering read only what it assigns, and never panic? | grades 98 of 1,492 functions, none stripped; cannot see invented arguments (T6) |
 | Source-gold (`scripts/differential_truth.py`) | Are signatures what the source declared, or marked? | soundness 43% and 21% (W49); `frame_agree.py` in no gate (T21) |
