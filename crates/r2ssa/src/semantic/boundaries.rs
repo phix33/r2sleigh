@@ -431,6 +431,7 @@ pub(crate) fn variadic_callsite_arguments(
     interface: &r2source::SourceCallSiteInterface,
     fixed_arguments: &[Option<SourceCallArgumentFact>],
     evidence: VariadicCallsiteArgumentCountEvidence,
+    mut stack_pointer: Option<&mut ReachingStorage<'_>>,
 ) -> Result<Vec<SourceCallArgumentFact>, VariadicCallsiteArgumentCountRefusal> {
     let convention = recovery
         .machine_context
@@ -487,13 +488,13 @@ pub(crate) fn variadic_callsite_arguments(
                     graph: recovery.graph,
                     block_addr: recovery.block_addr,
                     op_index: recovery.op_index,
-                    calls_move_stack_pointer: recovery.machine_context.call_moves_stack_pointer(),
                 },
                 StackArgument {
                     offset,
                     callee_offset: offset,
                     size_bytes: placement.stride_bytes(),
                 },
+                stack_pointer.as_deref_mut(),
             )
             .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)?;
             arguments.push(SourceCallArgumentFact {
@@ -563,7 +564,6 @@ pub(crate) struct CallPosition<'a> {
     pub(crate) graph: &'a SsaGraph,
     pub(crate) block_addr: u64,
     pub(crate) op_index: usize,
-    pub(crate) calls_move_stack_pointer: bool,
 }
 
 /// One stack argument: where the caller writes it, where the callee reads it,
@@ -578,6 +578,7 @@ pub(crate) struct StackArgument {
 pub(crate) fn reaching_stack_argument_before_call(
     at: CallPosition<'_>,
     argument: StackArgument,
+    stack_pointer: Option<&mut ReachingStorage<'_>>,
 ) -> Option<(ValueId, i64)> {
     let CallPosition {
         function,
@@ -592,7 +593,9 @@ pub(crate) fn reaching_stack_argument_before_call(
         callee_offset,
         size_bytes,
     } = argument;
-    let Some((entering, transfer_moved_carrier)) = call_entering_stack_pointer_offset(at) else {
+    let Some((entering, transfer_moved_carrier)) =
+        call_entering_stack_pointer_offset(at, stack_pointer)
+    else {
         r2il::refusal_evidence!(
             "call-argument-stack-store",
             "callsite ({block_addr:#x}, {call_op_index}) has no frame position for the stack pointer entering the call"
@@ -780,6 +783,8 @@ fn body_writes(graph: &SsaGraph, slot: CanonicalStorageId) -> bool {
     })
 }
 
+/// The arity a call takes from the convention when no prototype describes it: the argument
+/// registers this body provably wrote before the call, and the result register where it is read.
 pub(crate) fn convention_call_boundary(
     function: &SSAFunction,
     prep: Option<&crate::DecompilePrepFacts>,
@@ -791,6 +796,7 @@ pub(crate) fn convention_call_boundary(
     at_least: usize,
     entry_values: &BTreeMap<CanonicalStorageId, Option<ValueId>>,
     written_anywhere: &mut BTreeMap<CanonicalStorageId, bool>,
+    mut stack_pointer: Option<&mut ReachingStorage<'_>>,
 ) -> Option<ConventionCallBoundary> {
     let convention = machine_context.convention_slots()?;
     // Whether a call returns its result in `slot`: what a call leaves there is a value, elsewhere garbage.
@@ -962,14 +968,16 @@ pub(crate) fn convention_call_boundary(
         // nothing is there, and a call that passes arguments would be spelled
         // as one that passes none.
         graph.block_id_for_addr(block_addr)?;
-        if call_entering_stack_pointer_offset(CallPosition {
-            function,
-            prep,
-            graph,
-            block_addr,
-            op_index,
-            calls_move_stack_pointer: machine_context.call_moves_stack_pointer(),
-        })
+        if call_entering_stack_pointer_offset(
+            CallPosition {
+                function,
+                prep,
+                graph,
+                block_addr,
+                op_index,
+            },
+            stack_pointer.as_deref_mut(),
+        )
         .is_none()
         {
             r2il::refusal_evidence!(
@@ -994,13 +1002,13 @@ pub(crate) fn convention_call_boundary(
                     graph,
                     block_addr,
                     op_index,
-                    calls_move_stack_pointer: machine_context.call_moves_stack_pointer(),
                 },
                 StackArgument {
                     offset,
                     callee_offset: offset.saturating_add(spent),
                     size_bytes: placement.stride_bytes(),
                 },
+                stack_pointer.as_deref_mut(),
             ) else {
                 break;
             };
@@ -1046,6 +1054,10 @@ pub(crate) fn collect_source_boundary_facts(
     // for the whole boundary pass and attach that identity when the reaching
     // proof says the carrier was untouched.
     let entry_values = unique_entry_values_by_storage(graph);
+    // One reaching solve of the stack pointer for every call that asks where it stands.
+    let mut stack_pointer_states = function
+        .stack_pointer_carrier()
+        .map(|stack_pointer| ReachingStorage::new(function, graph, stack_pointer));
     let mut facts = SourceBoundaryFacts {
         parameters: machine_context
             .map(|machine_context| collect_source_formal_parameter_facts(graph, machine_context))
@@ -1142,14 +1154,13 @@ pub(crate) fn collect_source_boundary_facts(
                                     graph,
                                     block_addr,
                                     op_index,
-                                    calls_move_stack_pointer: machine_context
-                                        .call_moves_stack_pointer(),
                                 },
                                 StackArgument {
                                     offset,
                                     callee_offset,
                                     size_bytes,
                                 },
+                                stack_pointer_states.as_mut(),
                             );
                             if found.is_none() {
                                 r2il::refusal_evidence!(
@@ -1223,6 +1234,7 @@ pub(crate) fn collect_source_boundary_facts(
                                 interface,
                                 &fixed_arguments,
                                 evidence,
+                                stack_pointer_states.as_mut(),
                             ) {
                                 Ok(arguments) => {
                                     boundary.arguments = arguments;
@@ -1314,6 +1326,7 @@ pub(crate) fn collect_source_boundary_facts(
                 stated.map_or(0, |statement| statement.at_least),
                 &entry_values,
                 &mut written_anywhere,
+                stack_pointer_states.as_mut(),
             );
             // One record of what the fallback was asked and what it answered.
             r2il::refusal_evidence!(

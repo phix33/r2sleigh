@@ -44,6 +44,10 @@ impl<'a> ReachingStorage<'a> {
         }
     }
 
+    pub(crate) const fn storage(&self) -> CanonicalStorageId {
+        self.storage
+    }
+
     /// The state before `inst`; none for an instruction no block operation is (a phi).
     pub(crate) fn before(&mut self, inst: InstId) -> Option<ReachingStorageState> {
         self.at(inst).map(|boundary| boundary.before)

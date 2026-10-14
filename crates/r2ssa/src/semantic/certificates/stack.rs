@@ -164,15 +164,16 @@ pub(crate) fn checked_ranges_overlap(
     left_offset < right_end && right_offset < left_end
 }
 
-pub(crate) fn collect_callee_stack_allocation_certificates(
-    function: &SSAFunction,
+pub(crate) fn collect_callee_stack_allocation_certificates<'a>(
+    function: &'a SSAFunction,
     prep: Option<&crate::DecompilePrepFacts>,
-    graph: &SsaGraph,
+    graph: &'a SsaGraph,
     machine_context: Option<&SourceMachineContext>,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
     exact_stack_slots: &BTreeMap<(StackAddressBase, i64), SourceStackSlotSpec>,
     sizing: &AllocationSizing<'_>,
+    stack_pointer_states: Option<&mut ReachingStorage<'a>>,
 ) -> BTreeMap<ObjectId, CalleeStackAllocationCertificate> {
     let AllocationSizing {
         array_layouts,
@@ -197,7 +198,16 @@ pub(crate) fn collect_callee_stack_allocation_certificates(
         })
     });
     let explicit_contract = SourceStackAllocationContract::new(contract.growth());
-    let mut active_stack_pointer_states = ReachingStorage::new(function, graph, stack_pointer);
+    // The function's solve of its stack pointer, where the roles name the same carrier.
+    let mut own_states;
+    let active_stack_pointer_states =
+        match stack_pointer_states.filter(|states| states.storage() == stack_pointer) {
+            Some(states) => states,
+            None => {
+                own_states = ReachingStorage::new(function, graph, stack_pointer);
+                &mut own_states
+            }
+        };
     let mut candidates = BTreeMap::new();
 
     for (object, fact) in &objects.objects {
@@ -1489,7 +1499,7 @@ pub(crate) fn collect_stack_call_argument_values(
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
     call_site: &CallSiteFact,
-    calls_move_stack_pointer: bool,
+    stack_pointer_states: Option<&mut ReachingStorage<'_>>,
 ) -> Vec<StackCallArgumentCertificate> {
     let Some((block_addr, op_idx)) = graph.walk_start(call_site.at) else {
         return Vec::new();
@@ -1502,16 +1512,16 @@ pub(crate) fn collect_stack_call_argument_values(
     // instruction finds it. Objects are keyed by their position in a frame, so
     // the boundary is that pointer's position in the same frame: anything
     // below it is this function's own, not an argument.
-    let Some((entering, _)) =
-        call_entering_stack_pointer_offset(super::super::boundaries::CallPosition {
+    let Some((entering, _)) = call_entering_stack_pointer_offset(
+        super::super::boundaries::CallPosition {
             function,
             prep,
             graph,
             block_addr,
             op_index: op_idx,
-            calls_move_stack_pointer,
-        })
-    else {
+        },
+        stack_pointer_states,
+    ) else {
         return Vec::new();
     };
     let mut by_offset = BTreeMap::<i64, StackCallArgumentCertificate>::new();

@@ -979,6 +979,46 @@ fn a_function_is_decompiled_on_aarch64_too() {
     assert!(returned.contains(parameters[0].1.as_str()), "{text}");
 }
 
+/// An AArch64 `blr` records no `CallRestore`: the pointer entering it is read from the function's
+/// solve of `sp` across a merge, so the slot stored at `[sp]` is the call's ninth argument.
+#[test]
+fn an_aarch64_call_past_a_merge_reads_its_stack_argument_from_the_reaching_stack_pointer() {
+    const NINE_ARGUMENTS: &[u8] = &[
+        0xff, 0x83, 0x00, 0xd1, // 0x1000 sub sp, sp, 0x20
+        0xfd, 0x7b, 0x01, 0xa9, // 0x1004 stp x29, x30, [sp, 0x10]
+        0xe9, 0x03, 0x01, 0xaa, // 0x1008 mov x9, x1
+        0x08, 0x00, 0x80, 0xd2, // 0x100c mov x8, 0
+        0x40, 0x00, 0x00, 0xb4, // 0x1010 cbz x0, 0x1018
+        0xa8, 0x00, 0x80, 0xd2, // 0x1014 mov x8, 5
+        0x20, 0x00, 0x80, 0xd2, // 0x1018 mov x0, 1
+        0x41, 0x00, 0x80, 0xd2, // 0x101c mov x1, 2
+        0x62, 0x00, 0x80, 0xd2, // 0x1020 mov x2, 3
+        0x83, 0x00, 0x80, 0xd2, // 0x1024 mov x3, 4
+        0xa4, 0x00, 0x80, 0xd2, // 0x1028 mov x4, 5
+        0xc5, 0x00, 0x80, 0xd2, // 0x102c mov x5, 6
+        0xe6, 0x00, 0x80, 0xd2, // 0x1030 mov x6, 7
+        0x07, 0x01, 0x80, 0xd2, // 0x1034 mov x7, 8
+        0xe8, 0x03, 0x00, 0xf9, // 0x1038 str x8, [sp]
+        0x20, 0x01, 0x3f, 0xd6, // 0x103c blr x9
+        0xfd, 0x7b, 0x41, 0xa9, // 0x1040 ldp x29, x30, [sp, 0x10]
+        0xff, 0x83, 0x00, 0x91, // 0x1044 add sp, sp, 0x20
+        0xc0, 0x03, 0x5f, 0xd6, // 0x1048 ret
+    ];
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: NINE_ARGUMENTS.to_vec(),
+        name: "nine",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let text = response.output.text();
+    let call = (text.lines())
+        .find(|line| line.contains("(1, 2, 3, 4, 5, 6, 7, 8, "))
+        .unwrap_or_else(|| panic!("no nine-argument call: {text}"));
+    let ninth = call.rsplit(", ").next().unwrap().trim_end_matches(");");
+    assert!(text.contains(&format!("{ninth} = ")), "{text}");
+}
+
 /// A lane written into a vector register whose other bytes nobody reads.
 ///
 /// `dup` fills all of v2, `mov v2.s[1], w1` inserts one lane into it, and the

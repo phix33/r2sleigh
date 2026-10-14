@@ -868,6 +868,10 @@ pub(crate) fn collect_prepared_function_certificates(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    // One reaching solve of the stack pointer, read by every pass below that asks where it stands.
+    let mut stack_pointer_states = function
+        .stack_pointer_carrier()
+        .map(|stack_pointer| ReachingStorage::new(function, graph, stack_pointer));
     let mut callee_stack_allocations = collect_callee_stack_allocation_certificates(
         function,
         prep,
@@ -880,6 +884,7 @@ pub(crate) fn collect_prepared_function_certificates(
             array_layouts: &stack_array_layouts,
             values,
         },
+        stack_pointer_states.as_mut(),
     );
     let (stack_frame_round_trips, stack_frame_round_trip_by_inst) =
         collect_stack_frame_round_trip_certificates(
@@ -1072,7 +1077,7 @@ pub(crate) fn collect_prepared_function_certificates(
                 objects,
                 structured,
                 fact,
-                machine_context.is_none_or(SourceMachineContext::call_moves_stack_pointer),
+                stack_pointer_states.as_mut(),
             );
             let boundary = boundaries
                 .calls

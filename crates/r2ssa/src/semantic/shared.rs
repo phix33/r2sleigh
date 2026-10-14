@@ -591,63 +591,18 @@ pub(crate) fn induction_step_for_update(
     }
 }
 
-/// The arity a call takes from the convention when no prototype describes it.
-///
-/// A boundary otherwise completes in exactly one way, from a source-owned
-/// callsite interface, and that is the better answer wherever it exists. Where
-/// it does not -- an indirect call, a callee radare2 never resolved, a thunk --
-/// the alternative was not fewer facts but none: the boundary stayed
-/// incomplete, every obligation on it was seeded as an unknown effect, and the
-/// function refused. `sym._init` in a stock GCC binary refuses for exactly
-/// that, on the indirect `__gmon_start__` guard, and so does every import
-/// thunk and every tail call.
-///
-/// The rule is the one the project owner settled: the count comes from the
-/// convention's argument registers that this function provably wrote on the way
-/// to the call and that reach it. That is dataflow evidence rather than a
-/// guess, and it is the same evidence a variadic call's tail already rests on
-/// -- the same scan answers both, so the two cannot come to disagree about what
-/// counts as an argument. A call is a barrier in that scan, so a register left
-/// set by an earlier call's arguments is not mistaken for this call's, and a
-/// register this function never wrote ends the count: without a prototype
-/// saying an argument exists, an untouched register carrying whatever the
-/// function was entered with is no evidence that the call reads it.
-///
-/// The result is the widest observed view of the convention's result register,
-/// and only when something reads it. A call defines both a full carrier and
-/// its declared register lanes, while an unknown prototype tells us only the
-/// full convention carrier. Code that consumes a 32-bit return therefore reads
-/// the lane and may never read the 64-bit carrier. The contained lane is still
-/// structural register geometry, and its exact use proves the width the caller
-/// observes without guessing a prototype. No read proves nothing either way --
-/// the callee may be `void`, or its result may simply be ignored -- and since
-/// nothing observes it, claiming one would add a local no reader ever names.
-///
-/// Where the convention itself is unknown there is no ground to stand on, and
-/// the boundary stays incomplete: the function refuses, which is the honest
-/// answer and the one this leaves in place for that case alone.
-/// Where the stack pointer stands as a call instruction finds it, before the
-/// instruction's own p-code spends anything.
-///
-/// The position is named in the frame the pointer belongs to: the entry frame,
-/// or the realigned one when a mask cut a new origin. Both sides of every
-/// question asked about an outgoing slot are read in that same frame, so which
-/// one it is travels with the offset.
-///
-/// Construction records exactly that carrier as the source of the
-/// `CallRestore` it emits after the call, so no instruction boundary has to
-/// be reconstructed here. A call the convention does not restore has no such
-/// record, and the position is then unknown.
+/// Where the stack pointer stands as a call finds it, in its frame (entry or realigned), and
+/// whether the transfer moved it; read off one reaching solve (doc/adr-frame-model.md, "P5").
 pub(crate) fn call_entering_stack_pointer_offset(
     at: super::boundaries::CallPosition<'_>,
+    stack_pointer: Option<&mut ReachingStorage<'_>>,
 ) -> Option<(StackAddressRoot, bool)> {
     let super::boundaries::CallPosition {
-        function,
         prep,
         graph,
         block_addr,
         op_index: call_op_index,
-        calls_move_stack_pointer,
+        ..
     } = at;
     let block = graph.block_id_for_addr(block_addr)?;
     let recorded = (graph.op_insts(block))
@@ -663,10 +618,9 @@ pub(crate) fn call_entering_stack_pointer_offset(
     let entering = match recorded {
         Some(entering) => entering,
         // A transfer that spends nothing on the carrier records no restore: a
-        // tail call returns nowhere, so there is nothing to bring back, and
-        // the pointer it found is the one reaching it.
+        // tail call returns nowhere, so the pointer it found is the one reaching it.
         None => {
-            let Some(storage) = function.stack_pointer_carrier() else {
+            let Some(states) = stack_pointer else {
                 r2il::refusal_evidence!(
                     "call-entering-stack-pointer",
                     "call at ({:#x}, {call_op_index}) records no carrier and the machine names no stack pointer",
@@ -674,16 +628,9 @@ pub(crate) fn call_entering_stack_pointer_offset(
                 );
                 return None;
             };
-            match reaching_stack_pointer_before(
-                function,
-                prep,
-                graph,
-                storage,
-                block_addr,
-                call_op_index,
-                calls_move_stack_pointer,
-            ) {
-                Some(ReachingAbiState::PreservedEntry) => {
+            let call = *graph.op_insts(block).get(call_op_index)?;
+            match states.before(call) {
+                Some(ReachingStorageState::PreservedEntry) => {
                     return Some((
                         StackAddressRoot {
                             base: StackAddressBase::StackPointer,
@@ -692,12 +639,13 @@ pub(crate) fn call_entering_stack_pointer_offset(
                         false,
                     ));
                 }
-                Some(ReachingAbiState::Value(value)) => value,
-                None => {
+                Some(ReachingStorageState::Value(value)) => value,
+                _ => {
                     r2il::refusal_evidence!(
                         "call-entering-stack-pointer",
-                        "call at ({:#x}, {call_op_index}) records no carrier and no {storage:?} reaches it",
-                        block_addr
+                        "call at ({:#x}, {call_op_index}) records no carrier and no {:?} reaches it",
+                        block_addr,
+                        states.storage()
                     );
                     return None;
                 }
@@ -963,43 +911,6 @@ pub(crate) fn reaching_abi_value_in_block(
     })
 }
 
-/// The stack pointer reaching a boundary, for a caller that has the carrier
-/// but no machine context of its own.
-pub(crate) fn reaching_stack_pointer_before(
-    function: &SSAFunction,
-    prep: Option<&crate::DecompilePrepFacts>,
-    graph: &SsaGraph,
-    storage: CanonicalStorageId,
-    block_addr: u64,
-    boundary_op_index: usize,
-    calls_move_stack_pointer: bool,
-) -> Option<ReachingAbiState> {
-    let visited = BTreeMap::new();
-    let search = ReachingAbi {
-        function,
-        machine_context: None,
-        prep,
-        graph,
-        storage,
-        policy: ReachingAbiPolicy {
-            allow_distinct_phi_inputs: false,
-            calls_are_barriers: true,
-            stack_pointer: Some(storage),
-            transfer_carrier: calls_move_stack_pointer.then_some(storage),
-        },
-    };
-    match reaching_abi_value_before(
-        search,
-        block_addr,
-        boundary_op_index,
-        &visited,
-        &mut BTreeMap::new(),
-    )? {
-        ReachingAbiPath::Reaches(state) => Some(state),
-        ReachingAbiPath::Cycle => None,
-    }
-}
-
 pub(crate) fn reaching_abi_value_in_block_with_policy(
     function: &SSAFunction,
     prep: Option<&crate::DecompilePrepFacts>,
@@ -1013,7 +924,7 @@ pub(crate) fn reaching_abi_value_in_block_with_policy(
     let visited = BTreeMap::new();
     let search = ReachingAbi {
         function,
-        machine_context: Some(machine_context),
+        machine_context,
         prep,
         graph,
         storage,
@@ -1189,8 +1100,7 @@ pub(crate) fn reaching_abi_value_before(
             // value answers its low lane (doc/adr-byte-relation.md, B3), and
             // any other lane fails closed below.
             if matches!(op, SSAOp::CallDefine { .. })
-                && machine_context
-                    .is_some_and(|context| context.is_low_lane_of(storage, dst_storage))
+                && machine_context.is_low_lane_of(storage, dst_storage)
             {
                 return graph
                     .inst(producer)
@@ -1224,7 +1134,7 @@ pub(crate) fn reaching_abi_value_before(
                 }
             }
             // Any other write of the root the wanted storage is the low lane of: the root's value answers it (B3).
-            if machine_context.is_some_and(|context| context.is_low_lane_of(storage, dst_storage)) {
+            if machine_context.is_low_lane_of(storage, dst_storage) {
                 return graph
                     .inst(producer)
                     .and_then(|inst| inst.output)
@@ -1257,8 +1167,7 @@ pub(crate) fn reaching_abi_value_before(
     }
     // The merge of the storage, or of the root it is the low lane of (B3).
     let merges = |merged: CanonicalStorageId| {
-        merged == storage
-            || machine_context.is_some_and(|context| context.is_low_lane_of(storage, merged))
+        merged == storage || machine_context.is_low_lane_of(storage, merged)
     };
     let phi_insts = (graph.phi_insts(block).iter().copied())
         .filter(|phi| {
