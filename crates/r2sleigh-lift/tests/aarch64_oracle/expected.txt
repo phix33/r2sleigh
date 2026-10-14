@@ -25,8 +25,6 @@ fcvtzs_v4s: stop Undefined
 frintx_d: stop unmodelled CALLOTHER NEON_frintx
 frinti_d: stop unmodelled CALLOTHER NEON_frinti
 fmla_elem: wrong v0
-ldaxr_stlxr: stop unmodelled CALLOTHER ExclusiveMonitorPass
-ldxr_stxr_w: stop unmodelled CALLOTHER ExclusiveMonitorPass
-ldaxp_stlxp: stop unmodelled CALLOTHER ExclusiveMonitorPass
 ldaddal_w: stop unmodelled CALLOTHER LOAcquire
 swpal_w: stop unmodelled CALLOTHER LOAcquire
+clrex_stxr: stop unmodelled CALLOTHER ClearExclusiveLocal

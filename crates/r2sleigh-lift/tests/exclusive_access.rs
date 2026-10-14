@@ -110,3 +110,58 @@ fn an_aarch64_load_exclusive_is_one_linked_load() {
         );
     }
 }
+
+/// Each AArch64 store-exclusive is one conditional store of its access width at `[Xn]`, a pair's
+/// second register stored under its success, and the status register the negation of that
+/// success: no branch, no user operation, no store that happens either way.
+#[test]
+fn an_aarch64_store_exclusive_is_one_conditional_store() {
+    for (name, word, width, guarded) in [
+        ("stxr w10, w9, [x0]", 0x880a_7c09, 4, 0),
+        ("stlxr w10, x9, [x8]", 0xc80a_fd09, 8, 0),
+        ("stxrb w9, w1, [x8]", 0x0809_7d01, 1, 0),
+        ("stxp w9, x0, x1, [x8]", 0xc829_0500, 8, 1),
+    ] {
+        let ops = aarch64(word);
+        let conditional: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                R2ILOp::StoreConditional {
+                    result: Some(ok),
+                    val,
+                    addr,
+                    ..
+                } => Some((ok.clone(), val.size, addr.space)),
+                _ => None,
+            })
+            .collect();
+        let [(ok, size, space)] = conditional.as_slice() else {
+            panic!("{name}: one conditional store with a result: {ops:?}");
+        };
+        assert_eq!(
+            (*size, *space),
+            (width, r2il::SpaceId::Register),
+            "{name}: {ops:?}"
+        );
+        let under_success = ops
+            .iter()
+            .filter(|op| matches!(op, R2ILOp::StoreGuarded { guard, .. } if guard == ok))
+            .count();
+        assert_eq!(under_success, guarded, "{name}: {ops:?}");
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, R2ILOp::BoolNot { src, .. } if src == ok)),
+            "{name}: the status is the negated success: {ops:?}"
+        );
+        assert!(
+            !ops.iter().any(|op| matches!(
+                op,
+                R2ILOp::Store { .. }
+                    | R2ILOp::CallOther { .. }
+                    | R2ILOp::CBranch { .. }
+                    | R2ILOp::Unimplemented
+            )),
+            "{name}: {ops:?}"
+        );
+    }
+}

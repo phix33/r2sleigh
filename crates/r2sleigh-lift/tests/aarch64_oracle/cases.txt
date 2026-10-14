@@ -378,3 +378,9 @@ eor3|-|eor3 v0.16b, v1.16b, v2.16b, v3.16b
 bcax|-|bcax v0.16b, v1.16b, v2.16b, v3.16b
 rax1|-|rax1 v0.2d, v1.2d, v2.2d
 xar|-|xar v0.2d, v1.2d, v2.2d, #13
+ldxp_stxp|P|ldxp x0, x1, [x9]; stxp w4, x2, x3, [x9]
+ldxp_stxp_w|P|ldxp w0, w1, [x9]; stxp w4, w2, w3, [x9]
+ldxrb_stxrb|P|ldxrb w0, [x9]; stxrb w2, w3, [x9]
+ldaxrh_stlxrh|P|ldaxrh w0, [x9]; stlxrh w2, w3, [x9]
+stxr_twice|P|ldxr x0, [x9]; stxr w2, x3, [x9]; stxr w4, x5, [x9]
+clrex_stxr|P|ldxr x0, [x9]; clrex; stxr w2, x3, [x9]

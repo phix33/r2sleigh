@@ -710,6 +710,7 @@ fn rewrite_exclusive_access(block: &mut R2ILBlock, names: &dyn Fn(u32) -> Option
             "ExclusiveAccess" => linked_load(block, at, &inputs, MemoryOrdering::Relaxed),
             "SetExclusiveMonitors" => linked_load(block, at, &inputs, MemoryOrdering::Unknown),
             "hasExclusiveAccess" => conditional_store(block, at, output.as_ref(), &inputs),
+            "ExclusiveMonitorPass" => monitored_store(block, at, output.as_ref(), &inputs, names),
             _ => None,
         };
         match rewritten {
@@ -838,6 +839,120 @@ fn conditional_store(
             },
         ],
     ))
+}
+
+/// AArch64's store-exclusive (Arm ARM C6.2.350), which also writes nought on success:
+///
+/// ```text
+///   ok     = ExclusiveMonitorPass(addr, 16)
+///   not    = !ok
+///   if (not) goto done
+///   <temporaries>; STORE [ram] addr = val; [<temporaries>; STORE [ram] addr + 8 = val2]
+///   status = ExclusiveMonitorsStatus()
+/// done:
+/// ```
+///
+/// is `ok = StoreConditional(addr, val)`, a pair's second store guarded by `ok`, and
+/// `status = !ok`. Anything else under the skip is left for `skips` to refuse.
+fn monitored_store(
+    block: &R2ILBlock,
+    at: usize,
+    ok: Option<&Varnode>,
+    inputs: &[Varnode],
+    names: &dyn Fn(u32) -> Option<String>,
+) -> Option<(usize, Vec<R2ILOp>)> {
+    let ([addr] | [addr, _]) = inputs else {
+        return None;
+    };
+    let ok = ok?;
+    let R2ILOp::BoolNot {
+        dst: not,
+        src: tested,
+    } = block.ops.get(at + 1)?
+    else {
+        return None;
+    };
+    let skip = at + 2;
+    let (_, LocalBranch::Conditional { cond, .. }, done) =
+        local_branch(block, skip, block.ops.get(skip)?)?
+    else {
+        return None;
+    };
+    let reported = done.checked_sub(1).filter(|reported| *reported > skip)?;
+    let R2ILOp::CallOther {
+        userop,
+        output: Some(status),
+        inputs: none,
+    } = block.ops.get(reported)?
+    else {
+        return None;
+    };
+    if !(same(tested, ok)
+        && same(&cond, not)
+        && none.is_empty()
+        && status.size == not.size
+        && names(*userop).as_deref() == Some("ExclusiveMonitorsStatus"))
+    {
+        return None;
+    }
+    let guarded = &block.ops[skip + 1..reported];
+    // The temporaries the skip guarded now run either way, so nothing after it may read one.
+    let temporaries: Vec<&Varnode> = guarded.iter().filter_map(R2ILOp::output).collect();
+    let read_after = block.ops[done..]
+        .iter()
+        .flat_map(R2ILOp::inputs)
+        .any(|input| temporaries.iter().any(|written| same(written, input)));
+    if read_after {
+        return None;
+    }
+    let mut ops = Vec::with_capacity(guarded.len() + 2);
+    let mut linked = false;
+    for op in guarded {
+        match op {
+            R2ILOp::Store {
+                space,
+                addr: stored,
+                val,
+            } if !linked => {
+                if !same(stored, addr) {
+                    return None;
+                }
+                linked = true;
+                ops.push(R2ILOp::StoreConditional {
+                    result: Some(ok.clone()),
+                    space: *space,
+                    addr: addr.clone(),
+                    val: val.clone(),
+                    ordering: MemoryOrdering::Unknown,
+                });
+            }
+            R2ILOp::Store { space, addr, val } => ops.push(R2ILOp::StoreGuarded {
+                space: *space,
+                addr: addr.clone(),
+                val: val.clone(),
+                guard: ok.clone(),
+                ordering: MemoryOrdering::Unknown,
+            }),
+            op if op.is_speculatable_value()
+                && op.output().is_some_and(|dst| dst.space == SpaceId::Unique) =>
+            {
+                ops.push(op.clone());
+            }
+            _ => return None,
+        }
+    }
+    if !linked {
+        return None;
+    }
+    ops.push(R2ILOp::BoolNot {
+        dst: not.clone(),
+        src: ok.clone(),
+    });
+    ops.push(R2ILOp::Copy {
+        dst: status.clone(),
+        src: not.clone(),
+    });
+    Some((done - at, ops))
 }
 
 #[cfg(test)]
