@@ -54,6 +54,8 @@ pub(super) struct Values<'a> {
     restored: RefCell<Vec<bool>>,
     /// The instructions whose rendered text evaluates a residual: their obligations are residual.
     residual: RefCell<Vec<bool>>,
+    /// By instruction index: a gap stands for its atomic effect beside the value the text assigns.
+    effect: RefCell<Vec<bool>>,
     /// The values read as residuals because C has no value for them, which the proof line names.
     unassigned: RefCell<Vec<super::proof::UnassignedRead>>,
     /// What the text being spelled reads and absorbs, kept only once a statement or test holding it is.
@@ -316,7 +318,7 @@ impl Demand<'_> {
             let owes = match &inst.payload {
                 InstPayload::Phi { .. } => false,
                 InstPayload::Op(op) => {
-                    writes_value(op)
+                    (writes_value(op) || reads_beside_effect(op))
                         && inventory
                             .obligations_for_inst(inst.id)
                             .any(|o| o.id.kind != SemanticObligationKind::LiveValueProducer)
@@ -784,6 +786,7 @@ impl<'a> Values<'a> {
             rendered: RefCell::new(vec![false; graph.insts.len()]),
             restored: RefCell::new(vec![false; graph.insts.len()]),
             residual: RefCell::new(vec![false; graph.insts.len()]),
+            effect: RefCell::new(vec![false; graph.insts.len()]),
             unassigned: RefCell::new(Vec::new()),
             pending: RefCell::new(Attempt::default()),
             dispatch,
@@ -1234,6 +1237,7 @@ impl<'a> Values<'a> {
             };
             self.attempt();
             let state = self.inventory.state_of(inst.id);
+            let at = self.graph.instruction_for_inst(inst.id).unwrap_or(addr);
             let stmt = match state {
                 _ if certified_elision(
                     self.artifact,
@@ -1244,6 +1248,10 @@ impl<'a> Values<'a> {
                 {
                     Ok(Vec::new())
                 }
+                Some(SemanticInstructionState::LiveObligation) if reads_beside_effect(op) => {
+                    self.effect_gap(&mut out, (addr, at), inst.id);
+                    self.value(inst.id, inst.output)
+                }
                 Some(SemanticInstructionState::LiveObligation) => {
                     self.statement(inst.id, op, inst.output)
                 }
@@ -1253,7 +1261,6 @@ impl<'a> Values<'a> {
                 }),
                 _ => Ok(Vec::new()),
             };
-            let at = self.graph.instruction_for_inst(inst.id).unwrap_or(addr);
             match stmt {
                 Ok(stmts) => {
                     for stmt in stmts {
@@ -1272,8 +1279,25 @@ impl<'a> Values<'a> {
         if let Some(slot) = self.residual.borrow_mut().get_mut(inst.0 as usize) {
             *slot = true;
         }
+        self.marker(out, (addr, at), inst, self.gap_kind(gap));
+    }
+
+    /// The gap for an atomic effect C has no statement of, beside the value its text still assigns.
+    fn effect_gap(&self, out: &mut Vec<(u64, CStmt)>, (addr, at): (u64, u64), inst: InstId) {
+        if let Some(slot) = self.effect.borrow_mut().get_mut(inst.0 as usize) {
+            *slot = true;
+        }
+        self.marker(out, (addr, at), inst, GapKind::EffectNotRendered);
+    }
+
+    fn marker(
+        &self,
+        out: &mut Vec<(u64, CStmt)>,
+        (addr, at): (u64, u64),
+        inst: InstId,
+        kind: GapKind,
+    ) {
         let op_idx = self.graph.op_ordinal(inst).unwrap_or(0);
-        let kind = self.gap_kind(gap);
         if let Some((_, CStmt::Gap(marker))) = out.last_mut()
             && marker.op_idx + marker.ops == op_idx
             && marker.kind == kind
@@ -1344,30 +1368,33 @@ impl<'a> Values<'a> {
             SSAOp::CallDefine { .. } if output.is_some_and(|o| self.is_named(o)) => {
                 Err(Gap::Unknown)
             }
-            _ if writes_value(op) => {
-                let Some(output) = output else {
-                    return Ok(Vec::new());
-                };
-                if !self.bound[inst.0 as usize] {
-                    return Ok(Vec::new());
-                }
-                let (name, _) = self.names[output.0 as usize].ok_or(Gap::Type)?;
-                let canonical = self.roots.value(output).ok_or(Gap::Term)?;
-                if reads_itself(
-                    &self.projection,
-                    self.roots.arena(),
-                    canonical.canonical,
-                    output,
-                ) {
-                    return Err(Gap::Unknown);
-                }
-                let value = self.spell(canonical.canonical).ok_or(Gap::Term)?;
-                self.mark_discharged(output);
-                Ok(vec![self.binding(output, name, canonical.canonical, value)])
-            }
+            _ if writes_value(op) => self.value(inst, output),
             _ if self.inventory.obligations_for_inst(inst).next().is_none() => Ok(Vec::new()),
             _ => Err(Gap::Effect),
         }
+    }
+
+    /// The binding of `inst`'s output to its term's spelling, where a statement owes it one.
+    fn value(&self, inst: InstId, output: Option<ValueId>) -> Result<Vec<CStmt>, Gap> {
+        let Some(output) = output else {
+            return Ok(Vec::new());
+        };
+        if !self.bound[inst.0 as usize] {
+            return Ok(Vec::new());
+        }
+        let (name, _) = self.names[output.0 as usize].ok_or(Gap::Type)?;
+        let canonical = self.roots.value(output).ok_or(Gap::Term)?;
+        if reads_itself(
+            &self.projection,
+            self.roots.arena(),
+            canonical.canonical,
+            output,
+        ) {
+            return Err(Gap::Unknown);
+        }
+        let value = self.spell(canonical.canonical).ok_or(Gap::Term)?;
+        self.mark_discharged(output);
+        Ok(vec![self.binding(output, name, canonical.canonical, value)])
     }
 
     /// `value` written at the store's cell: its canonical access where import built one, else its
@@ -2187,6 +2214,7 @@ impl<'a> Values<'a> {
     pub(super) fn close(&self, ledger: &mut crate::ledger::ObligationLedger) {
         use crate::ledger::{ElisionReason, Outcome};
         let (rendered, restored) = (self.rendered.borrow(), self.restored.borrow());
+        let effect = self.effect.borrow();
         let covered = self.covered_by_residuals();
         let certificates = self.artifact.certificates();
         let frame_setup = &certificates.stack_geometry.frame_setup;
@@ -2204,6 +2232,11 @@ impl<'a> Values<'a> {
                 }
                 (_, Some(reason)) => Outcome::Elided(reason),
                 _ if index.is_some_and(|i| covered[i]) => Outcome::Gapped,
+                (SemanticObligationKind::Atomicity | SemanticObligationKind::MemoryOrdering, _)
+                    if index.is_some_and(|i| effect[i]) =>
+                {
+                    Outcome::Gapped
+                }
                 _ if index.is_some_and(|i| rendered[i]) => {
                     match self.artifact.obligation_extent_assumption(obligation.id) {
                         Some(_) => Outcome::Assumed,
@@ -2522,6 +2555,12 @@ fn returned_values(inventory: &SemanticObligationInventory, inst: InstId) -> Vec
         .filter(|o| o.id.kind == SemanticObligationKind::ReturnValue)
         .flat_map(|o| o.inputs.iter().copied())
         .collect()
+}
+
+/// A linked load reads what a plain one reads (`r2ssa` machine lowering): its value is assigned,
+/// and its link and ordering, which C has no statement of, are a gap beside it.
+fn reads_beside_effect(op: &SSAOp<ValueId>) -> bool {
+    matches!(op, SSAOp::LoadLinked { .. })
 }
 
 /// Whether an operation's effect is its output alone, so a local assigned its term states it.

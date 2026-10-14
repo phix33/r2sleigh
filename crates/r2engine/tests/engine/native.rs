@@ -1520,38 +1520,67 @@ fn an_exclusive_pair_reaches_the_rendering_rather_than_the_projection() {
     assert!(!output.contains("store_conditional"), "{output}");
 }
 
-/// An AArch64 `ldxr`/`stxr` loop: the store is no plain store, and the loop exits on its status,
-/// a residual here, not on a constant (W20 left the status 1 and the loop endless).
+/// `atomic_fetch_add` without LSE, relaxed (`ldxr`/`stxr`) and acquire-release (`ldaxr`/`stlxr`):
+/// the linked load's value is read and returned, its link and ordering a gap beside it, and the loop
+/// exits on the store's status, a residual, not on a constant (W20 left it 1 and the loop endless).
 #[test]
-fn an_aarch64_exclusive_loop_exits_on_the_conditional_store_status() {
-    const FETCH_ADD: &[u8] = &[
-        0x08, 0x7c, 0x5f, 0x88, // 0x1000 ldxr w8, [x0]
-        0x09, 0x01, 0x01, 0x0b, // 0x1004 add w9, w8, w1
-        0x09, 0x7c, 0x0a, 0x88, // 0x1008 stxr w10, w9, [x0]
-        0xaa, 0xff, 0xff, 0x35, // 0x100c cbnz w10, 0x1000
-        0xe0, 0x03, 0x08, 0x2a, // 0x1010 mov w0, w8
-        0xc0, 0x03, 0x5f, 0xd6, // 0x1014 ret
-    ];
-    let machine = Machine::new("aarch64", "aarch64", 64);
-    let target = machine.target();
-    let program = Fixture {
-        bytes: FETCH_ADD.to_vec(),
-        name: "fetch_add",
-    };
-    let response = decompile(&target, &program, BASE).expect("decompile");
-    let output = response.output.text();
-    assert!(response.output.function().is_some(), "{output}");
-    // The linked load is the loop's first operation, and its value is no plain read.
-    assert!(output.contains(" at 0x1000:0 covering"), "{output}");
-    for absent in [
-        "ExclusiveMonitor",
-        "Unimplemented",
-        "load_linked",
-        "store_conditional",
-        "r2sleigh_store",
-        "if ((uint8_t)1U)",
+fn an_aarch64_exclusive_loop_returns_the_value_it_loaded() {
+    for (ordered, load, store) in [
+        (
+            "relaxed",
+            [0x08, 0x7c, 0x5f, 0x88],
+            [0x09, 0x7c, 0x0a, 0x88],
+        ),
+        (
+            "acq_rel",
+            [0x08, 0xfc, 0x5f, 0x88],
+            [0x09, 0xfc, 0x0a, 0x88],
+        ),
     ] {
-        assert!(!output.contains(absent), "{absent}: {output}");
+        let mut bytes = Vec::new();
+        bytes.extend(load); // 0x1000 ldxr / ldaxr w8, [x0]
+        bytes.extend([0x09, 0x01, 0x01, 0x0b]); // 0x1004 add w9, w8, w1
+        bytes.extend(store); // 0x1008 stxr / stlxr w10, w9, [x0]
+        bytes.extend([0xaa, 0xff, 0xff, 0x35]); // 0x100c cbnz w10, 0x1000
+        bytes.extend([0xe0, 0x03, 0x08, 0x2a]); // 0x1010 mov w0, w8
+        bytes.extend([0xc0, 0x03, 0x5f, 0xd6]); // 0x1014 ret
+        let machine = Machine::new("aarch64", "aarch64", 64);
+        let target = machine.target();
+        let program = Fixture {
+            bytes,
+            name: "fetch_add",
+        };
+        let response = decompile(&target, &program, BASE).expect("decompile");
+        let output = response.output.text();
+        assert!(response.output.function().is_some(), "{ordered}: {output}");
+        assert!(
+            output.contains("r2dec gap: EffectNotRendered at 0x1000:0 covering"),
+            "{ordered}: {output}"
+        );
+        let loaded = output
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_suffix(" = r2sleigh_load_u32((void*)(uint64_t)arg0);")
+            })
+            .unwrap_or_else(|| panic!("{ordered}: the loaded value is assigned: {output}"));
+        assert!(
+            output.contains(&format!("return (uint32_t){loaded};")),
+            "{ordered}: {output}"
+        );
+        for absent in [
+            "ExclusiveMonitor",
+            "Unimplemented",
+            "UnsupportedInstruction",
+            "load_linked",
+            "store_conditional",
+            "atomic",
+            "r2sleigh_store",
+            "if ((uint8_t)1U)",
+            "r2sleigh_residual_u32",
+        ] {
+            assert!(!output.contains(absent), "{ordered}: {absent}: {output}");
+        }
     }
 }
 
