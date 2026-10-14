@@ -103,6 +103,20 @@ strip = false
 debug = "full"
 opt-level = 1
 
+# The spec compiler runs in every clean build: at -O3 the SLA compile takes 11-14 s
+# for -O0's 29 s (audit B2). A global build-override costs more than it saves.
+[profile.dev.package.sleigh-compiler]
+opt-level = 3
+
+[profile.dev.package.libsla-sys]
+opt-level = 3
+
+[profile.release.package.sleigh-compiler]
+opt-level = 3
+
+[profile.release.package.libsla-sys]
+opt-level = 3
+
 # The Sleigh crates are vendored (vendor/README.md): owned code, built from
 # this tree, with the upstream commit each was taken from recorded there.
 [patch.crates-io]
