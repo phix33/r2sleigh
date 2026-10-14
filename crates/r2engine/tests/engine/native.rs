@@ -1512,6 +1512,42 @@ fn an_exclusive_pair_reaches_the_rendering_rather_than_the_projection() {
     assert!(!output.contains("store_conditional"), "{output}");
 }
 
+/// An AArch64 `ldxr`/`stxr` retry loop: the store happens only where the monitor held, so it is
+/// no plain store, and the loop exits on the store's own status, which C cannot compute here, not
+/// on a constant (W20 left the status 1 and the loop endless).
+#[test]
+fn an_aarch64_exclusive_loop_exits_on_the_conditional_store_status() {
+    const FETCH_ADD: &[u8] = &[
+        0x08, 0x7c, 0x5f, 0x88, // 0x1000 ldxr w8, [x0]
+        0x09, 0x01, 0x01, 0x0b, // 0x1004 add w9, w8, w1
+        0x09, 0x7c, 0x0a, 0x88, // 0x1008 stxr w10, w9, [x0]
+        0xaa, 0xff, 0xff, 0x35, // 0x100c cbnz w10, 0x1000
+        0xe0, 0x03, 0x08, 0x2a, // 0x1010 mov w0, w8
+        0xc0, 0x03, 0x5f, 0xd6, // 0x1014 ret
+    ];
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: FETCH_ADD.to_vec(),
+        name: "fetch_add",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(response.output.function().is_some(), "{output}");
+    // The linked load is the loop's first operation, and its value is no plain read.
+    assert!(output.contains(" at 0x1000:0 covering"), "{output}");
+    for absent in [
+        "ExclusiveMonitor",
+        "Unimplemented",
+        "load_linked",
+        "store_conditional",
+        "r2sleigh_store",
+        "if ((uint8_t)1U)",
+    ] {
+        assert!(!output.contains(absent), "{absent}: {output}");
+    }
+}
+
 /// `dmb` is a user operation with no output, and p-code says it writes nothing else: the value
 /// before it is returned, and the barrier itself is a gap by its name.
 #[test]
