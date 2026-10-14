@@ -297,6 +297,12 @@ impl Permissions {
         write: false,
         execute: true,
     };
+
+    /// Whether the loader backs the range at all: any access maps it; none (Mach-O `__PAGEZERO`)
+    /// is a reservation. An execute-only section's bytes are still the program's code.
+    pub const fn mapped(self) -> bool {
+        self.read || self.write || self.execute
+    }
 }
 
 /// One run of addresses the loader maps, and what the program may do there.

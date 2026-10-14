@@ -818,8 +818,8 @@ impl Image {
             return Some(Cow::Borrowed(&[]));
         }
         let segment = self.segment_at(vaddr)?;
-        // An unreadable range is not zeroes; Mach-O __PAGEZERO is the whole low 4GiB.
-        if !segment.permissions.read {
+        // A reservation is not zeroes; Mach-O __PAGEZERO is the whole low 4GiB.
+        if !segment.permissions.mapped() {
             return None;
         }
         let here = segment.vsize - (vaddr - segment.vaddr);
@@ -847,7 +847,7 @@ impl Image {
     /// The file's own bytes, with no patch layer over them.
     fn read_unpatched(&self, vaddr: u64, len: usize) -> Option<Cow<'_, [u8]>> {
         let segment = self.segment_at(vaddr)?;
-        if !segment.permissions.read {
+        if !segment.permissions.mapped() {
             return None;
         }
         let offset_in_segment = vaddr - segment.vaddr;
@@ -884,10 +884,10 @@ impl Image {
         let segment = self.segment_at(vaddr)?;
         let wanted = vaddr.saturating_add(max as u64);
         let mut end = segment.vaddr + segment.vsize;
-        // The window runs on through readable segments that each begin where the last ends.
+        // The window runs on through mapped segments that each begin where the last ends.
         while end < wanted {
             match self.segment_at(end) {
-                Some(next) if next.vaddr == end && next.permissions.read => end += next.vsize,
+                Some(next) if next.vaddr == end && next.permissions.mapped() => end += next.vsize,
                 _ => break,
             }
         }
