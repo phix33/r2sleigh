@@ -434,6 +434,11 @@ impl ValueLiveness {
 
         for value in &graph.values {
             offsets.push(segments.len() as u32);
+            // A literal is written into its reader and occupies no storage, except where a merge
+            // reads it: storage spans join a merge with its sources by these ranges (span.rs).
+            if value.var.constant_bits().is_some() && !read_by_a_merge(graph, value.id) {
+                continue;
+            }
             let stamp = value.id.0 + 1;
             let definition = graph
                 .def_inst(value.id)
@@ -1034,9 +1039,11 @@ mod tests {
         for value in &graph.values {
             for node in &graph.blocks {
                 for position in 0..node.insts.len() as u32 {
+                    // A literal occupies no storage, so nothing holds it live.
                     assert_eq!(
                         liveness.live_after(value.id, node.id, position),
-                        naive_live_after(graph, value.id, node.id, position),
+                        !value.var.is_const()
+                            && naive_live_after(graph, value.id, node.id, position),
                         "{} after {:?}:{position}",
                         value.var.display_name(),
                         node.id
@@ -1491,4 +1498,13 @@ mod tests {
             }
         }
     }
+}
+
+/// Whether a phi reads `value`.
+fn read_by_a_merge(graph: &crate::graph::SsaGraph, value: crate::graph::ValueId) -> bool {
+    let phi = |site: &crate::graph::UseSite| {
+        let inst = graph.inst(site.inst);
+        inst.is_some_and(|inst| matches!(inst.payload, crate::graph::InstPayload::Phi { .. }))
+    };
+    graph.use_sites(value).iter().any(phi)
 }
