@@ -229,8 +229,11 @@ pub(crate) fn disassemble_function(
     let addr = parse_number(session, argument)?;
     let listing = session.program.function_listing(addr)?;
     let answer = &listing.lines;
-    if answer.value.is_empty() {
-        return Err(format!("no blocks at {addr:#x}"));
+    // A walk refused at the entry lists nothing: the record is the answer (ROADMAP D29).
+    match (&listing.refused, answer.value.is_empty()) {
+        (Some(refused), true) => return Ok(unanalysed(refused).trim_end().to_owned()),
+        (None, true) => return Err(format!("no blocks at {addr:#x}")),
+        _ => {}
     }
     let mut out: String = answer
         .value

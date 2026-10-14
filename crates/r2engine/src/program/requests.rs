@@ -533,8 +533,23 @@ impl<S: Source + 'static> OpenProgram<S> {
         entry: u64,
         reason: NativeRefusal,
     ) -> Result<(FunctionListing, Shape), String> {
-        let body = crate::body::lift_body(entry, target.disasm, self, &BTreeMap::new())
-            .map_err(|error| NativeRefusal::Body(error).to_string())?;
+        let body = match crate::body::lift_body(entry, target.disasm, self, &BTreeMap::new()) {
+            Ok(body) => body,
+            // An address nothing maps names no function; any other walk refusal is the record.
+            Err(unmapped @ crate::body::BodyError::EntryUnmapped(_)) => {
+                return Err(NativeRefusal::Body(unmapped).to_string());
+            }
+            Err(error) => {
+                let listing = FunctionListing {
+                    lines: Answer::complete(Vec::new()),
+                    refused: Some(AnalysisRefused {
+                        reason: NativeRefusal::Body(error),
+                        unresolved: Vec::new(),
+                    }),
+                };
+                return Ok((listing, shape_of(std::iter::empty(), std::iter::empty())));
+            }
+        };
         let unresolved = body
             .unresolved
             .iter()

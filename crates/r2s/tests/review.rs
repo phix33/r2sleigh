@@ -84,12 +84,11 @@ fn an_address_in_read_only_data_is_no_function() {
     // 0x2020 is the third entry of classify's jump table, in the segment
     // mapped read-only. Its bytes happen to decode, so the shell listed
     // `xor eax, 0x3cfffff2` there and rendered `void fcn_2020(void)` under a
-    // clean proof line: data, presented as a function. `pdd` prints the walk's refusal as a record
-    // (ROADMAP D29); the listing has no body to list.
-    for (script, record) in [("s 0x2020; pdd", true), ("s 0x2020; pdf", false)] {
+    // clean proof line: data, presented as a function. Both print the walk's refusal as a record
+    // and exit 0 (ROADMAP D29).
+    for script in ["s 0x2020; pdd", "s 0x2020; pdf", "s 0x2020; afb"] {
         let run = bounded(script);
-        assert_eq!(run.ok, record, "{script}: {}", run.out);
-        assert_eq!(run.out.contains("r2sleigh refused"), record, "{}", run.out);
+        assert!(run.ok, "{script}: {}", run.out);
         assert!(
             run.out.contains(
                 "no instruction can run at 0x2020: the program maps it without execute permission"

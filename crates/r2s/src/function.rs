@@ -134,8 +134,10 @@ pub fn blocks(session: &mut Session, argument: &str) -> Result<String, String> {
     use r2engine::program::EdgeKind;
     let entry = parse_number(session, argument)?;
     let graph = session.program.function_graph(entry)?;
-    if graph.blocks.is_empty() {
-        return Err(format!("no blocks at {entry:#x}"));
+    match (&graph.refused, graph.blocks.is_empty()) {
+        (Some(refused), true) => return Ok(format!("refused: {}", refused.reason)),
+        (None, true) => return Err(format!("no blocks at {entry:#x}")),
+        _ => {}
     }
     let mut out = String::new();
     for block in &graph.blocks {
