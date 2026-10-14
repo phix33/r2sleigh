@@ -110,29 +110,38 @@ fn is_arm32(arch: &Arch) -> bool {
     arch.name == "ARM" && arch.bits == 32
 }
 
-/// The address `LC_MAIN` names, and the file offset of the field that names it, where the Mach-O carries that command.
-fn macho_c_main(file: &object::File<'_>, data: &[u8]) -> Option<(u64, u64)> {
+/// Where a Mach-O starts and the file offset of the field stating it: `LC_MAIN`'s `entryoff` is
+/// an offset from the segment mapping the header, `LC_UNIXTHREAD`'s pc an address (audit W33).
+struct MachEntry {
+    /// The address, with ARM's mode bit still on it.
+    raw: u64,
+    field: Option<u64>,
+    main: bool,
+}
+
+fn macho_entry(file: &object::File<'_>, data: &[u8]) -> Option<MachEntry> {
     match file {
-        object::File::MachO64(macho) => c_main(macho, data),
-        object::File::MachO32(macho) => c_main(macho, data),
+        object::File::MachO64(macho) => mach_entry(macho, data),
+        object::File::MachO32(macho) => mach_entry(macho, data),
         _ => None,
     }
 }
 
-fn c_main<'data, Mach, R>(
+fn mach_entry<'data, Mach, R>(
     file: &object::read::macho::MachOFile<'data, Mach, R>,
     data: &'data [u8],
-) -> Option<(u64, u64)>
+) -> Option<MachEntry>
 where
     Mach: object::read::macho::MachHeader<Endian = object::Endianness>,
     R: object::ReadRef<'data>,
 {
     use object::macho;
+    use object::read::macho::LoadCommandVariant as Variant;
     use object::read::macho::Segment as _;
 
     let endian = file.macho_header().endian().ok()?;
     let mut commands = file.macho_header().load_commands(endian, data, 0).ok()?;
-    let mut text_base = None;
+    let mut header = None;
     let mut entryoff = None;
     // Load commands follow the header back to back, so each starts where the last one's size ends.
     let mut at = std::mem::size_of::<Mach>() as u64;
@@ -144,27 +153,35 @@ where
             entryoff = Some((main.entryoff.get(endian), at + 8));
         }
         at += u64::from(command.cmdsize());
-        if text_base.is_none()
-            && let Ok(variant) = command.variant()
+        let segment = match command.variant() {
+            Ok(Variant::Segment32(segment, _)) => Some((
+                u64::from(segment.vmaddr.get(endian)),
+                segment.file_range(endian),
+            )),
+            Ok(Variant::Segment64(segment, _)) => {
+                Some((segment.vmaddr.get(endian), segment.file_range(endian)))
+            }
+            _ => None,
+        };
+        if header.is_none()
+            && let Some((vmaddr, (0, 1..))) = segment
         {
-            text_base = match variant {
-                object::read::macho::LoadCommandVariant::Segment32(segment, _)
-                    if segment.name() == b"__TEXT" =>
-                {
-                    Some(u64::from(segment.vmaddr.get(endian)))
-                }
-                object::read::macho::LoadCommandVariant::Segment64(segment, _)
-                    if segment.name() == b"__TEXT" =>
-                {
-                    Some(segment.vmaddr.get(endian))
-                }
-                _ => None,
-            };
+            header = Some(vmaddr);
         }
     }
-    // `entryoff` is measured from the start of the mapped image.
-    let (entryoff, field) = entryoff?;
-    Some((text_base?.checked_add(entryoff)?, field))
+    match entryoff {
+        Some((entryoff, field)) => Some(MachEntry {
+            raw: header?.checked_add(entryoff)?,
+            field: Some(field),
+            main: true,
+        }),
+        // No `LC_MAIN`: `object` reads `LC_UNIXTHREAD`'s pc, which is an address.
+        None => Some(MachEntry {
+            raw: Some(file.entry()).filter(|pc| *pc != 0)?,
+            field: None,
+            main: false,
+        }),
+    }
 }
 
 /// Whether a Mach-O symbol is `N_INDR`: an alias whose `n_value` is the string-table index of the
@@ -831,31 +848,33 @@ impl Image {
         let languages = language::read(&file, &symbols);
 
         let mut entries = Vec::new();
-        let declared_entry = file.entry();
-        let entry = code_address(&arch, declared_entry);
-        let c_main = macho_c_main(&file, &data[..]);
-        // Where the header states the entry: ELF's `e_entry`, Mach-O's `LC_MAIN`.
-        let entry_field = match format {
-            Format::Elf => Some(ELF_ENTRY_FIELD),
-            Format::MachO => c_main.map(|(_, field)| field),
-            _ => None,
-        }
-        .map(|offset| StatedAt {
+        let mach_entry = macho_entry(&file, &data[..]);
+        // Where the header states the entry: ELF's `e_entry`, Mach-O's `LC_MAIN` or `LC_UNIXTHREAD`.
+        let (declared_entry, entry_field) = match (format, &mach_entry) {
+            (Format::MachO, Some(entry)) => (entry.raw, entry.field),
+            (Format::MachO, None) => (0, None),
+            (Format::Elf, _) => (file.entry(), Some(ELF_ENTRY_FIELD)),
+            _ => (file.entry(), None),
+        };
+        let entry_field = entry_field.map(|offset| StatedAt {
             offset,
             vaddr: file_offset_to_vaddr(&segments, offset),
         });
-        if entry != 0 {
-            // Mach-O states the entry as a file offset, so translate when unmapped.
-            let vaddr = if executable(entry) {
-                Some(entry)
-            } else {
-                file_offset_to_vaddr(&segments, entry).filter(|vaddr| executable(*vaddr))
-            };
-            if let Some(vaddr) = vaddr {
+        let entry = code_address(&arch, declared_entry);
+        let thumb = is_arm32(&arch) && declared_entry & 1 == 1;
+        if entry != 0 && executable(entry) {
+            entries.push(Entry {
+                vaddr: entry,
+                kind: EntryKind::Main,
+                thumb,
+                stated_at: entry_field,
+            });
+            // `LC_MAIN` names `main` itself: dyld calls it.
+            if mach_entry.as_ref().is_some_and(|entry| entry.main) {
                 entries.push(Entry {
-                    vaddr,
-                    kind: EntryKind::Main,
-                    thumb: is_arm32(&arch) && declared_entry & 1 == 1,
+                    vaddr: entry,
+                    kind: EntryKind::CMain,
+                    thumb,
                     stated_at: entry_field,
                 });
             }
@@ -881,19 +900,6 @@ impl Image {
                     stated_at: Some(stated),
                 });
             }
-        }
-        if let Some((vaddr, field)) = c_main
-            && executable(vaddr)
-        {
-            entries.push(Entry {
-                vaddr,
-                kind: EntryKind::CMain,
-                thumb: false,
-                stated_at: Some(StatedAt {
-                    offset: field,
-                    vaddr: file_offset_to_vaddr(&segments, field),
-                }),
-            });
         }
         // The linker wrote one entry per function it laid out, so a body no
         // symbol names and nothing calls is still stated here.

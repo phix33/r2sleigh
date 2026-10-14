@@ -2,6 +2,7 @@
 """Write the Mach-O quirk fixtures: small images, each stating one thing as dyld or the linker reads it.
 
 macho_indirect   an executable whose symbol table holds an N_INDR alias, whose n_value is a string index
+macho_thumb_main an ARMv7 executable whose LC_MAIN entryoff is a file offset, odd for Thumb, into __TEXT at 0x1000
 """
 
 import pathlib
@@ -48,8 +49,22 @@ def indirect():
     return macho64(MH_EXECUTE, [text, symtab, main], [(0x1000, CODE), (0x1010, symbols), (0x1030, strings)])
 
 
+def thumb_main():
+    # __text runs over both readings of entryoff 0x1801: the address 0x2800 and, misread, 0x1800.
+    code = bytearray(0x2000)
+    code[0x1700:0x1704] = b"\x80\xb5\x6f\x46"  # push {r7, lr}; mov r7, sp, at 0x2800
+    sections = struct.pack("<16s16sIIIIIIIII", b"__text", b"__TEXT", 0x1100, len(code), 0x100, 1, 0, 0, 0x80000400, 0, 0)
+    text = struct.pack("<II16sIIIIiiII", 0x1, 56 + 68, b"__TEXT", 0x1000, 0x3000, 0, 0x2100, 5, 5, 1, 0) + sections
+    main = struct.pack("<IIQQ", 0x80000028, 24, 0x1801, 0)
+    commands = [text, main]
+    header = struct.pack("<IiiIIII", 0xFEEDFACE, 12, 9, MH_EXECUTE, len(commands), sum(map(len, commands)), 0)
+    out = bytearray(header + b"".join(commands))
+    out += bytes(0x100 - len(out)) + code
+    return bytes(out)
+
+
 if __name__ == "__main__":
     here = pathlib.Path(__file__).parent
-    for name, build in [("macho_indirect", indirect)]:
+    for name, build in [("macho_indirect", indirect), ("macho_thumb_main", thumb_main)]:
         (here / name).write_bytes(build())
         print("wrote", name)

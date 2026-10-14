@@ -60,18 +60,6 @@ verdict = "r2-right"
 reason = "0x100015fe0 begins __objc_stubs: it loads a selector into x1, then jumps through objc_msgSend's slot (0x100020270), so it is objc_msgSend$<selector>, yet r2s names it imp.objc_msgSend and names the stubs after it nothing; owner r2engine stub naming (ROADMAP P11, audit W10)"
 
 [[judged]]
-command = "ie"
-binaries = "BatteryLife.arm_32.0"
-verdict = "r2-right"
-reason = "LC_MAIN entryoff 0x11e25 is a file offset into __TEXT (vmaddr 0x4000, fileoff 0): the entry is Thumb at 0x15e24, file 0x11e24, as radare2 states; r2s reads the offset as the address; owner r2image entries (ROADMAP I, audit W33)"
-
-[[judged]]
-command = "px"
-binaries = "BatteryLife.arm_32.0"
-verdict = "r2-right"
-reason = "dumped at r2s's misread entry (0x11e24 for LC_MAIN's 0x15e24); owner r2image entries (ROADMAP I, audit W33)"
-
-[[judged]]
 command = "iS"
 binaries = "watchos-relocs.obj"
 verdict = "r2-right"
@@ -572,7 +560,7 @@ reason = "radare2 names each LC_FUNCTION_STARTS entry sym.func.*; r2s names no f
 command = "pd"
 binaries = ["TestRTTI-armv7", "arm-or-thumb", "arm16-ofp.lzh", "arm32-ofp.lzh", "hello-objc-arm", "ired-thumb", "misaligned_data-iOS-armv7", "test-thumb", "thumb-test", "BatteryLife.arm_32.0"]
 verdict = "r2-right"
-reason = "ARMv7 (ungraded): r2s decodes ARM at a Mach-O entry radare2 reads as Thumb (mov r7, sp); owner r2image's entry mode"
+reason = "ARMv7 (ungraded): r2s states the Mach-O entry Thumb (LC_MAIN's low bit) and decodes its first instruction so, then decodes ARM where radare2 reads Thumb (mov r7, sp); owner r2engine's listing mode"
 
 [[judged]]
 command = "pd"
