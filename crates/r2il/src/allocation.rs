@@ -10,8 +10,8 @@
 //!
 //! So the counters live here, at the bottom of the crate graph where every
 //! stage can reach them, and the global allocator that feeds them is r2s's
-//! `alloc-count` build. With no allocator installed every function below is
-//! a relaxed load of a zero, which is what an ordinary build pays.
+//! `alloc-count` build. With no allocator installed every reading below is
+//! `None`, never a zero that would claim nothing was allocated (audit W63).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -75,7 +75,7 @@ pub const fn size_class_bound(class: usize) -> Option<usize> {
 
 /// Count one allocation of `size` bytes: the counting allocator's half of these counters.
 pub fn allocated(size: usize) {
-    COUNTING.store(1, Ordering::Relaxed);
+    COUNTING.store(true, Ordering::Relaxed);
     ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
     BY_SIZE[size_class(size)].fetch_add(1, Ordering::Relaxed);
     let live = LIVE.fetch_add(size, Ordering::Relaxed) + size;
@@ -92,19 +92,43 @@ pub fn freed(size: usize) {
     LIVE.fetch_sub(size, Ordering::Relaxed);
 }
 
-/// Bytes allocated and not yet freed.
-pub fn live_bytes() -> usize {
-    LIVE.load(Ordering::Relaxed)
+/// Bytes allocated and not yet freed, where something counts them.
+pub fn live_bytes() -> Option<usize> {
+    counted(&LIVE)
 }
 
-/// How many allocations have been made since the process started.
-pub fn allocation_count() -> usize {
-    ALLOCATIONS.load(Ordering::Relaxed)
+/// How many allocations have been made since the process started, where something counts them.
+pub fn allocation_count() -> Option<usize> {
+    counted(&ALLOCATIONS)
 }
 
-/// The high-water mark since it was last reset.
-pub fn peak_bytes() -> usize {
-    PEAK.load(Ordering::Relaxed)
+/// The high-water mark since it was last reset, where something counts it.
+pub fn peak_bytes() -> Option<usize> {
+    counted(&PEAK)
+}
+
+/// What grew from `before` to `after`, where both were measured.
+pub fn grown(before: Option<usize>, after: Option<usize>) -> Option<usize> {
+    Some(after?.saturating_sub(before?))
+}
+
+/// A count as evidence spells it: the number, or `unmeasured` where nothing counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Evidence(pub Option<usize>);
+
+impl std::fmt::Display for Evidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(count) => write!(f, "{count}"),
+            None => f.write_str("unmeasured"),
+        }
+    }
+}
+
+fn counted(counter: &AtomicUsize) -> Option<usize> {
+    COUNTING
+        .load(Ordering::Relaxed)
+        .then(|| counter.load(Ordering::Relaxed))
 }
 
 /// Start a new measurement from what is live now.
@@ -115,15 +139,8 @@ pub fn reset_peak() {
     PEAK.store(LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
 }
 
-/// Whether anything is actually counting.
-///
-/// Set by the first allocation the counting allocator sees, so a report can say
-/// "not measured" rather than "zero bytes", which are different claims.
-static COUNTING: AtomicUsize = AtomicUsize::new(0);
-
-pub fn is_counting() -> bool {
-    COUNTING.load(Ordering::Relaxed) == 1
-}
+/// Whether a counting allocator is installed: set by the first allocation it sees.
+static COUNTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(test)]
 mod tests {
@@ -137,5 +154,17 @@ mod tests {
                 class == 0 || super::size_class_bound(class - 1).is_some_and(|below| size > below)
             );
         }
+    }
+
+    /// No counting allocator in the test binary: a reading is unmeasured, never zero.
+    #[test]
+    fn an_uncounted_reading_is_no_zero() {
+        assert_eq!(super::live_bytes(), None);
+        assert_eq!(
+            super::Evidence(super::live_bytes()).to_string(),
+            "unmeasured"
+        );
+        assert_eq!(super::grown(Some(3), Some(10)), Some(7));
+        assert_eq!(super::grown(None, Some(10)), None);
     }
 }

@@ -69,10 +69,8 @@ pub fn profile() -> Profile {
 pub fn report(_profile: Profile) {
     #[cfg(all(feature = "alloc-count", not(feature = "dhat-heap")))]
     if std::env::var_os("R2S_ALLOCATIONS").is_some() {
-        eprintln!(
-            "r2s: allocations: {}",
-            r2engine::allocation::allocation_count()
-        );
-        eprintln!("r2s: heap peak: {}", r2engine::allocation::peak_bytes());
+        use r2engine::allocation::{Evidence, allocation_count, peak_bytes};
+        eprintln!("r2s: allocations: {}", Evidence(allocation_count()));
+        eprintln!("r2s: heap peak: {}", Evidence(peak_bytes()));
     }
 }
