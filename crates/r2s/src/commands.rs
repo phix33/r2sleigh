@@ -488,12 +488,29 @@ fn seek(session: &mut Session, argument: &str) -> Result<String, String> {
     Ok(String::new())
 }
 
+/// A container format as radare2's `i` spells it: `elf64`, `mach064`, `pe`.
+pub(crate) fn format_name(format: r2image::Format, bits: u32) -> String {
+    let (name, wide) = match format {
+        r2image::Format::Elf => ("elf", "elf64"),
+        r2image::Format::MachO => ("mach0", "mach064"),
+        r2image::Format::Pe => ("pe", "pe64"),
+        r2image::Format::Coff => ("coff", "coff"),
+        r2image::Format::Wasm => ("wasm", "wasm"),
+        r2image::Format::Xcoff => ("xcoff", "xcoff64"),
+        r2image::Format::Other => ("any", "any"),
+    };
+    (if bits == 64 { wide } else { name }).to_owned()
+}
+
 fn info(session: &Session) -> Result<String, String> {
     let image = session.image();
     let arch = image.arch();
     let mut out = String::new();
     out.push_str(&format!("file     {}\n", session.path));
-    out.push_str(&format!("format   {:?}\n", image.format()));
+    out.push_str(&format!(
+        "format   {}\n",
+        format_name(image.format(), arch.bits)
+    ));
     out.push_str(&format!("arch     {}\n", arch.name));
     out.push_str(&format!("bits     {}\n", arch.bits));
     out.push_str(&format!(
@@ -644,14 +661,14 @@ fn write_text(session: &mut Session, bytes: &[u8]) -> Result<String, String> {
 fn write_hex(session: &mut Session, argument: &str) -> Result<String, String> {
     let digits = argument.replace(' ', "");
     if !digits.len().is_multiple_of(2) {
-        return Err("r2s: a byte is two hex digits".to_owned());
+        return Err("a byte is two hex digits".to_owned());
     }
     let bytes = digits
         .as_bytes()
         .chunks(2)
         .map(|pair| {
-            let text = std::str::from_utf8(pair).map_err(|_| "r2s: not hex".to_owned())?;
-            u8::from_str_radix(text, 16).map_err(|_| format!("r2s: '{text}' is not hex"))
+            let text = std::str::from_utf8(pair).map_err(|_| "not hex".to_owned())?;
+            u8::from_str_radix(text, 16).map_err(|_| format!("'{text}' is not hex"))
         })
         .collect::<Result<Vec<u8>, String>>()?;
     patch(session, &bytes)
@@ -667,7 +684,7 @@ fn patch(session: &mut Session, bytes: &[u8]) -> Result<String, String> {
     session
         .image_mut()
         .write(addr, bytes)
-        .map_err(|error| format!("r2s: {error}"))?;
+        .map_err(|error| error.to_string())?;
     Ok(format!("{} bytes at {addr:#x}", bytes.len()))
 }
 
@@ -694,7 +711,7 @@ fn revert(session: &mut Session) -> Result<String, String> {
 /// Where each address is named from, how, and on what evidence.
 fn cross_references(session: &mut Session, argument: &str) -> Result<String, String> {
     if !argument.trim().is_empty() {
-        return Err("r2s: ax takes no argument; use axt <address>".to_owned());
+        return Err("ax takes no argument; use axt <address>".to_owned());
     }
     let index = session.program.references()?.value;
     let mut out = String::from("from       to         role     size support\n");

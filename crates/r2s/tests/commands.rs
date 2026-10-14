@@ -155,7 +155,7 @@ fn aa_refuses_a_machine_it_cannot_decode() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(!run.ok, "{}", run.out);
     assert!(
-        run.out.contains("no architecture mapping for S390"),
+        run.out.contains("this build decodes no s390x code"),
         "{}",
         run.out
     );
@@ -917,11 +917,24 @@ fn a_write_where_nothing_is_mapped_is_refused() {
     assert!(!run.ok, "{}", run.out);
 }
 
+/// A directory is said to be one, not reported as the OS error reading it gave (audit D14).
+#[test]
+fn a_directory_is_no_binary() {
+    let run = on(fixture().parent().expect("a directory").to_owned(), "i");
+    assert!(!run.ok, "{}", run.out);
+    assert!(
+        run.out.contains("is a directory, not a binary"),
+        "{}",
+        run.out
+    );
+    assert!(!run.out.contains("os error"), "{}", run.out);
+}
+
 #[test]
 fn the_image_reports_what_the_container_states() {
     let run = r2s("i");
     assert!(run.ok, "{}", run.out);
-    assert!(run.out.contains("Elf"), "{}", run.out);
+    assert!(run.out.contains("format   elf64\n"), "{}", run.out);
     assert!(run.out.contains("x86"), "{}", run.out);
     // The fixture is C, which its compile units state (LP0), spelled as radare2 does.
     assert!(run.out.contains("lang     c\n"), "{}", run.out);

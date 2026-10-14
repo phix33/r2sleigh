@@ -29,12 +29,47 @@ pub enum ImageError {
         #[source]
         source: std::io::Error,
     },
+    #[error("{path} is a directory, not a binary")]
+    Directory { path: String },
     #[error("unrecognised binary: {0}")]
     Parse(String),
-    #[error("no architecture mapping for {0:?}")]
+    #[error("this build decodes no {} code", architecture_name(*.0))]
     UnsupportedArchitecture(object::Architecture),
+    #[error(
+        "unrecognised binary: a universal binary with {slices} slices, none of an architecture this build decodes"
+    )]
+    NoSupportedSlice { slices: usize },
+    #[error("unrecognised binary: its universal slice runs past the file")]
+    SliceOutOfFile,
+    #[error("a write at {0:#x} runs past the end of the address space")]
+    WriteOverflows(u64),
+    #[error("nothing mapped at {start:#x}..{end:#x} to write over")]
+    WriteUnmapped { start: u64, end: u64 },
     #[error("an object's sections need more address space than there is")]
     Unplaceable,
+}
+
+/// What an architecture the object reader names is called, where this build has no decoder for it.
+fn architecture_name(architecture: object::Architecture) -> &'static str {
+    use object::Architecture as A;
+    match architecture {
+        A::Mips | A::Mips64 | A::Mips64_N32 => "MIPS",
+        A::PowerPc | A::PowerPc64 => "PowerPC",
+        A::Riscv32 => "RISC-V 32",
+        A::Sparc | A::Sparc32Plus | A::Sparc64 => "SPARC",
+        A::S390x => "s390x",
+        A::LoongArch64 => "LoongArch",
+        A::Avr => "AVR",
+        A::Msp430 => "MSP430",
+        A::Bpf | A::Sbf => "BPF",
+        A::Hexagon => "Hexagon",
+        A::Xtensa => "Xtensa",
+        A::Wasm32 | A::Wasm64 => "WebAssembly",
+        A::Csky => "C-SKY",
+        A::E2K32 | A::E2K64 => "Elbrus",
+        A::M68k => "68k",
+        _ => "such",
+    }
 }
 
 pub use r2abi::statement::*;
@@ -471,6 +506,10 @@ impl Image {
             path: path.display().to_string(),
             source,
         };
+        if path.is_dir() {
+            let path = path.display().to_string();
+            return Err(ImageError::Directory { path });
+        }
         let file = std::fs::File::open(path).map_err(io)?;
         Self::held(held::Held::map(&file).map_err(io)?)
     }
@@ -1036,13 +1075,11 @@ impl Image {
     pub fn write(&mut self, vaddr: u64, bytes: &[u8]) -> Result<(), ImageError> {
         let end = vaddr
             .checked_add(bytes.len() as u64)
-            .ok_or_else(|| ImageError::Parse(format!("write at {vaddr:#x} overflows")))?;
+            .ok_or(ImageError::WriteOverflows(vaddr))?;
         // Every byte must land somewhere the program maps, or the write is a
         // claim about memory the program does not have.
         if self.read_unpatched(vaddr, bytes.len()).is_none() && !bytes.is_empty() {
-            return Err(ImageError::Parse(format!(
-                "nothing mapped at {vaddr:#x}..{end:#x}"
-            )));
+            return Err(ImageError::WriteUnmapped { start: vaddr, end });
         }
         for (offset, byte) in bytes.iter().enumerate() {
             self.patches.insert(vaddr + offset as u64, *byte);
@@ -1207,11 +1244,8 @@ fn select_fat_slice(data: &[u8]) -> Result<Option<std::ops::Range<usize>>, Image
                 .iter()
                 .find(|(arch, _)| map_architecture(*arch, true, object::Endianness::Little).is_ok())
         })
-        .ok_or_else(|| {
-            ImageError::Parse(format!(
-                "universal binary carries no supported slice: {:?}",
-                arches.iter().map(|(arch, _)| *arch).collect::<Vec<_>>()
-            ))
+        .ok_or(ImageError::NoSupportedSlice {
+            slices: arches.len(),
         })?;
 
     let (offset, size) = chosen.1;
@@ -1219,7 +1253,7 @@ fn select_fat_slice(data: &[u8]) -> Result<Option<std::ops::Range<usize>>, Image
     let end = start
         .checked_add(size as usize)
         .filter(|end| *end <= data.len())
-        .ok_or_else(|| ImageError::Parse("universal slice runs past the file".to_owned()))?;
+        .ok_or(ImageError::SliceOutOfFile)?;
     Ok(Some(start..end))
 }
 

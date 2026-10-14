@@ -956,7 +956,19 @@ pub enum SnapshotValidationError {
 
 impl std::fmt::Display for SnapshotValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid owned source snapshot: {self:?}")
+        let why = match self {
+            Self::InvalidMachineProfile => "the machine profile is not one the snapshot describes",
+            Self::InvalidPresentation => "the function's name or presentation is malformed",
+            Self::EmptyRevisionIdentity => "it names no source revision",
+            Self::InvalidFunctionImage => {
+                "the function's bytes are not a bounded body beginning at its entry"
+            }
+            Self::InvalidAdvisoryCall => "a call it lists lies outside the body or is listed twice",
+            Self::InvalidFunctionInterface => {
+                "the function interface disagrees with what was captured"
+            }
+        };
+        write!(f, "invalid source snapshot: {why}")
     }
 }
 

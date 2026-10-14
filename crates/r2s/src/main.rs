@@ -65,10 +65,8 @@ fn main() {
 
     let mut reader = line::Reader::default();
     if cli.visual {
-        if let Err(error) = r2s_tui::run(&mut visual::Visual {
-            session: &mut session,
-        }) {
-            eprintln!("r2s: visual mode: {error}");
+        if let Err(message) = visual::open(&mut session) {
+            eprintln!("r2s: {message}");
             std::process::exit(1);
         }
         std::process::exit(0);
@@ -83,9 +81,9 @@ fn main() {
     if !cli.quiet {
         let arch = session.image().arch();
         emit(format_args!(
-            "r2s: {} {:?} {} {}-bit, entry {:#x}\n",
+            "r2s: {} {} {} {}-bit, entry {:#x}\n",
             cli.file,
-            session.image().format(),
+            commands::format_name(session.image().format(), arch.bits),
             arch.name,
             arch.bits,
             session.addr

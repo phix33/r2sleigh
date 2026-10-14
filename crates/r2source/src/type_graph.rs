@@ -447,7 +447,15 @@ pub enum SourceTypeGraphError {
 
 impl std::fmt::Display for SourceTypeGraphError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid source type graph: {self:?}")
+        let what = match self {
+            Self::InvalidType => "type",
+            Self::InvalidAggregate => "aggregate layout",
+            Self::InvalidMember => "member",
+            Self::InvalidAlias => "alias",
+            Self::InvalidSignature => "signature",
+            Self::InvalidTag => "opaque tag",
+        };
+        write!(f, "invalid source type graph: a malformed {what}")
     }
 }
 

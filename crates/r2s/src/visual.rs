@@ -13,6 +13,11 @@ use r2s_tui::{
 
 /// `V`: the visual mode, from the prompt, returning to it on `q`.
 pub(crate) fn open(session: &mut Session) -> Result<String, String> {
+    use std::io::IsTerminal;
+    // The mode draws on a terminal and reads its keys; without one there is nothing to open.
+    if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        return Err("visual mode needs a terminal on stdin and stdout".to_owned());
+    }
     r2s_tui::run(&mut Visual { session }).map_err(|error| format!("visual mode: {error}"))?;
     Ok(String::new())
 }
@@ -139,9 +144,9 @@ impl Host for Visual<'_> {
         let image = self.session.image();
         let arch = image.arch();
         format!(
-            "{}  {:?} {} {}-bit",
+            "{}  {} {} {}-bit",
             self.session.path,
-            image.format(),
+            crate::commands::format_name(image.format(), arch.bits),
             arch.name,
             arch.bits
         )

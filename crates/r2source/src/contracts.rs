@@ -878,7 +878,25 @@ pub enum SourceFunctionInterfaceError {
 
 impl std::fmt::Display for SourceFunctionInterfaceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid source function interface: {self:?}")
+        let why = match self {
+            Self::InvalidFormatParameterIndex => {
+                "its format parameter is not one of its parameters"
+            }
+            Self::EmptyRevisionIdentity => "it names no source revision",
+            Self::EmptyCallingConvention => "it names no calling convention",
+            Self::InvalidParameterOrder => "its parameters are out of order",
+            Self::InvalidRegisterStorage => "a register it names is not a register storage",
+            Self::InvalidReturnAddressStorage => "its return address storage is malformed",
+            Self::InvalidStackPointerStorage => "its stack pointer storage is malformed",
+            Self::InvalidFramePointerStorage => "its frame pointer storage is malformed",
+            Self::InvalidReturnMechanism => "its return mechanism is malformed",
+            Self::OverlappingRegisterStorages => "two of its registers overlap",
+            Self::InvalidStackSlot => "a stack slot it names is malformed",
+            Self::InvalidStackSlotRole => "a stack slot's role is malformed",
+            Self::OverlappingStackSlots => "two of its stack slots overlap",
+            Self::InvalidLogicalTypes { reason } => reason,
+        };
+        write!(f, "invalid source function interface: {why}")
     }
 }
 
@@ -2162,7 +2180,18 @@ pub enum SourceCallSiteInterfaceError {
 
 impl std::fmt::Display for SourceCallSiteInterfaceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid source callsite interface: {self:?}")
+        let why = match self {
+            Self::EmptyRevisionIdentity => "it names no source revision",
+            Self::InvalidTargetStorage => "its target storage is malformed",
+            Self::EmptyCallingConvention => "it names no calling convention",
+            Self::InvalidArgumentOrder => "its arguments are out of order",
+            Self::InvalidRegisterStorage => "a register it names is not a register storage",
+            Self::OverlappingRegisterStorages => "two of its registers overlap",
+            Self::InvalidFormatParameterIndex => "its format argument is not one of its arguments",
+            Self::NoreturnWithResult => "a call that never returns states a result",
+            Self::IncompatibleCalleeInterface => "the callee's own interface disagrees with it",
+        };
+        write!(f, "invalid source callsite interface: {why}")
     }
 }
 
