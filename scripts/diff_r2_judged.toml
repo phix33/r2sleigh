@@ -155,15 +155,6 @@ reason = "a PE with no sections and SectionAlignment 4: the loader maps the file
 
 [[judged]]
 command = "pd"
-binaries = "ibknoreloc64.exe"
-corpus = "pe"
-r2 = 'call qword \[sym\.imp\.'
-r2s = 'call qword \[0xffffffffffff10e[08]\]$'
-verdict = "r2-right"
-reason = "the import slots at 0xffffffffffff10e0 and 0xffffffffffff10e8 are stated and flagged (`is`, `f`), yet the listing leaves the number: a claimed operand at or above 2^63 does not convert to an address (u64::try_from of its signed value); owner the listing's number (r2s listing.rs, r2engine query::Line)"
-
-[[judged]]
-command = "pd"
 binaries = "*"
 corpus = "pe"
 r2 = 'xchg esp, eax$'
