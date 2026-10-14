@@ -231,7 +231,7 @@ jobs:
           python3 scripts/certify_render.py \
             --bins "$RUNNER_TEMP/testbins/elf" \
             --r2s target/ci/r2s \
-            --limit 12 --functions 8
+            --limit 80 --functions 8
 
   # ── Hostile input (ROADMAP H, D18) ───────────────────────────────
   #

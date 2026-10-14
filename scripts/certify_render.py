@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Certification gate: render every named function and read the proof.
+"""Certification gate: render every function analysis finds and read the proof.
 
 radare2 is not run. A rendering that reads a value nothing wrote is a claim
 about the program the program does not make, and it is wrong on its own terms
@@ -8,12 +8,14 @@ capture comparison it grew out of. The engine is graded against the source a
 binary was compiled from, not against another route into the same renderer.
 
 Usage:
-  scripts/certify_render.py BINARY                 # every named function
+  scripts/certify_render.py BINARY                 # every function `aflj` lists
   scripts/certify_render.py BINARY --at 0x1000     # one function
   scripts/certify_render.py --bins DIR --limit 24 --functions 8
 """
 
 import argparse
+import itertools
+import json
 import pathlib
 import re
 import subprocess
@@ -59,33 +61,56 @@ def clean(text):
 
 
 def functions(r2s, binary, timeout):
-    """Every defined function the binary names, as (address, name)."""
-    text, error = run([str(r2s), "-q", "-c", "is", str(binary)], timeout)
+    """Every function analysis finds, named or not, as (address, name); and how many have no body.
+
+    `aflj` after `aa` lists what discovery found, so a stripped binary is graded
+    as a symbolised one is. A function of no blocks has nothing to render: it is
+    discovery's defect (ROADMAP FS), counted, not graded here.
+    """
+    text, error = run([str(r2s), "-q", "-c", "aa; aflj", str(binary)], timeout)
     if error:
-        return [], error
-    found = []
-    # radare2's layout: nth paddr vaddr bind type size lib name, the lib
-    # column empty for a symbol this binary defines. An import is listed
-    # after the symbols as `imp.<name>`, at its stub where it has one, and
-    # has no body of its own to render.
-    for line in text.splitlines():
-        parts = line.split()
-        if len(parts) < 7 or not parts[2].startswith("0x"):
-            continue
-        if parts[4] != "FUNC":
-            continue
-        address = int(parts[2], 16)
-        name = parts[-1]
-        if name.endswith("_header") or name.startswith("imp."):
-            continue
-        found.append((address, name))
-    return found, ""
+        return [], 0, error
+    start = text.find("[")
+    try:
+        listed = json.loads(text[start:]) if start >= 0 else []
+    except json.JSONDecodeError as problem:
+        return [], 0, f"aflj is not JSON: {problem}"
+    found = [(entry["addr"], entry["name"]) for entry in listed if entry.get("nbbs", 0) > 0]
+    return found, len(listed) - len(found), ""
+
+
+# A separator no rendering prints, between the renderings of one batch.
+SEPARATOR = "@@r2s-certify@@"
 
 
 def native_render(r2s, binary, address, timeout):
     script = f"aa; s {address:#x}; pdd"
     text, error = run([str(r2s), "-q", "-c", script, str(binary)], timeout)
     return text, error
+
+
+def batch_render(r2s, binary, addresses, timeout):
+    """Each function's rendering from one process, `aa` paid once; none where it died.
+
+    An error does not end a script, and stderr is merged in order, so each
+    function's refusal stays beside it.
+    """
+    script = "aa; " + "; ".join(f"?e {SEPARATOR}; pdd @ {address:#x}" for address in addresses)
+    try:
+        done = subprocess.run(
+            [str(r2s), "-q", "-c", script, str(binary)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout * max(1, len(addresses)),
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if done.returncode < 0:
+        return None
+    parts = done.stdout.split(SEPARATOR + "\n")[1:]
+    return parts if len(parts) == len(addresses) else None
 
 
 def refused(lines):
@@ -98,9 +123,10 @@ def refused(lines):
 # identifier, which is what keeps an array bound from being read as one. A
 # statement that opens with a keyword has the same shape -- `return x;`,
 # `goto L2;` -- and declares nothing: taking `return x;` for a declaration
-# listed `x` once more for every return of it.
+# listed `x` once more for every return of it. A block-scope `extern` names an
+# object defined elsewhere, which the program assigns.
 DECLARATION = re.compile(
-    r"^\s*(?!(?:return|goto|else|case|do)\b)(?:const\s+)?"
+    r"^\s*(?!(?:return|goto|else|case|do|extern)\b)(?:const\s+)?"
     r"[A-Za-z_][\w*\s]*?\b([A-Za-z_]\w*)\s*;\s*$"
 )
 # A rendering defines each struct it reads through, `struct node { ... };`,
@@ -177,8 +203,14 @@ def proof_refusals(lines):
 def lint(args, binary, found):
     """Report what the rendering claims it proved and did not."""
     tally = {"rendered": 0, "refused": 0, "undefined reads": 0, "panicked": 0, "crashed": 0}
-    for address, name in found[: args.functions]:
-        native, error = native_render(args.r2s, binary, address, args.timeout)
+    chosen = found if args.functions is None else found[: args.functions]
+    batch = batch_render(args.r2s, binary, [address for address, _ in chosen], args.timeout)
+    for index, (address, name) in enumerate(chosen):
+        # A batch that died is run again one function at a time, so the one that died is named.
+        if batch is not None:
+            native, error = batch[index], ""
+        else:
+            native, error = native_render(args.r2s, binary, address, args.timeout)
         if error:
             if error.startswith("crashed"):
                 tally["crashed"] += 1
@@ -219,6 +251,13 @@ def uncertified_reads(lines):
 
 
 
+def opens(r2s, path):
+    """Whether r2s opens the file: a corpus directory also holds sources and notes, and r2image
+    alone says which containers it reads."""
+    done = subprocess.run([str(r2s), "-q", "-c", "?e", str(path)], capture_output=True, check=False)
+    return done.returncode == 0
+
+
 def main():
     here = pathlib.Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__)
@@ -227,7 +266,7 @@ def main():
     parser.add_argument("--r2s", default=str(here / "target/debug/r2s"))
     parser.add_argument("--at", type=lambda value: int(value, 0))
     parser.add_argument("--limit", type=int, default=5, help="binaries")
-    parser.add_argument("--functions", type=int, default=20, help="per binary")
+    parser.add_argument("--functions", type=int, default=None, help="per binary (default all)")
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument(
@@ -251,19 +290,21 @@ def main():
     if args.binary:
         binaries = [pathlib.Path(args.binary)]
     elif args.bins:
-        binaries = sorted(p for p in pathlib.Path(args.bins).iterdir() if p.is_file())[
-            : args.limit
-        ]
+        files = sorted(p for p in pathlib.Path(args.bins).iterdir() if p.is_file())
+        binaries = list(itertools.islice((p for p in files if opens(args.r2s, p)), args.limit))
     else:
         parser.error("pass a binary or --bins")
 
     totals = {}
     for binary in binaries:
         print(binary.name)
-        found, error = functions(args.r2s, binary, args.timeout)
+        found, empty, error = functions(args.r2s, binary, args.timeout)
         if error:
+            # A binary analysis could not list was not graded: that fails the gate.
+            totals["unlisted"] = totals.get("unlisted", 0) + 1
             print(f"  {error}")
             continue
+        totals["no body"] = totals.get("no body", 0) + empty
         if args.at is not None:
             found = [(address, name) for address, name in found if address == args.at]
             if not found:
@@ -272,11 +313,14 @@ def main():
             totals[key] = totals.get(key, 0) + value
 
     print()
-    for key in ("rendered", "refused", "undefined reads", "panicked", "crashed"):
+    for key in ("rendered", "refused", "no body", "unlisted", "undefined reads", "panicked", "crashed"):
         print(f"{key:16} {totals.get(key, 0)}")
     # An uncertified rendering is a defect on its own terms, and so is a
     # panic the engine isolated or a process that never answered.
-    failed = ("undefined reads", "panicked", "crashed")
+    failed = ("unlisted", "undefined reads", "panicked", "crashed")
+    if not totals.get("rendered"):
+        print("nothing rendered: the gate graded nothing")
+        return 1
     return 1 if any(totals.get(key, 0) for key in failed) else 0
 
 
