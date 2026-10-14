@@ -630,6 +630,11 @@ impl Image {
                 .any(|(address, size)| vaddr >= *address && vaddr - *address < *size)
         };
 
+        let os_abi = match &file {
+            object::File::Elf32(elf) => elf.elf_header().e_ident.os_abi,
+            object::File::Elf64(elf) => elf.elf_header().e_ident.os_abi,
+            _ => object::elf::ELFOSABI_NONE,
+        };
         // Both tables, because a stripped shared library has no `.symtab` and
         // every name it still carries is in `.dynsym`. Reading only the first
         // is why such a library listed no functions at all.
@@ -681,6 +686,7 @@ impl Image {
                     (None, object::SymbolKind::Data) => SymbolKind::Data,
                     (None, object::SymbolKind::Section) => SymbolKind::Section,
                     (None, object::SymbolKind::File) => SymbolKind::File,
+                    (None, object::SymbolKind::Tls) => SymbolKind::Tls,
                     (None, _) => SymbolKind::Other,
                 },
                 // A name is defined here when it sits in a section of this image; `object` counts only STT_FUNC and STT_OBJECT, so every NASM label went unlisted.
@@ -692,7 +698,7 @@ impl Image {
                 thumb: is_arm32(&arch)
                     && symbol.kind() == object::SymbolKind::Text
                     && address & 1 == 1,
-                binding: symbol_binding(&symbol),
+                binding: symbol_binding(&symbol, os_abi),
                 visibility: match symbol.flags() {
                     object::SymbolFlags::Elf { st_other, .. } => match st_other.visibility() {
                         object::elf::STV_INTERNAL => Visibility::Internal,
@@ -1345,14 +1351,9 @@ fn section_statement(section: &object::read::Section<'_, '_>) -> SectionStatemen
 }
 
 /// A symbol's binding, as its table states it.
-fn symbol_binding(symbol: &object::read::Symbol<'_, '_>) -> Binding {
+fn symbol_binding(symbol: &object::read::Symbol<'_, '_>, os_abi: object::elf::OsAbi) -> Binding {
     match symbol.flags() {
-        object::SymbolFlags::Elf { st_info, .. } => match st_info.st_bind() {
-            object::elf::STB_LOCAL => Binding::Local,
-            object::elf::STB_GLOBAL => Binding::Global,
-            object::elf::STB_WEAK => Binding::Weak,
-            other => Binding::Other(other.0),
-        },
+        object::SymbolFlags::Elf { st_info, .. } => loader::binding(st_info.st_bind(), os_abi),
         _ if symbol.is_weak() => Binding::Weak,
         _ if symbol.is_local() => Binding::Local,
         _ => Binding::Global,

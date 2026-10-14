@@ -612,7 +612,7 @@ columns = ["vaddr"]
 r2 = '^\d+ 0x0*[0-9a-f]{1,4} 0x[0-9a-f]+ '
 r2s = '^\d+ -{10} 0x0*[0-9a-f]{1,4} \S+ (NOTYPE|FILE|TLS|SECT|OBJ) '
 verdict = "r2s-right"
-reason = "st_value is no address here: SHN_ABS (FILE symbols, _nl_current_*_used), a TLS offset (.tdata, .tbss), or an offset in a section no segment loads (.debug_frame's $d); r2s states the value unplaced, radare2 prints it as the paddr and adds the base for the vaddr. r2s spells STT_TLS as NOTYPE and STB_GNU_UNIQUE as 10 (owner r2image symbol kinds, ROADMAP I)"
+reason = "st_value is no address here: SHN_ABS (FILE symbols, _nl_current_*_used), a TLS offset (.tdata, .tbss), or an offset in a section no segment loads (.debug_frame's $d); r2s states the value unplaced, radare2 prints it as the paddr and adds the base for the vaddr"
 
 [[judged]]
 command = "iS"

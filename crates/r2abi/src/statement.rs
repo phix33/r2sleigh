@@ -485,6 +485,8 @@ pub enum SymbolKind {
     Section,
     /// The source file an object came from, which names no address.
     File,
+    /// A thread-local variable: its value is an offset into each thread's block, not an address.
+    Tls,
     #[default]
     Other,
     /// An ARM mapping symbol: where the bytes become code of one instruction
@@ -632,6 +634,8 @@ pub enum Binding {
     #[default]
     Global,
     Weak,
+    /// GNU's `STB_GNU_UNIQUE`: one definition across the process, whatever loaded it.
+    Unique,
     /// A binding the format numbers but this reader does not name.
     Other(u8),
     /// The container states none: a PE import or export has no binding.

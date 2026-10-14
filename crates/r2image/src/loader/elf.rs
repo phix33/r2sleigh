@@ -491,7 +491,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
             name: name.into(),
             defined: defined.then(|| symbol.st_value(endian).into()),
             size: symbol.st_size(endian).into(),
-            binding: binding(symbol.st_bind()),
+            binding: binding(symbol.st_bind(), self.file.elf_header().e_ident().os_abi),
             visibility: visibility(symbol.st_visibility()),
         })
     }
@@ -891,7 +891,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
             name: name.into(),
             defined,
             size: symbol.st_size(endian).into(),
-            binding: binding(symbol.st_bind()),
+            binding: binding(symbol.st_bind(), self.file.elf_header().e_ident().os_abi),
             visibility: visibility(symbol.st_visibility()),
         };
         (Some(stated), bound)
@@ -991,11 +991,15 @@ fn extent(record: &Relocation, pointer: u64) -> u64 {
     }
 }
 
-fn binding(bind: elf::SymbolBind) -> Binding {
+/// A symbol's binding; 10 is `STB_GNU_UNIQUE` only under the GNU ABI, as readelf reads it.
+pub(crate) fn binding(bind: elf::SymbolBind, os_abi: elf::OsAbi) -> Binding {
     match bind {
         elf::STB_LOCAL => Binding::Local,
         elf::STB_GLOBAL => Binding::Global,
         elf::STB_WEAK => Binding::Weak,
+        elf::STB_GNU_UNIQUE if matches!(os_abi, elf::ELFOSABI_NONE | elf::ELFOSABI_GNU) => {
+            Binding::Unique
+        }
         other => Binding::Other(other.0),
     }
 }

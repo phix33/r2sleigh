@@ -24,7 +24,7 @@ const fn binding_strength(binding: Binding) -> u8 {
         Binding::Global => 0,
         Binding::Weak => 1,
         Binding::Local => 2,
-        Binding::Other(_) | Binding::Unstated => 3,
+        Binding::Unique | Binding::Other(_) | Binding::Unstated => 3,
     }
 }
 
@@ -65,9 +65,10 @@ pub fn of(source: &impl Source) -> NameDb {
                     SymbolKind::Function => Namespace::Symbol,
                     SymbolKind::Data => Namespace::Object,
                     // An untyped symbol names a place, not an object, which is the difference `loc.` carries.
-                    SymbolKind::Other | SymbolKind::File | SymbolKind::Mapping(_) => {
-                        Namespace::Label
-                    }
+                    SymbolKind::Other
+                    | SymbolKind::File
+                    | SymbolKind::Tls
+                    | SymbolKind::Mapping(_) => Namespace::Label,
                 },
                 size: symbol.size,
             },

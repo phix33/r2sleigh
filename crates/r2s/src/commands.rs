@@ -1263,6 +1263,7 @@ fn binding(binding: r2image::Binding) -> String {
         r2image::Binding::Local => "LOCAL".to_owned(),
         r2image::Binding::Global => "GLOBAL".to_owned(),
         r2image::Binding::Weak => "WEAK".to_owned(),
+        r2image::Binding::Unique => "UNIQUE".to_owned(),
         r2image::Binding::Other(other) => format!("{other}"),
         r2image::Binding::Unstated => "NONE".to_owned(),
     }
@@ -1275,6 +1276,7 @@ fn symbol_type(kind: r2image::SymbolKind) -> &'static str {
         r2image::SymbolKind::Data => "OBJ",
         r2image::SymbolKind::Section => "SECT",
         r2image::SymbolKind::File => "FILE",
+        r2image::SymbolKind::Tls => "TLS",
         r2image::SymbolKind::Other | r2image::SymbolKind::Mapping(_) => "NOTYPE",
     }
 }
