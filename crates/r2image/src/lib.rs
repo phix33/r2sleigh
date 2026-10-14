@@ -20,6 +20,7 @@ pub mod unwind;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ImageError {
@@ -584,8 +585,11 @@ impl Image {
         let relocatable = placement.relocatable;
         let placed = |section: &object::read::Section<'_, '_>| placement.at(section);
 
+        // A PE image is read once, as its loader maps it; its directories are read through that mapping.
+        let pe = pe::read(&file, &data);
         let mut segments: Vec<Segment> = file
             .segments()
+            .filter(|_| pe.is_none())
             .map(|segment| {
                 let (file_offset, file_size) = held(segment.file_range());
                 Segment {
@@ -599,6 +603,9 @@ impl Image {
             })
             .filter(|segment| segment.vsize > 0)
             .collect();
+        if let Some(pe) = &pe {
+            segments.clone_from(&pe.segments);
+        }
         segments.sort_by_key(|segment| segment.vaddr);
 
         // A format whose segments do not map (an object file) still has sections.
@@ -623,13 +630,23 @@ impl Image {
             segments.sort_by_key(|segment| segment.vaddr);
         }
 
-        let base_address = base_address(&file, &segments);
+        let base_address = pe
+            .as_ref()
+            .map_or_else(|| base_address(&file, &segments), |pe| pe.base);
         let located = roles::Located::of(&file);
         let sections: Vec<Section> = file
             .sections()
             .map(|section| {
-                let (file_offset, file_size) = section_bytes(&section);
-                let vaddr = placed(&section);
+                let (mut file_offset, mut file_size) = section_bytes(&section);
+                let mut vaddr = placed(&section);
+                let mut vsize = section.size();
+                // A PE section header as its loader reads it; `object` reads the raw fields.
+                if let Some(read) =
+                    (pe.as_ref()).and_then(|pe| pe.sections.get(section.index().0.wrapping_sub(1)))
+                {
+                    (vaddr, vsize, file_offset, file_size) =
+                        (read.vaddr, read.vsize, read.file_offset, read.file_size);
+                }
                 let loaded = section_is_loaded(&section);
                 let stated = section_statement(&section);
                 Section {
@@ -649,7 +666,7 @@ impl Image {
                     },
                     stated,
                     vaddr,
-                    vsize: section.size(),
+                    vsize,
                     file_offset,
                     file_size,
                     align: section.align(),
@@ -805,8 +822,12 @@ impl Image {
             )
             .collect();
         // A PE image states its imports by slot and its exports in directories, not a symbol table.
-        symbols.extend(pe::imports(&file).into_iter().map(|import| Symbol {
-            name: import.name,
+        let (imports, exports) = match &pe {
+            Some(pe) => (&pe.imports[..], &pe.exports[..]),
+            None => (&[][..], &[][..]),
+        };
+        symbols.extend(imports.iter().map(|import| Symbol {
+            name: Arc::clone(&import.name),
             vaddr: import.slot,
             // PE states no type; radare2 lists every import as a function.
             kind: SymbolKind::Function,
@@ -816,11 +837,11 @@ impl Image {
                 directory: Some(import.nth),
                 ..SymbolOrigin::default()
             },
-            library: Some(import.library),
+            library: Some(Arc::clone(&import.library)),
             ..Symbol::default()
         }));
-        symbols.extend(pe::exports(&file).into_iter().map(|export| Symbol {
-            name: export.name,
+        symbols.extend(exports.iter().map(|export| Symbol {
+            name: Arc::clone(&export.name),
             vaddr: export.vaddr,
             kind: match executable(export.vaddr) {
                 true => SymbolKind::Function,
@@ -832,7 +853,7 @@ impl Image {
                 directory: Some(export.nth),
                 ..SymbolOrigin::default()
             },
-            library: export.library,
+            library: export.library.clone(),
             ..Symbol::default()
         }));
         // One name at one address is one symbol, whichever table held it.
@@ -864,6 +885,7 @@ impl Image {
             placement.linkage,
             &|index| placement.common.get(&(index as usize)).copied(),
             u64::from(arch.bits / 8),
+            pe.as_ref(),
         );
 
         let sealed = loader::sealed(&file);
@@ -882,19 +904,28 @@ impl Image {
         let mut entries = Vec::new();
         let mach_entry = macho_entry(&file, &data[..]);
         // Where the header states the entry: ELF's `e_entry`, Mach-O's `LC_MAIN` or `LC_UNIXTHREAD`.
-        let (declared_entry, entry_field) = match (format, &mach_entry) {
-            (Format::MachO, Some(entry)) => (entry.raw, entry.field),
-            (Format::MachO, None) => (0, None),
-            (Format::Elf, _) => (file.entry(), Some(ELF_ENTRY_FIELD)),
-            _ => (file.entry(), None),
+        let (declared_entry, entry_field) = match (format, &mach_entry, &pe) {
+            (_, _, Some(pe)) => (pe.entry, None),
+            (Format::MachO, Some(entry), _) => (Some(entry.raw), entry.field),
+            (Format::MachO, None, _) => (None, None),
+            (Format::Elf, ..) => (Some(file.entry()), Some(ELF_ENTRY_FIELD)),
+            _ => (Some(file.entry()), None),
         };
         let entry_field = entry_field.map(|offset| StatedAt {
             offset,
             vaddr: file_offset_to_vaddr(&segments, offset),
         });
-        let entry = code_address(&arch, declared_entry);
-        let thumb = is_arm32(&arch) && declared_entry & 1 == 1;
-        if entry != 0 && executable(entry) {
+        let entry = declared_entry.map(|raw| code_address(&arch, raw));
+        let thumb = is_arm32(&arch) && declared_entry.is_some_and(|raw| raw & 1 == 1);
+        // Windows starts an image wherever AddressOfEntryPoint is mapped, the headers or a section
+        // without execute included; elsewhere an entry is where the container states code.
+        let runs = |vaddr: u64| match pe {
+            Some(_) => segments
+                .iter()
+                .any(|segment| segment.contains(vaddr) && segment.permissions.mapped()),
+            None => vaddr != 0 && executable(vaddr),
+        };
+        if let Some(entry) = entry.filter(|entry| runs(*entry)) {
             entries.push(Entry {
                 vaddr: entry,
                 kind: EntryKind::Main,

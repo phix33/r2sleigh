@@ -2,7 +2,6 @@
 
 use std::ops::Range;
 
-use object::read::pe::ImageNtHeaders;
 use object::{Object, ObjectSection};
 
 use r2abi::statement::{Encoding, ImportStub, LoaderWrite, Relocation, WriteKind};
@@ -31,6 +30,7 @@ pub(crate) fn read(
     linkage: u64,
     common: &dyn Fn(u32) -> Option<u64>,
     pointer: u64,
+    pe: Option<&crate::pe::Read>,
 ) -> Loaded {
     let relocatable = file.kind() == object::ObjectKind::Relocatable;
     let (relocations, writes, ranges, import_stubs) = match file {
@@ -66,19 +66,15 @@ pub(crate) fn read(
             let read = macho::read(file, data);
             (read.relocations, read.writes, read.ranges, read.stubs)
         }
-        object::File::Pe32(pe) => (
-            Vec::new(),
-            pe_imports(file, pointer),
-            pe_writes(pe),
-            Vec::new(),
-        ),
-        object::File::Pe64(pe) => (
-            Vec::new(),
-            pe_imports(file, pointer),
-            pe_writes(pe),
-            Vec::new(),
-        ),
-        _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+        _ => match pe {
+            Some(pe) => (
+                Vec::new(),
+                pe_imports(pe, pointer),
+                pe.written.clone(),
+                Vec::new(),
+            ),
+            None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+        },
     };
     Loaded {
         relocations,
@@ -239,9 +235,8 @@ fn linked(
 }
 
 /// Each import address table slot, which the loader (or the delay-load helper) fills with its import.
-fn pe_imports(file: &object::File<'_>, pointer: u64) -> Vec<LoaderWrite> {
-    crate::pe::imports(file)
-        .into_iter()
+fn pe_imports(pe: &crate::pe::Read, pointer: u64) -> Vec<LoaderWrite> {
+    (pe.imports.iter())
         .map(|import| LoaderWrite {
             place: import.slot,
             width: pointer,
@@ -252,87 +247,6 @@ fn pe_imports(file: &object::File<'_>, pointer: u64) -> Vec<LoaderWrite> {
             encoding: Encoding::Word,
         })
         .collect()
-}
-
-/// The base relocations, and each import address table the loader or the delay-load helper fills.
-fn pe_writes<'data, Pe, R>(file: &object::read::pe::PeFile<'data, Pe, R>) -> Vec<Range<u64>>
-where
-    Pe: ImageNtHeaders,
-    R: object::ReadRef<'data>,
-{
-    let base = file.relative_address_base();
-    let sections = file.section_table();
-    let directories = file.data_directories();
-    let mut ranges = Vec::new();
-    if let Ok(Some(blocks)) = directories.relocation_blocks(file.data(), &sections) {
-        let relocations = blocks.flatten().flatten();
-        let one = |relocation: object::read::pe::Relocation| {
-            let start = base.wrapping_add(u64::from(relocation.virtual_address));
-            written(start, based_width(relocation.typ))
-        };
-        ranges.extend(relocations.map(one));
-    }
-    let pointer = if file.is_64() { 8 } else { 4 };
-    if let Ok(Some(imports)) = file.import_table() {
-        let descriptors = imports.descriptors().into_iter().flatten().flatten();
-        let firsts = descriptors.map(|descriptor| descriptor.first_thunk.get(object::LittleEndian));
-        let thunks = |first| imports.thunks(first).ok();
-        ranges.extend(tables::<Pe>(firsts.collect(), &thunks, base, pointer));
-    }
-    if let Ok(Some(delayed)) = directories.delay_load_import_table(file.data(), &sections) {
-        let descriptors = delayed.descriptors().into_iter().flatten().flatten();
-        let firsts = descriptors.map(|descriptor| {
-            descriptor
-                .import_address_table_rva
-                .get(object::LittleEndian)
-        });
-        let thunks = |first| delayed.thunks(first).ok();
-        ranges.extend(tables::<Pe>(firsts.collect(), &thunks, base, pointer));
-    }
-    ranges
-}
-
-/// Each import address table, walked once: in address order, a table starting inside one already walked, in step with it, ends at that one's null.
-fn tables<'t, Pe: ImageNtHeaders>(
-    firsts: std::collections::BTreeSet<u32>,
-    thunks: &dyn Fn(u32) -> Option<object::read::pe::ImportThunkList<'t>>,
-    base: u64,
-    pointer: u64,
-) -> Vec<Range<u64>> {
-    // Where the last table walked in each alignment class ends.
-    let mut walked = [0u64; 8];
-    let mut ranges = Vec::new();
-    for first in firsts {
-        let (start, class) = (u64::from(first), usize::from(first as u8 % pointer as u8));
-        if start < walked[class] {
-            continue;
-        }
-        let bytes = thunks(first).map_or(0, thunk_count::<Pe>) * pointer;
-        walked[class] = start + bytes;
-        ranges.push(written(base.wrapping_add(start), bytes));
-    }
-    ranges
-}
-
-/// How many thunks an import address table holds before its null one.
-fn thunk_count<Pe: ImageNtHeaders>(mut thunks: object::read::pe::ImportThunkList<'_>) -> u64 {
-    let mut count = 0;
-    while let Ok(Some(_)) = thunks.next::<Pe>() {
-        count += 1;
-    }
-    count
-}
-
-/// How many bytes a PE base relocation of this type rewrites.
-fn based_width(typ: object::pe::BaseRelocationType) -> u64 {
-    use object::pe;
-    match typ {
-        pe::IMAGE_REL_BASED_ABSOLUTE => 0,
-        pe::IMAGE_REL_BASED_HIGH | pe::IMAGE_REL_BASED_LOW | pe::IMAGE_REL_BASED_HIGHADJ => 2,
-        pe::IMAGE_REL_BASED_HIGHLOW => 4,
-        // A pair of instructions, or a doubleword; unknown types are taken as wide as any.
-        _ => 8,
-    }
 }
 
 #[cfg(test)]
