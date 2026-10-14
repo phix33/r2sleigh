@@ -1,0 +1,99 @@
+sdiv_x: stop Undefined
+sdiv_w: stop Undefined
+udiv_x: stop Undefined
+udiv_w: stop Undefined
+crc32b: stop unmodelled Load
+crc32cx: stop unmodelled Load
+mrs_nzcv: stop unwritten nzcv
+msr_nzcv: wrong cy; wrong ng; wrong ov; wrong zr
+ldrsb_post: wrong x0
+ldpsw_x: wrong x1
+sminv_8h: stop unmodelled CALLOTHER NEON_sminv
+tbl_2: stop unmodelled CALLOTHER a64_TBL
+umull_8h: stop unmodelled CALLOTHER NEON_umull
+fadd_d: stop unmodelled FloatAdd
+fadd_s: stop unmodelled FloatAdd
+fsub_d: stop unmodelled FloatSub
+fmul_s: stop unmodelled FloatMult
+fdiv_d: stop unmodelled FloatDiv
+fmadd_d: stop unmodelled FloatMult
+fmsub_s: stop unmodelled FloatMult
+fnmadd_d: stop unmodelled FloatMult
+fnmul_d: stop unmodelled FloatMult
+fsqrt_d: stop unmodelled FloatSqrt
+fabs_s: stop unmodelled FloatAbs
+fneg_d: stop unmodelled FloatNeg
+fmax_d: stop unmodelled FloatLess
+fmin_s: stop unmodelled FloatLessEqual
+fmaxnm_d: stop unmodelled FloatLess
+fminnm_d: stop unmodelled CALLOTHER NEON_fminnm
+fcvtzs_xd: stop unmodelled Trunc
+fcvtzs_wd: stop unmodelled Trunc
+fcvtzs_ws: stop unmodelled Trunc
+fcvtzs_xs: stop unmodelled Trunc
+fcvtzu_xd: stop unmodelled Trunc
+fcvtzu_ws: stop unmodelled Trunc
+fcvtzs_fix: stop unmodelled Int2Float
+fcvtas_xd: stop unmodelled Trunc
+fcvtms_xd: stop unmodelled Trunc
+fcvtps_ws: stop unmodelled Trunc
+fcvtns_xd: stop unmodelled Trunc
+fcvtzs_v4s: stop unmodelled Trunc
+scvtf_dx: stop unmodelled Int2Float
+scvtf_sw: stop unmodelled Int2Float
+scvtf_dw: stop unmodelled Int2Float
+ucvtf_dx: stop unmodelled Int2Float
+ucvtf_sx: stop unmodelled Int2Float
+scvtf_fix: stop unmodelled Int2Float
+fcvt_ds: stop unmodelled FloatFloat
+fcvt_sd: stop unmodelled FloatFloat
+fcmp_d: stop unmodelled FloatNaN
+fcmp_s0: stop unmodelled Int2Float
+fcmpe_d: stop unmodelled FloatNaN
+fccmp_d: stop unmodelled Unimplemented
+frintm_d: stop unmodelled Trunc
+frintp_s: stop unmodelled Trunc
+frintn_d: stop unmodelled Trunc
+frinta_s: stop unmodelled Trunc
+frintz_d: stop unmodelled Trunc
+frintx_d: stop unmodelled Trunc
+frinti_d: stop unmodelled Trunc
+fadd_v2d: stop unmodelled FloatAdd
+fmul_v4s: stop unmodelled FloatMult
+faddp_d: stop unmodelled FloatAdd
+fmla_elem: stop unmodelled FloatMult
+ldaxr_stlxr: stop unmodelled CALLOTHER ExclusiveMonitorPass
+ldxr_stxr_w: stop unmodelled CALLOTHER ExclusiveMonitorPass
+ldaxp_stlxp: stop unmodelled CALLOTHER ExclusiveMonitorPass
+cas_x: stop unmodelled StoreGuarded
+casal_w: stop unmodelled StoreGuarded
+casb: stop unmodelled StoreGuarded
+casp_x: stop unmodelled Unimplemented
+ldaddal_w: stop unmodelled CALLOTHER LOAcquire
+swpal_w: stop unmodelled CALLOTHER LOAcquire
+ldset_w: wrong x0
+ldumin_w: wrong x0
+ldaddh: wrong x0
+ldursb_w: wrong x0
+ldursh_w: wrong x0
+ldrsb_w_uimm: wrong x0
+ldrsb_w_pre: wrong x0
+ldrsb_w_reg: wrong x0
+ldrsh_w_uimm: wrong x0
+ldrsh_w_post: wrong x0
+ldrsh_w_reg: wrong x0
+ldtrsb_w: wrong x0
+ldpsw_pre: wrong x1
+ldpsw_post: wrong x1
+ldapr_w: wrong x0
+ldaprb: wrong x0
+fmadd_s: stop unmodelled FloatMult
+fnmsub_d: stop unmodelled FloatMult
+fmul_d: stop unmodelled FloatMult
+swpb: wrong x0
+ldeor_w: wrong x0
+cas_w: stop unmodelled StoreGuarded
+casah: stop unmodelled StoreGuarded
+ldaddb: wrong x0
+ldsmax_w: wrong x0
+ldsminh: wrong memory; wrong x0
