@@ -120,6 +120,7 @@ fn checked(binary: &Path, addr: u64, cc: Option<&str>) -> Value {
         check_residual(&label, residual, &text);
     }
     check_names(&label, &answer, code);
+    check_calls(&label, &answer, code);
     check_definition(&label, &answer, code);
     if let Some(cc) = cc {
         compile(cc, code, &label);
@@ -236,6 +237,29 @@ fn check_names(label: &str, answer: &Value, code: &str) {
             code.contains(name),
             "{label}: variable {name} is not in the code"
         );
+    }
+}
+
+/// Every call names a callee the unit links, at the address the link resolves, or is a pointer
+/// call, which names none; and the code spells each one.
+fn check_calls(label: &str, answer: &Value, code: &str) {
+    let links = answer["links"].as_array().expect("links");
+    for call in answer["calls"].as_array().expect("calls") {
+        let kind = call["kind"].as_str().expect("a kind");
+        let callee = call["callee"].as_str();
+        match kind {
+            "pointer" => assert!(callee.is_none(), "{label}: {call}"),
+            "self" => assert_eq!(callee, answer["definition"].as_str(), "{label}: {call}"),
+            "function" | "import" => {
+                let ident = callee.expect("a named callee");
+                let linked = links.iter().find(|link| link["ident"] == ident);
+                let linked = linked.unwrap_or_else(|| panic!("{label}: {ident} is not linked"));
+                assert_eq!(linked["kind"], kind, "{label}: {call}");
+                assert_eq!(linked["addr"], call["addr"], "{label}: {call}");
+                assert!(code.contains(&format!("{ident}(")), "{label}: {call}");
+            }
+            other => panic!("{label}: a call of kind {other}"),
+        }
     }
 }
 

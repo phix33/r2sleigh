@@ -48,6 +48,19 @@ pub struct RenderedFunctionJson {
     pub links: Vec<RenderedLinkJson>,
     /// Every residual in `code`, in site order.
     pub residuals: Vec<RenderedResidualJson>,
+    /// Every call to a function `code` spells, in text order.
+    pub calls: Vec<RenderedCallJson>,
+}
+
+/// One call `code` spells: whom it calls and how many arguments it hands on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenderedCallJson {
+    /// `function`, `import`, `self`, or `pointer` for a computed target.
+    pub kind: &'static str,
+    pub callee: Option<String>,
+    pub addr: Option<u64>,
+    pub arguments: usize,
+    pub variadic: bool,
 }
 
 /// Why a unit defines nothing.
@@ -222,6 +235,7 @@ impl RenderedFunctionJson {
                     lines: Vec::new(),
                     links: Vec::new(),
                     residuals: Vec::new(),
+                    calls: Vec::new(),
                 };
             }
         };
@@ -263,7 +277,25 @@ impl RenderedFunctionJson {
                     line: residual.line,
                 })
                 .collect(),
+            calls: emission.calls().iter().map(call_json).collect(),
         }
+    }
+}
+
+/// One rendered call, as `pddj` spells it.
+fn call_json(call: &r2dec::report::RenderedCall) -> RenderedCallJson {
+    use r2dec::report::CallKind;
+    RenderedCallJson {
+        kind: match call.kind {
+            CallKind::Function => "function",
+            CallKind::Import => "import",
+            CallKind::Itself => "self",
+            CallKind::Pointer => "pointer",
+        },
+        callee: call.callee.clone(),
+        addr: call.addr,
+        arguments: call.arguments,
+        variadic: call.variadic,
     }
 }
 

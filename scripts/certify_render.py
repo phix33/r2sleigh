@@ -79,8 +79,8 @@ def functions(r2s, binary, timeout):
     return found, len(listed) - len(found), ""
 
 
-# A separator no rendering prints, between the renderings of one batch.
-SEPARATOR = "@@r2s-certify@@"
+# A separator no rendering prints, between the renderings of one batch; `@` would be read as a seek.
+SEPARATOR = "==r2s-certify=="
 
 
 def native_render(r2s, binary, address, timeout):
@@ -111,6 +111,92 @@ def batch_render(r2s, binary, addresses, timeout):
         return None
     parts = done.stdout.split(SEPARATOR + "\n")[1:]
     return parts if len(parts) == len(addresses) else None
+
+
+def batch_json(r2s, binary, addresses, timeout):
+    """Each function's `pddj` from one process, `aa` paid once, by address; none where it died."""
+    if not addresses:
+        return {}
+    script = "aa; " + "; ".join(f"?e {SEPARATOR}; pddj @ {address:#x}" for address in addresses)
+    try:
+        done = subprocess.run(
+            [str(r2s), "-q", "-c", script, str(binary)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=timeout * max(1, len(addresses)),
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return {}
+    parts = done.stdout.split(SEPARATOR + "\n")[1:]
+    found = {}
+    for address, part in zip(addresses, parts):
+        start = part.find("{")
+        try:
+            found[address] = json.loads(part[start:]) if start >= 0 else None
+        except json.JSONDecodeError:
+            found[address] = None
+    return found
+
+
+def defined_arity(rendering):
+    """How many parameters a rendering's definition takes; None where it defines none or a variadic one."""
+    if not rendering or rendering.get("refused") or not rendering.get("signature"):
+        return None
+    if "..." in rendering["signature"]:
+        return None
+    return sum(1 for variable in rendering.get("variables", []) if variable["kind"] == "param")
+
+
+def arity(args, binary, chosen):
+    """Each call a rendering spells against its callee's definition, as the same session renders it.
+
+    A caller and its callee are two halves of one link: a call handing on more
+    arguments than the definition takes invents them, fewer drops them. Both are
+    wrong C whatever the proof line says. A pointer call is counted, not judged:
+    nothing names what it reaches.
+    """
+    tally = {"calls graded": 0, "invented": 0, "dropped": 0, "pointer calls": 0, "unjudged": 0}
+    rendered = batch_json(args.r2s, binary, [address for address, _ in chosen], args.timeout)
+    callees = sorted(
+        {
+            call["addr"]
+            for rendering in rendered.values()
+            if rendering
+            for call in rendering.get("calls", [])
+            if call["kind"] == "function"
+            and call["addr"] is not None
+            and call["addr"] not in rendered
+        }
+    )
+    definitions = dict(rendered)
+    definitions.update(batch_json(args.r2s, binary, callees, args.timeout))
+    for address, name in chosen:
+        rendering = rendered.get(address)
+        if not rendering:
+            continue
+        for call in rendering.get("calls", []):
+            if call["kind"] == "pointer":
+                tally["pointer calls"] += 1
+                continue
+            if call["kind"] == "import" or call["variadic"]:
+                continue
+            target = address if call["kind"] == "self" else call["addr"]
+            takes = defined_arity(definitions.get(target))
+            if takes is None:
+                tally["unjudged"] += 1
+                continue
+            tally["calls graded"] += 1
+            if call["arguments"] == takes:
+                continue
+            key = "invented" if call["arguments"] > takes else "dropped"
+            tally[key] += 1
+            print(
+                f"  {name}: calls {call['callee']} with {call['arguments']} arguments,"
+                f" defined with {takes} ({key})"
+            )
+    return tally
 
 
 def refused(lines):
@@ -311,10 +397,17 @@ def main():
                 found = [(args.at, f"fcn.{args.at:x}")]
         for key, value in lint(args, binary, found).items():
             totals[key] = totals.get(key, 0) + value
+        chosen = found if args.functions is None else found[: args.functions]
+        for key, value in arity(args, binary, chosen).items():
+            totals[key] = totals.get(key, 0) + value
 
     print()
     for key in ("rendered", "refused", "no body", "unlisted", "undefined reads", "panicked", "crashed"):
         print(f"{key:16} {totals.get(key, 0)}")
+    # The arity check reports; it gates once its counts are blessed (ROADMAP GT).
+    print("arity:")
+    for key in ("calls graded", "invented", "dropped", "pointer calls", "unjudged"):
+        print(f"  {key:14} {totals.get(key, 0)}")
     # An uncertified rendering is a defect on its own terms, and so is a
     # panic the engine isolated or a process that never answered.
     failed = ("unlisted", "undefined reads", "panicked", "crashed")

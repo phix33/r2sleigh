@@ -13,7 +13,7 @@ int32_t add(int32_t a, int32_t b)
     }
 }
 
-{"name":"sym.add","addr":4521,"language":"c","definition":"add","signature":"int32_t add(int32_t a, int32_t b)","refused":null,"code":"#include <stdint.h>\n\nint32_t add(int32_t a, int32_t b)\n{\n    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered */\n    {\n        return (int32_t)((uint32_t)b + (uint32_t)a);\n    }\n}\n","proof":{"total":10,"rendered":3,"elided":7,"refused":0,"residual":0,"split":0,"compiler_inserted":0,"assumed":0,"unaccounted":0},"variables":[{"name":"a","type":"int32_t","kind":"param","location":"arg:0"},{"name":"b","type":"int32_t","kind":"param","location":"arg:1"}],"lines":[{"line":7,"addrs":[4544]}],"links":[],"residuals":[]}
+{"name":"sym.add","addr":4521,"language":"c","definition":"add","signature":"int32_t add(int32_t a, int32_t b)","refused":null,"code":"#include <stdint.h>\n\nint32_t add(int32_t a, int32_t b)\n{\n    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered */\n    {\n        return (int32_t)((uint32_t)b + (uint32_t)a);\n    }\n}\n","proof":{"total":10,"rendered":3,"elided":7,"refused":0,"residual":0,"split":0,"compiler_inserted":0,"assumed":0,"unaccounted":0},"variables":[{"name":"a","type":"int32_t","kind":"param","location":"arg:0"},{"name":"b","type":"int32_t","kind":"param","location":"arg:1"}],"lines":[{"line":7,"addrs":[4544]}],"links":[],"residuals":[],"calls":[]}
 EOF
 RUN
 
@@ -22,7 +22,7 @@ FILE=tests/fixtures/rv_O0g
 CMDS=pdd @ 0x2000; pddj @ 0x2000; pddo @ 0x2000
 EXPECT=<<EOF
 /* r2sleigh refused _IO_stdin_used: no instruction can run at 0x2000: the program maps it without execute permission */
-{"name":"obj._IO_stdin_used","addr":8192,"language":"c","definition":"_IO_stdin_used","signature":"","refused":{"kind":"walk","reason":"no instruction can run at 0x2000: the program maps it without execute permission"},"code":"/* r2sleigh refused _IO_stdin_used: no instruction can run at 0x2000: the program maps it without execute permission */","proof":{"total":0,"rendered":0,"elided":0,"refused":0,"residual":0,"split":0,"compiler_inserted":0,"assumed":0,"unaccounted":0},"variables":[],"lines":[],"links":[],"residuals":[]}
+{"name":"obj._IO_stdin_used","addr":8192,"language":"c","definition":"_IO_stdin_used","signature":"","refused":{"kind":"walk","reason":"no instruction can run at 0x2000: the program maps it without execute permission"},"code":"/* r2sleigh refused _IO_stdin_used: no instruction can run at 0x2000: the program maps it without execute permission */","proof":{"total":0,"rendered":0,"elided":0,"refused":0,"residual":0,"split":0,"compiler_inserted":0,"assumed":0,"unaccounted":0},"variables":[],"lines":[],"links":[],"residuals":[],"calls":[]}
 no obligation ledger: no instruction can run at 0x2000: the program maps it without execute permission
 EOF
 RUN
@@ -56,7 +56,7 @@ FILE=tests/fixtures/shapes_zig_riscv64_O0
 CMDS=pdd @ sym.shape_step; pddj @ sym.shape_step; afi @ sym.shape_step
 EXPECT=<<EOF
 /* r2sleigh refused shape_step: no equivalence target grades riscv64 64-bit C, so none is rendered */
-{"name":"sym.shape_step","addr":16785384,"language":"c","definition":"shape_step","signature":"","refused":{"kind":"architecture","reason":"no equivalence target grades riscv64 64-bit C, so none is rendered"},"code":"/* r2sleigh refused shape_step: no equivalence target grades riscv64 64-bit C, so none is rendered */","proof":{"total":0,"rendered":0,"elided":0,"refused":0,"residual":0,"split":0,"compiler_inserted":0,"assumed":0,"unaccounted":0},"variables":[],"lines":[],"links":[],"residuals":[]}
+{"name":"sym.shape_step","addr":16785384,"language":"c","definition":"shape_step","signature":"","refused":{"kind":"architecture","reason":"no equivalence target grades riscv64 64-bit C, so none is rendered"},"code":"/* r2sleigh refused shape_step: no equivalence target grades riscv64 64-bit C, so none is rendered */","proof":{"total":0,"rendered":0,"elided":0,"refused":0,"residual":0,"split":0,"compiler_inserted":0,"assumed":0,"unaccounted":0},"variables":[],"lines":[],"links":[],"residuals":[],"calls":[]}
 #
 addr: 0x01001fe8
 name: sym.shape_step

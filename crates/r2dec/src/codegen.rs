@@ -199,6 +199,7 @@ pub struct Emission {
     signature: Option<String>,
     variables: Vec<crate::report::RenderedVariable>,
     links: Vec<crate::report::RenderedLink>,
+    calls: Vec<crate::report::RenderedCall>,
     /// What each span of the definition is.
     roles: CRoles,
 }
@@ -254,6 +255,11 @@ impl Emission {
     /// resolves in the program.
     pub fn links(&self) -> &[crate::report::RenderedLink] {
         &self.links
+    }
+
+    /// Every call the unit spells, in the order the text writes them.
+    pub fn calls(&self) -> &[crate::report::RenderedCall] {
+        &self.calls
     }
 
     pub(crate) fn into_definition(self) -> String {
@@ -475,6 +481,7 @@ impl<'c> CodeGenerator<'c> {
             signature,
             variables: crate::report::variables(func),
             links: crate::report::links(func, pointer_bits),
+            calls: crate::report::calls(func),
             roles: std::mem::take(&mut self.roles),
         }
     }
