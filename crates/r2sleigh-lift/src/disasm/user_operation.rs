@@ -38,6 +38,9 @@ pub(crate) enum ModelledUserOperation {
     SetIsaMode,
     /// ARM and AArch64 `clrex`: the exclusive monitor a linked load set is cleared.
     ClearExclusive,
+    /// AArch64 `LoadAcquire`, `LoadAcquirePC` and `StoreRelease`: the instruction's access is
+    /// ordered, stated as a fence after the load or before the store (`vendor/README.md`).
+    Ordering(r2il::MemoryOrdering),
     /// x86 `PMOVSX*` / `PMOVZX*`.
     PackedExtension(PackedExtension),
     /// x86 `PSHUFLW`, `PSHUFHW` and `PSHUFW`.
@@ -364,7 +367,7 @@ const WORD_SHUFFLES: [(&str, ShuffledQuadword, EncodingForm); 11] = [
 
 /// The operations outside the packed-extension family, by the exact name the
 /// specification declares.
-const NAMED: [(&str, ModelledUserOperation); 14] = [
+const NAMED: [(&str, ModelledUserOperation); 17] = [
     ("NEON_ext", ModelledUserOperation::NeonExt),
     ("NEON_ushl", ModelledUserOperation::NeonUshl),
     ("NEON_rev64", ModelledUserOperation::NeonRev64),
@@ -389,6 +392,19 @@ const NAMED: [(&str, ModelledUserOperation); 14] = [
     ("invalidInstructionException", ModelledUserOperation::Trap),
     ("setISAMode", ModelledUserOperation::SetIsaMode),
     ("ClearExclusiveLocal", ModelledUserOperation::ClearExclusive),
+    (
+        "LoadAcquire",
+        ModelledUserOperation::Ordering(r2il::MemoryOrdering::Acquire),
+    ),
+    // RCpc: C11's acquire is what compilers emit `ldapr` for, so Acquire states no more than it.
+    (
+        "LoadAcquirePC",
+        ModelledUserOperation::Ordering(r2il::MemoryOrdering::Acquire),
+    ),
+    (
+        "StoreRelease",
+        ModelledUserOperation::Ordering(r2il::MemoryOrdering::Release),
+    ),
 ];
 
 /// Every modelled operation with the exact name it is declared under.

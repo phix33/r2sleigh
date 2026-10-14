@@ -987,6 +987,12 @@ cas_var: "al" is b_22=1 & b_15=1 { }
 cas_var: "" is b_22=0 & b_15=0 { }
 cas_var: "l" is b_22=0 & b_15=1 { }
 
+# acquire (L, b_22) closes the access and release (o0, b_15) opens it, as ls_loa and ls_lor
+cas_loa: is b_22=1 { LoadAcquire(); }
+cas_loa: is b_22=0 { }
+cas_lor: is b_15=1 { StoreRelease(); }
+cas_lor: is b_15=0 { }
+
 # C6.2.42 CASB, CASAB, CASALB, CASLB page C6-1216 line 71570 MATCH x08a07c00/mask=xffa07c00
 # CONSTRUCT x08a07c00/mask=xffa07c00 MATCHED 1 DOCUMENTED OPCODES
 # AUNIT --inst x08a07c00/mask=xffa07c00 --status nomem
@@ -994,8 +1000,9 @@ cas_var: "l" is b_22=0 & b_15=1 { }
 # CAS{,A,AL,L}B size=0b10 (b_3031)
 
 :cas^cas_var^"b" aa_Ws, aa_Wt, [Rn_GPR64xsp]
-is b_3031=0b00 & b_2329=0b0010001 & b_21=1 & b_1014=0b11111 & cas_var & aa_Wt & Rn_GPR64xsp & aa_Ws & aa_Xs
+is b_3031=0b00 & b_2329=0b0010001 & b_21=1 & b_1014=0b11111 & cas_var & cas_loa & cas_lor & aa_Wt & Rn_GPR64xsp & aa_Ws & aa_Xs
 {
+	build cas_lor;
 	comparevalue:1 = aa_Ws:1;
 	newvalue:1 = aa_Wt:1;
 	data:1 = *:1 Rn_GPR64xsp;
@@ -1003,6 +1010,7 @@ is b_3031=0b00 & b_2329=0b0010001 & b_21=1 & b_1014=0b11111 & cas_var & aa_Wt & 
 	*:1 Rn_GPR64xsp = newvalue;
 <skip>
 	aa_Xs = zext(data);
+	build cas_loa;
 }
 
 # C6.2.43 CASH, CASAH, CASALH, CASLH page C6-1218 line 71692 MATCH x48a07c00/mask=xffa07c00
@@ -1012,8 +1020,9 @@ is b_3031=0b00 & b_2329=0b0010001 & b_21=1 & b_1014=0b11111 & cas_var & aa_Wt & 
 # CAS{,A,AL,L}H size=0b10 (b_3031)
 
 :cas^cas_var^"h" aa_Ws, aa_Wt, [Rn_GPR64xsp]
-is b_3031=0b01 & b_2329=0b0010001 & b_21=1 & b_1014=0b11111 & cas_var & aa_Wt & Rn_GPR64xsp & aa_Ws & aa_Xs
+is b_3031=0b01 & b_2329=0b0010001 & b_21=1 & b_1014=0b11111 & cas_var & cas_loa & cas_lor & aa_Wt & Rn_GPR64xsp & aa_Ws & aa_Xs
 {
+	build cas_lor;
 	comparevalue:2 = aa_Ws:2;
 	newvalue:2 = aa_Wt:2;
 	data:2 = *:2 Rn_GPR64xsp;
@@ -1021,6 +1030,7 @@ is b_3031=0b01 & b_2329=0b0010001 & b_21=1 & b_1014=0b11111 & cas_var & aa_Wt & 
 	*:2 Rn_GPR64xsp = newvalue;
 <skip>
 	aa_Xs = zext(data);
+	build cas_loa;
 }
 
 # C6.2.44 CASP, CASPA, CASPAL, CASPL page C6-1220 line 71814 MATCH x08207c00/mask=xbfa07c00
@@ -1030,8 +1040,9 @@ is b_3031=0b01 & b_2329=0b0010001 & b_21=1 & b_1014=0b11111 & cas_var & aa_Wt & 
 # CASP{,A,AL,L} size=0b00 (b_3031)
 
 :casp^cas_var aa_Ws, aa_Wss, aa_Wt, aa_Wtt, [Rn_GPR64xsp]
-is b_3031=0b00 & b_2329=0b0010000 & b_21=1 & b_1014=0b11111 & b_16=0 & b_00=0 & cas_var & aa_Ws & aa_Wss & aa_Wt & aa_Wtt & Rn_GPR64xsp & aa_Xs & aa_Xss
+is b_3031=0b00 & b_2329=0b0010000 & b_21=1 & b_1014=0b11111 & b_16=0 & b_00=0 & cas_var & cas_loa & cas_lor & aa_Ws & aa_Wss & aa_Wt & aa_Wtt & Rn_GPR64xsp & aa_Xs & aa_Xss
 {
+	build cas_lor;
 @if DATA_ENDIAN == "big"
 	comparevalue:8 = (zext(aa_Ws) << 32) | zext(aa_Wss);
 	newvalue:8 = (zext(aa_Wt) << 32) | zext(aa_Wtt);
@@ -1052,6 +1063,7 @@ is b_3031=0b00 & b_2329=0b0010000 & b_21=1 & b_1014=0b11111 & b_16=0 & b_00=0 & 
 	aa_Xs = zext(lo);
 	aa_Xss = zext(hi);
 @endif
+	build cas_loa;
 }
 
 # C6.2.44 CASP, CASPA, CASPAL, CASPL page C6-1220 line 71814 MATCH x08207c00/mask=xbfa07c00
@@ -1061,8 +1073,9 @@ is b_3031=0b00 & b_2329=0b0010000 & b_21=1 & b_1014=0b11111 & b_16=0 & b_00=0 & 
 # CASP{,A,AL,L} size=0b01 (b_3031)
 
 :casp^cas_var aa_Xs, aa_Xss, aa_Xt, aa_Xtt, [Rn_GPR64xsp]
-is b_3031=0b01 & b_2329=0b0010000 & b_21=1 & b_1014=0b11111 & b_16=0 & b_00=0 & cas_var & aa_Xs & aa_Xss & aa_Xt & aa_Xtt & Rn_GPR64xsp
+is b_3031=0b01 & b_2329=0b0010000 & b_21=1 & b_1014=0b11111 & b_16=0 & b_00=0 & cas_var & cas_loa & cas_lor & aa_Xs & aa_Xss & aa_Xt & aa_Xtt & Rn_GPR64xsp
 {
+	build cas_lor;
 	# Xs and Xt are at [Xn] in either byte order: comparevalue is s2:s1 little, s1:s2 big.
 	local tmp_s:8 = aa_Xs;
 	local tmp_ss:8 = aa_Xss;
@@ -1084,6 +1097,7 @@ is b_3031=0b01 & b_2329=0b0010000 & b_21=1 & b_1014=0b11111 & b_16=0 & b_00=0 & 
 <skip>
 	aa_Xs = tmp_d;
 	aa_Xss = tmp_dd;
+	build cas_loa;
 }
 
 # C6.2.45 CAS, CASA, CASAL, CASL page C6-1223 line 71996 MATCH x88a07c00/mask=xbfa07c00
@@ -1092,8 +1106,9 @@ is b_3031=0b01 & b_2329=0b0010000 & b_21=1 & b_1014=0b11111 & b_16=0 & b_00=0 & 
 # CAS{,A,AL,L} size=0b10 (b_3031)
 
 :cas^cas_var aa_Ws, aa_Wt, [Rn_GPR64xsp]
-is b_3031=0b10 & b_2329=0b0010001 & b_21=1 & b_1014=0b11111 & cas_var & aa_Wt & Rn_GPR64xsp & aa_Ws & aa_Xs
+is b_3031=0b10 & b_2329=0b0010001 & b_21=1 & b_1014=0b11111 & cas_var & cas_loa & cas_lor & aa_Wt & Rn_GPR64xsp & aa_Ws & aa_Xs
 {
+	build cas_lor;
 	comparevalue:4 = aa_Ws;
 	newvalue:4 = aa_Wt;
 	data:4 = *:4 Rn_GPR64xsp;
@@ -1101,6 +1116,7 @@ is b_3031=0b10 & b_2329=0b0010001 & b_21=1 & b_1014=0b11111 & cas_var & aa_Wt & 
 	*:4 Rn_GPR64xsp = newvalue;
 <skip>
 	aa_Xs = zext(data);
+	build cas_loa;
 }
 
 # C6.2.45 CAS, CASA, CASAL, CASL page C6-1223 line 71996 MATCH x88a07c00/mask=xbfa07c00
@@ -1110,8 +1126,9 @@ is b_3031=0b10 & b_2329=0b0010001 & b_21=1 & b_1014=0b11111 & cas_var & aa_Wt & 
 # CAS{,A,AL,L} size=0b11 (b_3031)
 
 :cas^cas_var aa_Xs, aa_Xt, [Rn_GPR64xsp]
-is b_3031=0b11 & b_2329=0b0010001 & b_21=1 & b_1014=0b11111 & cas_var & aa_Xt & Rn_GPR64xsp & aa_Xs
+is b_3031=0b11 & b_2329=0b0010001 & b_21=1 & b_1014=0b11111 & cas_var & cas_loa & cas_lor & aa_Xt & Rn_GPR64xsp & aa_Xs
 {
+	build cas_lor;
 	comparevalue:8 = aa_Xs;
 	newvalue:8 = aa_Xt;
 	data:8 = *:8 Rn_GPR64xsp;
@@ -1119,6 +1136,7 @@ is b_3031=0b11 & b_2329=0b0010001 & b_21=1 & b_1014=0b11111 & cas_var & aa_Xt & 
 	*:8 Rn_GPR64xsp = newvalue;
 <skip>
 	aa_Xs = data;
+	build cas_loa;
 }
 
 # C6.2.41 CBNZ page C6-589 line 34530 KEEPWITH
@@ -2510,17 +2528,17 @@ is b_2431=0xd5 & b_2223=0 & l=0 & Op0=0 & Op1=3 & CRn=0x3 & IsbOption & Op2=6 & 
 # C6.2.86 LDADDB, LDADDAB, LDADDALB, LDADDLB page C6-648 line 37726 KEEPWITH
 
 # variants, a=acquire, al=acquire+release, l=release
-# build ls_loa to acquire and ls_lor to release
+# build ls_lor first to release and ls_loa last to acquire: a release orders what precedes the access, an acquire what follows it
 
-ls_loa: "a" is b_23=1 & b_22=0 { LOAcquire(); }
-ls_loa: "al" is b_23=1 & b_22=1 { LOAcquire(); }
+ls_loa: "a" is b_23=1 & b_22=0 { LoadAcquire(); }
+ls_loa: "al" is b_23=1 & b_22=1 { LoadAcquire(); }
 ls_loa: "" is b_23=0 & b_22=0 { }
 ls_loa: "l" is b_23=0 & b_22=1 { }
 
 ls_lor: "a" is b_23=1 & b_22=0 { }
-ls_lor: "al" is b_23=1 & b_22=1 { LORelease(); }
+ls_lor: "al" is b_23=1 & b_22=1 { StoreRelease(); }
 ls_lor: "" is b_23=0 & b_22=0 { }
-ls_lor: "l" is b_23=0 & b_22=1 { LORelease(); }
+ls_lor: "l" is b_23=0 & b_22=1 { StoreRelease(); }
 
 ls_data1: is b_3031=0b00 & Rn_GPR64xsp { tmp_ldWn = zext(*:1 Rn_GPR64xsp); }
 ls_data2: is b_3031=0b01 & Rn_GPR64xsp { tmp_ldWn = zext(*:2 Rn_GPR64xsp); }
@@ -2603,7 +2621,7 @@ ls_opc8: "umin" is b_3031=0b11 & b_1215=0b0111 & aa_Xs & ls_data8 & ls_mem8 { bu
 
 :ld^ls_opc1^ls_lor^"b" aa_Ws, aa_Wt, [Rn_GPR64xsp]
 is b_3031=0b00 & b_2429=0b111000 & b_21=1 & b_1515=0 & b_1011=0b00 & ls_opc1 & ls_loa & ls_lor & aa_Wt & aa_Ws & Rn_GPR64xsp & aa_Xt
-{ build ls_loa; build ls_opc1; aa_Xt = zext(tmp_ldWn); build ls_lor; }
+{ build ls_lor; build ls_opc1; aa_Xt = zext(tmp_ldWn); build ls_loa; }
 
 # C6.2.134 LDADDH, LDADDAH, LDADDALH, LDADDLH page C6-1491 line 88670 MATCH x78200000/mask=xff20fc00
 # C6.2.153 LDCLRH, LDCLRAH, LDCLRALH, LDCLRLH page C6-1526 line 90621 MATCH x78201000/mask=xff20fc00
@@ -2620,7 +2638,7 @@ is b_3031=0b00 & b_2429=0b111000 & b_21=1 & b_1515=0 & b_1011=0b00 & ls_opc1 & l
 
 :ld^ls_opc2^ls_lor^"h" aa_Ws, aa_Wt, [Rn_GPR64xsp]
 is b_3031=0b01 & b_2429=0b111000 & b_21=1 & b_1515=0 & b_1011=0b00 & ls_opc2 & ls_loa & ls_lor & aa_Wt & aa_Ws & Rn_GPR64xsp & aa_Xt
-{ build ls_loa; build ls_opc2; aa_Xt = zext(tmp_ldWn); build ls_lor; }
+{ build ls_lor; build ls_opc2; aa_Xt = zext(tmp_ldWn); build ls_loa; }
 
 # C6.2.135 LDADD, LDADDA, LDADDAL, LDADDL page C6-1493 line 88796 MATCH xb8200000/mask=xbf20fc00
 # C6.2.154 LDCLR, LDCLRA, LDCLRAL, LDCLRL page C6-1528 line 90747 MATCH xb8201000/mask=xbf20fc00
@@ -2645,7 +2663,7 @@ is b_3031=0b01 & b_2429=0b111000 & b_21=1 & b_1515=0 & b_1011=0b00 & ls_opc2 & l
 
 :ld^ls_opc4^ls_lor aa_Ws, aa_Wt, [Rn_GPR64xsp]
 is b_3031=0b10 & b_2429=0b111000 & b_21=1 & b_1515=0 & b_1011=0b00 & ls_opc4 & ls_loa & ls_lor & aa_Wt & aa_Ws & Rn_GPR64xsp & aa_Xt
-{ build ls_loa; build ls_opc4; aa_Xt = zext(tmp_ldWn); build ls_lor; }
+{ build ls_lor; build ls_opc4; aa_Xt = zext(tmp_ldWn); build ls_loa; }
 
 # C6.2.135 LDADD, LDADDA, LDADDAL, LDADDL page C6-1493 line 88796 MATCH xb8200000/mask=xbf20fc00
 # C6.2.154 LDCLR, LDCLRA, LDCLRAL, LDCLRL page C6-1528 line 90747 MATCH xb8201000/mask=xbf20fc00
@@ -2670,7 +2688,7 @@ is b_3031=0b10 & b_2429=0b111000 & b_21=1 & b_1515=0 & b_1011=0b00 & ls_opc4 & l
 
 :ld^ls_opc8^ls_lor aa_Xs, aa_Xt, [Rn_GPR64xsp]
 is b_3031=0b11 & b_2429=0b111000 & b_21=1 & b_1515=0 & b_1011=0b00 & ls_opc8 & ls_loa & ls_lor & aa_Xt & aa_Xs & Rn_GPR64xsp
-{ build ls_loa; build ls_opc8; aa_Xt = tmp_ldXn; build ls_lor; }
+{ build ls_lor; build ls_opc8; aa_Xt = tmp_ldXn; build ls_loa; }
 
 # C6.2.136 LDAPR page C6-1496 line 88965 MATCH xb8a0c000/mask=xbfe0fc00
 # CONSTRUCT xb8a0c000/mask=xffe0fc00 MATCHED 1 DOCUMENTED OPCODES
@@ -2683,6 +2701,7 @@ is b_3031=0b11 & b_2429=0b111000 & b_21=1 & b_1515=0 & b_1011=0b00 & ls_opc8 & l
 is b_3031=0b10 & b_2129=0b111000101 & b_1015=0b110000 & Rn_GPR64xsp & aa_Wt & ls_data4 & aa_Xt
 {
 	aa_Xt = zext(tmp_ldWn);
+	LoadAcquirePC();
 }
 
 # C6.2.136 LDAPR page C6-1496 line 88965 MATCH xb8a0c000/mask=xbfe0fc00
@@ -2696,6 +2715,7 @@ is b_3031=0b10 & b_2129=0b111000101 & b_1015=0b110000 & Rn_GPR64xsp & aa_Wt & ls
 is b_3031=0b11 & b_2129=0b111000101 & b_1015=0b110000 & Rn_GPR64xsp & aa_Xt & ls_data8
 {
 	aa_Xt = tmp_ldXn;
+	LoadAcquirePC();
 }
 
 # C6.2.137 LDAPRB page C6-1498 line 89064 MATCH x38a0c000/mask=xffe0fc00
@@ -2708,6 +2728,7 @@ is b_3031=0b11 & b_2129=0b111000101 & b_1015=0b110000 & Rn_GPR64xsp & aa_Xt & ls
 is b_3031=0b00 & b_2129=0b111000101 & b_1015=0b110000 & Rn_GPR64xsp & aa_Wt & ls_data1 & aa_Xt
 {
 	aa_Xt = zext(tmp_ldWn);
+	LoadAcquirePC();
 }
 
 # C6.2.138 LDAPRH page C6-1500 line 89148 MATCH x78a0c000/mask=xffe0fc00
@@ -2719,6 +2740,7 @@ is b_3031=0b00 & b_2129=0b111000101 & b_1015=0b110000 & Rn_GPR64xsp & aa_Wt & ls
 is b_3031=0b01 & b_2129=0b111000101 & b_1015=0b110000 & Rn_GPR64xsp & aa_Wt & ls_data2 & aa_Xt
 {
 	aa_Xt = zext(tmp_ldWn);
+	LoadAcquirePC();
 }
 
 
@@ -2733,6 +2755,7 @@ is b_3031=0b01 & b_2129=0b111000101 & b_1015=0b110000 & Rn_GPR64xsp & aa_Wt & ls
 is b_3031=0b10 & b_2129=0b011001010 & b_1011=0b00 & addr_SIMM9 & aa_Wt & aa_Xt
 {
 	aa_Xt = zext(*:4 addr_SIMM9);
+	LoadAcquirePC();
 }
 
 # C6.2.139 LDAPUR page C6-1502 line 89232 MATCH x99400000/mask=xbfe00c00
@@ -2742,6 +2765,7 @@ is b_3031=0b10 & b_2129=0b011001010 & b_1011=0b00 & addr_SIMM9 & aa_Wt & aa_Xt
 is b_3031=0b11 & b_2129=0b011001010 & b_1011=0b00 & addr_SIMM9 & aa_Xt
 {
 	aa_Xt = *addr_SIMM9;
+	LoadAcquirePC();
 }
 
 # C6.2.140 LDAPURB page C6-1504 line 89343 MATCH x19400000/mask=xffe00c00
@@ -2752,6 +2776,7 @@ is b_3031=0b11 & b_2129=0b011001010 & b_1011=0b00 & addr_SIMM9 & aa_Xt
 is b_3031=0b00 & b_2129=0b011001010 & b_1011=0b00 & addr_SIMM9 & aa_Wt & aa_Xt
 {
 	aa_Xt = zext(*:1 addr_SIMM9);
+	LoadAcquirePC();
 }
 
 # C6.2.141 LDAPURH page C6-1506 line 89439 MATCH x59400000/mask=xffe00c00
@@ -2762,6 +2787,7 @@ is b_3031=0b00 & b_2129=0b011001010 & b_1011=0b00 & addr_SIMM9 & aa_Wt & aa_Xt
 is b_3031=0b01 & b_2129=0b011001010 & b_1011=0b00 & addr_SIMM9 & aa_Wt & aa_Xt
 {
 	aa_Xt = zext(*:2 addr_SIMM9);
+	LoadAcquirePC();
 }
 
 
@@ -2774,6 +2800,7 @@ is b_3031=0b00 & b_2329=0b0110011 & b_22=1 & b_2121=0b0 & b_1011=0b00 & addr_SIM
 {
 	aa_Xt = 0;
 	aa_Wt = sext(*:1 addr_SIMM9);
+	LoadAcquirePC();
 }
 
 # C6.2.142 LDAPURSB page C6-1508 line 89535 MATCH x19800000/mask=xffa00c00
@@ -2783,6 +2810,7 @@ is b_3031=0b00 & b_2329=0b0110011 & b_22=1 & b_2121=0b0 & b_1011=0b00 & addr_SIM
 is b_3031=0b00 & b_2329=0b0110011 & b_22=0 & b_2121=0b0 & b_1011=0b00 & addr_SIMM9 & aa_Xt
 {
 	aa_Xt = sext(*:1 addr_SIMM9);
+	LoadAcquirePC();
 }
 
 # C6.2.143 LDAPURSH page C6-1510 line 89667 MATCH x59800000/mask=xffa00c00
@@ -2794,6 +2822,7 @@ is b_3031=0b01 & b_2329=0b0110011 & b_22=1 & b_2121=0b0 & b_1011=0b00 & addr_SIM
 {
 	aa_Xt = 0;
 	aa_Wt = sext(*:2 addr_SIMM9);
+	LoadAcquirePC();
 }
 
 # C6.2.143 LDAPURSH page C6-1510 line 89667 MATCH x59800000/mask=xffa00c00
@@ -2803,6 +2832,7 @@ is b_3031=0b01 & b_2329=0b0110011 & b_22=1 & b_2121=0b0 & b_1011=0b00 & addr_SIM
 is b_3031=0b01 & b_2329=0b0110011 & b_22=0 & b_2121=0b0 & b_1011=0b00 & addr_SIMM9 & aa_Xt
 {
 	aa_Xt = sext(*:2 addr_SIMM9);
+	LoadAcquirePC();
 }
 
 # C6.2.144 LDAPURSW page C6-1512 line 89799 MATCH x99800000/mask=xffe00c00
@@ -2813,6 +2843,7 @@ is b_3031=0b01 & b_2329=0b0110011 & b_22=0 & b_2121=0b0 & b_1011=0b00 & addr_SIM
 is b_3031=0b10 & b_2129=0b011001100 & b_1011=0b00 & addr_SIMM9 & aa_Xt
 {
 	aa_Xt = sext(*:4 addr_SIMM9);
+	LoadAcquirePC();
 }
 
 # C6.2.145 LDAR page C6-1514 line 89895 MATCH x88c08000/mask=xbfe08000
@@ -2826,6 +2857,7 @@ is b_3031=0b10 & b_2129=0b011001100 & b_1011=0b00 & addr_SIMM9 & aa_Xt
 is size.ldstr=3 & b_2429=0x8 & b_23=1 & L=1 & b_21=0 & b_15=1 & addrReg & Rt_GPR64
 {
 	Rt_GPR64 = *addrReg;
+	LoadAcquire();
 }
 
 # C6.2.145 LDAR page C6-1514 line 89895 MATCH x88c08000/mask=xbfe08000
@@ -2837,6 +2869,7 @@ is size.ldstr=3 & b_2429=0x8 & b_23=1 & L=1 & b_21=0 & b_15=1 & addrReg & Rt_GPR
 is size.ldstr=2 & b_2429=0x8 & b_23=1 & L=1 & b_21=0 & b_1620=0b11111 & b_15=1 & b_1014=0b11111 & addrReg & Rt_GPR32 & Rt_GPR64
 {
 	Rt_GPR64 = zext(*:4 addrReg);
+	LoadAcquire();
 }
 
 # C6.2.146 LDARB page C6-1516 line 89986 MATCH x08c08000/mask=xffe08000
@@ -2848,6 +2881,7 @@ is size.ldstr=2 & b_2429=0x8 & b_23=1 & L=1 & b_21=0 & b_1620=0b11111 & b_15=1 &
 is size.ldstr=0 & b_2429=0x8 & b_23=1 & L=1 & b_21=0 & b_15=1 & addrReg & Rt_GPR32 & Rt_GPR64
 {
 	Rt_GPR64 = zext(*:1 addrReg);
+	LoadAcquire();
 }
 
 # C6.2.147 LDARH page C6-1517 line 90054 MATCH x48c08000/mask=xffe08000
@@ -2859,6 +2893,7 @@ is size.ldstr=0 & b_2429=0x8 & b_23=1 & L=1 & b_21=0 & b_15=1 & addrReg & Rt_GPR
 is size.ldstr=1 & b_2429=0x8 & b_23=1 & L=1 & b_21=0 & b_1620=0b11111 & b_15=1 & b_1014=0b11111 & addrReg & Rt_GPR32 & Rt_GPR64
 {
 	Rt_GPR64 = zext(*:2 addrReg);
+	LoadAcquire();
 }
 
 # C6.2.148 LDAXP page C6-1518 line 90122 MATCH x88608000/mask=xbfe08000
@@ -2874,6 +2909,7 @@ is size.ldstr=3 & b_2429=0x8 & b_23=0 & L=1 & b_21=1 & b_15=1 & Rt2_GPR64 & addr
 	local addrval2:8 = *(addrReg+8);
 	Rt_GPR64 = addrval1;
 	Rt2_GPR64 = addrval2;
+	LoadAcquire();
 }
 
 # C6.2.148 LDAXP page C6-1518 line 90122 MATCH x88608000/mask=xbfe08000
@@ -2888,6 +2924,7 @@ is size.ldstr=2 & b_2429=0x8 & b_23=0 & L=1 & b_21=1 & b_1620 & b_15=1 & Rt2_GPR
 	local addrval2:8 = zext(*:4(addrReg+4));
 	Rt_GPR64 = addrval1;
 	Rt2_GPR64 = addrval2;
+	LoadAcquire();
 }
 
 # C6.2.149 LDAXR page C6-1520 line 90256 MATCH x88408000/mask=xbfe08000
@@ -2900,6 +2937,7 @@ is size.ldstr=3 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=1 & addrReg & Rt_GPR
 {
 	SetExclusiveMonitors(addrReg, 8:1);
 	Rt_GPR64 = *addrReg;
+	LoadAcquire();
 }
 
 # C6.2.149 LDAXR page C6-1520 line 90256 MATCH x88408000/mask=xbfe08000
@@ -2913,6 +2951,7 @@ is size.ldstr=2 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=1 & addrReg & Rt_GPR
 	SetExclusiveMonitors(addrReg, 4:1);
 	tmp:4 = *addrReg;
 	Rt_GPR64 = zext(tmp);
+	LoadAcquire();
 }
 
 # C6.2.150 LDAXRB page C6-1522 line 90351 MATCH x08408000/mask=xffe08000
@@ -2926,6 +2965,7 @@ is size.ldstr=0 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=1 & addrReg & Rt_GPR
 	SetExclusiveMonitors(addrReg, 1:1);
 	tmp:1 = *addrReg;
 	Rt_GPR64 = zext(tmp);
+	LoadAcquire();
 }
 
 # C6.2.151 LDAXRH page C6-1523 line 90423 MATCH x48408000/mask=xffe08000
@@ -2939,6 +2979,7 @@ is size.ldstr=1 & b_2429=0x8 & b_23=0 & L=1 & b_21=0 & b_15=1 & addrReg & Rt_GPR
 	SetExclusiveMonitors(addrReg, 2:1);
 	tmp:2 = *addrReg;
 	Rt_GPR64 = zext(tmp);
+	LoadAcquire();
 }
 
 # C6.2.160 LDLARB page C6-1540 line 91472 MATCH x08c00000/mask=xffe08000
@@ -5546,7 +5587,7 @@ is sf=1 & op.dp3_op54=0 & b_2428=0x1b & op.dp3_op31=1 & Rm_GPR32 & op.dp3_o0=0 &
 
 :st^ls_opc1^ls_lor^"b" aa_Ws, [Rn_GPR64xsp]
 is b_3031=0b00 & b_2429=0b111000 & b_23=0 & b_21=1 & b_1515=0 & b_1011=0b00 & b_0004=0b11111 & ls_opc1 & ls_lor & aa_Ws & Rn_GPR64xsp
-{ build ls_opc1; build ls_lor; }
+{ build ls_lor; build ls_opc1; }
 
 # C6.2.296 STADDH, STADDLH page C6-1820 line 107469 MATCH x7820001f/mask=xffa0fc1f
 # C6.2.299 STCLRH, STCLRLH page C6-1826 line 107756 MATCH x7820101f/mask=xffa0fc1f
@@ -5571,7 +5612,7 @@ is b_3031=0b00 & b_2429=0b111000 & b_23=0 & b_21=1 & b_1515=0 & b_1011=0b00 & b_
 
 :st^ls_opc2^ls_lor^"h" aa_Ws, [Rn_GPR64xsp]
 is b_3031=0b01 & b_2429=0b111000 & b_23=0 & b_21=1 & b_1515=0 & b_1011=0b00 & b_0004=0b11111 & ls_opc2 & ls_lor & aa_Ws & Rn_GPR64xsp
-{ build ls_opc2; build ls_lor; }
+{ build ls_lor; build ls_opc2; }
 
 # C6.2.297 STADD, STADDL page C6-1822 line 107555 MATCH xb820001f/mask=xbfa0fc1f
 # C6.2.300 STCLR, STCLRL page C6-1828 line 107842 MATCH xb820101f/mask=xbfa0fc1f
@@ -5596,7 +5637,7 @@ is b_3031=0b01 & b_2429=0b111000 & b_23=0 & b_21=1 & b_1515=0 & b_1011=0b00 & b_
 
 :st^ls_opc4^ls_lor aa_Ws, [Rn_GPR64xsp]
 is b_3031=0b10 & b_2429=0b111000 & b_23=0 & b_21=1 & b_1515=0 & b_1011=0b00 & b_0004=0b11111 & ls_opc4 & ls_lor & aa_Ws & Rn_GPR64xsp
-{ build ls_opc4; build ls_lor; }
+{ build ls_lor; build ls_opc4; }
 
 # C6.2.297 STADD, STADDL page C6-1822 line 107555 MATCH xb820001f/mask=xbfa0fc1f
 # C6.2.300 STCLR, STCLRL page C6-1828 line 107842 MATCH xb820101f/mask=xbfa0fc1f
@@ -5620,7 +5661,7 @@ is b_3031=0b10 & b_2429=0b111000 & b_23=0 & b_21=1 & b_1515=0 & b_1011=0b00 & b_
 
 :st^ls_opc8^ls_lor aa_Xs, [Rn_GPR64xsp]
 is b_3031=0b11 & b_2429=0b111000 & b_23=0 & b_21=1 & b_1515=0 & b_1011=0b00 & b_0004=0b11111 & ls_opc8 & ls_lor & aa_Xs & Rn_GPR64xsp
-{ build ls_opc8; build ls_lor; }
+{ build ls_lor; build ls_opc8; }
 
 # C6.2.307 STLLRB page C6-1842 line 108609 MATCH x08800000/mask=xffe08000
 # CONSTRUCT x08800000/mask=xffe08000 MATCHED 1 DOCUMENTED OPCODES
@@ -5670,6 +5711,7 @@ is b_3031=0b11 & b_2329=0b0010001 & b_22=0 & b_21=0 & b_15=0 & aa_Xt & Rn_GPR64x
 :stlr Rt_GPR64, addrReg
 is size.ldstr=3 & b_2429=0x8 & b_23=1 & L=0 & b_21=0 & b_15=1 & addrReg & Rt_GPR64
 {
+	StoreRelease();
 	*addrReg = Rt_GPR64;
 }
 
@@ -5681,6 +5723,7 @@ is size.ldstr=3 & b_2429=0x8 & b_23=1 & L=0 & b_21=0 & b_15=1 & addrReg & Rt_GPR
 :stlr Rt_GPR32, addrReg
 is size.ldstr=2 & b_2429=0x8 & b_23=1 & L=0 & b_21=0 & b_15=1 & addrReg & Rt_GPR32
 {
+	StoreRelease();
 	*addrReg = Rt_GPR32;
 }
 
@@ -5692,6 +5735,7 @@ is size.ldstr=2 & b_2429=0x8 & b_23=1 & L=0 & b_21=0 & b_15=1 & addrReg & Rt_GPR
 :stlrb Rt_GPR32, addrReg
 is size.ldstr=0 & b_2429=0x8 & b_23=1 & L=0 & b_21=0 & b_15=1 & addrReg & Rt_GPR32
 {
+	StoreRelease();
 	*:1 addrReg = Rt_GPR32:1;
 }
 
@@ -5703,6 +5747,7 @@ is size.ldstr=0 & b_2429=0x8 & b_23=1 & L=0 & b_21=0 & b_15=1 & addrReg & Rt_GPR
 :stlrh Rt_GPR32, addrReg
 is size.ldstr=1 & b_2429=0x8 & b_23=1 & L=0 & b_21=0 & b_15=1 & addrReg & Rt_GPR32
 {
+	StoreRelease();
 	*:2 addrReg = Rt_GPR32:2;
 }
 
@@ -5712,6 +5757,7 @@ is size.ldstr=1 & b_2429=0x8 & b_23=1 & L=0 & b_21=0 & b_15=1 & addrReg & Rt_GPR
 :stlur  aa_Wt, addr_SIMM9
 is b_3031=0b10 & b_2129=0b011001000 & b_1011=0b00 & addr_SIMM9 & aa_Wt
 {
+	StoreRelease();
 	*addr_SIMM9 = aa_Wt;
 }
 
@@ -5721,6 +5767,7 @@ is b_3031=0b10 & b_2129=0b011001000 & b_1011=0b00 & addr_SIMM9 & aa_Wt
 :stlur aa_Xt, addr_SIMM9
 is b_3031=0b11 & b_2129=0b011001000 & b_1011=0b00 & addr_SIMM9 & aa_Xt
 {
+	StoreRelease();
 	*addr_SIMM9 = aa_Xt;
 }
 
@@ -5731,6 +5778,7 @@ is b_3031=0b11 & b_2129=0b011001000 & b_1011=0b00 & addr_SIMM9 & aa_Xt
 :stlurb aa_Wt, addr_SIMM9
 is b_2131=0b00011001000 & b_1011=0b00 & addr_SIMM9 & aa_Wt
 {
+	StoreRelease();
 	*addr_SIMM9 = aa_Wt:1;
 }
 
@@ -5741,6 +5789,7 @@ is b_2131=0b00011001000 & b_1011=0b00 & addr_SIMM9 & aa_Wt
 :stlurh aa_Wt, addr_SIMM9
 is b_2131=0b01011001000 & b_1011=0b00 & addr_SIMM9 & aa_Wt
 {
+	StoreRelease();
 	*addr_SIMM9 = aa_Wt:2;
 }
 
@@ -5751,6 +5800,7 @@ is b_2131=0b01011001000 & b_1011=0b00 & addr_SIMM9 & aa_Wt
 :stlxp Rs_GPR32, Rt_GPR64, Rt2_GPR64, addrReg
 is size.ldstr=3 & b_2429=0x8 & b_23=0 & L=0 & b_21=1 & Rs_GPR32 & b_15=1 & Rt2_GPR64 & addrReg & Rt_GPR64 & Rs_GPR64
 {
+	StoreRelease();
 	status:1 = 1;
 	rsize:1 = 16;
 	check:1 = ExclusiveMonitorPass(addrReg, rsize);
@@ -5769,6 +5819,7 @@ is size.ldstr=3 & b_2429=0x8 & b_23=0 & L=0 & b_21=1 & Rs_GPR32 & b_15=1 & Rt2_G
 :stlxp Rs_GPR32, Rt_GPR32, Rt2_GPR32, addrReg
 is size.ldstr=2 & b_2429=0x8 & b_23=0 & L=0 & b_21=1 & Rs_GPR32 & b_15=1 & Rt2_GPR32 & addrReg & Rt_GPR32 & Rs_GPR64
 {
+	StoreRelease();
 	status:1 = 1;
 	rsize:1 = 16;
 	check:1 = ExclusiveMonitorPass(addrReg, rsize);
@@ -5788,6 +5839,7 @@ is size.ldstr=2 & b_2429=0x8 & b_23=0 & L=0 & b_21=1 & Rs_GPR32 & b_15=1 & Rt2_G
 :stlxr Rs_GPR32, Rt_GPR64, addrReg
 is size.ldstr=3 & b_2429=0x8 & b_23=0 & L=0 & b_21=0 & Rs_GPR32 & b_15=1 & addrReg & Rt_GPR64 & Rs_GPR64
 {
+	StoreRelease();
 	status:1 = 1;
 	rsize:1 = 16;
 	check:1 = ExclusiveMonitorPass(addrReg, rsize);
@@ -5806,6 +5858,7 @@ is size.ldstr=3 & b_2429=0x8 & b_23=0 & L=0 & b_21=0 & Rs_GPR32 & b_15=1 & addrR
 :stlxr Rs_GPR32, Rt_GPR32, addrReg
 is size.ldstr=2 & b_2429=0x8 & b_23=0 & L=0 & b_21=0 & Rs_GPR32 & b_15=1 & addrReg & Rt_GPR32 & Rs_GPR64
 {
+	StoreRelease();
 	status:1 = 1;
 	rsize:1 = 16;
 	check:1 = ExclusiveMonitorPass(addrReg, rsize);
@@ -5824,6 +5877,7 @@ is size.ldstr=2 & b_2429=0x8 & b_23=0 & L=0 & b_21=0 & Rs_GPR32 & b_15=1 & addrR
 :stlxrb Rs_GPR32, Rt_GPR32, addrReg
 is size.ldstr=0 & b_2429=0x8 & b_23=0 & L=0 & b_21=0 & Rs_GPR32 & b_15=1 & addrReg & Rt_GPR32 & Rs_GPR64
 {
+	StoreRelease();
 	status:1 = 1;
 	rsize:1 = 16;
 	check:1 = ExclusiveMonitorPass(addrReg, rsize);
@@ -5843,6 +5897,7 @@ is size.ldstr=0 & b_2429=0x8 & b_23=0 & L=0 & b_21=0 & Rs_GPR32 & b_15=1 & addrR
 :stlxrh Rs_GPR32, Rt_GPR32, addrReg
 is size.ldstr=1 & b_2429=0x8 & b_23=0 & L=0 & b_21=0 & Rs_GPR32 & b_15=1 & addrReg & Rt_GPR32 & Rs_GPR64
 {
+	StoreRelease();
 	status:1 = 1;
 	rsize:1 = 16;
 	check:1 = ExclusiveMonitorPass(addrReg, rsize);
@@ -6514,7 +6569,7 @@ is b_2431=0xd4 & excCode=0 & imm16 & excCode2=0 & ll=1
 
 :swp^ls_lor^"b" aa_Ws, aa_Wt, [Rn_GPR64xsp]
 is b_3031=0b00 & b_2429=0b111000 & b_21=1 & b_1215=0b1000 & b_1011=0b00 & ls_loa & ls_lor & aa_Wt & ls_data1 & ls_mem1 & aa_Ws & Rn_GPR64xsp & aa_Xt
-{ build ls_loa; build ls_data1; ls_opc_swp(tmp_ldWn, aa_Ws, tmp_stWn); build ls_mem1; aa_Xt = zext(tmp_ldWn); build ls_lor; }
+{ build ls_lor; build ls_data1; ls_opc_swp(tmp_ldWn, aa_Ws, tmp_stWn); build ls_mem1; aa_Xt = zext(tmp_ldWn); build ls_loa; }
 
 # C6.2.367 SWPH, SWPAH, SWPALH, SWPLH page C6-1960 line 115079 MATCH x78208000/mask=xff20fc00
 # CONSTRUCT x78208000/mask=xff20fc00 MATCHED 1 DOCUMENTED OPCODES
@@ -6524,7 +6579,7 @@ is b_3031=0b00 & b_2429=0b111000 & b_21=1 & b_1215=0b1000 & b_1011=0b00 & ls_loa
 
 :swp^ls_lor^"h" aa_Ws, aa_Wt, [Rn_GPR64xsp]
 is b_3031=0b01 & b_2429=0b111000 & b_21=1 & b_1215=0b1000 & b_1011=0b00 & ls_loa & ls_lor & aa_Wt & ls_data2 & ls_mem2 & aa_Ws & Rn_GPR64xsp & aa_Xt
-{ build ls_loa; build ls_data2; ls_opc_swp(tmp_ldWn, aa_Ws, tmp_stWn); build ls_mem2; aa_Xt = zext(tmp_ldWn); build ls_lor; }
+{ build ls_lor; build ls_data2; ls_opc_swp(tmp_ldWn, aa_Ws, tmp_stWn); build ls_mem2; aa_Xt = zext(tmp_ldWn); build ls_loa; }
 
 # C6.2.368 SWP, SWPA, SWPAL, SWPL page C6-1962 line 115186 MATCH xb8208000/mask=xbf20fc00
 # CONSTRUCT xb8208000/mask=xff20fc00 MATCHED 1 DOCUMENTED OPCODES
@@ -6534,7 +6589,7 @@ is b_3031=0b01 & b_2429=0b111000 & b_21=1 & b_1215=0b1000 & b_1011=0b00 & ls_loa
 
 :swp^ls_lor aa_Ws, aa_Wt, [Rn_GPR64xsp]
 is b_3031=0b10 & b_2429=0b111000 & b_21=1 & b_1215=0b1000 & b_1011=0b00 & ls_loa & ls_lor & aa_Wt & ls_data4 & ls_mem4 & aa_Ws & Rn_GPR64xsp & aa_Xt
-{ build ls_loa; build ls_data4; ls_opc_swp(tmp_ldWn, aa_Ws, tmp_stWn); build ls_mem4; aa_Xt = zext(tmp_ldWn); build ls_lor; }
+{ build ls_lor; build ls_data4; ls_opc_swp(tmp_ldWn, aa_Ws, tmp_stWn); build ls_mem4; aa_Xt = zext(tmp_ldWn); build ls_loa; }
 
 # C6.2.368 SWP, SWPA, SWPAL, SWPL page C6-1962 line 115186 MATCH xb8208000/mask=xbf20fc00
 # CONSTRUCT xf8208000/mask=xff20fc00 MATCHED 1 DOCUMENTED OPCODES
@@ -6544,7 +6599,7 @@ is b_3031=0b10 & b_2429=0b111000 & b_21=1 & b_1215=0b1000 & b_1011=0b00 & ls_loa
 
 :swp^ls_lor aa_Xs, aa_Xt, [Rn_GPR64xsp]
 is b_3031=0b11 & b_2429=0b111000 & b_21=1 & b_1215=0b1000 & b_1011=0b00 & ls_loa & ls_lor & aa_Xt & ls_data8 & ls_mem8 & aa_Xs & Rn_GPR64xsp
-{ build ls_loa; build ls_data8; ls_opc_swp(tmp_ldXn, aa_Xs, tmp_stXn); build ls_mem8; aa_Xt = tmp_ldXn; build ls_lor; }
+{ build ls_lor; build ls_data8; ls_opc_swp(tmp_ldXn, aa_Xs, tmp_stXn); build ls_mem8; aa_Xt = tmp_ldXn; build ls_loa; }
 
 # C6.2.369 SXTB page C6-1964 line 115324 MATCH x13001c00/mask=x7fbffc00
 # C6.2.267 SBFIZ page C6-1751 line 103178 MATCH x13000000/mask=x7f800000

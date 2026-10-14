@@ -25,5 +25,3 @@ fcvtzs_v4s: stop Undefined
 frintx_d: stop unmodelled CALLOTHER NEON_frintx
 frinti_d: stop unmodelled CALLOTHER NEON_frinti
 fmla_elem: wrong v0
-ldaddal_w: stop unmodelled CALLOTHER LOAcquire
-swpal_w: stop unmodelled CALLOTHER LOAcquire

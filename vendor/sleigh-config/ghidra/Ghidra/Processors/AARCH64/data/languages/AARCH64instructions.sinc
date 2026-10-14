@@ -3163,6 +3163,11 @@ define pcodeop IC_IVAU;
 define pcodeop InstructionSynchronizationBarrier;
 define pcodeop LOAcquire;
 define pcodeop LORelease;
+# Arm ARM B2.3's Load-Acquire, Load-AcquirePC and Store-Release, placed after the load or before the store they order;
+# LOAcquire and LORelease are LDLAR's and STLLR's limited-ordering forms only.
+define pcodeop LoadAcquire;
+define pcodeop LoadAcquirePC;
+define pcodeop StoreRelease;
 define pcodeop pacda;
 define pcodeop pacdb;
 define pcodeop pacdza;

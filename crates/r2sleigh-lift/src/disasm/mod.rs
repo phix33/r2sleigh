@@ -2598,6 +2598,9 @@ impl Disassembler {
             // more; which set a body decodes in is the function's own fact.
             Some(ModelledUserOperation::SetIsaMode) => Some(Vec::new()),
             Some(ModelledUserOperation::ClearExclusive) => Some(vec![R2ILOp::ClearExclusive]),
+            Some(ModelledUserOperation::Ordering(ordering)) => {
+                (output.is_none() && inputs.is_empty()).then(|| vec![R2ILOp::Fence { ordering }])
+            }
             Some(ModelledUserOperation::PackedExtension(extension)) => {
                 Self::expand_packed_extension(output, inputs, temp_base, extension)
             }
