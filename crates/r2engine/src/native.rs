@@ -220,6 +220,12 @@ impl NativeRefusal {
         matches!(self, Self::Stopped(_))
     }
 
+    /// Whether the request named an address nothing maps: no function, so the request's error,
+    /// never a record (ROADMAP D29).
+    pub const fn names_no_function(&self) -> bool {
+        matches!(self, Self::Body(BodyError::EntryUnmapped(_)))
+    }
+
     /// The refusal's kind, as `pddj` tags it.
     pub const fn kind(&self) -> &'static str {
         match self {

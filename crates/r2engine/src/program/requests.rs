@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::{OpenProgram, ProgramInputs, Source, View};
-use crate::body::BodyError;
 use crate::discovery::{Basis, Confidence, Discovered};
 use crate::isolation::isolated;
 use crate::native::{NativeRefusal, Prepared};
@@ -361,9 +360,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         let render = render.map_err(|cycle| format!("{cycle:?}"))?;
         let rendering = &render.0.rendering;
         match &rendering.refused {
-            Some(unmapped @ NativeRefusal::Body(crate::body::BodyError::EntryUnmapped(_))) => {
-                Err(unmapped.to_string())
-            }
+            Some(refusal) if refusal.names_no_function() => Err(refusal.to_string()),
             _ => Ok(Rendering::clone(rendering)),
         }
     }
@@ -376,10 +373,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         let prepared = match self.analysed(entry) {
             Ok(prepared) => prepared,
             // A stop is the request's, and an address nothing maps names no function.
-            Err(
-                refusal @ (NativeRefusal::Stopped(_)
-                | NativeRefusal::Body(BodyError::EntryUnmapped(_))),
-            ) => {
+            Err(refusal) if refusal.stopped() || refusal.names_no_function() => {
                 return Err(refusal.to_string());
             }
             Err(refusal) => {
@@ -557,15 +551,15 @@ impl<S: Source + 'static> OpenProgram<S> {
     ) -> Result<(FunctionListing, Shape), String> {
         let body = match crate::body::lift_body(entry, target.disasm, self, &BTreeMap::new()) {
             Ok(body) => body,
-            // An address nothing maps names no function; any other walk refusal is the record.
-            Err(unmapped @ crate::body::BodyError::EntryUnmapped(_)) => {
-                return Err(NativeRefusal::Body(unmapped).to_string());
-            }
             Err(error) => {
+                let reason = NativeRefusal::Body(error);
+                if reason.names_no_function() {
+                    return Err(reason.to_string());
+                }
                 let listing = FunctionListing {
                     lines: Answer::complete(Vec::new()),
                     refused: Some(AnalysisRefused {
-                        reason: NativeRefusal::Body(error),
+                        reason,
                         unresolved: Vec::new(),
                     }),
                 };
