@@ -244,6 +244,15 @@ reason = "an export and an import slot share the address: r2s names the import"
 
 [[judged]]
 command = "pd"
+binaries = "dllweirdexp-ld.exe"
+corpus = "pe"
+r2 = 'sym\.imp\.dllweirdexp\.dll_\.'
+r2s = '\[0x[0-9a-f]+\]$'
+verdict = "deliberate"
+reason = "the import's name is 131 KB holding every C0 control: a name with a control character names nothing (ROADMAP H), so the slot stays a number"
+
+[[judged]]
+command = "pd"
 binaries = ["dll-webdavld.exe", "dllweirdexp-ld.exe", "importsdotXP.exe", "imports_apimsW7.exe", "ownexports2.exe", "ownexportsdot.exe"]
 corpus = "pe"
 r2 = 'sym\.imp\.'
@@ -317,8 +326,8 @@ command = "pd"
 binaries = "test.ko"
 r2 = 'mov r[ds]i, [A-Za-z_.]'
 r2s = 'mov r[ds]i, 0x'
-verdict = "unfilled"
-reason = "a relocatable object's operand is resolved by its relocation; r2s does not apply ET_REL relocations to listings yet"
+verdict = "deliberate"
+reason = "r2s decodes an object's instruction as a static link leaves it (W5): the field holds the relocated address; radare2 lists the file's zeros under the relocation's name"
 
 [[judged]]
 command = "is"
@@ -441,10 +450,18 @@ verdict = "unfilled"
 reason = "a shared object's e_entry 0 names no entry; at 0 radare2 lists the ELF header as data, r2s decodes it as code"
 
 [[judged]]
-command = "is"
+command = ["is", "iS"]
 binaries = "*.obj"
-verdict = "unfilled"
-reason = "a relocatable states no addresses: r2s places a NOBITS .bss at the base, radare2 at its sh_offset (over .rodata); owner r2image placement"
+verdict = "r2s-right"
+reason = "a relocatable states no addresses: r2s places a NOBITS .bss past the allocated sections at its alignment (W5), radare2 at its sh_offset, over .rodata, since a NOBITS section takes no file bytes"
+
+[[judged]]
+command = "is"
+binaries = ["*.o", "*_o", "*.ko"]
+columns = ["vaddr"]
+r2s = ' imp\.'
+verdict = "deliberate"
+reason = "an object's undefined symbol is listed at the stub this reader places for it past the sections (W5), where a call to it lands; radare2 lists it unplaced"
 
 [[judged]]
 command = "iS"
@@ -654,10 +671,10 @@ reason = "the encoded register is r0 (movw r0, #:lower16:ext); radare2 substitut
 [[judged]]
 command = "pd"
 binaries = ["*.o", "*_o", "*.ko"]
-r2 = '(call|b\.w|beq\.w|ldr x\d+,) (reloc\.|loc\.|[A-Za-z_])'
-r2s = '(call|b\.w|beq\.w|ldr x\d+,) 0x'
-verdict = "unfilled"
-reason = "a relocatable object's operand is resolved by its relocation; r2s does not apply ET_REL relocations to listings yet (owner r2image relocations, ROADMAP I audit W5, and FS's ET_REL half)"
+r2 = '(call|push|b\.w|beq\.w|ldr x\d+,) '
+r2s = '(call|push|b\.w|beq\.w|ldr x\d+,) (0x|sym\.|loc\.|obj\.|fcn\.|section\.)'
+verdict = "deliberate"
+reason = "r2s decodes an object's instruction as a static link leaves it (W5): the field's bytes hold the relocated value and the operand names its target; radare2 lists the file's zeros and the relocation's name (bin.relocs.apply off)"
 
 [[judged]]
 command = "pd"
