@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut sla_data = Vec::new();
     let mut pspec_data = Vec::new();
     let mut cspec_data = Vec::new();
-    // `sla-<stem>` features select languages (`CARGO_FEATURE_SLA_<VAR>`); r2sleigh-lift chooses them.
+    // `sla-<stem>` features select single languages (`CARGO_FEATURE_SLA_<VAR>`).
     let mut unmatched: BTreeSet<String> = std::env::vars_os()
         .filter_map(|(key, _)| key.into_string().ok())
         .filter(|key| key.starts_with("CARGO_FEATURE_SLA_"))
@@ -22,11 +22,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     for processor_dir in sorted_entries(Path::new(processors_root))? {
         let processor_name = processor_dir.file_name().to_str().unwrap().to_owned();
+        let feature_env_name = processor_name.to_uppercase().replace("-", "_");
+        // A processor feature selects all of its languages; `sla-<stem>` selects one.
+        let processor_selected = std::env::var(format!("CARGO_FEATURE_{feature_env_name}")).is_ok();
         let lang_entries = sorted_entries(&processor_dir.path().join("data/languages"))?;
         let selected = |entry: &DirEntry| {
             let path = entry.path();
             path.extension().is_some_and(|ext| ext == "slaspec")
-                && feature_var(&path).is_some_and(|key| std::env::var(key).is_ok())
+                && (processor_selected
+                    || feature_var(&path).is_some_and(|key| std::env::var(key).is_ok()))
         };
         // A processor with no selected language emits nothing.
         if lang_entries.iter().any(selected) {
