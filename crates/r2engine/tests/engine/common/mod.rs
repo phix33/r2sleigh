@@ -728,6 +728,7 @@ impl Literal {
             start: range.start,
             end: range.end,
             saves: BTreeMap::new(),
+            entry: r2abi::frames::FrameEntry::Called,
         });
         self
     }
