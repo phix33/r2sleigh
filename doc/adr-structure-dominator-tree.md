@@ -1,6 +1,6 @@
 # ADR: control structure is the dominator tree; everything else is an edge spelling
 
-Status: done; quality rewrites in progress (no open ROADMAP item)
+Status: done; quality rewrites are ROADMAP SD
 
 ## Decision
 
