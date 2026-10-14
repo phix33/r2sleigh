@@ -13,6 +13,10 @@
 #           unfilled: r2s does not yet state what radare2 does
 #           deliberate: r2s spells it otherwise on purpose
 
+# The radare2 release every judgment was made against; CI installs it, and the
+# harness refuses any other (a newer radare2 moves what the judgments match).
+radare2 = "6.2.4"
+
 [[judged]]
 command = "pd"
 binaries = "armeb_hello_static"

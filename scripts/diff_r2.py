@@ -17,7 +17,8 @@ Two comparison modes, because the two tools do not yet fill the same columns:
 
 Every disagreement is either judged in `diff_r2_judged.toml` (who is right,
 and why) or fails the run; a judgment nothing matches any more is reported, so
-the table cannot outlive what it judged (ROADMAP P11).
+the table cannot outlive what it judged (ROADMAP P11). The judgments were made
+against one radare2 release, which the table names and the run refuses any other.
 
 Usage:
   scripts/diff_r2.py                        # default corpus and commands
@@ -172,11 +173,21 @@ def differences(command, mode, left, right):
     return found
 
 
-def load_judgments(path):
-    """The judged disagreements: each a class of them, with its verdict and reason."""
+def load_table(path):
+    """The radare2 release the table was judged against, and its judged disagreements."""
     if not path.exists():
-        return []
-    judged = tomllib.loads(path.read_text())["judged"]
+        return None, []
+    table = tomllib.loads(path.read_text())
+    return table.get("radare2"), load_judgments(path, table)
+
+
+def load_judgments(path, table=None):
+    """The judged disagreements: each a class of them, with its verdict and reason."""
+    if table is None:
+        if not path.exists():
+            return []
+        table = tomllib.loads(path.read_text())
+    judged = table["judged"]
     for judgment in judged:
         if judgment["verdict"] not in VERDICTS:
             raise ValueError("unknown verdict {!r}".format(judgment["verdict"]))
@@ -184,6 +195,12 @@ def load_judgments(path):
         judgment["columns"] = set(judgment.get("columns", []))
         judgment["matched"] = 0
     return judged
+
+
+def release(banner):
+    """The release `radare2 -v` names on its first line, or None."""
+    words = banner.split()
+    return words[1] if len(words) > 1 and words[0] == "radare2" else None
 
 
 def judgment_for(judgments, binary, command, difference):
@@ -285,7 +302,14 @@ def main():
         print("no binaries under {}".format(args.bins), file=sys.stderr)
         return 2
 
-    judgments = load_judgments(pathlib.Path(args.judged))
+    pinned, judgments = load_table(pathlib.Path(args.judged))
+    banner, _, _ = run([str(r2), "-v"], args.timeout)
+    if pinned and release(banner) != pinned:
+        print(
+            "{} is radare2 {}; the judgments are against {}".format(r2, release(banner), pinned),
+            file=sys.stderr,
+        )
+        return 2
     agreed = {command: 0 for command, _ in commands}
     differed = {command: 0 for command, _ in commands}
     judged = {command: 0 for command, _ in commands}

@@ -93,6 +93,16 @@ class Judged(unittest.TestCase):
         diff_r2.judgment_for(table, "arm1.bin", "pd 8", ("lines", ("push {r4}", "stmdb sp!, {r4}")))
         self.assertEqual([j["reason"] for j in table if j["matched"] == 0][-1], "nothing matches this")
 
+    def test_the_table_names_the_radare2_it_was_judged_against(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "judged.toml"
+            path.write_text('radare2 = "6.2.4"\n' + TABLE)
+            pinned, table = diff_r2.load_table(path)
+        self.assertEqual(pinned, "6.2.4")
+        self.assertEqual(len(table), 4)
+        self.assertEqual(diff_r2.release("radare2 6.2.4 +38388 abi:152 @ linux-x86-64\n"), "6.2.4")
+        self.assertIsNone(diff_r2.release(""))
+
     def test_an_unknown_verdict_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "judged.toml"
