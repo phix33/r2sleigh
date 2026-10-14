@@ -559,7 +559,7 @@ void Sleigh::reset(LoadImage *ld,ContextDatabase *c_db)
   contextcommitted = false;
 }
 
-/// r2sleigh: a parse whose state is \e uninitialized is parsed again from the bytes and context
+/// A parse whose state is \e uninitialized is parsed again from the bytes and context
 /// at its address, as a cache miss would be.
 void Sleigh::invalidateParseCache(void) const
 

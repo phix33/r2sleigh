@@ -94,7 +94,7 @@ uint4 getSize(const VarnodeData &data) {
     return data.size;
 }
 
-/// r2sleigh: a varnode's space and offset, read in place where getAddress allocates an Address.
+/// A varnode's space and offset, read in place where getAddress allocates an Address.
 AddrSpace *getVarnodeSpace(const VarnodeData &data) {
     return data.space;
 }
