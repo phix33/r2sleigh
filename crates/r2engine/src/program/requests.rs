@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::{OpenProgram, ProgramInputs, Source, View};
+use crate::body::BodyError;
 use crate::discovery::{Basis, Confidence, Discovered};
 use crate::isolation::isolated;
 use crate::native::{NativeRefusal, Prepared};
@@ -367,12 +368,28 @@ impl<S: Source + 'static> OpenProgram<S> {
         }
     }
 
-    /// What one function is, read off the sealed analysis every rendering draws from.
+    /// What one function is, read off the sealed analysis every rendering draws from; where the
+    /// analysis refused, what the plain walk shows and the record (ROADMAP D29).
     pub fn function_info(&mut self, entry: u64) -> Result<super::info::FunctionInfo, String> {
         self.start_request();
-        let prepared = self.prepare(entry)?;
-        let artifact = prepared.artifact().artifact();
         let noreturn = (!self.comes_back(entry)).then(|| self.view().exit_premises(entry));
+        let prepared = match self.analysed(entry) {
+            Ok(prepared) => prepared,
+            // A stop is the request's, and an address nothing maps names no function.
+            Err(
+                refusal @ (NativeRefusal::Stopped(_)
+                | NativeRefusal::Body(BodyError::EntryUnmapped(_))),
+            ) => {
+                return Err(refusal.to_string());
+            }
+            Err(refusal) => {
+                let graph = self.graph_of(entry).ok();
+                let blocks = graph.as_ref().map_or(&[][..], |graph| &graph.blocks);
+                let info = super::info::FunctionInfo::refused(entry, blocks, noreturn, refusal);
+                return Ok(info);
+            }
+        };
+        let artifact = prepared.artifact().artifact();
         let read = |sealed: &SealedFunctionAnalysis| {
             super::info::FunctionInfo::read(entry, artifact, sealed.facts(), noreturn)
         };
@@ -433,6 +450,11 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// O(body + lines): one walk, which the listing already makes.
     pub fn function_graph(&mut self, entry: u64) -> Result<FunctionGraph, String> {
         self.start_request();
+        self.graph_of(entry)
+    }
+
+    /// One function's graph, within a request already started.
+    fn graph_of(&self, entry: u64) -> Result<FunctionGraph, String> {
         let (listing, shape) = self.listed_body(entry)?;
         let starts = shape
             .blocks

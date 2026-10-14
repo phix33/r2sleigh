@@ -19,6 +19,12 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
         .map(r2engine::names::Name::spelled);
     let mut out = vec!["#".to_owned(), format!("addr: {entry:#010x}")];
     out.extend(name.as_ref().map(|name| format!("name: {name}")));
+    // A refused analysis keeps what the walk shows; what the convention decides is unknown.
+    if let Some(refused) = &info.refused {
+        out.extend(walked(&info));
+        out.push(format!("refused: {refused}"));
+        return Ok(out.join("\n"));
+    }
     out.extend([
         format!("size: {}", info.max_addr() - info.min_addr()),
         format!("realsz: {}", info.real_size()),
@@ -38,7 +44,40 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
         format!("end-bbs: {}", info.exits()),
     ]);
     // Only a proof is printed, with what it takes for granted: unproven, a function may still never return.
-    out.extend(info.noreturn.as_ref().map(|premises| {
+    out.extend(noreturn(&info));
+    out.extend([
+        format!("recursive: {}", info.is_recursive()),
+        format!("out-degree: {}", info.direct_calls()),
+        format!("locals: {}", info.locals.len()),
+        format!("args: {}", info.arguments.len()),
+    ]);
+    Ok(out.join("\n"))
+}
+
+/// What `afi` prints of a function the plain walk listed: its extent and shape, and its noreturn proof.
+fn walked(info: &r2engine::program::info::FunctionInfo) -> Vec<String> {
+    if info.blocks.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![
+        format!("size: {}", info.max_addr() - info.min_addr()),
+        format!("realsz: {}", info.real_size()),
+        format!("cyclomatic-complexity: {}", info.complexity()),
+        format!("num-bbs: {}", info.blocks.len()),
+        format!("num-instrs: {}", info.instructions()),
+        format!("edges: {}", info.edges()),
+        format!("minaddr: {:#010x}", info.min_addr()),
+        format!("maxaddr: {:#010x}", info.max_addr()),
+        format!("is-lineal: {}", info.is_lineal()),
+        format!("end-bbs: {}", info.exits()),
+    ];
+    out.extend(noreturn(info));
+    out
+}
+
+/// `noreturn: true`, with what it takes for granted, where it is proved.
+fn noreturn(info: &r2engine::program::info::FunctionInfo) -> Option<String> {
+    info.noreturn.as_ref().map(|premises| {
         let assuming = premises.iter().map(|premise| premise.spelled());
         match premises.is_empty() {
             true => "noreturn: true".to_owned(),
@@ -47,14 +86,7 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
                 assuming.collect::<Vec<_>>().join(", ")
             ),
         }
-    }));
-    out.extend([
-        format!("recursive: {}", info.is_recursive()),
-        format!("out-degree: {}", info.direct_calls()),
-        format!("locals: {}", info.locals.len()),
-        format!("args: {}", info.arguments.len()),
-    ]);
-    Ok(out.join("\n"))
+    })
 }
 
 /// `signature: <ret> <name> (<type> <arg>, ...);`, as radare2's `afcf` spells one, where it is authorized.
@@ -93,6 +125,9 @@ fn argument_name(argument: &Argument) -> String {
 pub fn variables(session: &mut Session, argument: &str) -> Result<String, String> {
     let entry = parse_number(session, argument)?;
     let info = session.program.function_info(entry)?;
+    if let Some(refused) = &info.refused {
+        return Ok(format!("refused: {refused}"));
+    }
     let arguments = info
         .arguments
         .iter()

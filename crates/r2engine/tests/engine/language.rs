@@ -135,3 +135,21 @@ fn a_go_runtime_panic_ends_its_caller_under_the_runtime_s_contract() {
     );
     assert_eq!(noreturn(&mut c, BASE + 0x40), None);
 }
+
+/// A refused convention leaves what the walk shows: `afi`'s blocks stand, and the parameters,
+/// locals, convention and calls it would decide are unknown, not empty (ROADMAP D29).
+#[test]
+fn a_refused_convention_keeps_the_walks_facts() {
+    let adds = Literal::of_code(ADDS, &[("main.adds", BASE, 5)]).in_go(Some((1, 14)), None);
+    let mut program = OpenProgram::of(adds.running_on(GLIBC));
+    let info = program.function_info(BASE).expect("a refusal is a record");
+    let refused = info
+        .refused
+        .as_ref()
+        .expect("ABI0 results are on the stack");
+    assert_eq!(refused.kind(), "convention", "{refused}");
+    assert_eq!((info.blocks.len(), info.instructions()), (1, 2));
+    assert_eq!((info.min_addr(), info.max_addr()), (BASE, BASE + 5));
+    assert!(info.convention.is_none() && info.arguments.is_empty() && info.locals.is_empty());
+    assert!(info.returns.is_none() && info.calls.is_empty());
+}
