@@ -57,9 +57,8 @@ fn x86_32_bit_register_write_explicitly_zero_extends_its_declared_carrier() {
     );
 }
 
-/// `stlxp w0, x1, x2, [x3]` and `stxp w0, x1, x2, [x3]` store Rt2 at [Xn + 8] (Arm ARM: one
-/// 16-byte access), read off the specification's p-code and kept by the lift: the store at [Xn]
-/// is the conditional one, the store at [Xn + 8] is guarded by its success.
+/// `stlxp`/`stxp w0, x1, x2, [x3]` store Rt2 at [Xn + 8] in the p-code (Arm ARM: one 16-byte
+/// access), and the lift keeps it: conditional at [Xn], guarded by its success at [Xn + 8].
 #[cfg(feature = "arm")]
 #[test]
 fn aarch64_store_exclusive_pair_stores_eight_bytes_up_under_the_conditional_store() {

@@ -119,9 +119,8 @@ fn an_aarch64_clrex_clears_the_monitor() {
     }
 }
 
-/// Each AArch64 store-exclusive is one conditional store of its access width at `[Xn]`, a pair's
-/// second register stored under its success, and the status register the negation of that
-/// success: no branch, no user operation, no store that happens either way.
+/// Each AArch64 store-exclusive is one conditional store at `[Xn]`, a pair's second under its
+/// success, and the status its negation: no branch, user operation or unconditional store.
 #[test]
 fn an_aarch64_store_exclusive_is_one_conditional_store() {
     for (name, word, width, guarded) in [

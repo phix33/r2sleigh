@@ -1512,9 +1512,8 @@ fn an_exclusive_pair_reaches_the_rendering_rather_than_the_projection() {
     assert!(!output.contains("store_conditional"), "{output}");
 }
 
-/// An AArch64 `ldxr`/`stxr` retry loop: the store happens only where the monitor held, so it is
-/// no plain store, and the loop exits on the store's own status, which C cannot compute here, not
-/// on a constant (W20 left the status 1 and the loop endless).
+/// An AArch64 `ldxr`/`stxr` loop: the store is no plain store, and the loop exits on its status,
+/// a residual here, not on a constant (W20 left the status 1 and the loop endless).
 #[test]
 fn an_aarch64_exclusive_loop_exits_on_the_conditional_store_status() {
     const FETCH_ADD: &[u8] = &[

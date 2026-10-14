@@ -841,19 +841,8 @@ fn conditional_store(
     ))
 }
 
-/// AArch64's store-exclusive (Arm ARM C6.2.350), which also writes nought on success:
-///
-/// ```text
-///   ok     = ExclusiveMonitorPass(addr, 16)
-///   not    = !ok
-///   if (not) goto done
-///   <temporaries>; STORE [ram] addr = val; [<temporaries>; STORE [ram] addr + 8 = val2]
-///   status = ExclusiveMonitorsStatus()
-/// done:
-/// ```
-///
-/// is `ok = StoreConditional(addr, val)`, a pair's second store guarded by `ok`, and
-/// `status = !ok`. Anything else under the skip is left for `skips` to refuse.
+/// AArch64's `ok = ExclusiveMonitorPass(addr); if (!ok) skip { stores }; status = ...Status()`
+/// is `ok = StoreConditional`, a pair's +8 store under `ok`, `status = !ok` (Arm ARM C6.2.350).
 fn monitored_store(
     block: &R2ILBlock,
     at: usize,
