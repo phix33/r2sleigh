@@ -24,7 +24,7 @@ const fn binding_strength(binding: Binding) -> u8 {
         Binding::Global => 0,
         Binding::Weak => 1,
         Binding::Local => 2,
-        Binding::Other(_) => 3,
+        Binding::Other(_) | Binding::Unstated => 3,
     }
 }
 
@@ -271,17 +271,25 @@ pub fn name_slots(
             continue;
         }
         // As wide as the word the loader writes there.
-        let size = r2abi::statement::write_at(writes, *slot)
-            .filter(|write| write.place == *slot)
-            .map_or(0, |write| write.width);
-        db.insert(
-            *slot,
-            Name {
+        let write = r2abi::statement::write_at(writes, *slot).filter(|write| write.place == *slot);
+        let size = write.map_or(0, |write| write.width);
+        // A PE program calls through the slot itself, which radare2 names as the import, by its DLL.
+        let name = match write.map(|write| &write.kind) {
+            Some(r2abi::statement::WriteKind::Import {
+                library: Some(library),
+                ..
+            }) => Name {
+                text: format!("{library}_{symbol}").into(),
+                namespace: Namespace::Import,
+                size,
+            },
+            _ => Name {
                 text: symbol.as_str().into(),
                 namespace: Namespace::Reloc,
                 size,
             },
-        );
+        };
+        db.insert(*slot, name);
     }
 }
 

@@ -417,6 +417,7 @@ pub fn import_write(place: u64, width: u64, import: &str) -> LoaderWrite {
         width,
         kind: WriteKind::Import {
             symbol: import.to_owned(),
+            library: None,
         },
     }
 }

@@ -325,6 +325,7 @@ impl<'d> Macho<'d> {
             {
                 WriteKind::Import {
                     symbol: symbol.name.to_string(),
+                    library: None,
                 }
             }
             _ => WriteKind::Unknown,

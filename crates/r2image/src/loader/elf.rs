@@ -174,6 +174,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                     return match offset {
                         0 => WriteKind::Import {
                             symbol: symbol.name.to_string(),
+                            library: None,
                         },
                         _ => WriteKind::Unknown,
                     };

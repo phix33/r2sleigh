@@ -12,6 +12,7 @@ mod debug;
 mod held;
 mod language;
 mod loader;
+mod pe;
 mod platform;
 mod roles;
 pub mod unwind;
@@ -588,12 +589,15 @@ impl Image {
                     true => SymbolOrigin {
                         table: None,
                         dynamic: Some(symbol.index().0),
+                        directory: None,
                     },
                     false => SymbolOrigin {
                         table: Some(symbol.index().0),
                         dynamic: None,
+                        directory: None,
                     },
                 },
+                library: None,
             })
         };
         let mut symbols: Vec<Symbol> = file
@@ -604,6 +608,37 @@ impl Image {
                     .filter_map(|symbol| read_symbol(symbol, true)),
             )
             .collect();
+        // A PE image states its imports by slot and its exports in directories, not a symbol table.
+        symbols.extend(pe::imports(&file).into_iter().map(|import| Symbol {
+            name: import.name,
+            vaddr: import.slot,
+            // PE states no type; radare2 lists every import as a function.
+            kind: SymbolKind::Function,
+            import: true,
+            binding: Binding::Unstated,
+            origin: SymbolOrigin {
+                directory: Some(import.nth),
+                ..SymbolOrigin::default()
+            },
+            library: Some(import.library),
+            ..Symbol::default()
+        }));
+        symbols.extend(pe::exports(&file).into_iter().map(|export| Symbol {
+            name: export.name,
+            vaddr: export.vaddr,
+            kind: match executable(export.vaddr) {
+                true => SymbolKind::Function,
+                false => SymbolKind::Data,
+            },
+            defined: true,
+            binding: Binding::Global,
+            origin: SymbolOrigin {
+                directory: Some(export.nth),
+                ..SymbolOrigin::default()
+            },
+            library: export.library,
+            ..Symbol::default()
+        }));
         // One name at one address is one symbol, whichever table held it.
         symbols.sort_by(|left, right| {
             left.vaddr

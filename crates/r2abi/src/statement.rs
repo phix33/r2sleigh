@@ -149,7 +149,7 @@ impl Container {
         self.loader_writes
             .iter()
             .filter_map(|write| match &write.kind {
-                WriteKind::Import { symbol } if !symbol.is_empty() => {
+                WriteKind::Import { symbol, .. } if !symbol.is_empty() => {
                     Some((write.place, symbol.as_str()))
                 }
                 _ => None,
@@ -520,6 +520,9 @@ pub struct Symbol {
     /// Where each symbol table states it: one name at one address is one
     /// symbol, whichever of the two tables states it.
     pub origin: SymbolOrigin,
+    /// The module the container names beside it: a PE import's DLL, or the
+    /// module name a PE export directory states for itself.
+    pub library: Option<std::sync::Arc<str>>,
 }
 
 /// Where each symbol table states a symbol, by its index there.
@@ -529,6 +532,8 @@ pub struct SymbolOrigin {
     pub table: Option<usize>,
     /// The dynamic table the loader reads: ELF's `.dynsym`.
     pub dynamic: Option<usize>,
+    /// A PE import or export directory, by position within its library's list, from one.
+    pub directory: Option<usize>,
 }
 
 /// One relocation record the loader, or the program's own start-up, applies.
@@ -615,6 +620,8 @@ pub enum Binding {
     Weak,
     /// A binding the format numbers but this reader does not name.
     Other(u8),
+    /// The container states none: a PE import or export has no binding.
+    Unstated,
 }
 
 /// A symbol's visibility, as ELF's `st_other` states it.
@@ -678,8 +685,12 @@ pub enum WriteKind {
     /// replace: the executable's own, a hidden or protected one, or any under
     /// `DT_SYMBOLIC`.
     Absolute(u64),
-    /// The address of an import, which another image defines.
-    Import { symbol: String },
+    /// The address of an import, which another image defines; `library` where
+    /// the container names that image (a PE import's DLL).
+    Import {
+        symbol: String,
+        library: Option<String>,
+    },
     /// This image's own definition, which an image loaded ahead of it may
     /// replace; `default` is what the word holds when none does.
     Preemptible { symbol: String, default: u64 },

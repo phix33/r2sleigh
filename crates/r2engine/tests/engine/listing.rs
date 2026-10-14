@@ -726,6 +726,7 @@ fn a_table_the_loader_writes_is_read_as_the_values_the_container_states() {
         width: 8,
         kind: WriteKind::Import {
             symbol: "elsewhere".to_owned(),
+            library: None,
         },
     });
     literal.write(table + 8, &[0; 8]);

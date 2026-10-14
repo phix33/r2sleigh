@@ -718,6 +718,7 @@ fn a_result_another_way_in_may_read_stays_a_residual() {
         origin: r2abi::statement::SymbolOrigin {
             table: None,
             dynamic: Some(1),
+            directory: None,
         },
         ..r2abi::statement::Symbol::default()
     });

@@ -43,8 +43,18 @@ pub(crate) fn read(
             let read = macho::read(file, data);
             (read.relocations, read.writes, read.ranges, read.stubs)
         }
-        object::File::Pe32(pe) => (Vec::new(), Vec::new(), pe_writes(pe), Vec::new()),
-        object::File::Pe64(pe) => (Vec::new(), Vec::new(), pe_writes(pe), Vec::new()),
+        object::File::Pe32(pe) => (
+            Vec::new(),
+            pe_imports(file, pointer),
+            pe_writes(pe),
+            Vec::new(),
+        ),
+        object::File::Pe64(pe) => (
+            Vec::new(),
+            pe_imports(file, pointer),
+            pe_writes(pe),
+            Vec::new(),
+        ),
         _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
     };
     Loaded {
@@ -195,6 +205,21 @@ fn linked(
     file.sections().flat_map(at).collect()
 }
 
+/// Each import address table slot, which the loader (or the delay-load helper) fills with its import.
+fn pe_imports(file: &object::File<'_>, pointer: u64) -> Vec<LoaderWrite> {
+    crate::pe::imports(file)
+        .into_iter()
+        .map(|import| LoaderWrite {
+            place: import.slot,
+            width: pointer,
+            kind: WriteKind::Import {
+                symbol: import.name.to_string(),
+                library: Some(import.library.to_string()),
+            },
+        })
+        .collect()
+}
+
 /// The base relocations, and each import address table the loader or the delay-load helper fills.
 fn pe_writes<'data, Pe, R>(file: &object::read::pe::PeFile<'data, Pe, R>) -> Vec<Range<u64>>
 where
@@ -296,6 +321,7 @@ mod tests {
                 8,
                 WriteKind::Import {
                     symbol: "f".to_owned(),
+                    library: None,
                 },
             ),
             write(0x10, 8, WriteKind::Relative(0x200)),

@@ -1154,10 +1154,10 @@ pub(crate) fn symbols(session: &Session) -> Result<Table, String> {
         .collect();
     // Numbered as the static table numbers them, where it states them.
     let nth = |symbol: &r2image::Symbol| {
-        symbol
-            .origin
-            .table
-            .map_or((true, symbol.origin.dynamic), |index| (false, Some(index)))
+        symbol.origin.table.map_or(
+            (true, symbol.origin.dynamic.or(symbol.origin.directory)),
+            |index| (false, Some(index)),
+        )
     };
     stated.sort_by_key(|symbol| nth(symbol));
     for symbol in stated {
@@ -1165,25 +1165,36 @@ pub(crate) fn symbols(session: &Session) -> Result<Table, String> {
         table.row(
             mapped,
             format!(
-                "{:<3} {} {} {:<6} {:<6} {:<4}     {}",
+                "{:<3} {} {} {:<6} {:<6} {:<4} {} {}",
                 nth(symbol).1.unwrap_or_default(),
                 spelled(mapped.and_then(|vaddr| file_offset_of(session, vaddr))),
                 spelled(Some(symbol.vaddr)),
                 binding(symbol.binding),
                 symbol_type(symbol.kind),
                 symbol.size,
+                symbol.library.as_deref().unwrap_or("   "),
                 symbol.name
             ),
         );
     }
+    import_rows(session, &mut table);
+    Ok(table)
+}
+
+/// `is`'s import rows, after the symbols.
+fn import_rows(session: &Session, table: &mut Table) {
+    let spelled = |value: Option<u64>| {
+        value.map_or_else(|| "----------".to_owned(), |value| format!("{value:#010x}"))
+    };
     let dynamic = session
         .image()
         .symbols()
         .iter()
         .any(|symbol| symbol.import && symbol.origin.dynamic.is_some());
-    let index = |symbol: &r2image::Symbol| match dynamic {
-        true => symbol.origin.dynamic,
-        false => symbol.origin.table,
+    let index = |symbol: &r2image::Symbol| match (symbol.origin.directory, dynamic) {
+        (Some(nth), _) => Some(nth),
+        (None, true) => symbol.origin.dynamic,
+        (None, false) => symbol.origin.table,
     };
     let mut imports: Vec<&r2image::Symbol> = session
         .image()
@@ -1191,16 +1202,30 @@ pub(crate) fn symbols(session: &Session) -> Result<Table, String> {
         .iter()
         .filter(|symbol| symbol.import && index(symbol).is_some())
         .collect();
-    imports.sort_by_key(|symbol| index(symbol));
+    // A PE import is listed in its directory's order, which is its slot's.
+    imports.sort_by_key(|symbol| {
+        (
+            symbol.library.is_some().then_some(symbol.vaddr),
+            index(symbol),
+        )
+    });
     let linkage = session.program.imports();
-    let stubs = &linkage.stubs;
+    // The first stub naming each import, as the stubs are ordered.
+    let mut stubs = std::collections::BTreeMap::new();
+    for (at, stub) in &linkage.stubs {
+        stubs.entry(&*stub.symbol).or_insert((at, stub));
+    }
     for symbol in imports {
-        let stub = stubs.iter().find(|(_, stub)| *stub.symbol == *symbol.name);
-        let at = stub.map(|(at, _)| *at);
+        let stub = stubs.get(&*symbol.name).copied();
+        // A PE import is its slot, which a call reads; no stub stands for it.
+        let at = match symbol.library {
+            Some(_) => Some(symbol.vaddr),
+            None => stub.map(|(at, _)| *at),
+        };
         table.row(
             at,
             format!(
-                "{:<3} {} {} {:<6} {:<6} {:<4}     imp.{}",
+                "{:<3} {} {} {:<6} {:<6} {:<4} {} imp.{}",
                 index(symbol).unwrap_or_default(),
                 spelled(at.and_then(|at| file_offset_of(session, at))),
                 spelled(at),
@@ -1208,11 +1233,11 @@ pub(crate) fn symbols(session: &Session) -> Result<Table, String> {
                 symbol_type(symbol.kind),
                 // An import's size is the stub's, which is what a call to it reaches.
                 stub.map_or(symbol.size, |(_, stub)| stub.size),
+                symbol.library.as_deref().unwrap_or("   "),
                 symbol.name
             ),
         );
     }
-    Ok(table)
 }
 
 /// A symbol's binding, as radare2 spells it.
@@ -1222,6 +1247,7 @@ fn binding(binding: r2image::Binding) -> String {
         r2image::Binding::Global => "GLOBAL".to_owned(),
         r2image::Binding::Weak => "WEAK".to_owned(),
         r2image::Binding::Other(other) => format!("{other}"),
+        r2image::Binding::Unstated => "NONE".to_owned(),
     }
 }
 
