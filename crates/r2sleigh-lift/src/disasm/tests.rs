@@ -99,6 +99,44 @@ fn aarch64_store_exclusive_pair_stores_eight_bytes_up_and_the_lift_refuses_it_wh
     }
 }
 
+/// `casp x0, x1, x2, x3, [x9]` compares x0 with [x9] and x1 with [x9 + 8], then stores x2 and x3
+/// there: the Arm ARM's comparevalue is s2:s1 little-endian, s1:s2 big, so Xs is at [Xn] in both.
+#[cfg(feature = "arm")]
+#[test]
+fn aarch64_casp_compares_and_stores_its_first_register_at_the_address() {
+    let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::Aarch64Le)
+        .expect("trusted AArch64 specification");
+    let arch = disassembler.arch_spec();
+    let x = |n: u32| register_varnode(declared_register_storage(arch, &format!("x{n}")));
+    let bytes = padded_instruction(0x4820_7d22u32.to_le_bytes());
+    disassembler.clear_decode_cache().expect("fresh decode");
+    let pcode = disassembler.pcode(&bytes, 0x1000).expect("p-code");
+    let raw = disassembler
+        .translate_pcode(pcode, 0x1000)
+        .expect("translation");
+    // The register a temporary last copied before operation `at`.
+    let copied = |at: usize, value: &Varnode| {
+        raw.ops[..at].iter().rev().find_map(|op| match op {
+            R2ILOp::Copy { dst, src } if dst == value => Some(src.clone()),
+            _ => None,
+        })
+    };
+    let compared: Vec<_> = (0..raw.ops.len())
+        .filter_map(|at| match &raw.ops[at] {
+            R2ILOp::IntNotEqual { b, .. } => copied(at, b),
+            _ => None,
+        })
+        .collect();
+    let stored: Vec<_> = (0..raw.ops.len())
+        .filter_map(|at| match &raw.ops[at] {
+            R2ILOp::Store { val, .. } => copied(at, val),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(compared, vec![x(0), x(1)], "{:?}", raw.ops);
+    assert_eq!(stored, vec![x(2), x(3)], "{:?}", raw.ops);
+}
+
 #[cfg(feature = "arm")]
 #[test]
 fn aarch64_w_register_write_explicitly_zero_extends_its_declared_carrier() {
