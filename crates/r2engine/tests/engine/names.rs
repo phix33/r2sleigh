@@ -1,6 +1,6 @@
 //! Which of several symbols at one address names it.
 
-mod common;
+use crate::common;
 
 use common::{Literal, ONE};
 use r2engine::program::{Binding, OpenProgram, Symbol, SymbolKind};

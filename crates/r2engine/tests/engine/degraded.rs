@@ -4,7 +4,7 @@
 //! silence, so a call rendered from the call site alone looked exactly like a
 //! call rendered against a proven interface.
 
-mod common;
+use crate::common;
 
 use common::{CALLER, ONE, opened};
 use r2engine::native::Unreadable;

@@ -1,7 +1,7 @@
 //! Whether a listed number is a result or a step, as `pd` and `pdf` each answer it,
 //! and what a function listing says was proved.
 
-mod common;
+use crate::common;
 
 use common::{
     ARM_ENTRY, BASE, CALLER, FORKED, GUARDED_JOIN, HANDED, HANDS, JOINED, Literal, MOVED, ONE,

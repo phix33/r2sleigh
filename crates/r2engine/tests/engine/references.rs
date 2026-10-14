@@ -5,7 +5,7 @@
 //! the answer: which functions were read, which could not be, and where a walk
 //! stopped without knowing where control went.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

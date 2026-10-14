@@ -1,6 +1,6 @@
 //! `afi` and the rendered header state each parameter as the one declaration r2types gives it.
 
-mod common;
+use crate::common;
 
 use r2engine::discovery::Basis;
 

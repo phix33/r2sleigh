@@ -1,7 +1,7 @@
 //! The staged decompiler (ROADMAP D) through the open program: D1 writes the control, certified,
 //! around D2's statements, with D3 spelling each term; a call is still a gap.
 
-mod common;
+use crate::common;
 
 use common::{BASE, CALLER, FORKED, GLIBC, Literal, ONE, PLT_STUB, STUB, TWO, opened};
 use r2engine::program::OpenProgram;

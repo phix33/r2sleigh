@@ -1,6 +1,6 @@
 //! What `pdf` says a value lies in holds on every path that defines it.
 
-mod common;
+use crate::common;
 
 use common::{BASE, GUARDED_JOIN, Literal, SHIFT_MERGE};
 use r2engine::program::OpenProgram;

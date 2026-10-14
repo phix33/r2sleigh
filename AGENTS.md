@@ -193,7 +193,7 @@ helper names or incidental traversal order.
 | What a whole function renders | the certification gate, plus a unit test for the rule |
 | Discovery, naming or decoding | the differential gate, with the disagreement judged |
 
-`crates/r2engine/tests/native.rs` is the model integration test: an in-memory
+`crates/r2engine/tests/engine/native.rs` is the model integration test: an in-memory
 program from byte literals, the `Program` trait over it, an assertion on what
 the engine renders. More in [doc/testing.md](doc/testing.md).
 

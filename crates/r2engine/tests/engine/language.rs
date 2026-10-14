@@ -1,6 +1,6 @@
 //! A function's convention is its language's (ROADMAP LP1): Go's register ABI, or a refusal.
 
-mod common;
+use crate::common;
 
 use common::{BASE, GLIBC, Literal};
 use r2engine::program::OpenProgram;

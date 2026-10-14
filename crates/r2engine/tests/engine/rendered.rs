@@ -1,6 +1,6 @@
 //! What a rendering reads from the open program: names, and text in its data.
 
-mod common;
+use crate::common;
 
 use common::{BASE, CALLER, GLIBC, Literal, ONE, STUB, TEXT, TWO, opened};
 use r2engine::program::OpenProgram;

@@ -1,6 +1,6 @@
 //! What the open program says about the machine a storage lives in.
 
-mod common;
+use crate::common;
 
 use common::{ONE, opened};
 use r2ssa::{CanonicalStorageId, CanonicalStorageSpace};

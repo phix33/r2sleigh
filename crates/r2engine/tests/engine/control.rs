@@ -4,7 +4,7 @@
 //! every native request carried tokens nothing could reach. Nothing had ever
 //! run under a cancellation, which is why this exists.
 
-mod common;
+use crate::common;
 
 use common::{ONE, opened};
 use r2engine::{EngineCancellationToken, EngineExecutionControl};

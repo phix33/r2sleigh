@@ -1,6 +1,6 @@
 //! Decompiling from bytes and an address, with no radare2 in the process.
 
-mod common;
+use crate::common;
 
 use std::collections::{BTreeMap, BTreeSet};
 

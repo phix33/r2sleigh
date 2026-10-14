@@ -1,6 +1,6 @@
 //! Every claim `pd` and `pdf` make holds on every run of the function's own lift, and a claim no run rules on fails.
 
-mod common;
+use crate::common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

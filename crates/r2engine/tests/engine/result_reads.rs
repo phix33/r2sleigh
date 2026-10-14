@@ -1,7 +1,7 @@
 //! A body that writes both result registers returns the one its callers read
 //! (doc/adr-resolved-bodies.md, "Caller reads").
 
-mod common;
+use crate::common;
 
 use common::{BASE, Literal};
 use r2engine::program::OpenProgram;

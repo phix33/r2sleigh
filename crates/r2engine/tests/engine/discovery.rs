@@ -4,7 +4,7 @@
 //! the stubs the engine had decoded; which addresses are believed to be
 //! functions is the engine's question, so the whole answer is asked of it here.
 
-mod common;
+use crate::common;
 
 use common::{
     ARM_ENTRY, BASE, CALLER, FORKED, GLIBC, JOINED, Literal, ONE, PASSES, PLT_SEC_STUB, STEPPED,

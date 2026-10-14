@@ -1,7 +1,7 @@
 //! A body that hands its own argument register to a call, unwritten, does not prove it takes no
 //! argument: prepared alone it cannot see what the call reads.
 
-mod common;
+use crate::common;
 
 use common::{BASE, Literal};
 use r2engine::program::OpenProgram;

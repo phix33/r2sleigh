@@ -1,6 +1,6 @@
 //! A function's body is bounded by where other functions begin, and only there.
 
-mod common;
+use crate::common;
 
 use common::{CALLER, Literal, TWO, opened};
 use r2engine::program::{EdgeKind, OpenProgram, Symbol, SymbolKind};

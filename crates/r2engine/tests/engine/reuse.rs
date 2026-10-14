@@ -1,6 +1,6 @@
 //! One analysis serves every view asked of one function.
 
-mod common;
+use crate::common;
 
 use common::{
     ARM_ENTRY, CALLER, Literal, ONE, PASSES, STUB, TEXT, THUMB_CALLED, THUMB_LEAF, TWO, opened,

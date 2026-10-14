@@ -1,6 +1,6 @@
 //! Where a session starts, and what a flag spelling seeks to.
 
-mod common;
+use crate::common;
 
 use common::{BASE, CALLER, Literal, STUB, TEXT, TWO};
 use r2engine::program::{EntryKind, OpenProgram, Section, SectionRole};

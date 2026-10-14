@@ -1,6 +1,6 @@
 //! Where an import stub begins, as the call to it names it.
 
-mod common;
+use crate::common;
 
 use common::{
     ARM_PLT, ARM_PLT_SLOTS, BASE, Literal, MOVED_STUB, PLT_CALLER, PLT_STUB, import_write,
