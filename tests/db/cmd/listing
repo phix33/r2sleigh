@@ -376,7 +376,7 @@ EOF
 RUN
 
 # ARM 32-bit: the register roles (`fp`, `ip`, `sp`, `lr`, `pc`), `mov` for Sleigh's `cpy`, and a
-# big-endian Thumb-2 decode, the one place this engine reads an instruction radare2 reads wrongly.
+# BE8 Thumb-2 decode (little-endian code, big-endian data), which radare2 reads big-endian.
 NAME=arm listing
 FILE=crates/r2image/tests/data/arm_thumb_entry.elf
 CMDS=pd 12
@@ -404,5 +404,37 @@ EXPECT=<<EOF
             0x00000476      4ff0000e       mov.w lr, 0x0
             0x0000047a      0190           str r0, [sp, 0x4]
             0x0000047c      7046           mov r0, lr
+EOF
+RUN
+
+# Big-endian ARM, audit W26: BE32 (no `EF_ARM_BE8`) reads its instructions most significant byte
+# first, as objdump does; BE8 keeps them little-endian under its big-endian data.
+NAME=be32 thumb listing
+FILE=tests/fixtures/arm_thumb_movw_be.o
+CMDS=pd 9 @ 0x8000034
+EXPECT=<<EOF
+            0x08000034      4770           bx lr
+            0x08000036      f64f70fc       movw r0, 0xfffc
+            0x0800003a      f6cf70fc       movt r0, 0xfffc
+            0x0800003e      f47faffe       bne.w 0x800003e
+            0x08000042      f003a7fe       beq.w 0x8044042
+            0x08000046      4770           bx lr
+            0x08000048      f2400308       movw r3, 0x8
+            0x0800004c      f2c00308       movt r3, 0x8
+            0x08000050      4770           bx lr
+EOF
+RUN
+
+NAME=be8 arm listing
+FILE=tests/fixtures/arm_plt_lld_be8.so
+CMDS=pd 4 @ sym.f; pd 3 @ sym.imp.foo
+EXPECT=<<EOF
+            0x000101d4      10402de9       push {r4, lr}
+            0x000101d8      0c0000eb       bl sym.imp.foo
+            0x000101dc      0f0000eb       bl sym.imp.bar
+            0x000101e0      1080bde8       pop {r4, pc}
+            0x00010210      00c68fe2       adr ip, 0x10218
+            0x00010214      20ca8ce2       add ip, ip, 0x20000
+            0x00010218      7cf0bce5       ldr pc, [ip, 0x7c]!
 EOF
 RUN
