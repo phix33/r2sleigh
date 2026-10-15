@@ -40,6 +40,16 @@ issue owed). GP-7027's other changes wait for the x86 resync: `movbe` written
 out byte by byte, which the lift refuses as a temporary assembled from byte
 writes, `maskmovdqu`'s store, and the VEX `pcmp?str?` results.
 
+Carried in this tree, not yet in the fork or in Ghidra (a sleigh-config pull
+request and a Ghidra issue owed; master still says `# AF not implemented`): x86's
+arithmetic sets AF, the carry or borrow out of bit 3 (Intel SDM Vol. 1,
+3.4.3.1), in `addflags`, `subflags`, `addCarryFlags`, `subCarryFlags`,
+`negflags` and the new `incflags` and `decflags`, so ADD, ADC, SUB, SBB, CMP,
+CMPS, SCAS, INC, DEC, NEG, XADD and CMPXCHG state it (`ia.sinc`,
+`lockable.sinc`; `crates/r2sleigh-lift/tests/adjust_flag.rs`). It stays
+unwritten where the SDM leaves it undefined: the logical operations, shifts and
+rotates, multiplies, AAM and AAD.
+
 Carried in this tree, its Ghidra half on 0verflowme/ghidra
 `r2sleigh-sleigh-context-12` (`ec9a9312`) and not yet in the forks' mains (fork
 pull requests owed to 0verflowme/libsla-sys and 0verflowme/libsla; audit W2):
