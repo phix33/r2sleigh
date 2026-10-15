@@ -1081,9 +1081,9 @@ fn genuine_block_successors(block: &GenuineLiftedBlock) -> Result<Vec<u64>> {
             R2ILOp::Branch { .. } | R2ILOp::CBranch { .. } => {
                 !control_op_is_intra_instruction(block, op_index)
             }
-            R2ILOp::Return { .. } | R2ILOp::Breakpoint => true,
             R2ILOp::BranchInd { .. } => block.block.switch_info.is_some(),
-            _ => false,
+            // A return or a trap ends the block; a call comes back to the next instruction.
+            _ => op.is_control_flow() && !op.is_call(),
         };
         if decides_successors && block.block.instruction_of(op_index) != Some(last_instruction) {
             return Err(LiftError::Parse(format!(
