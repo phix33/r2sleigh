@@ -925,12 +925,12 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
     }
 }
 
-/// Whether each function the survey found is Thumb; empty where the machine has one instruction set.
+/// Which instruction set the discovered code at each address is in; empty where the machine has one.
 pub(super) struct Modes;
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for Modes {
     type Key = ();
-    type Value = BTreeMap<u64, bool>;
+    type Value = ModeMap;
     const NAME: &'static str = "modes";
     const RETENTION: Retention = Retention::Held;
 
@@ -940,21 +940,101 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Modes {
             .machines()
             .map_or(true, |machines| machines.thumb.is_none())
         {
-            return BTreeMap::new();
+            return ModeMap::default();
         }
         match db
             .get::<SurveyQuery>(&())
             .expect("the survey reads no modes")
             .as_ref()
         {
-            Ok(surveyed) => surveyed
-                .0
-                .functions
-                .iter()
-                .map(|one| (one.address, one.thumb))
-                .collect(),
-            Err(_) => BTreeMap::new(),
+            Ok(surveyed) => ModeMap::of(&surveyed.0),
+            Err(_) => ModeMap::default(),
         }
+    }
+}
+
+/// An instruction set, and the function entry whose body states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Placed {
+    pub(super) from: u64,
+    pub(super) thumb: bool,
+}
+
+/// What the discovered code says of an address: a body places it, or only the code before it is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Mode {
+    Placed(Placed),
+    After(bool),
+}
+
+/// One stretch the walked bodies hold, and its strongest holder's set: a container-stated function's
+/// before a derived one's, then the innermost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Piece {
+    end: u64,
+    held: Placed,
+}
+
+/// Each discovered function's set at its entry and each held stretch's, so a derived set reaches only
+/// as far as its body.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct ModeMap {
+    starts: BTreeMap<u64, bool>,
+    stated: BTreeMap<u64, bool>,
+    pieces: BTreeMap<u64, Piece>,
+}
+
+impl ModeMap {
+    /// One pass over the survey's held pieces: O(P h log F) for P pieces of h holders among F functions.
+    fn of(survey: &Survey) -> Self {
+        let starts = (survey.functions.iter())
+            .map(|one| (one.address, one.thumb))
+            .collect::<BTreeMap<_, _>>();
+        let stated = (survey.functions.iter())
+            .filter(|one| matches!(one.confidence.basis, Basis::Stated | Basis::DebugInfo))
+            .map(|one| (one.address, one.thumb))
+            .collect::<BTreeMap<_, _>>();
+        let mut pieces = BTreeMap::new();
+        for (range, holders) in survey.holders.pieces() {
+            let strongest = (holders.iter().copied())
+                .filter_map(|entry| Some((entry, *starts.get(&entry)?)))
+                .max_by_key(|(entry, _)| (stated.contains_key(entry), *entry));
+            if let Some((from, thumb)) = strongest {
+                let end = range.end;
+                pieces.insert(
+                    range.start,
+                    Piece {
+                        end,
+                        held: Placed { from, thumb },
+                    },
+                );
+            }
+        }
+        Self {
+            starts,
+            stated,
+            pieces,
+        }
+    }
+
+    /// A function's own set at its entry, else its body's strongest holder's; where no body holds
+    /// `vaddr`, the set of the nearer below of a held stretch and a container-stated function.
+    pub(super) fn at(&self, vaddr: u64) -> Option<Mode> {
+        if let Some(&thumb) = self.starts.get(&vaddr) {
+            return Some(Mode::Placed(Placed { from: vaddr, thumb }));
+        }
+        let piece = self.pieces.range(..=vaddr).next_back();
+        if let Some((_, piece)) = piece.filter(|(_, piece)| vaddr < piece.end) {
+            return Some(Mode::Placed(piece.held));
+        }
+        let piece = piece.map(|(&start, piece)| (start, piece.held.thumb));
+        let stated = self.stated.range(..=vaddr).next_back();
+        let before = piece
+            .into_iter()
+            .chain(stated.map(|(&at, &thumb)| (at, thumb)));
+        before
+            .max_by_key(|(at, _)| *at)
+            .map(|(_, thumb)| Mode::After(thumb))
     }
 }
 

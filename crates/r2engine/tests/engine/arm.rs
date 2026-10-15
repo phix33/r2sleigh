@@ -490,3 +490,81 @@ fn a_pool_load_an_it_predicates_still_reads_its_pool_word() {
     assert!(kinds.contains(&reads), "{spelled}: {kinds:?}");
     assert!(kinds.contains(&holds), "{spelled}: {kinds:?}");
 }
+
+/// A Thumb function at the start of `code`, stated by the entry alone, and `$t` there where `mapped`.
+fn thumb_entry(code: &'static [u8], mapped: bool) -> OpenProgram<Mixed> {
+    let mut mixed = arm_only(code, Endian::Little);
+    mixed.container.symbols.clear();
+    mixed.container.entries.push(Entry {
+        vaddr: ARM,
+        kind: EntryKind::Main,
+        thumb: true,
+        ..Entry::default()
+    });
+    if mapped {
+        mixed.container.symbols.push(Symbol {
+            name: "$t".into(),
+            vaddr: ARM,
+            kind: SymbolKind::Mapping(Mapping::Thumb),
+            defined: true,
+            ..Symbol::default()
+        });
+    }
+    OpenProgram::of(mixed)
+}
+
+/// Each line `pd` lists from `start`: its width and spelling.
+fn listed_at(program: &mut OpenProgram<Mixed>, start: u64, count: usize) -> Vec<(usize, String)> {
+    let listing = Listing {
+        start,
+        stop: Stop::After(count),
+    };
+    let lines = program.listing(listing).expect("it lists").value;
+    lines
+        .iter()
+        .map(|line| {
+            let spelled = line.syntax.as_ref().map(r2sleigh_lift::Syntax::text);
+            (line.bytes.len(), spelled.unwrap_or_default())
+        })
+        .collect()
+}
+
+/// Thumb `blx 0x1008; bx lr; nop`, the ARM `mov r0, 1; bx lr` it calls, then Thumb no body reaches.
+const BLX_FORWARD: [u8; 0x18] = [
+    0x00, 0xf0, 0x02, 0xe8, 0x70, 0x47, 0x00, 0xbf, //
+    0x01, 0x00, 0xa0, 0xe3, 0x1e, 0xff, 0x2f, 0xe1, //
+    0x00, 0x20, 0x70, 0x47, 0x00, 0x20, 0x70, 0x47,
+];
+
+#[test]
+fn a_blx_target_is_arm_only_as_far_as_its_body_reaches() {
+    let mut program = thumb_entry(&BLX_FORWARD, true);
+    let callee = listed_at(&mut program, ARM + 8, 2);
+    assert_eq!(callee[0], (4, "mov r0, 0x1".to_owned()), "{callee:?}");
+    // `$t` states the code below; the ARM body ends at 0x1010 and says nothing past it.
+    let past = listed_at(&mut program, ARM + 0x10, 2);
+    assert_eq!(past[0], (2, "movs r0, 0x0".to_owned()), "{past:?}");
+    // Stripped of `$t`, bytes no body holds read the code just before them: here the ARM body.
+    let mut stripped = thumb_entry(&BLX_FORWARD, false);
+    let past = listed_at(&mut stripped, ARM + 0x10, 1);
+    assert_eq!(past[0].0, 4, "{past:?}");
+}
+
+/// Thumb `movs r0..r3, 0`, then `blx 0x1004` back into its own body, as audit W3's patched libarm.so has it.
+const BLX_INTO_ITSELF: [u8; 0x10] = [
+    0x00, 0x20, 0x00, 0x21, 0x00, 0x22, 0x00, 0x23, //
+    0xff, 0xf7, 0xfc, 0xef, 0x70, 0x47, 0x00, 0xbf,
+];
+
+#[test]
+fn a_function_the_container_states_keeps_its_set_where_a_derived_body_overlaps_it() {
+    let mut program = thumb_entry(&BLX_INTO_ITSELF, false);
+    // The function the `blx` derives is ARM at its own entry ...
+    let derived = listed_at(&mut program, ARM + 4, 1);
+    assert_eq!(derived[0].0, 4, "{derived:?}");
+    // ... but the bytes the stated Thumb body holds stay Thumb.
+    let held = listed_at(&mut program, ARM + 6, 3);
+    let widths: Vec<_> = held.iter().map(|line| line.0).collect();
+    assert_eq!(widths, [2, 4, 2], "{held:?}");
+    assert!(held[1].1.starts_with("blx"), "{held:?}");
+}

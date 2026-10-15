@@ -1,6 +1,5 @@
 //! The program as a query reads it: every fact through the database, every byte recorded.
 
-use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use super::LoaderWrite;
@@ -11,8 +10,10 @@ use super::{Imports, NameDb, Names, ProgramInputs, Source, naming};
 use crate::native::NativeTarget;
 use crate::query::db::Db;
 
-/// Whether each function the survey found is Thumb.
-pub(super) fn modes<S: Source + 'static>(db: &Db<ProgramInputs<S>>) -> Rc<BTreeMap<u64, bool>> {
+/// Which instruction set the code the survey found is in.
+pub(super) fn modes<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+) -> Rc<super::requests::ModeMap> {
     db.get::<super::requests::Modes>(&())
         .expect("the survey reads no modes")
 }
@@ -32,8 +33,8 @@ pub(crate) struct View<'a, S: Source + 'static> {
     imports: Rc<naming::Linkage>,
     /// Where the container states a function begins, which bounds every body walk.
     starts: Rc<StatedStarts>,
-    /// Whether each function discovery found is Thumb; empty for discovery itself, which decides it.
-    modes: Rc<BTreeMap<u64, bool>>,
+    /// Which set the code discovery found is in; empty for discovery itself, which decides it.
+    modes: Rc<super::requests::ModeMap>,
 }
 
 impl<S: Source + 'static> Clone for View<'_, S> {
@@ -96,14 +97,17 @@ impl<'a, S: Source + 'static> View<'a, S> {
         }
     }
 
-    /// Whether the code at this address is Thumb: whichever is nearest below it of a mapping symbol and a function discovery placed, the container's statement winning a tie.
+    /// Whether the code at this address is Thumb: the nearer of the mapping symbol below it and the body
+    /// placing it (`ModeMap::at`), the symbol winning a tie; unplaced, the symbol, the code before it, ARM.
     pub(super) fn thumb_at(&self, vaddr: u64) -> bool {
+        use super::requests::Mode;
         let inputs = self.db.inputs();
         let stated = inputs.mapped.range(..=vaddr).next_back();
-        let derived = self.modes.range(..=vaddr).next_back();
-        match (stated, derived) {
-            (Some((at, thumb)), Some((from, _))) if at >= from => *thumb,
-            (_, Some((_, thumb))) | (Some((_, thumb)), None) => *thumb,
+        match (stated, self.modes.at(vaddr)) {
+            (Some((at, thumb)), Some(Mode::Placed(placed))) if *at >= placed.from => *thumb,
+            (_, Some(Mode::Placed(placed))) => placed.thumb,
+            (Some((_, thumb)), _) => *thumb,
+            (None, Some(Mode::After(thumb))) => thumb,
             (None, None) => false,
         }
     }
