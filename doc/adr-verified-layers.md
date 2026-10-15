@@ -34,6 +34,7 @@ structural decisions that close each gap.
 | Decoder (Sleigh, vendored) | instruction length and text | `diff_r2 pd`; `decode_sweep` (random words per language, no fault) | present |
 | Lift semantics (specs) | each instruction's effect | the CPU oracle: AArch64 (Apple M5) and x86-64 (contabo, D35) present; ARM32 refused (D32) | present |
 | Lift passes (`translate.rs`, `internal_control`) | a rewrite of one instruction's ops | **none**: no eval before and after (D34) | missing |
+| Temporary names (`r2il::number_temporaries`, r2ssa `naming.rs`) | which value a `tmp_` name is | `stable_temporaries`: every census function's `pdd`, `pdil` and `ao` byte-identical with Sleigh's temporaries shifted or reversed (D36) | present |
 | Register effects | reads and writes per instruction | AO against radare2's `aeaj` | present (#284) |
 | r2ssa rewrites | value-preserving IR edits | `EditPlan` with stable ids ([stable identity](adr-stable-identity.md)), the semantic kernel | present |
 | Arity | how many arguments a callee takes | certification and equivalence; the floor's cause **not typed** (D37) | partial |
@@ -68,13 +69,22 @@ evidence.** Owner: VC.
 - Done (2026-10-16): 374 cases, 12 listed (VC row); `scripts/spec_evidence.py`.
 
 **D36. A temporary's name comes from where it is defined, not from its
-unique-space offset.** Owner: r2ssa (`naming.rs`); r2dec spells it.
-- The name derives from the stable op identity (the instruction and the op's
-  index within it), which a spec change leaves alone unless the instruction's
-  own semantics change.
-- Gate: a specification resync that changes no instruction's semantics moves
-  no census line.
-- Order: before the next specification resync.
+unique-space offset.** Done (2026-10-16). Owners: r2il lays out an
+instruction's temporaries, r2ssa names them, r2dec and the low tier spell them.
+- The lift's last step (`r2il::number_temporaries`) places each temporary of
+  one instruction by first appearance, each after the last, so its offset is a
+  function of that instruction's operations, never of Sleigh's allocator.
+  `pdil`, `ao` and `r2il::eval` see that layout.
+- r2ssa names a temporary `tmp:<instruction>:<offset>`, spelled
+  `tmp_<instruction>_<offset>_<version>` in C. Sleigh scopes the unique space
+  to an instruction and an instruction lies in one block, so a temporary takes
+  no phi and no liveness bits; a read of a temporary its instruction did not
+  write is an undefined value, not another instruction's.
+- A lane temporary is `tmp:lane:<instruction>:<op in it>:<serial>`.
+- Gate: `crates/r2s/tests/stable_temporaries.rs` runs every census function
+  with `R2S_MOVE_TEMPORARIES=shift` and `=reverse` (the lift moves each
+  instruction's raw temporaries before its passes) and requires `pdd`, `pdil`
+  and `ao` byte-identical.
 
 **D37. r2ssa states why an arity is a floor.** Owner: r2ssa (boundaries);
 r2engine reads it.
@@ -104,5 +114,5 @@ r2engine reads it.
 
 The six decisions slot into ROADMAP's order. D35 and D34 come after LS's
 typed atomic read-modify-write and before AO's spec follow-ups ship further x86
-fixes. D36 comes before the next resync. D37 is P7's next item. D38 and D39 are
+fixes. D36 is done. D37 is P7's next item. D38 and D39 are
 GT's, beside the path whenever a step waits on CI.

@@ -94,7 +94,7 @@ Decisions
 | D33 | `libsla-sys`'s Ghidra, the compiler `sleigh-compiler` builds against its headers, and `sleigh-config`'s specifications sit on one Ghidra commit; the engine resyncs whenever the specifications do (2026-10-15: master `918acd744d`) | standing (VC) |
 | D34 | A lift pass over one instruction's ops edits through one plan whose applier keeps every instruction-relative label on its op, and `decode_sweep` runs each pass's input and output through `r2il::eval` from the same states ([verified layers](doc/adr-verified-layers.md)) | LS |
 | D35 | x86-64 has a CPU oracle recorded on contabo and replayed on every host, and CI fails a change to a vendored `.sinc`, `.slaspec` or `.pspec` that adds no oracle case or `r2il::eval` test (D28 enforced) | done (VC, 2026-10-16: 374 cases; `scripts/spec_evidence.py`) |
-| D36 | A temporary is named by where it is defined (its instruction and op index), not by its unique-space offset, so a resync that changes no semantics moves no census line | r2ssa (`naming.rs`) |
+| D36 | A temporary is named by where it is defined (its instruction and op index), not by its unique-space offset, so a resync that changes no semantics moves no census line | done (2026-10-16: r2il lays out, r2ssa names; gate `stable_temporaries`) |
 | D37 | r2ssa states why an arity is a floor (an indirect call, an unresolved cycle member, a missing prototype); r2engine reads the cause, and a cycle's results are the same fixpoint as its arities | P7 |
 | D38 | The cost verdict counts retired user-space instructions (`perf_event_open`, CPU time under emulation); each record states its measure and the ratchet never compares across measures | GT |
 | D39 | A scheduled CI job reports how far the Ghidra base, `TESTBINS_REF` and the judged radare2 release are behind upstream and fails past a stated budget | GT, VC |
@@ -228,8 +228,8 @@ each other, each on its own branch and stacked (AGENTS.md).
    (done 2026-10-15: VC's AF, `lodsd` and scratch registers, the lift's shift
    flags and LS's conditional ARM transfers, recorded in its row).
    Then the verified layers ([ADR](doc/adr-verified-layers.md)): D35's x86-64
-   oracle before further x86 spec fixes (done 2026-10-16, its list in the VC row), D34's pass plan and its eval check,
-   D36's stable temporary names before the next resync.
+   oracle before further x86 spec fixes (done 2026-10-16, its list in the VC row), D34's pass plan and its eval check
+   (D36's stable temporary names done 2026-10-16).
 7. **P7**, with T's one declaration fact (W46, W47): invented arguments are an
    AGENTS blocker and the most common wrong C left.
    Its next is D37: the floor's cause typed in r2ssa, then a cycle's results.
@@ -300,7 +300,6 @@ Standing debt
 -------------
 
 - A reload certified as the stored value binds as a copy of the stored temporary (three census functions; D).
-- r2dec names a Sleigh temporary by its unique-space offset (`tmp_24c00_1`), so any specification edit renames temporaries across the census with no change in meaning (VC, 2026-10-14): a name should follow the value's role, not an allocator's offset (SD).
 - Listing claims follow the demand release, valid only for the function's meaning; annotations must read the index before it (F2).
 - `def_use_graph` seals a raw function to answer a listing (F2.1, in LX).
 - `seal_body_proven_interface` rewrites the format parameter after the build (C1).
