@@ -1487,3 +1487,20 @@ fn an_embedded_machine_shares_the_trusted_profile_s_parse() {
         Disassembler::shared_trusted_profile(TrustedSleighProfile::X86_64).expect("trusted");
     assert!(machine.disasm.shares_loaded_specification(&trusted));
 }
+
+/// The x86-64 processor spec marks Ghidra's SIMD scratch `hidden`; machine registers stay unmarked.
+#[cfg(feature = "x86")]
+#[test]
+fn the_processor_spec_marks_hidden_registers() {
+    let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::X86_64)
+        .expect("trusted x86-64 specification");
+    let arch = disassembler.arch_spec();
+    let hidden = |name: &str| arch.get_register(name).expect(name).hidden;
+    assert!(hidden("xmmTmp1") && hidden("xmmTmp2_Qa"));
+    assert!(!hidden("RAX") && !hidden("AF"));
+    let scratch = register_varnode(declared_register_storage(arch, "xmmTmp1"));
+    assert!(disassembler.hides_register(&scratch));
+    assert!(
+        !disassembler.hides_register(&register_varnode(declared_register_storage(arch, "RAX")))
+    );
+}

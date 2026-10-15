@@ -480,9 +480,39 @@ pub fn build_arch_spec(
         .map_err(|e| LiftError::Parse(format!("Failed to load SLA data: {}", e)))?;
 
     let mut arch = extract_arch_spec(&sleigh, arch_name)?;
+    apply_processor_spec(&mut arch, pspec_data);
+    Ok(arch)
+}
+
+/// What the processor specification states over what the compiled specification declares.
+pub(crate) fn apply_processor_spec(arch: &mut ArchSpec, pspec_data: &str) {
     arch.program_counter = processor_spec_program_counter(pspec_data);
     arch.tracked_entry_values = processor_spec_tracked_values(pspec_data);
-    Ok(arch)
+    let hidden: HashSet<String> = processor_spec_hidden_registers(pspec_data)
+        .into_iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    for register in &mut arch.registers {
+        register.hidden = hidden.contains(&register.name.to_ascii_lowercase());
+    }
+}
+
+/// The names `<register_data>` marks `hidden="true"`; a specification that does not parse marks none.
+pub(crate) fn processor_spec_hidden_registers(pspec_data: &str) -> Vec<String> {
+    let Ok(document) = roxmltree::Document::parse(pspec_data) else {
+        return Vec::new();
+    };
+    document
+        .descendants()
+        .filter(|node| {
+            node.has_tag_name("register")
+                && node.attribute("hidden") == Some("true")
+                && node
+                    .parent_element()
+                    .is_some_and(|parent| parent.has_tag_name("register_data"))
+        })
+        .filter_map(|node| node.attribute("name").map(str::to_owned))
+        .collect()
 }
 
 /// The register the processor specification names as the program counter.
@@ -560,6 +590,17 @@ pub fn get_sleigh_info(sleigh: &GhidraSleigh, arch_name: &str) -> Result<SleighI
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn register_data_marks_the_hidden_registers() {
+        let pspec = r#"<processor_spec><register_data>
+            <register name="bit64" hidden="true"/>
+            <register name="ST0" group="FPU"/>
+            <register name="xmmTmp1" hidden="true"/>
+        </register_data></processor_spec>"#;
+        assert_eq!(processor_spec_hidden_registers(pspec), ["bit64", "xmmTmp1"]);
+        assert!(processor_spec_hidden_registers("<unclosed").is_empty());
+    }
 
     #[test]
     fn a_tracked_set_states_what_a_register_holds_on_entry() {

@@ -65,6 +65,8 @@ struct LoadedSpecification {
     space_map: crate::sleigh::SpaceMap,
     /// Register the processor spec names as the program counter.
     program_counter: String,
+    /// The storage of the registers the processor spec marks hidden, sorted, overlaps joined.
+    hidden_storage: Vec<(u64, u64)>,
     /// Architecture exactly as `extract_architecture` derived it, before any
     /// processor-spec overlay a particular consumer wants.
     arch: Arc<r2il::ArchSpec>,
@@ -1594,8 +1596,7 @@ impl LoadedSpecification {
             .map(|name| name.to_ascii_lowercase())
             .collect();
         let mut extracted = crate::sleigh::extract_architecture(&sleigh, arch_name)?;
-        extracted.arch.tracked_entry_values = crate::sleigh::processor_spec_tracked_values(pspec);
-        extracted.arch.program_counter = crate::sleigh::processor_spec_program_counter(pspec);
+        crate::sleigh::apply_processor_spec(&mut extracted.arch, pspec);
         let arch = Arc::new(extracted.arch);
         let unique_big_endian = arch
             .spaces
@@ -1614,8 +1615,10 @@ impl LoadedSpecification {
             )
         });
 
+        let hidden_storage = hidden_storage(&arch.registers);
         Ok(Self {
             program_counter: program_counter_from_pspec(pspec),
+            hidden_storage,
             sleigh: RefCell::new(sleigh),
             reg_name_map,
             register_names,
@@ -1628,6 +1631,29 @@ impl LoadedSpecification {
             unique_big_endian,
         })
     }
+}
+
+/// The ranges `hidden` registers occupy, sorted with overlapping ones joined. O(r log r).
+fn hidden_storage(registers: &[r2il::RegisterDef]) -> Vec<(u64, u64)> {
+    let mut ranges: Vec<(u64, u64)> = registers
+        .iter()
+        .filter(|register| register.hidden)
+        .map(|register| {
+            (
+                register.offset,
+                register.offset.saturating_add(u64::from(register.size)),
+            )
+        })
+        .collect();
+    ranges.sort_unstable();
+    let mut joined: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        match joined.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => joined.push((start, end)),
+        }
+    }
+    joined
 }
 
 /// Load an embedded specification.
@@ -2299,6 +2325,14 @@ impl Disassembler {
     /// Whether the specification declares a register at exactly this range.
     pub fn declares_register(&self, vn: &Varnode) -> bool {
         vn.space == SpaceId::Register && self.spec.reg_name_map.contains_key(&(vn.offset, vn.size))
+    }
+
+    /// Whether `vn` lies within registers the processor spec marks hidden. O(log h).
+    pub fn hides_register(&self, vn: &Varnode) -> bool {
+        let end = vn.offset.saturating_add(u64::from(vn.size));
+        let ranges = &self.spec.hidden_storage;
+        let at = ranges.partition_point(|&(start, _)| start <= vn.offset);
+        vn.space == SpaceId::Register && at > 0 && end <= ranges[at - 1].1
     }
 
     /// A register as the listing spells it in an operand, so a register set names what `pd` prints.
