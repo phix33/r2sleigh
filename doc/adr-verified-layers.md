@@ -18,6 +18,7 @@ were found by chance.
 | a label inside an instruction naming the op before its own (#280, #281) | the lift's own passes | review, twice |
 | 1,477 census lines renamed by a resync | temporary names | every spec change |
 | a recursive function's arity left a floor (#279) | r2ssa's arity evidence | equivalence |
+| a register only a conditional write defines never merging, so a `cmpxchg` retry or a 64-bit `cmovcc` loop reads its pre-loop value on every pass | SSA construction's def sites, a stale copy of `R2ILOp::output()` | reading the atomic item's output, once a LOCK residual stopped hiding it |
 
 Every fix that held came with a gate: the CPU oracle, `diff_r2`, AO's register
 sets, `decode_sweep`. D31 already states the rule ("every layer has an
@@ -35,7 +36,7 @@ structural decisions that close each gap.
 | Register effects | reads and writes per instruction | AO against radare2's `aeaj` | present (#284) |
 | r2ssa rewrites | value-preserving IR edits | `EditPlan` with stable ids ([stable identity](adr-stable-identity.md)), the semantic kernel | present |
 | Arity | how many arguments a callee takes | certification and equivalence; the floor's cause **not typed** (D37) | partial |
-| Rendered C | the function's behaviour | equivalence on x86-64 and aarch64 | present |
+| Rendered C | the function's behaviour | equivalence on x86-64 and aarch64; a loop runs on the single-threaded path only, so `tests/gold/loop_carried.c` forces a second pass where a conditional write carries the value | present |
 | Cost | time to render | wall time, which **depends on host load** (D38) | nondeterministic |
 | Upstream pins | Ghidra, testbins, radare2 releases | **none**: the drift was found by hand (D39) | missing |
 
