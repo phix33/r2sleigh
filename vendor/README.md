@@ -5,9 +5,11 @@ Each is a copy of its 0verflowme fork's `main` (which carries every change
 below as a merged pull request), keeping only the files its own `include`
 list packages; a refresh copies the fork again and re-applies the trims.
 `libsla-sys`'s Ghidra, the compiler `sleigh-compiler` builds against its
-headers, and `sleigh-config`'s specifications sit on one Ghidra commit, master
-`918acd744d` (2026-10-13): the engine resyncs whenever the specifications do
-(ROADMAP D33).
+headers, and `sleigh-config`'s AArch64 specifications sit on one Ghidra commit,
+master `918acd744d` (2026-10-13): the engine resyncs whenever the
+specifications do (ROADMAP D33). Its x86, ARM, MIPS and RISC-V specifications
+are still Ghidra 11.4's (`aed1cf1c`) with the changes below; their resync is
+owed (ROADMAP VC).
 
 | Crate | Fork `main` | Upstream | Carried by the fork | Vendoring trims |
 |---|---|---|---|---|
@@ -24,6 +26,19 @@ ones), where #9's text wrapped (`fp_to_unsigned`, `fp_to_unsigned64`;
 fraction bits with `Imm_shr_imm16` and `Imm_shr_imm64`, as `fcvtzs` does, where
 Ghidra read `Imm_shr_imm32`: `fcvtzu d0, d1, #8` decoded as `#-0x38` and
 `fcvtzu h0, h1, #8` as `#0x28`.
+
+Carried in this tree, not yet in the fork (a sleigh-config pull request owed): a
+32-bit register destination zero-extends into its 64-bit register in 64-bit mode
+(Intel SDM Vol. 1, 3.4.1.1). Ghidra's GP-7027 (`1735e73f4e`, in `918acd744d`)
+states it with `check_*_dest`, ported onto 11.4's text for `lodsd`, `lsl`, `mov`
+from a control or debug register, `movbe`, `movmskpd`/`movmskps`, MMX `pextrw`,
+`pcmpestri`, `xadd m32` and `cmpxchg8b` (`lockable.sinc`), `rdrand`/`rdseed`,
+`kmovw`/`kmovb`/`kmovd`, and the VEX and EVEX `vcvt*2*si`, `vmovd`,
+`vmovmskpd`/`vmovmskps` and `vpextrd` (`crates/r2sleigh-lift/tests/zero_extension.rs`).
+`rdrand` widens its r/m register, where GP-7027 widens the reg field's (a Ghidra
+issue owed). GP-7027's other changes wait for the x86 resync: `movbe` written
+out byte by byte, which the lift refuses as a temporary assembled from byte
+writes, `maskmovdqu`'s store, and the VEX `pcmp?str?` results.
 
 Carried in this tree, its Ghidra half on 0verflowme/ghidra
 `r2sleigh-sleigh-context-12` (`ec9a9312`) and not yet in the forks' mains (fork

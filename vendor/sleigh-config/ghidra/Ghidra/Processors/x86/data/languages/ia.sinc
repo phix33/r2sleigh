@@ -1501,12 +1501,14 @@ check_Rmr32_dest:	is rexBprefix=0 & r32 & r64		{ r64 = zext(r32); }
 check_Rmr32_dest:	is rexBprefix=1 & r32_x & r64_x 	{ r64_x = zext(r32_x); }
 check_rm32_dest:	is mod=3 & check_Rmr32_dest		{ build check_Rmr32_dest; }
 check_EAX_dest:		is epsilon									{ RAX = zext(EAX); }
+check_ECX_dest:		is epsilon									{ RCX = zext(ECX); }
 check_EDX_dest:     is epsilon                                  { RDX = zext(EDX); }   
 check_vexVVVV_r32_dest: is bit64=1 & vexVVVV_r64 & vexVVVV_r32  { vexVVVV_r64 = zext(vexVVVV_r32);}
 @else 
 check_Reg32_dest:	is epsilon	{ }
 check_Rmr32_dest:	is epsilon	{ }
 check_EAX_dest:		is epsilon  { }
+check_ECX_dest:		is epsilon  { }
 check_EDX_dest:		is epsilon  { }
 check_vexVVVV_r32_dest: is epsilon {  }
 @endif
@@ -3853,7 +3855,7 @@ define pcodeop LocalDescriptorTableRegister;
 
 :LODSB^rep^reptail dseSI1   is vexMode=0 & rep & reptail & byte=0xAC & dseSI1           { build rep; build dseSI1; AL=dseSI1; build reptail; }
 :LODSW^rep^reptail dseSI2   is vexMode=0 & rep & reptail & opsize=0 & byte=0xAD & dseSI2    { build rep; build dseSI2; AX=dseSI2; build reptail; }
-:LODSD^rep^reptail dseSI4   is vexMode=0 & rep & reptail & opsize=1 & byte=0xAD & dseSI4    { build rep; build dseSI4; EAX=dseSI4; build reptail; }
+:LODSD^rep^reptail dseSI4   is vexMode=0 & rep & reptail & opsize=1 & byte=0xAD & dseSI4 & check_EAX_dest    { build rep; build dseSI4; EAX=dseSI4; build check_EAX_dest; build reptail; }
 @ifdef IA64
 :LODSQ^rep^reptail dseSI8   is $(LONGMODE_ON) & vexMode=0 & rep & reptail & opsize=2 & byte=0xAD & dseSI8    { build rep; build dseSI8; RAX=dseSI8; build reptail; }
 @endif
@@ -3884,10 +3886,11 @@ define pcodeop SegmentLimit;
   ZF = tmp[16,1];
 }
 
-:LSL Reg32,rm32     is vexMode=0 & opsize=1 & byte=0xf; byte=0x3; rm32 & Reg32 ...
+:LSL Reg32,rm32     is vexMode=0 & opsize=1 & byte=0xf; byte=0x3; rm32 & (Reg32 & check_Reg32_dest) ...
 {
   tmp:3 = SegmentLimit(rm32);
   Reg32 = zext(tmp:2);
+  build check_Reg32_dest;
   ZF = tmp[16,1];
 }
 
@@ -4015,9 +4018,10 @@ define pcodeop TaskRegister;
 :MOV creg_x, Rmr64      is $(LONGMODE_ON) & vexMode=0 & rexRprefix=1 & byte=0xf; byte=0x22; Rmr64 & creg_x     { creg_x=Rmr64; }
 @endif
 
-:MOV Rmr32, creg        is $(LONGMODE_OFF) & vexMode=0 & byte=0xf; byte=0x20; Rmr32 & creg      {
+:MOV Rmr32, creg        is $(LONGMODE_OFF) & vexMode=0 & byte=0xf; byte=0x20; Rmr32 & check_Rmr32_dest & creg      {
 @ifdef IA64
     Rmr32 = creg:4;
+    build check_Rmr32_dest;
 @else
     Rmr32 = creg;
 @endif
@@ -4027,9 +4031,10 @@ define pcodeop TaskRegister;
 :MOV Rmr64, creg_x      is $(LONGMODE_ON) & vexMode=0 & rexRprefix=1 & byte=0xf; byte=0x20; Rmr64 & creg_x     { Rmr64 = creg_x; }
 @endif
 
-:MOV Rmr32, debugreg    is $(LONGMODE_OFF) & vexMode=0 & byte=0xf; byte=0x21; Rmr32 & debugreg      {
+:MOV Rmr32, debugreg    is $(LONGMODE_OFF) & vexMode=0 & byte=0xf; byte=0x21; Rmr32 & check_Rmr32_dest & debugreg      {
 @ifdef IA64
     Rmr32 = debugreg:4;
+    build check_Rmr32_dest;
 @else
     Rmr32 = debugreg;
 @endif
@@ -4059,7 +4064,7 @@ define pcodeop TaskRegister;
 
 define pcodeop swap_bytes;
 :MOVBE Reg16, m16       is vexMode=0 & opsize=0 & byte=0xf; byte=0x38; byte=0xf0; Reg16 ... & m16  { Reg16 = swap_bytes( m16 ); }
-:MOVBE Reg32, m32       is vexMode=0 & opsize=1 & mandover=0 & byte=0xf; byte=0x38; byte=0xf0; Reg32 ... & m32  { Reg32 = swap_bytes( m32 ); }
+:MOVBE Reg32, m32       is vexMode=0 & opsize=1 & mandover=0 & byte=0xf; byte=0x38; byte=0xf0; (Reg32 & check_Reg32_dest) ... & m32  { Reg32 = swap_bytes( m32 ); build check_Reg32_dest; }
 :MOVBE m16, Reg16       is vexMode=0 & opsize=0 & byte=0xf; byte=0x38; byte=0xf1; Reg16 ... & m16  { m16 = swap_bytes( Reg16 ); }
 :MOVBE m32, Reg32       is vexMode=0 & opsize=1 & mandover=0 & byte=0xf; byte=0x38; byte=0xf1; Reg32 ... & m32  { m32 = swap_bytes( Reg32 ); }
 @ifdef IA64
@@ -7386,10 +7391,10 @@ define pcodeop movdq2q;
 :MOVLPS       m64, XmmReg         is vexMode=0 &  mandover=0 & byte=0x0F; byte=0x13; XmmReg ... & m64 { m64 = XmmReg[0,64]; }
 
 define pcodeop movmskpd;
-:MOVMSKPD     Reg32, XmmReg2      is vexMode=0 &  $(PRE_66) & byte=0x0F; byte=0x50; XmmReg2 & Reg32 { Reg32 = movmskpd(Reg32, XmmReg2); }
+:MOVMSKPD     Reg32, XmmReg2      is vexMode=0 &  $(PRE_66) & byte=0x0F; byte=0x50; XmmReg2 & Reg32 & check_Reg32_dest { Reg32 = movmskpd(Reg32, XmmReg2); build check_Reg32_dest; }
 
 define pcodeop movmskps;
-:MOVMSKPS     Reg32, XmmReg2      is vexMode=0 &  mandover=0 & byte=0x0F; byte=0x50; XmmReg2 & Reg32 { Reg32 = movmskps(Reg32, XmmReg2); }
+:MOVMSKPS     Reg32, XmmReg2      is vexMode=0 &  mandover=0 & byte=0x0F; byte=0x50; XmmReg2 & Reg32 & check_Reg32_dest { Reg32 = movmskps(Reg32, XmmReg2); build check_Reg32_dest; }
 
 :MOVNTQ       m64, mmxreg      is vexMode=0 & mandover=0 & byte=0x0F; byte=0xE7; mmxreg ... & m64   { m64 = mmxreg; }
 
@@ -8384,10 +8389,11 @@ define pcodeop pavgw;
     XmmReg1[96,32] = zext(XmmReg1[96,32] s> XmmReg2[96,32]) * 0xFFFFFFFF;
 }
 
-:PEXTRW        Reg32, mmxreg2, imm8 is vexMode=0 &  mandover=0 & byte=0x0F; byte=0xC5; Reg32 & mmxreg2; imm8
+:PEXTRW        Reg32, mmxreg2, imm8 is vexMode=0 &  mandover=0 & byte=0x0F; byte=0xC5; Reg32 & check_Reg32_dest & mmxreg2; imm8
 {
     temp:8 = mmxreg2 >> ( (imm8 & 0x03) * 16 );
     Reg32 = zext(temp:2);
+    build check_Reg32_dest;
 }
 
 :PEXTRW        Reg32, XmmReg2, imm8 is vexMode=0 &  $(PRE_66) & byte=0x0F; byte=0xC5; Reg32 & XmmReg2 & check_Reg32_dest; imm8
@@ -10247,16 +10253,16 @@ define pcodeop crc32;
 @endif
 
 define pcodeop pcmpestri;
-:PCMPESTRI XmmReg, m128, imm8     is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x3A; byte=0x61; XmmReg ... & m128; imm8 { ECX = pcmpestri(XmmReg, m128, imm8:8); }
-:PCMPESTRI XmmReg1, XmmReg2, imm8 is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x3A; byte=0x61; xmmmod=3 & XmmReg1 & XmmReg2; imm8 { ECX = pcmpestri(XmmReg1, XmmReg2, imm8:8); }
+:PCMPESTRI XmmReg, m128, imm8     is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x3A; byte=0x61 & check_ECX_dest; XmmReg ... & m128; imm8 { ECX = pcmpestri(XmmReg, m128, imm8:8); build check_ECX_dest; }
+:PCMPESTRI XmmReg1, XmmReg2, imm8 is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x3A; byte=0x61 & check_ECX_dest; xmmmod=3 & XmmReg1 & XmmReg2; imm8 { ECX = pcmpestri(XmmReg1, XmmReg2, imm8:8); build check_ECX_dest; }
 
 define pcodeop pcmpestrm;
 :PCMPESTRM XmmReg, m128, imm8     is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x3A; byte=0x60; XmmReg ... & m128; imm8 { XMM0 = pcmpestrm(XmmReg, m128, imm8:8); }
 :PCMPESTRM XmmReg1, XmmReg2, imm8 is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x3A; byte=0x60; xmmmod=3 & XmmReg1 & XmmReg2; imm8 { XMM0 = pcmpestrm(XmmReg1, XmmReg2, imm8:8); }
 
 define pcodeop pcmpistri;
-:PCMPISTRI XmmReg, m128, imm8     is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x3A; byte=0x63; XmmReg ... & m128; imm8 { ECX = pcmpistri(XmmReg, m128, imm8:8); }
-:PCMPISTRI XmmReg1, XmmReg2, imm8 is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x3A; byte=0x63; xmmmod=3 & XmmReg1 & XmmReg2; imm8 { ECX = pcmpistri(XmmReg1, XmmReg2, imm8:8); }
+:PCMPISTRI XmmReg, m128, imm8     is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x3A; byte=0x63 & check_ECX_dest; XmmReg ... & m128; imm8 { ECX = pcmpistri(XmmReg, m128, imm8:8); build check_ECX_dest; }
+:PCMPISTRI XmmReg1, XmmReg2, imm8 is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x3A; byte=0x63 & check_ECX_dest; xmmmod=3 & XmmReg1 & XmmReg2; imm8 { ECX = pcmpistri(XmmReg1, XmmReg2, imm8:8); build check_ECX_dest;}
 
 define pcodeop pcmpistrm;
 :PCMPISTRM XmmReg, m128, imm8     is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x3A; byte=0x62; XmmReg ... & m128; imm8 { XMM0 = pcmpistrm(XmmReg, m128, imm8:8); }
