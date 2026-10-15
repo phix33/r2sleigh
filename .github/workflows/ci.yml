@@ -41,7 +41,7 @@ env:
   # was last run against: the gate takes the first binaries in name order, so
   # a moving corpus would move the gate.
   TESTBINS_URL: https://github.com/radareorg/radare2-testbins
-  TESTBINS_REF: a2a92dc41a06aff40e24cd6a44d372587f01747c
+  TESTBINS_REF: 3bc992e70159372d999ef427b685091d9dc21fc1
   # A harness that stalls says where: the steps below that drive one run
   # under `timeout -s ABRT`, and the fault handler prints every thread's
   # stack when that signal lands.
