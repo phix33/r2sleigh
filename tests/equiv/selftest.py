@@ -289,6 +289,13 @@ CASES = [
         "int32_t sub_ping(const struct st_node *n)\n{\n"
         "    return n ? (int32_t)(1u + 2u * (uint32_t)st_pong(n->next)) : 0;\n}\n"),
         links=[("st_pong", "function")]),
+    # The program reaches the entry by a tail jump from a function the rendering
+    # called: the return address is the rendering's call, and it is a recursion.
+    Case("recursion-through-a-tail-jump", "st_tping", "equal", _tu(
+        "extern uint64_t st_tpong(uint64_t, uint64_t);\n"
+        "uint64_t sub_tping(uint64_t d, uint64_t a)\n{\n"
+        "    return d & 7 ? 7 * st_tpong((d & 7) - 1, a + d) : a ^ 0x55;\n}\n"),
+        links=[("st_tpong", "function")]),
     # Wrong only where the program calls it back (depth > 1): only a gate
     # whose rendering replaced the function in the image can see it.
     Case("wrong-only-when-called-back", "st_ping", "differs", _tu(

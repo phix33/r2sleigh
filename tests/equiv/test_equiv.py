@@ -842,7 +842,7 @@ class _PipelineCases(_OnTarget):
     original is never equal.
     """
 
-    FUNCTIONS = 20  # nineteen functions and main, per level
+    FUNCTIONS = 22  # twenty-one functions and main, per level
 
     def run_gate(self, tmp: Path, *extra: str, **env: str) -> tuple[int, dict]:
         # --out is given relative to the working directory, as a person types
@@ -877,7 +877,7 @@ class _PipelineCases(_OnTarget):
         got = {k: r["status"] for k, r in records.items()}
         want = {k: self.known(k.rsplit("::", 1)[1]) for k in records}
         self.assertEqual(got, want)
-        self.assertEqual(sum(s == "equal" for s in got.values()), 2 * 16)
+        self.assertEqual(sum(s == "equal" for s in got.values()), 2 * 17)
         configs = {key.split("::")[1] for key in records}
         self.assertEqual(configs, {self.TARGET.config("gcc", opt) for opt in ("O0", "O2")})
 

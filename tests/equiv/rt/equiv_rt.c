@@ -113,6 +113,18 @@ static uint64_t entry_return_address(const ucontext_t *uc)
     return *(const uint64_t *)(uintptr_t)uc->uc_mcontext.gregs[REG_RSP];
 }
 
+/* Where the direct call ending just before `ret` went, or 0 where that is no
+ * `call rel32` (an indirect call states no target here). */
+static uint64_t direct_call_target(uint64_t ret)
+{
+    const uint8_t *call = (const uint8_t *)(uintptr_t)(ret - 5);
+    if (call[0] != 0xe8)
+        return 0;
+    int32_t rel;
+    memcpy(&rel, call + 1, sizeof rel);
+    return ret + (uint64_t)(int64_t)rel;
+}
+
 /* int3 over every byte: any byte control can reach traps. */
 static void trap_fill(uint8_t *start, size_t length)
 {
@@ -160,6 +172,18 @@ static uint64_t trap_address(const ucontext_t *uc)
 static uint64_t entry_return_address(const ucontext_t *uc)
 {
     return (uint64_t)uc->uc_mcontext.regs[30];
+}
+
+/* Where the `bl` just before `ret` went, or 0 where that is no `bl` (a `blr`
+ * states no target here). */
+static uint64_t direct_call_target(uint64_t ret)
+{
+    uint32_t word;
+    memcpy(&word, (const void *)(uintptr_t)(ret - 4), sizeof word);
+    if ((word & 0xfc000000u) != 0x94000000u)
+        return 0;
+    int64_t imm = (int64_t)((word & 0x03ffffffu) << 6) >> 4;
+    return ret - 4 + (uint64_t)imm;
 }
 
 /* brk #0 over every instruction word: instructions are 4-byte aligned, so any
@@ -526,7 +550,11 @@ static void child_guard(int sig, siginfo_t *info, void *context)
     if (pc == start) {
         caller = entry_return_address(uc);
         uintptr_t base = object_base((const void *)(uintptr_t)caller);
-        if (base != g_guard_own_base && base != g_guard_rt_base) {
+        /* A direct call from the rendering to another function that tail-jumped
+         * here is a recursion through the program, not a delegation. */
+        uint64_t called = base == g_guard_own_base ? direct_call_target(caller) : 0;
+        if ((base != g_guard_own_base && base != g_guard_rt_base)
+            || (called != 0 && called != start)) {
             /* The program called the function: it is the rendering now. The
              * registers and the stack are the caller's, exactly as a jump. */
             context_set_pc(uc, (uint64_t)(uintptr_t)g_guard_target);
