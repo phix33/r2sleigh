@@ -1,5 +1,5 @@
 {
- "note": "AArch64 (run_equiv.py --target aarch64, under qemu-user). Blessed from the first full run, on an x86-64 Ubuntu 24.04 host with its aarch64-linux-gnu-gcc 13.3 and clang 18.1 (--target=aarch64-linux-gnu), after reading the records; a cause in brackets names the owner. No CI job runs this target yet, so the CI bless D5 asks for is still owed. Re-blessed after 63e6300e (run at 5b1a9206 on contabo, 553 equal): classify clang-O1/O2 and gcc-O2 equal, from ub, once the lookup table is read at its address rather than through a string literal; no other record moved. Re-blessed at P4's exit (9da018ab, all shards at f8ca4cc5): 600 equal; each record that moved names its owner, and calls of unproven arity refuse (decided 2026-10-07). Re-blessed at the result-carrier stack (#85 to #87, gated at c9361ccc on gcc 13.3.0 / clang 18.1.3): 606 equal. A body writing both result registers is unproven unless the code reading it says which, each call deciding for itself; a float result is the lane its readers take; a parameter handed on untouched, or read only for a call of unproven arity, leaves the arity a floor its callers fill. Gained: avg at gcc-O0, gcc-O1 and clang-O1 (its double, returned as d0's lane), the mains of hashes gcc-O2, shapes clang-O1, clang-O2, gcc-O1 and gcc-O2, review gcc-O0 and gcc-O1, and code_pointer_table clang-O2. Lost to an honest residual: crc32_init and fill (void, unread), shape_function_pointer and table_dispatch at gcc-O0 (an indirect call of unproven arity, where legacy passed an argument nothing proved), and code_pointer_table clang-O0 main (its callee's result unproven). Re-blessed at lift-addv (#93): `addv b0` zeroes the vector above byte 0 (the vendored Ghidra AArch64 spec fix), so bit_count at gcc-O1 and gcc-O2 moves differs to equal, 606 to 608; CI run 37936776903 held every other record. Re-blessed at the D switch (#122): pdd renders through the staged decompiler, every move judged; equal rises x86-64 635 to 659 and aarch64 606 to 631, with no differs, ub, uninit or compile error on either. Re-blessed at #126: a callee with an unproven result states its parameters to every call, so shape_call_chain gcc-O1/O2 and shape_struct_pointer at four levels are equal (631 to 637). Re-blessed at #127: a constant byte shift demands only the bytes it moves, so combined clang-O1/O2 are equal (637 to 639). Re-blessed at #201 from its CI run (38331907688): value_count_bits is equal at gcc -O0/-O1/-O2, LZCOUNT being spelled; clang's cells wait on NEON_uaddlv. Re-blessed at #228 from its CI run (38488342021): 27 cells are equal, from the pair result (shape_multiword_return, shape_struct_pointer, shape_struct_value), the closed world's void result (inverted_void, crc32_init, fill, shape_stash, indirect_store, mixed_touch, shape_struct_array, #224) and the monotone stack-roots meet (#213). gcc-O2 shape_byte_indexed_buffer now first traps on a vector lane store: #213 removed its frame-record residuals. Re-blessed at #235 from its CI run (38511197484): gcc-O1 mixed_touch leaves equal, since the closed world now needs the second result register overwritten by every call (#224's review), and one call is followed by another call. Re-blessed at GT T1/T20 (schema 2): a residual trap is graded on the state it reached, so every residual-trap record now compares its output before the trap (and its memory, for a returned residual in the outermost activation; `compared`), and its reason names the trapping site's pddj cause; no record moved status. Every non-equal record names its ROADMAP.md owner and its site; causes that no longer described their record were rewritten from its rendering (sext, which carried gate_three's setcc cause, and the records whose trap had moved to another site), and the placeholders replaced. Re-blessed at #272 (52003906, gated on contabo): P7 (#264) makes a call to a callee whose arity is a floor a counted residual, and M3 (#269) names call gaps by their refusal. x86-64 equal 678 to 666, aarch64 685 to 676, no differs, ub or uninit; every move is judged in one of five causes: an indirect call of unstated arity, a caller of such a function, a recursive callee whose component reads itself alone, a variadic callee whose register save area reads as parameters (W14), and printf's stack tail now named.",
+ "note": "AArch64 (run_equiv.py --target aarch64, under qemu-user). Blessed from the first full run, on an x86-64 Ubuntu 24.04 host with its aarch64-linux-gnu-gcc 13.3 and clang 18.1 (--target=aarch64-linux-gnu), after reading the records; a cause in brackets names the owner. No CI job runs this target yet, so the CI bless D5 asks for is still owed. Re-blessed after 63e6300e (run at 5b1a9206 on contabo, 553 equal): classify clang-O1/O2 and gcc-O2 equal, from ub, once the lookup table is read at its address rather than through a string literal; no other record moved. Re-blessed at P4's exit (9da018ab, all shards at f8ca4cc5): 600 equal; each record that moved names its owner, and calls of unproven arity refuse (decided 2026-10-07). Re-blessed at the result-carrier stack (#85 to #87, gated at c9361ccc on gcc 13.3.0 / clang 18.1.3): 606 equal. A body writing both result registers is unproven unless the code reading it says which, each call deciding for itself; a float result is the lane its readers take; a parameter handed on untouched, or read only for a call of unproven arity, leaves the arity a floor its callers fill. Gained: avg at gcc-O0, gcc-O1 and clang-O1 (its double, returned as d0's lane), the mains of hashes gcc-O2, shapes clang-O1, clang-O2, gcc-O1 and gcc-O2, review gcc-O0 and gcc-O1, and code_pointer_table clang-O2. Lost to an honest residual: crc32_init and fill (void, unread), shape_function_pointer and table_dispatch at gcc-O0 (an indirect call of unproven arity, where legacy passed an argument nothing proved), and code_pointer_table clang-O0 main (its callee's result unproven). Re-blessed at lift-addv (#93): `addv b0` zeroes the vector above byte 0 (the vendored Ghidra AArch64 spec fix), so bit_count at gcc-O1 and gcc-O2 moves differs to equal, 606 to 608; CI run 37936776903 held every other record. Re-blessed at the D switch (#122): pdd renders through the staged decompiler, every move judged; equal rises x86-64 635 to 659 and aarch64 606 to 631, with no differs, ub, uninit or compile error on either. Re-blessed at #126: a callee with an unproven result states its parameters to every call, so shape_call_chain gcc-O1/O2 and shape_struct_pointer at four levels are equal (631 to 637). Re-blessed at #127: a constant byte shift demands only the bytes it moves, so combined clang-O1/O2 are equal (637 to 639). Re-blessed at #201 from its CI run (38331907688): value_count_bits is equal at gcc -O0/-O1/-O2, LZCOUNT being spelled; clang's cells wait on NEON_uaddlv. Re-blessed at #228 from its CI run (38488342021): 27 cells are equal, from the pair result (shape_multiword_return, shape_struct_pointer, shape_struct_value), the closed world's void result (inverted_void, crc32_init, fill, shape_stash, indirect_store, mixed_touch, shape_struct_array, #224) and the monotone stack-roots meet (#213). gcc-O2 shape_byte_indexed_buffer now first traps on a vector lane store: #213 removed its frame-record residuals. Re-blessed at #235 from its CI run (38511197484): gcc-O1 mixed_touch leaves equal, since the closed world now needs the second result register overwritten by every call (#224's review), and one call is followed by another call. Re-blessed at GT T1/T20 (schema 2): a residual trap is graded on the state it reached, so every residual-trap record now compares its output before the trap (and its memory, for a returned residual in the outermost activation; `compared`), and its reason names the trapping site's pddj cause; no record moved status. Every non-equal record names its ROADMAP.md owner and its site; causes that no longer described their record were rewritten from its rendering (sext, which carried gate_three's setcc cause, and the records whose trap had moved to another site), and the placeholders replaced. Re-blessed at #272 (52003906, gated on contabo): P7 (#264) makes a call to a callee whose arity is a floor a counted residual, and M3 (#269) names call gaps by their refusal. x86-64 equal 678 to 666, aarch64 685 to 676, no differs, ub or uninit; every move is judged in one of five causes: an indirect call of unstated arity, a caller of such a function, a recursive callee whose component reads itself alone, a variadic callee whose register save area reads as parameters (W14), and printf's stack tail now named. Re-blessed for P7 W14 (p7-variadic-save-area): a register save area is a variadic tail, so shapes.c's shape_variadic_local calls to vfold and main's calls to it are counted residuals where they passed never-assigned arguments; each moved record names its cause.",
  "records": {
   "tests/corpus/branchy.c::aarch64-clang-O0::addr_chain": {
    "status": "equal"
@@ -942,11 +942,11 @@
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::main": {
-   "cause": "[P7, W14] shape_variadic and shape_variadic_local hand their unwritten argument registers on to a variadic callee whose va_start prologue saves every argument register, which recovery reads as parameters: the arity resolves to every register slot and main's call passes the slots it never wrote as never-assigned residuals. Closing fact: a register save area stated as a variadic tail (W14).",
+   "cause": "[P7, W14] The first trap is main's call to shape_variadic_local: that function hands its parameters only into vfold's variadic tail (vfold's va_start save area is its tail, W14), whose count no format literal proves, so its arity is a floor of 0 and this call, writing past it, is a counted Floor gap where it passed never-assigned residuals before. Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count, so vfold(1u, a) passes one (a summary, SM).",
    "compared": "output",
    "owner": "P7",
-   "reason": "r2sleigh_residual_u64 never-assigned",
-   "site": "crates/r2ssa/src/recover_interface.rs",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/save_area.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::mixed_fold": {
@@ -1043,7 +1043,12 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::shape_variadic_local": {
-   "status": "equal"
+   "cause": "[P7, W14] vfold is variadic (its va_start save area, W14), and no format literal counts the tail its calls pass, so each call is the counted residual VariadicCount(missing_format_parameter) where it passed every argument register before (slots this function never wrote). Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count (a summary, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/save_area.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::vfold": {
    "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
@@ -1071,11 +1076,11 @@
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::main": {
-   "cause": "[P7, #264] The callee (table_dispatch or shape_function_pointer) hands an argument slot to an indirect call of unstated arity, so its arity stays a floor even under aa, and this call, writing past the floor, is a counted residual (a tail jump's TailTransferNotRendered; never-assigned where the unrendered call's result is read). Closing fact: the indirect call's target-set prototype, which makes the callee's arity exact (P7).",
+   "cause": "[P7, W14] The first trap is main's call to shape_variadic_local: that function hands its parameters only into vfold's variadic tail (vfold's va_start save area is its tail, W14), whose count no format literal proves, so its arity is a floor of 0 and this call, writing past it, is a counted Floor gap where it passed never-assigned residuals before. Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count, so vfold(1u, a) passes one (a summary, SM). The #264 floor the record carried before follows: table_dispatch or shape_function_pointer hands an argument slot to an indirect call of unstated arity, so a call to it writing past the floor is a counted residual too (closing fact: the indirect call's target-set prototype).",
    "compared": "output",
    "owner": "P7",
-   "reason": "r2sleigh_residual_u64 never-assigned",
-   "site": "crates/r2ssa/src/recover_interface.rs",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/save_area.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::mixed_fold": {
@@ -1165,7 +1170,12 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::shape_variadic_local": {
-   "status": "equal"
+   "cause": "[P7, W14] vfold is variadic (its va_start save area, W14), and no format literal counts the tail its calls pass, so each call is the counted residual VariadicCount(missing_format_parameter) where it passed every argument register before (slots this function never wrote). Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count (a summary, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/save_area.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::vfold": {
    "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
@@ -1188,11 +1198,11 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::main": {
-   "cause": "[P7, #264] The callee (table_dispatch or shape_function_pointer) hands an argument slot to an indirect call of unstated arity, so its arity stays a floor even under aa, and this call, writing past the floor, is a counted residual (a tail jump's TailTransferNotRendered; never-assigned where the unrendered call's result is read). Closing fact: the indirect call's target-set prototype, which makes the callee's arity exact (P7).",
+   "cause": "[P7, W14] The first trap is main's call to shape_variadic_local: that function hands its parameters only into vfold's variadic tail (vfold's va_start save area is its tail, W14), whose count no format literal proves, so its arity is a floor of 0 and this call, writing past it, is a counted Floor gap where it passed never-assigned residuals before. Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count, so vfold(1u, a) passes one (a summary, SM). The #264 floor the record carried before follows: table_dispatch or shape_function_pointer hands an argument slot to an indirect call of unstated arity, so a call to it writing past the floor is a counted residual too (closing fact: the indirect call's target-set prototype).",
    "compared": "output",
    "owner": "P7",
-   "reason": "r2sleigh_residual_u64 never-assigned",
-   "site": "crates/r2ssa/src/recover_interface.rs",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/save_area.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::mixed_fold": {
@@ -1282,7 +1292,12 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::shape_variadic_local": {
-   "status": "equal"
+   "cause": "[P7, W14] vfold is variadic (its va_start save area, W14), and no format literal counts the tail its calls pass, so each call is the counted residual VariadicCount(missing_format_parameter) where it passed every argument register before (slots this function never wrote). Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count (a summary, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/save_area.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::vfold": {
    "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
@@ -1305,11 +1320,11 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::main": {
-   "cause": "[P7, W14] shape_variadic and shape_variadic_local hand their unwritten argument registers on to a variadic callee whose va_start prologue saves every argument register, which recovery reads as parameters: the arity resolves to every register slot and main's call passes the slots it never wrote as never-assigned residuals. Closing fact: a register save area stated as a variadic tail (W14).",
+   "cause": "[P7, W14] The first trap is main's call to shape_variadic_local: that function hands its parameters only into vfold's variadic tail (vfold's va_start save area is its tail, W14), whose count no format literal proves, so its arity is a floor of 0 and this call, writing past it, is a counted Floor gap where it passed never-assigned residuals before. Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count, so vfold(1u, a) passes one (a summary, SM).",
    "compared": "output",
    "owner": "P7",
-   "reason": "r2sleigh_residual_u64 never-assigned",
-   "site": "crates/r2ssa/src/recover_interface.rs",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/save_area.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::mixed_fold": {
@@ -1401,11 +1416,11 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::shape_variadic_local": {
-   "cause": "The local variadic callee vfold(unsigned, ...) is recovered with eight fixed parameters (x0..x7, as `uint64_t fcn(uint32_t, uint64_t x 7)`), so the call passes x3..x7, which the caller never assigns: those arguments are residuals (never-assigned). Owner: the variadic callee's arity as AtLeast(n) from its body. Before, this record carried the frame record's cause, which now describes gcc-O2.",
+   "cause": "[P7, W14] vfold is variadic (its va_start save area, W14), and no format literal counts the tail its calls pass, so each call is the counted residual VariadicCount(missing_format_parameter) where it passed every argument register before (slots this function never wrote). Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count (a summary, SM).",
    "compared": "output",
    "owner": "P7",
-   "reason": "r2sleigh_residual_u64 never-assigned",
-   "site": "crates/r2ssa/src/recover_interface.rs",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/save_area.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::vfold": {
@@ -1429,11 +1444,11 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::main": {
-   "cause": "[P7, #264] The callee (table_dispatch or shape_function_pointer) hands an argument slot to an indirect call of unstated arity, so its arity stays a floor even under aa, and this call, writing past the floor, is a counted residual (a tail jump's TailTransferNotRendered; never-assigned where the unrendered call's result is read). Closing fact: the indirect call's target-set prototype, which makes the callee's arity exact (P7).",
+   "cause": "[P7, W14] The first trap is main's call to shape_variadic_local: that function hands its parameters only into vfold's variadic tail (vfold's va_start save area is its tail, W14), whose count no format literal proves, so its arity is a floor of 0 and this call, writing past it, is a counted Floor gap where it passed never-assigned residuals before. Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count, so vfold(1u, a) passes one (a summary, SM). The #264 floor the record carried before follows: table_dispatch or shape_function_pointer hands an argument slot to an indirect call of unstated arity, so a call to it writing past the floor is a counted residual too (closing fact: the indirect call's target-set prototype).",
    "compared": "output",
    "owner": "P7",
-   "reason": "r2sleigh_residual_u64 never-assigned",
-   "site": "crates/r2ssa/src/recover_interface.rs",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/save_area.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::mixed_fold": {
@@ -1538,11 +1553,11 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_variadic_local": {
-   "cause": "The local variadic callee vfold(unsigned, ...) is recovered with eight fixed parameters (x0..x7, as `uint64_t fcn(uint32_t, uint64_t x 7)`), so the call passes x3..x7, which the caller never assigns: those arguments are residuals (never-assigned). Owner: the variadic callee's arity as AtLeast(n) from its body. Before, this record carried the frame record's cause, which now describes gcc-O2.",
+   "cause": "[P7, W14] vfold is variadic (its va_start save area, W14), and no format literal counts the tail its calls pass, so each call is the counted residual VariadicCount(missing_format_parameter) where it passed every argument register before (slots this function never wrote). Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count (a summary, SM).",
    "compared": "output",
    "owner": "P7",
-   "reason": "r2sleigh_residual_u64 never-assigned",
-   "site": "crates/r2ssa/src/recover_interface.rs",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/save_area.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::vfold": {
@@ -1665,11 +1680,11 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::shape_variadic_local": {
-   "cause": "The frame record's store of the caller's frame pointer (x29) is rendered as a store of x29's entry value, held from entry, into frame + 0, and nothing reads it back; that residual traps first, before the call to vfold whose x2..x7 arguments (unadmitted-argument) are residuals too. x86-64's `push rbp` is kept as a preserved save since R4. Before, this record carried the va_list calls' cause, a later site.",
+   "cause": "[P7, W14] vfold is variadic (its va_start save area, W14), and no format literal counts the tail its calls pass, so each call is the counted residual VariadicCount(missing_format_parameter) where it passed every argument register before (slots this function never wrote). Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count (a summary, SM).",
    "compared": "output",
-   "owner": "P4",
-   "reason": "r2sleigh_residual_u64 held-from-entry",
-   "site": "crates/r2ssa/src/function/dead_frame_stores.rs",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/save_area.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::vfold": {

@@ -183,6 +183,125 @@ request demands results only, as above, and pays no closure (D23): measured on
 0pack `0x62ecf0`, demanding arity on a cold `pdd` took 20.0 to 36.5 G
 instructions, pumasim `0x23fdf0` 18.1 to 21.2 G.
 
+### Variadic tail (ROADMAP P7, W14)
+
+A `va_start` prologue saves every argument register past the named ones to
+the convention's register save area, and recovery read those saves as
+parameter reads: shapes.c's `vfold(unsigned, ...)` was `Exact(6)` on x86-64
+and `Exact(8)` on AArch64, and its callers passed slots they never wrote.
+
+**The fact.** A body is variadic with `named` fixed parameters where, in
+entry-stack-pointer coordinates and for one area base `A` and slot width `w`:
+
+1. each argument slot `i` from `named` to the last has its entry value stored
+   at `A + w·i`, and slot `named - 1` has not, with `named ≥ 1`;
+2. nothing else reads those saved values, through merges and copies; a use
+   nothing observes (`xor ecx, ecx`) or a call's implicit use reads nothing;
+3. the bound of the area the convention names is stored to memory, as a
+   `va_list` holds it: System V AMD64's `reg_save_area` (`A`, psABI 3.5.7,
+   Figure 3.33) and AAPCS64's `__gr_top` (`A + w·N`, "Variable argument
+   lists"), r2abi's cited rows, carried by `SourceConventionSlots`.
+
+Rule 3 separates an O0 body spilling its own six parameters, whose spill
+address no `va_list` holds; rule 1's named slot separates an aggregate of
+every parameter whose address is stored (`struct six s = {a, ..., f}; p =
+&s;`), which C before C23 cannot be variadic with; rule 2's other reads
+refuse the area, as does a tail slot the recovered reads still show (a
+call that takes it). The vector block behind `test al, al` and the
+`gp_offset`/`__gr_offs` constants are not required: gcc -O1 and -O2 omit
+the block and the `fp_offset` store when no `va_arg` reads a float.
+
+**Owner.** r2ssa (`save_area::register_save_area`, read by interface
+recovery); r2abi states the anchor; the interface carries it on the one
+variadic bit a declaration's `...` sets (`with_variadic_tail`), with the
+fixed prefix `Exact(named)`: a slot below the area the body never reads is
+a parameter at its slot's width, since the area starts at the first unnamed
+slot. The argument area past the registers and a tail register reaching a
+call of unproven arity are the tail's, not a floor. r2dec spells `, ...`.
+
+**Callers.** A call mints the existing variadic contract: a format literal
+counts its tail, else the call is the counted residual
+`VariadicCount(missing_format_parameter)`. A callee whose result is
+unproven is a statement, and a statement counts no tail, so it states a
+variadic callee `AtLeast(named)`. The body's reads of its tail registers
+and of the vector count (`al`) are named "variadic tail registers" on the
+proof line.
+
+**The `al` input.** A summary resolves alone, where a local callee is
+unread, so a call to `vfold` was counted from the registers written
+(gcc -O0's dead `rdx = 0` among them) and proved `shape_variadic_local`
+`Exact(2)`, while its root, reading `vfold`'s summary, is a floor of 0:
+certification graded `main` calling it with 2, "defined with 0". System V
+hands a call to a variadic or unprototyped function its vector count in
+`al` (psABI 3.5.7; r2abi's row, on `SourceConventionSlots`), so a register
+count is refused (`CountRegisterSet`) where the body sets that register for
+the call alone: a constant at most 8 only the call reads, found from the
+call's own `CallUse`, O(reads). The call keeps no argument past its callee's
+floor, and both grades agree. gcc's stack protector clears its guard from
+`eax` with the same `xor eax, eax`, often just before the first call
+(pumasim `0x21fb90`, `0x23da20`, `0x23fdf0`): a zero over a compiler-inserted
+guard read is the protector's, not a count (one reaching search, only where
+the register is set). Where gcc merges the two the call stays counted, as
+before. A K&R call to an unprototyped function sets `al` too, so its summary
+is a floor until `aa` resolves it against the callee.
+
+**Cost.** One pass over the body's stores and the uses of the saved values,
+O(insts + uses), inside recovery's existing pass; per convention boundary,
+O(the call's reads). Release `pdd`, instructions before and after:
+0pack `0x62ecf0` 19.80 to 19.56 G (`aa; pdd` 62.08 to 61.88 G), 0pack
+`0x58e3d0` 23.25 to 23.06 G (74.51 to 74.30 G, output identical), pumasim
+`0x23fdf0` 18.32 to 18.16 G (60.36 to 60.17 G). Finding the call's reads by
+searching its block first cost 0pack `0x62ecf0` 1.4 G.
+
+**Measured (2026-10-15).** shapes.c, gcc and clang at -O0, -O1, -O2 on
+x86-64 and AArch64, stripped, `aa; pdd`: `vfold` renders
+`(uint32_t arg0, ...)` on all 12 builds (6 or 8 parameters before), and the
+four calls to it in each `shape_variadic_local` are counted residuals where
+they passed up to six slots the caller never wrote. `shape_variadic_local`
+hands its parameters only into tails of unproven count, so its arity is a
+floor of 0 and `main`'s call to it is a `Floor` gap on all 12, never the
+never-assigned residuals it passed. Certification over the 12 builds:
+invented arguments 1 to 0 (aarch64 gcc -O2's `shape_variadic_local` passed
+9 to the 8-ary `vfold`), graded calls 5 fewer per build (the calls now refused); on the
+census binaries invented stays 0 and the census moves only
+`shapes_gcc_x64_O0`'s three. 0pack `0x62ecf0` renders 10 calls to
+`el::base::Writer::construct(int, const char*, ...)` as counted residuals
+where they passed three never-assigned ones; pumasim `0x23fdf0` loses its 85
+never-assigned residuals (97 under `aa`), invented arguments of callees such
+as `QColor::setRgb(int, int, int)`, which handed its unwritten slots to
+`qWarning(const char*, ...)` and was 6-ary. Equivalence on shapes.c (both
+targets, 23 records moved, each with its cause): five records leave equal
+for residual-trap, `shape_variadic_local` on x86-64 clang -O0 and AArch64
+clang -O0/-O1/-O2 and x86-64 gcc -O0's `main`, whose C passed the caller's
+own unwritten registers on and so matched by accident; the W14 `main`
+records stay residual-trap, now at the `Floor` gap rather than
+never-assigned arguments. None closes: that needs the count-driven tail.
+
+**What is left.**
+
+- A count-driven tail: `vfold`'s `va_arg` loop is bounded by its named
+  `count`, so `vfold(1u, a)` passes exactly one; a summary that states it
+  (SM) would close the W14 `main` records. Conditional on SM.
+- The scrub exception rests on the stack-protector check being decided
+  (`UbFreeSource`, the platform's guard row); where it is not, gcc's
+  prologue `xor eax, eax` before a first call still reads as a count, and
+  that call's summary is a floor. K&R calls to unprototyped functions set
+  `al` too, so their summaries are floors until `aa`. Measured only on the
+  census set, shapes.c and three large functions.
+- A floor of 0 renders `(void)` (W11's "no invented `(void)`").
+- AArch64 hands no vector count, so a summary there can still count a call
+  to an unread variadic callee from registers and disagree with its root
+  (AArch64 shapes agreed only because `MayHandOn` fired). Closing it without
+  the closure D23 forbids needs a fact of the call site; conditional.
+- A tail jump to a variadic callee whose count is unproven is spelled
+  `UnsupportedInstruction` plus `TailTransferNotRendered` (pumasim
+  `QColor::setRgb`'s `qWarning`), not by its refusal as M3 spells a call.
+- pumasim `0x23fdf0` under `aa`: three calls to `QWidget::setMinimumSize`
+  that passed three invented arguments are now "another call disagrees with
+  its declaration" gaps (P7's 41, conditional).
+- Named float parameters (`fp_offset`, `__vr_offs`) with W11; Microsoft
+  x64's home area has no row, and Darwin arm64 passes the tail on the stack.
+
 ### Summaries (ROADMAP SM, D23)
 
 **The fact.** `Summary(f)` is what a caller reads of a body: its interface
