@@ -1158,9 +1158,18 @@ reason = "ARM32 (ungraded): a conditional transfer whose skipped run holds the T
 [[judged]]
 command = "aoj"
 binaries = "*"
+arch = '^x86$'
+fields = ["halted"]
+r2s = '^call 0x[0-9a-f]+$'
+verdict = "deliberate"
+reason = "radare2 folds a call to a get_pc_thunk (__x86.get_pc_thunk.bx and kin, named or not) into `reg = return address`, with no stack access, so its sets name that register alone; across the call and the thunk's return the effect is right"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
 fields = ["halted"]
 verdict = "r2s-right"
-reason = "radare2's aea stops at the first memory access its emulated registers do not map (core's mymemread and mymemwrite return false for an invalid offset, so ESIL aborts the expression) and drops the instruction's remaining effects, and folds a call to __x86.get_pc_thunk into `ebx = return address` with no stack access; its sets say nothing there. Upstream: record the access and return true"
+reason = "radare2's aea stops at the first memory access its emulated registers do not map (core's mymemread and mymemwrite return false for an invalid offset, so ESIL aborts the expression) and drops the instruction's remaining effects; its sets say nothing there. Upstream radare2#26987 (open) records the access and continues; this flips when it merges and the pinned release moves"
 
 # The register classes.
 
@@ -1203,7 +1212,7 @@ lacking = "r2"
 r2 = '^\w+?(eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le)(\.w)? '
 theirs = '^((cf|nf|vf|zf) ?)*$'
 verdict = "r2s-right"
-reason = "aea emulates one register state, with every flag clear: a condition that fails there (eq, le, ..) skips the instruction, so radare2 lists only the flags it tested and none of what the instruction does when it runs"
+reason = "aea emulates one register state, with every flag clear: a condition that fails there (eq, le, ..) skips the instruction, so radare2 lists only the flags it tested and none of what the instruction does when it runs; upstream issue radare2#26992, which flips this when it is fixed and the pinned release moves"
 
 [[judged]]
 command = "aoj"
@@ -1252,7 +1261,7 @@ registers = ["ng", "zr"]
 lacking = "r2"
 r2s = '^movs(\.w)? '
 verdict = "r2s-right"
-reason = "MOVS sets N and Z from its result (Arm ARM); radare2's ESIL for it writes the destination alone"
+reason = "MOVS sets N and Z from its result (Arm ARM); radare2's ESIL for it writes the destination alone; upstream radare2#26988, which flips this when it merges and the pinned release moves"
 
 [[judged]]
 command = "aoj"
@@ -1262,7 +1271,7 @@ fields = ["reads"]
 lacking = "r2"
 r2s = '^ldr \w+, \[pc, \w+\]$'
 verdict = "r2s-right"
-reason = "as pd, 0xe79f1001 is LDR (register), pc plus the offset register, which it reads; radare2's ESIL reads a pool word and no register"
+reason = "as pd, 0xe79f1001 is LDR (register), pc plus the offset register, which it reads; radare2's ESIL reads a pool word and no register; upstream radare2#26984, which flips this when it merges and the pinned release moves"
 
 [[judged]]
 command = "aoj"
@@ -1365,7 +1374,7 @@ lacking = "r2s"
 registers = ["lr"]
 r2s = '^ret x(?!30)\d+$'
 verdict = "r2s-right"
-reason = "RET Xn returns to Xn; radare2's ESIL for it reads lr whatever the operand"
+reason = "RET Xn returns to Xn; radare2's ESIL for it reads lr whatever the operand; upstream radare2#26991, which flips this when it merges and the pinned release moves"
 
 [[judged]]
 command = "aoj"
@@ -1375,7 +1384,7 @@ fields = ["reads"]
 lacking = "r2"
 r2s = '^ret x(?!30)\d+$'
 verdict = "r2s-right"
-reason = "RET Xn returns to Xn; radare2's ESIL for it reads lr whatever the operand"
+reason = "RET Xn returns to Xn; radare2's ESIL for it reads lr whatever the operand; upstream radare2#26991, which flips this when it merges and the pinned release moves"
 
 [[judged]]
 command = "aoj"
