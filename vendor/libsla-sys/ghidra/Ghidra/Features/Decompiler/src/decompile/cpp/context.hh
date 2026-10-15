@@ -18,6 +18,7 @@
 
 #include "globalcontext.hh"
 #include "opcodes.hh"
+#include "translate.hh"
 
 namespace ghidra {
 
@@ -202,7 +203,11 @@ inline void ParserContext::deallocateState(ParserWalkerChange &walker) {
   walker.baseState();
 }
 
+/// \throw BadDataError when the parse is deeper than \b state or the walker's path holds
 inline void ParserContext::allocateOperand(int4 i,ParserWalkerChange &walker) {
+  if ((uint4)alloc >= state.size() || (uint4)walker.depth + 1 >= sizeof(walker.breadcrumb)/sizeof(int4)
+      || (uint4)i >= walker.point->resolve.size())
+    throw BadDataError("Instruction parse is deeper than the parser context holds");
   ConstructState *opstate = &state[alloc++];
   opstate->parent = walker.point;
   opstate->ct = (Constructor *)0;
