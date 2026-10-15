@@ -341,7 +341,8 @@ fn relabel_local_branches(out: &mut [R2ILOp], at: &[usize], starts: &[usize]) {
 /// temporary the operation writes and a store carries out; a copy needs no
 /// temporary at all. The code address a direct transfer names, as
 /// [`R2ILOp::transfer`] states it, is not a memory operand; a slot an indirect
-/// transfer reads its destination from is, and is loaded like any other.
+/// transfer reads its destination from is, and is loaded like any other. A label
+/// inside the instruction keeps naming its operation (`relabel_local_branches`).
 pub fn canonicalize_memory_operands(
     ops: Vec<R2ILOp>,
     address_size: u32,
@@ -353,9 +354,15 @@ pub fn canonicalize_memory_operands(
         *next_temp += u64::from(size).max(1);
         node
     };
+    let (mut starts, mut at) = (
+        Vec::with_capacity(ops.len() + 1),
+        Vec::with_capacity(ops.len()),
+    );
     for mut op in ops {
+        starts.push(out.len());
         match &op {
             R2ILOp::Copy { dst, src } if src.space == SpaceId::Ram && dst.space != SpaceId::Ram => {
+                at.push(out.len());
                 out.push(R2ILOp::Load {
                     dst: dst.clone(),
                     space: SpaceId::Ram,
@@ -364,6 +371,7 @@ pub fn canonicalize_memory_operands(
                 continue;
             }
             R2ILOp::Copy { dst, src } if dst.space == SpaceId::Ram && src.space != SpaceId::Ram => {
+                at.push(out.len());
                 out.push(R2ILOp::Store {
                     space: SpaceId::Ram,
                     addr: Varnode::constant(dst.offset, address_size),
@@ -398,6 +406,7 @@ pub fn canonicalize_memory_operands(
                 *output = value.clone();
                 (address, value)
             });
+        at.push(out.len());
         out.push(op);
         if let Some((address, val)) = written {
             out.push(R2ILOp::Store {
@@ -406,6 +415,10 @@ pub fn canonicalize_memory_operands(
                 val,
             });
         }
+    }
+    starts.push(out.len());
+    if out.len() + 1 != starts.len() {
+        relabel_local_branches(&mut out, &at, &starts);
     }
     out
 }
@@ -662,6 +675,47 @@ mod tests {
             }
             _ => panic!("Expected PtrAdd"),
         }
+    }
+
+    /// `bsf ecx, [rip+d]` reads memory inside its own loop: a label still names its operation,
+    /// and one naming a read names the load that now computes it.
+    #[test]
+    fn a_label_across_a_loaded_operand_keeps_naming_its_operation() {
+        let flag = Varnode::register(0x206, 1);
+        let label = |offset| Varnode::constant(offset, 4);
+        let ops = vec![
+            R2ILOp::CBranch {
+                target: label(2),
+                cond: flag.clone(),
+            },
+            R2ILOp::IntAdd {
+                dst: Varnode::register(0, 4),
+                a: Varnode::ram(0x2000, 4),
+                b: Varnode::constant(1, 4),
+            },
+            R2ILOp::Copy {
+                dst: Varnode::register(8, 4),
+                src: Varnode::register(0, 4),
+            },
+            R2ILOp::Branch {
+                target: label(u64::from(u32::MAX) - 1),
+            },
+        ];
+        let out = canonicalize_memory_operands(ops, 8, &mut 0x100);
+        assert!(matches!(out[1], R2ILOp::Load { .. }), "{out:?}");
+        assert_eq!(
+            out[0],
+            R2ILOp::CBranch {
+                target: label(3),
+                cond: flag
+            }
+        );
+        assert_eq!(
+            out[4],
+            R2ILOp::Branch {
+                target: label(u64::from(u32::MAX) - 2)
+            }
+        );
     }
 
     #[test]
