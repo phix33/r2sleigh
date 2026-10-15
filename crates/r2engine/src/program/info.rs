@@ -23,6 +23,8 @@ pub struct FunctionInfo {
     /// The calling convention the type analysis settled on, where it did.
     pub convention: Option<String>,
     pub arguments: Vec<Argument>,
+    /// Whether arguments continue past `arguments`: a variadic tail the interface states.
+    pub variadic: bool,
     pub locals: Vec<Local>,
     /// What a definition of it declares it returns, and what that rests on: the decided type, or
     /// the result carrier a caller reads, on the convention alone, where the value is unproven
@@ -100,6 +102,8 @@ impl FunctionInfo {
                 .collect(),
             convention: facts.type_facts().callconv.clone(),
             arguments: arguments(artifact, sealed, &entities),
+            variadic: (artifact.machine_context().function_interface())
+                .is_some_and(r2source::SourceFunctionInterface::is_variadic),
             returns: returns(artifact, sealed),
             locals: locals(artifact, sealed, &entities),
             noreturn,
@@ -128,6 +132,7 @@ impl FunctionInfo {
             calls: Vec::new(),
             convention: None,
             arguments: Vec::new(),
+            variadic: false,
             locals: Vec::new(),
             returns: None,
             noreturn,

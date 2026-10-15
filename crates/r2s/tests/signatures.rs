@@ -39,8 +39,8 @@ fn header_types(header: &str) -> (String, Vec<String>) {
     let (returns, _name) = head.trim_end().rsplit_once(' ').expect("a return type");
     let parameters = parameters
         .split(", ")
-        // `(void)` is C's spelling of no parameters at all.
-        .filter(|parameter| !parameter.is_empty() && *parameter != "void")
+        // `(void)` is C's spelling of no parameters at all, and `...` a tail, not a parameter.
+        .filter(|parameter| !parameter.is_empty() && !matches!(*parameter, "void" | "..."))
         .map(|parameter| {
             let (ty, _name) = parameter.rsplit_once(' ').expect("a typed parameter");
             ty.to_owned()
@@ -71,12 +71,9 @@ fn afi_states_the_signature_pdd_declares() {
 
 #[test]
 fn pdd_declares_every_formal_the_interface_has_even_unread() {
-    // `vfold` spills six carriers for `va_start`, and the interface keeps every
-    // one though the body reads fewer. `main` has no declaration of its own
-    // here: the library table's `main` is found by name, and a name selects no
-    // body's declaration, so its formals are what its body proves -- which
-    // `afi` and `pdd` still state alike.
-    for (function, arity) in [("sym.vfold", Some(6)), ("main", None)] {
+    // `vfold`'s `va_start` saves are its variadic tail, not five more formals (W14). `main`'s
+    // formals are what its body proves; a name selects no declaration. `afi` and `pdd` agree.
+    for (function, arity) in [("sym.vfold", Some(1)), ("main", None)] {
         let info = r2s_on("shapes_gcc_x64_O0", &format!("afi @ {function}"));
         let signature = info
             .lines()
@@ -88,6 +85,8 @@ fn pdd_declares_every_formal_the_interface_has_even_unread() {
         let (_, pdd) = header_types(header);
         if let Some(arity) = arity {
             assert_eq!(pdd.len(), arity, "{header}");
+            assert!(header.ends_with(", ...)"), "{header}");
+            assert!(signature.ends_with(", ...);"), "{signature}");
         }
         assert_eq!(afi, pdd, "{signature}\n{header}");
     }
