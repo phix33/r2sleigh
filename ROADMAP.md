@@ -236,15 +236,18 @@ Every item replaces what it owns and deletes the old path in its own branch
 census line, meets D19's budgets, and violates nothing in D11.
 
 Upstream radare2 (differential target,
-[radare2-function-walk](doc/adr-radare2-function-walk.md)): `ret` given one
-definition, one read-ahead cache per walk, predecessor in the frame,
-edge-labelled path state, the callee-recursion cap derived; the defects P11's
-sweep judged (stub naming, PLT entry sizes, Thumb bits, `SHN_ABS`, BE8). Merged:
-the ObjC prototypes (audit W10, radare2#26975), packed-reloc imports (#26982).
-Open: ARM `ldr r, [pc, rN]` emulation and listing (#26984), the ARM pseudo
-mode's pc-relative offset (#26985), the read-ahead cache (#26986), `/as`
-alignment (#26965), a fat Mach-O's entry header offset (#26970); issue #26983
-(BE8 code byte order). Each its own pull request, measured alone.
+[radare2-function-walk](doc/adr-radare2-function-walk.md)): edge-labelled path
+state (needs design), the callee-recursion cap derived; `ret` given one
+definition and the predecessor in the frame were measured with no payoff (the
+ADR's numbers); the defects P11's sweep judged (stub naming, PLT entry sizes,
+Thumb bits, `SHN_ABS`, BE8). Merged: the ObjC prototypes (audit W10,
+radare2#26975), packed-reloc imports (#26982). Open: ARM `ldr r, [pc, rN]`
+emulation and listing (#26984), the ARM pseudo mode's pc-relative offset
+(#26985), the read-ahead cache (#26986), `/as` alignment (#26965), a fat
+Mach-O's entry header offset (#26970), `aea` on unmapped memory (#26987), Thumb
+`movs` (#26988), AArch64 `ret xN` (#26991), arm64 `mrs`/`msr` `tpidr_el0`
+(#26994); issues #26983 (BE8 code byte order), #26992 (`aea` under a failing
+ARM condition). Each its own pull request, measured alone.
 
 After the program, each only once its consumers exist: binary diffing over
 callee summaries, exception-handler recovery, the techniques of #65 (switch

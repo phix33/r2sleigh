@@ -57,18 +57,17 @@ upstream pull requests, one idea each.
 
 ## Left (upstream radare2, each one PR in this order)
 
-1. Give `ret` a definition: `END` when the entry block scanned, `ERROR` when it
-   could not, `NOP` on the `RJMP` path, never a byte count. Delete
-   `R_ANAL_RET_DUP`/`R_ANAL_RET_NEW`. This changes results, so it is measured
-   on its own.
+1. Give `ret` a definition. Measured on master with no payoff, not taken: no
+   walk returns a byte count since it became non-recursive (`aa` returns
+   ERROR/END/NOP: vim 2603/2029/74, libstdc++ 1626/3959/52, ls-m1 22/29/83), and
+   `br`'s NOP as END moved nothing on ls-m1, libstdc++, TestApp.ios, 3 blocks on vim.
 2. One read-ahead cache per walk instead of one per frame. Result-preserving;
    measured in IO reads per function. Open as radare2#26986: `aa` reads 109,762
    to 36,583 on 0pack, 94,428 to 23,866 on vim, CPU unchanged on local files.
-3. Carry the predecessor in the frame, replacing `try_get_jmptbl_info`'s scan
-   of every block; record each block's delay-slot tail so `bbget` stops
-   re-decoding; hoist `function_has_ret_between` out of the per-case loop.
-   Result-preserving; measured on switch-heavy functions.
+3. Carry the predecessor in the frame. Measured with no CPU payoff, not taken:
+   `try_get_jmptbl_info`'s block scan is 0 to 1 of 1746 to 2506 walk samples on
+   vim, 0pack and libstdc++.
 4. Edge-labelled path state with a join: the entry delta, the last compare and
    the live `lea` candidates become forward dataflow facts, where unequal
-   labels become unknown. Result-changing, so it is measured separately.
-5. Derive the cap on `r_core_anal_fcn`'s callee recursion the same way.
+   labels become unknown. Result-changing, so it is measured separately; needs design.
+5. Derive the cap on `r_core_anal_fcn`'s callee recursion the same way (not yet taken).
