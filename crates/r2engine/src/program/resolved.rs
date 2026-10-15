@@ -113,7 +113,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Resolved {
         if demand == Demand::Arity && member_owned(&alone.0, &cycle.members) {
             return least_fixpoint(db, &view, &cycle.members, node);
         }
-        outside_resolved(db, node, &alone, owners, &cycle.members, demand)
+        outside_resolved(db, node, &alone, &cycle.members, demand)
     }
 
     fn hold(value: &Shared<CalleeRead>) -> Hold {
@@ -130,11 +130,10 @@ fn outside_resolved<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,
     node: Node,
     alone: &Shared<CalleeRead>,
-    owners: Vec<Node>,
     members: &[Node],
     demand: Demand,
 ) -> Shared<CalleeRead> {
-    let outside = owners.into_iter();
+    let outside = bodies(&View::new(db, true), &alone.0, demand).into_iter();
     let outside = outside.filter(|owner| members.binary_search(owner).is_err());
     let mut resolved = Vec::new();
     for owner in outside {
@@ -236,121 +235,188 @@ impl Assumed {
     }
 }
 
-/// A cycle's arities as their least fixpoint (doc/adr-resolved-bodies.md, "Arity"): a member whose
-/// floor a member owns is open, seeded exact at what it reads alone; every other member an open
-/// one calls is stated as resolved. Its answer is returned and the other open members' deposited.
+/// A cycle's arities as their least fixpoint (doc/adr-resolved-bodies.md, "Arity"); the answer
+/// for `node`, the other open members' deposited.
 fn least_fixpoint<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,
     view: &View<'_, S>,
     members: &[Node],
     node: Node,
 ) -> Shared<CalleeRead> {
-    let demand = Demand::Arity;
-    let alone = members.iter().map(|member| {
-        db.get::<CalleeReads>(member)
-            .expect("a read asks for no resolution")
-    });
-    let alone = alone.collect::<Vec<_>>();
-    let open = alone.iter().map(|read| member_owned(&read.0, members));
-    let open = open.collect::<Vec<_>>();
-    let assumed = alone.iter().zip(&open);
-    let assumed = assumed.map(|(read, open)| open.then(|| Assumed::of(&read.0, false)).flatten());
-    let mut assumed = assumed.collect::<Vec<_>>();
-    // Which members are stated yet: an open one from its seed, any other once an open one calls it.
-    let mut stated_yet = open.clone();
-    let mut outside = vec![Vec::new(); members.len()];
-    let mut callees: Vec<Vec<usize>> = vec![Vec::new(); members.len()];
-    let mut callers: Vec<Vec<usize>> = vec![Vec::new(); members.len()];
-    let mut answers: Vec<Option<Shared<CalleeRead>>> = vec![None; members.len()];
+    let mut cycle = Cycle::new(db, members);
     let mut pending = (0..members.len())
-        .filter(|at| open[*at])
+        .filter(|at| cycle.open[*at])
         .collect::<BTreeSet<_>>();
     // Terminates: an assumption only rises, its count bounded by the slots its body can read, then
     // a floor, then unstated; each rise queues its callers once: O(k + (s + 2)·E) preparations.
     while let Some(at) = pending.pop_first() {
-        // A member's owners and callees are read at its first resolution: until then it is pending.
-        if answers[at].is_none() {
-            let owners = bodies(view, &alone[at].0, demand).into_iter();
-            for owner in owners.filter(|owner| members.binary_search(owner).is_err()) {
-                let read = db
-                    .get::<Resolved>(&(owner, demand))
-                    .expect("demands below a cycle close");
-                if stopped(&read.0) {
-                    return stopped_read();
-                }
-                outside[at].push((owner.0, Arc::clone(&read.0)));
-            }
-            let walked = db
-                .get::<Walked>(&members[at])
-                .expect("a walk asks for no resolution");
-            let reaches = match &walked.0 {
-                Ok(walk) => walk.reaches(view),
-                Err(refusal) if refusal.stopped() => return stopped_read(),
-                Err(_) => Vec::new(),
-            };
-            for callee in reaches {
-                let Ok(index) = members.binary_search_by_key(&callee, |(at, _)| *at) else {
-                    continue;
-                };
-                callees[at].push(index);
-                callers[index].push(at);
-                if !stated_yet[index] {
-                    let read = db
-                        .get::<Resolved>(&(members[index], demand))
-                        .expect("a member outside the fixpoint asks for none");
-                    if stopped(&read.0) {
-                        return stopped_read();
-                    }
-                    assumed[index] = Assumed::of(&read.0, true);
-                    stated_yet[index] = true;
-                }
-            }
-        }
-        let stated = callees[at].iter().filter_map(|callee| {
-            let held = assumed[*callee].as_ref()?;
-            Some((members[*callee].0, held.interface.clone()))
-        });
-        let stated = stated.collect::<Vec<_>>();
-        let stated = Stated {
-            owners: &outside[at],
-            assumed: &stated,
-        };
-        let read = callee_read(db, members[at], stated);
-        if stopped(&read) {
+        let Some(rose) = cycle.resolve(db, view, at) else {
             return stopped_read();
+        };
+        if rose {
+            pending.extend(cycle.callers[at].iter().copied());
         }
-        if Assumed::raise(&mut assumed[at], &read) {
-            pending.extend(callers[at].iter().copied());
-        }
-        answers[at] = Some(Shared(Arc::new(read)));
     }
-    let settled = (0..members.len()).filter(|at| open[*at]).all(|at| {
-        let read = answers[at].as_ref().expect("every open member is resolved");
-        Assumed::state(&Assumed::of(&read.0, true)) == Assumed::state(&assumed[at])
-    });
+    let open = (0..members.len()).filter(|at| cycle.open[*at]);
+    let mut answers = open.map(|at| (at, cycle.settled(at)));
+    let mut answers = answers.by_ref().collect::<Vec<_>>();
     // A read below its assumption is no fixpoint: every open member keeps the floor it had.
-    if !settled {
+    if answers.iter().any(|(_, read)| read.is_none()) {
         r2il::refusal_evidence!(
             "arity-fixpoint",
             "a member of {:#x}'s cycle read below its assumed arity",
             node.0
         );
-        for at in (0..members.len()).filter(|at| open[*at]) {
-            let owners = bodies(view, &alone[at].0, demand);
-            let read = outside_resolved(db, members[at], &alone[at], owners, members, demand);
-            answers[at] = Some(read);
+        for (at, read) in &mut answers {
+            *read = Some(outside_resolved(
+                db,
+                members[*at],
+                &cycle.alone[*at],
+                members,
+                Demand::Arity,
+            ));
         }
     }
-    let own = members
-        .binary_search(&node)
-        .expect("a member of its own component");
-    let deposited = (0..members.len()).filter(|at| open[*at] && *at != own);
-    let deposited = deposited.map(|at| {
-        let read = answers[at].clone().expect("every open member is resolved");
-        ((members[at], demand), read)
-    });
-    db.deposit::<Resolved>(deposited.collect::<Vec<_>>());
-    answers[own].take().expect("the member asked for is open")
+    let mut own = None;
+    let mut deposited = Vec::new();
+    for (at, read) in answers {
+        let read = read.expect("every open member is answered");
+        match members[at] == node {
+            true => own = Some(read),
+            false => deposited.push(((members[at], Demand::Arity), read)),
+        }
+    }
+    db.deposit::<Resolved>(deposited);
+    own.expect("the member asked for is open")
+}
+
+/// One component's least fixpoint in progress: a member whose floor a member owns is open, seeded
+/// exact at what it reads alone; every other member an open one calls is stated as resolved.
+struct Cycle<'m> {
+    members: &'m [Node],
+    alone: Vec<Shared<CalleeRead>>,
+    open: Vec<bool>,
+    assumed: Vec<Option<Assumed>>,
+    /// Whether a member is stated yet: an open one from its seed, another once an open one calls it.
+    stated: Vec<bool>,
+    outside: Vec<Vec<(u64, Arc<CalleeRead>)>>,
+    callees: Vec<Vec<usize>>,
+    callers: Vec<Vec<usize>>,
+    answers: Vec<Option<Shared<CalleeRead>>>,
+}
+
+impl<'m> Cycle<'m> {
+    fn new<S: Source + 'static>(db: &Db<ProgramInputs<S>>, members: &'m [Node]) -> Self {
+        let alone = members.iter().map(|member| {
+            db.get::<CalleeReads>(member)
+                .expect("a read asks for no resolution")
+                .as_ref()
+                .clone()
+        });
+        let alone = alone.collect::<Vec<_>>();
+        let open = alone.iter().map(|read| member_owned(&read.0, members));
+        let open = open.collect::<Vec<_>>();
+        let assumed = alone.iter().zip(&open);
+        let assumed =
+            assumed.map(|(read, open)| open.then(|| Assumed::of(&read.0, false)).flatten());
+        let k = members.len();
+        Self {
+            members,
+            assumed: assumed.collect(),
+            stated: open.clone(),
+            alone,
+            open,
+            outside: vec![Vec::new(); k],
+            callees: vec![Vec::new(); k],
+            callers: vec![Vec::new(); k],
+            answers: vec![None; k],
+        }
+    }
+
+    /// Resolve an open member against what is assumed of the members it calls: whether its
+    /// assumption rose, or `None` where the request stopped.
+    fn resolve<S: Source + 'static>(
+        &mut self,
+        db: &Db<ProgramInputs<S>>,
+        view: &View<'_, S>,
+        at: usize,
+    ) -> Option<bool> {
+        // A member's owners and callees are read at its first resolution: until then it is pending.
+        if self.answers[at].is_none() {
+            self.index(db, view, at)?;
+        }
+        let stated = self.callees[at].iter().filter_map(|callee| {
+            let held = self.assumed[*callee].as_ref()?;
+            Some((self.members[*callee].0, held.interface.clone()))
+        });
+        let stated = stated.collect::<Vec<_>>();
+        let stated = Stated {
+            owners: &self.outside[at],
+            assumed: &stated,
+        };
+        let read = callee_read(db, self.members[at], stated);
+        if stopped(&read) {
+            return None;
+        }
+        let rose = Assumed::raise(&mut self.assumed[at], &read);
+        self.answers[at] = Some(Shared(Arc::new(read)));
+        Some(rose)
+    }
+
+    /// An open member's owners outside the component, and the members it calls, each stated.
+    fn index<S: Source + 'static>(
+        &mut self,
+        db: &Db<ProgramInputs<S>>,
+        view: &View<'_, S>,
+        at: usize,
+    ) -> Option<()> {
+        let owners = bodies(view, &self.alone[at].0, Demand::Arity).into_iter();
+        for owner in owners.filter(|owner| self.members.binary_search(owner).is_err()) {
+            let read = resolved(db, owner)?;
+            self.outside[at].push((owner.0, read.0));
+        }
+        let walked = db
+            .get::<Walked>(&self.members[at])
+            .expect("a walk asks for no resolution");
+        let reaches = match &walked.0 {
+            Ok(walk) => walk.reaches(view),
+            Err(refusal) if refusal.stopped() => return None,
+            Err(_) => Vec::new(),
+        };
+        let members = self.members;
+        let calls = reaches
+            .into_iter()
+            .filter_map(|callee| members.binary_search_by_key(&callee, |(at, _)| *at).ok());
+        for callee in calls {
+            self.callees[at].push(callee);
+            self.callers[callee].push(at);
+            if !self.stated[callee] {
+                self.assumed[callee] = Assumed::of(&resolved(db, members[callee])?.0, true);
+                self.stated[callee] = true;
+            }
+        }
+        Some(())
+    }
+
+    /// An open member's last read where it states what was assumed of it, or `None`.
+    fn settled(&self, at: usize) -> Option<Shared<CalleeRead>> {
+        let read = self.answers[at]
+            .clone()
+            .expect("every open member is resolved");
+        let state = Assumed::state(&Assumed::of(&read.0, true));
+        (state == Assumed::state(&self.assumed[at])).then_some(read)
+    }
+}
+
+/// A function as `Resolved` answers it under `aa`, or `None` where the request stopped.
+fn resolved<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    node: Node,
+) -> Option<Shared<CalleeRead>> {
+    let read = db
+        .get::<Resolved>(&(node, Demand::Arity))
+        .expect("demands below a cycle close");
+    (!stopped(&read.0)).then(|| (*read).clone())
 }
 
 /// One frame of the search: a function, its callees, and the next callee to visit.

@@ -339,9 +339,8 @@ fn under_aa_a_two_member_cycle_rises_to_its_least_fixpoint() {
     assert!(!text.contains("a floor"), "{text}");
 }
 
-/// `p` and `q`: `test edi, edi; je ret; sub edi, 1; call <next>; ret`, each handing on the `rsi`
-/// it never wrote, `p` to `q` and `q` to `r`; `r`: `test esi, esi; je ret; sub edi, 1; call p;
-/// ret`; `caller` writes `edi`, `esi` and `edx` and calls `p`.
+/// `p` calls `q` and `q` calls `r`, each handing on the `rsi` it never wrote; `r` reads `esi` and
+/// calls `p`; `caller` writes `edi`, `esi` and `edx` and calls `p`.
 const RISE_THROUGH_A_CHAIN: &[u8] = &[
     0x85, 0xff, // 1000 test edi, edi
     0x74, 0x08, // 1002 je 0x100c
