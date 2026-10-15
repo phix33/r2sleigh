@@ -14,7 +14,8 @@ const ONES: u128 = u64::MAX as u128;
 #[test]
 fn a_32_bit_destination_clears_the_register_above_it() {
     let machine = Machine::x86_64();
-    // (instruction, bytes, the 64-bit register written, what it holds after).
+    // (instruction, bytes, the 64-bit register written, what it holds after). LODSD loads the
+    // doubleword at [RSI] into EAX (SDM Vol. 2B, LODS), so RAX holds that doubleword alone.
     let forms: [(&str, &[u8], &str, u128); 5] = [
         ("lodsd", &[0xad], "RAX", low(4)),
         (

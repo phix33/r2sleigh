@@ -128,3 +128,36 @@ fn one_operand_and_memory_forms_set_af() {
         );
     }
 }
+
+/// Worked cases from the definition, "set if an arithmetic operation generates a carry or a
+/// borrow out of bit 3 of the result" (Intel SDM Vol. 1, 3.4.3.1), each stated as a literal.
+#[test]
+fn af_is_the_carry_or_borrow_out_of_bit_3_as_the_sdm_states_it() {
+    let machine = Machine::x86_64();
+    // (instruction, bytes, EAX, ECX, CF in, AF out)
+    let cases: [(&str, &[u8], u128, u128, u128, u128); 8] = [
+        ("add eax, ecx", &[0x01, 0xc8], 0x0f, 0x01, 0, 1),
+        ("add eax, ecx", &[0x01, 0xc8], 0x0e, 0x01, 0, 0),
+        ("add eax, ecx", &[0x01, 0xc8], 0x08, 0x08, 0, 1),
+        ("adc eax, ecx", &[0x11, 0xc8], 0x0e, 0x01, 1, 1),
+        ("sub eax, ecx", &[0x29, 0xc8], 0x10, 0x01, 0, 1),
+        ("sub eax, ecx", &[0x29, 0xc8], 0x1f, 0x0f, 0, 0),
+        ("sbb eax, ecx", &[0x19, 0xc8], 0x1f, 0x0f, 1, 1),
+        ("cmp eax, ecx", &[0x39, 0xc8], 0x100, 0x01, 0, 1),
+    ];
+    for (text, bytes, eax, ecx, carry, af) in cases {
+        let state = &machine.run(bytes, &[("EAX", eax), ("ECX", ecx), ("CF", carry)]);
+        let stated = machine.read(state, "AF");
+        assert_eq!(stated, af, "{text}: {eax:#x}, {ecx:#x}, CF {carry}");
+    }
+    // INC of 0x0f carries out of bit 3; DEC of 0x10 borrows; NEG of a nonzero low nibble borrows.
+    for (text, bytes, eax, af) in [
+        ("inc eax", &[0xff, 0xc0][..], 0x0f, 1),
+        ("dec eax", &[0xff, 0xc8], 0x10, 1),
+        ("neg eax", &[0xf7, 0xd8], 0x01, 1),
+        ("neg eax", &[0xf7, 0xd8], 0x10, 0),
+    ] {
+        let state = &machine.run(bytes, &[("EAX", eax)]);
+        assert_eq!(machine.read(state, "AF"), af, "{text}: {eax:#x}");
+    }
+}
