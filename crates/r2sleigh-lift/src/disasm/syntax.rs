@@ -146,6 +146,15 @@ pub fn number_spans(body: &str) -> Vec<NumberSpan> {
     spans
 }
 
+/// One register as the listing spells it in an operand: lowercase, and on ARM by its role.
+pub(crate) fn register_text(name: &str, arch: &str) -> String {
+    let lowered = name.to_lowercase();
+    match arch {
+        "ARM" => arm_role_registers(&lowered),
+        _ => lowered,
+    }
+}
+
 /// Radare2 spells an instruction lowercase, with a space after each comma and
 /// no `#` before an immediate, where Sleigh keeps the assembler's own prefix.
 fn radare2_text(text: &str, arch: &str) -> String {

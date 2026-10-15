@@ -2296,6 +2296,17 @@ impl Disassembler {
             .map(std::borrow::Cow::Owned)
     }
 
+    /// Whether the specification declares a register at exactly this range.
+    pub fn declares_register(&self, vn: &Varnode) -> bool {
+        vn.space == SpaceId::Register && self.spec.reg_name_map.contains_key(&(vn.offset, vn.size))
+    }
+
+    /// A register as the listing spells it in an operand, so a register set names what `pd` prints.
+    pub fn register_listed(&self, vn: &Varnode) -> Option<String> {
+        let name = self.register_spelling(vn)?;
+        Some(syntax::register_text(&name, &self.arch_name))
+    }
+
     /// Format a varnode as a human-readable string, resolving register names.
     ///
     /// This is useful for pretty-printing P-code operations.
