@@ -562,6 +562,13 @@ fn section_stubs(
 /// nowhere the straight line does not already go: it is how ARM makes one
 /// instruction's effect conditional, and the literal word after ARM's PLT0
 /// decodes as one.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        r2il_op_property_outside_r2il,
+        reason = "a stub's shape, not an op property: its own jump through a slot chooses nothing"
+    )
+)]
 fn chooses(ops: &[R2ILOp], section: std::ops::Range<u64>, next: u64) -> bool {
     let stays = |target: &r2il::Varnode| {
         target.space == r2il::SpaceId::Ram && section.contains(&target.offset)

@@ -218,6 +218,14 @@ fn predicable(op: &R2ILOp) -> bool {
     op.is_speculatable_value() || is_access(op) || op.is_integer_division()
 }
 
+/// The plain accesses `Predicated::op` rewrites into their guarded forms; an exclusive or atomic one has none.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        r2il_op_property_outside_r2il,
+        reason = "the accesses this pass can guard, not every memory access"
+    )
+)]
 fn is_access(op: &R2ILOp) -> bool {
     matches!(
         op,
