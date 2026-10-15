@@ -6,6 +6,7 @@ Pure Python; no binary runs.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 import tempfile
@@ -202,6 +203,120 @@ class Judged(unittest.TestCase):
             found, [("lines", ("0x2 leave", "0x2 ret")), ("lines", ("0x3 ret", None))]
         )
 
+
+def sample(*rows, arch="x86-64"):
+    return json.dumps({"arch": arch, "rows": list(rows)})
+
+
+def ours(addr, opcode, reads=(), writes=(), il=("RAX = COPY 0x1:8",), size=2, raw="31c0", **extra):
+    row = {"addr": addr, "opcode": opcode, "mnemonic": opcode.split()[0], "size": size, "bytes": raw}
+    if "refused" in extra:
+        row["refused"] = extra["refused"]
+    else:
+        row.update(reads=list(reads), writes=list(writes))
+    if il:
+        row["il"] = list(il)
+    return row
+
+
+def theirs(addr, opcode, inputs=(), written=(), size=2, raw="31c0", **memory):
+    row = {"addr": addr, "opcode": opcode, "mnemonic": opcode.split()[0], "size": size, "bytes": raw}
+    row.update(I=list(inputs), W=list(written), **memory)
+    return row
+
+
+class Registers(unittest.TestCase):
+    def differences(self, mine, other, arch="x86-64"):
+        return diff_r2.register_differences(sample(*mine, arch=arch), json.dumps(other))
+
+    def test_each_register_one_side_lacks_is_one_disagreement(self):
+        (wide, rax, eax) = self.differences(
+            [ours(0x10, "xor eax, eax", reads=["eax"], writes=["cf", "rax"])],
+            [theirs(0x10, "xor eax, eax", inputs=["eax", "rax"], written=["eax", "cf"])],
+        )
+        # radare2's `I` and `W` against r2s's reads and writes; the side named is the one lacking it.
+        self.assertEqual(wide[1][:4], (0x10, "reads", "rax", "r2s"))
+        self.assertEqual(rax[1][:4], (0x10, "writes", "rax", "r2"))
+        self.assertEqual(eax[1][:4], (0x10, "writes", "eax", "r2s"))
+        self.assertEqual(wide[1][6]["ours"], "eax")
+        self.assertEqual(wide[1][6]["theirs"], "eax rax")
+
+    def test_an_instruction_read_differently_compares_no_registers(self):
+        found = self.differences(
+            [ours(0x10, "push rbx", reads=["rbx"], size=1, raw="53"), ours(0x11, "pop rbx", writes=["rbx"])],
+            [theirs(0x10, "push rbx", size=2, raw="5300"), theirs(0x11, "invalid")],
+        )
+        self.assertEqual([(item[0], item[1][1]) for item in found], [("instruction", "size"), ("instruction", "decode")])
+
+    def test_two_invalid_bytes_agree_and_an_address_radare2_skipped_is_missing(self):
+        found = self.differences(
+            [ours(0x10, "invalid", refused="the bytes are not an instruction", il=()), ours(0x12, "nop")],
+            [theirs(0x10, "invalid")],
+        )
+        self.assertEqual([(item[1][0], item[1][1]) for item in found], [(0x12, "missing")])
+
+    def test_a_refusal_and_esil_that_never_reached_memory_compare_no_registers(self):
+        found = self.differences(
+            [
+                ours(0x10, "cpuid", refused="an operation is unimplemented", il=("UNIMPLEMENTED",)),
+                ours(0x12, "add byte [rax], al", reads=["rax"], writes=["cf"], il=("uniq:0x1[1] = LOAD [ram]RAX",)),
+                ours(0x14, "mov eax, dword [rbx]", reads=["rbx"], writes=["rax"], il=("EAX = LOAD [ram]RBX",)),
+            ],
+            [
+                theirs(0x10, "cpuid"),
+                theirs(0x12, "add byte [rax], al", inputs=["rax", "al"]),
+                theirs(0x14, "mov eax, dword [rbx]", inputs=["rbx"], written=["rax"], **{"@R": [4096]}),
+            ],
+        )
+        self.assertEqual([item[1][1] for item in found], ["refused", "halted"])
+        self.assertEqual(found[0][1][6]["refused"], "an operation is unimplemented")
+
+    def test_radare2s_pairs_are_read_by_their_fence(self):
+        fence = diff_r2.FENCE
+        text = "\n".join([
+            fence, '[{"addr": 16, "opcode": "nop", "size": 1, "bytes": "90"}]', '{"I": [], "W": ["rip"]}',
+            fence, "ERROR: nothing",
+            fence, '[{"addr": 18, "opcode": "ret", "size": 1, "bytes": "c3"}]', '{"I": ["rsp"], "W": ["rsp"], "@R": [8]}',
+        ])
+        rows = diff_r2.radare2_rows(text)
+        self.assertEqual([row["addr"] for row in rows], [16, 18])
+        self.assertEqual((rows[1]["I"], rows[1]["@R"], rows[0]["@W"]), (["rsp"], [8], []))
+
+    def test_the_sample_is_the_stated_entries_and_spaced_function_symbols(self):
+        lines = [
+            "paddr      vaddr      phaddr     vhaddr     type",
+            "0x00000c90 0x00400c90 0x00000018 0x00400018 program",
+            "nth paddr      vaddr      bind   type   size lib name",
+        ] + [
+            "{}   0x{:08x} 0x{:08x} LOCAL  FUNC   0        f{}".format(n, n, 0x401000 + n * 16, n) for n in range(12)
+        ] + ["99  0x00004200 0x00405000 NONE   FUNC   0    KERNEL32.dll imp.WriteProcessMemory"]
+        entries = diff_r2.sampled_entries(lines)
+        self.assertEqual(entries[0], 0x400C90)
+        self.assertEqual(entries[1:], [0x401000, 0x401030, 0x401060, 0x401090])
+        self.assertNotIn(0x405000, entries)
+
+    def test_a_register_judgment_reads_its_fields_side_and_sets(self):
+        table = diff_r2.load_judgments(None, tomllib.loads(
+            '[[judged]]\ncommand = "aoj"\nbinaries = "*"\narch = \'^x86-64$\'\nfields = ["writes"]\n'
+            'register = \'e(ax|cx)\'\nlacking = "r2s"\nours = \'\\br{suffix}\\b\'\nverdict = "deliberate"\nreason = "zext"\n'
+        ))
+        (_, eax) = self.differences(
+            [ours(0x10, "add eax, ecx", reads=["eax", "ecx"], writes=["rax"])],
+            [theirs(0x10, "add eax, ecx", inputs=["eax", "ecx"], written=["eax"])],
+        )
+        self.assertIsNotNone(diff_r2.judgment_for(table, "a", "aoj", eax))
+        (_, ecx) = self.differences(
+            [ours(0x10, "add eax, ecx", reads=["eax", "ecx"], writes=["rax"])],
+            [theirs(0x10, "add eax, ecx", inputs=["eax", "ecx"], written=["ecx"])],
+        )
+        # ecx is lacked, but r2s writes no rcx: the zero-extension does not explain it.
+        self.assertIsNone(diff_r2.judgment_for(table, "a", "aoj", ecx))
+        (_, eax) = self.differences(
+            [ours(0x10, "add eax, ecx", reads=["eax", "ecx"], writes=["rax"])],
+            [theirs(0x10, "add eax, ecx", inputs=["eax", "ecx"], written=["eax"])],
+            arch="x86",
+        )
+        self.assertIsNone(diff_r2.judgment_for(table, "a", "aoj", eax))
 
 if __name__ == "__main__":
     unittest.main()
