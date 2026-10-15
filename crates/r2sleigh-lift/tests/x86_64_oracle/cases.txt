@@ -1,0 +1,376 @@
+# name | flags | asm (; separated, Intel syntax) [| extra undefined: a flag or register the SDM leaves undefined for these inputs]
+# flags: P=rsi,rdi into scratch memory  E=rax in [rdi] and rbx, half the runs  N=bx nonzero  D=unsigned division that cannot fault  S=signed division that cannot fault  F=float lanes
+add_8|-|add al, bl
+add_16|-|add ax, bx
+add_32|-|add eax, ebx
+add_64|-|add rax, rbx
+add_imm32|-|add eax, 0x7fffffff
+add_imm64|-|add rax, -5
+add_mem8|P|add byte ptr [rdi], cl
+adc_8|-|adc al, bl
+adc_16|-|adc ax, bx
+adc_32|-|adc eax, ebx
+adc_64|-|adc rax, rbx
+adc_imm32|-|adc eax, 0x7fffffff
+adc_imm64|-|adc rax, -5
+adc_mem8|P|adc byte ptr [rdi], cl
+sub_8|-|sub al, bl
+sub_16|-|sub ax, bx
+sub_32|-|sub eax, ebx
+sub_64|-|sub rax, rbx
+sub_imm32|-|sub eax, 0x7fffffff
+sub_imm64|-|sub rax, -5
+sub_mem8|P|sub byte ptr [rdi], cl
+sbb_8|-|sbb al, bl
+sbb_16|-|sbb ax, bx
+sbb_32|-|sbb eax, ebx
+sbb_64|-|sbb rax, rbx
+sbb_imm32|-|sbb eax, 0x7fffffff
+sbb_imm64|-|sbb rax, -5
+sbb_mem8|P|sbb byte ptr [rdi], cl
+cmp_8|-|cmp al, bl
+cmp_16|-|cmp ax, bx
+cmp_32|-|cmp eax, ebx
+cmp_64|-|cmp rax, rbx
+cmp_imm32|-|cmp eax, 0x7fffffff
+cmp_imm64|-|cmp rax, -5
+cmp_mem8|P|cmp byte ptr [rdi], cl
+add_ah_bh|-|add ah, bh
+add_r9b_sil|-|add r9b, sil
+add_r12_r13|-|add r12, r13
+sub_mem64|P|sub qword ptr [rdi], rcx
+neg_8|-|neg al
+neg_16|-|neg ax
+neg_32|-|neg eax
+neg_64|-|neg rax
+neg_mem32|P|neg dword ptr [rdi]
+inc_8|-|inc al
+inc_16|-|inc ax
+inc_32|-|inc eax
+inc_64|-|inc rax
+inc_mem32|P|inc dword ptr [rdi]
+dec_8|-|dec al
+dec_16|-|dec ax
+dec_32|-|dec eax
+dec_64|-|dec rax
+dec_mem32|P|dec dword ptr [rdi]
+not_8|-|not al
+not_16|-|not ax
+not_32|-|not eax
+not_64|-|not rax
+not_mem32|P|not dword ptr [rdi]
+and_8|-|and al, bl
+and_16|-|and ax, bx
+and_32|-|and eax, ebx
+and_64|-|and rax, rbx
+and_imm64|-|and rax, -256
+or_8|-|or al, bl
+or_16|-|or ax, bx
+or_32|-|or eax, ebx
+or_64|-|or rax, rbx
+or_imm64|-|or rax, -256
+xor_8|-|xor al, bl
+xor_16|-|xor ax, bx
+xor_32|-|xor eax, ebx
+xor_64|-|xor rax, rbx
+xor_imm64|-|xor rax, -256
+test_8|-|test al, bl
+test_16|-|test ax, bx
+test_32|-|test eax, ebx
+test_64|-|test rax, rbx
+test_imm64|-|test rax, -256
+xor_self_32|-|xor eax, eax
+shl_8_0|-|shl al, 0
+shl_8_1|-|shl al, 1
+shl_8_5|-|shl al, 5
+shl_16_0|-|shl ax, 0
+shl_16_1|-|shl ax, 1
+shl_16_5|-|shl ax, 5
+shl_32_0|-|shl eax, 0
+shl_32_1|-|shl eax, 1
+shl_32_5|-|shl eax, 5
+shl_64_0|-|shl rax, 0
+shl_64_1|-|shl rax, 1
+shl_64_5|-|shl rax, 5
+shl_8_9|-|shl al, 9
+shl_16_17|-|shl ax, 17
+shl_32_33|-|shl eax, 33
+shl_32_31|-|shl eax, 31
+shl_64_65|-|shl rax, 65
+shl_64_63|-|shl rax, 63
+shl_32_cl3|-|mov ecx, 3; shl eax, cl
+shl_64_cl0|-|mov ecx, 64; shl rax, cl
+shl_8_cl1|-|mov ecx, 1; shl bl, cl
+shr_8_0|-|shr al, 0
+shr_8_1|-|shr al, 1
+shr_8_5|-|shr al, 5
+shr_16_0|-|shr ax, 0
+shr_16_1|-|shr ax, 1
+shr_16_5|-|shr ax, 5
+shr_32_0|-|shr eax, 0
+shr_32_1|-|shr eax, 1
+shr_32_5|-|shr eax, 5
+shr_64_0|-|shr rax, 0
+shr_64_1|-|shr rax, 1
+shr_64_5|-|shr rax, 5
+shr_8_9|-|shr al, 9
+shr_16_17|-|shr ax, 17
+shr_32_33|-|shr eax, 33
+shr_32_31|-|shr eax, 31
+shr_64_65|-|shr rax, 65
+shr_64_63|-|shr rax, 63
+shr_32_cl3|-|mov ecx, 3; shr eax, cl
+shr_64_cl0|-|mov ecx, 64; shr rax, cl
+shr_8_cl1|-|mov ecx, 1; shr bl, cl
+sar_8_0|-|sar al, 0
+sar_8_1|-|sar al, 1
+sar_8_5|-|sar al, 5
+sar_16_0|-|sar ax, 0
+sar_16_1|-|sar ax, 1
+sar_16_5|-|sar ax, 5
+sar_32_0|-|sar eax, 0
+sar_32_1|-|sar eax, 1
+sar_32_5|-|sar eax, 5
+sar_64_0|-|sar rax, 0
+sar_64_1|-|sar rax, 1
+sar_64_5|-|sar rax, 5
+sar_8_9|-|sar al, 9
+sar_16_17|-|sar ax, 17
+sar_32_33|-|sar eax, 33
+sar_32_31|-|sar eax, 31
+sar_64_65|-|sar rax, 65
+sar_64_63|-|sar rax, 63
+sar_32_cl3|-|mov ecx, 3; sar eax, cl
+sar_64_cl0|-|mov ecx, 64; sar rax, cl
+sar_8_cl1|-|mov ecx, 1; sar bl, cl
+rol_8_1|-|rol al, 1
+rol_8_3|-|rol al, 3
+rol_16_1|-|rol ax, 1
+rol_16_3|-|rol ax, 3
+rol_32_1|-|rol eax, 1
+rol_32_3|-|rol eax, 3
+rol_64_1|-|rol rax, 1
+rol_64_3|-|rol rax, 3
+rol_32_0|-|rol eax, 0
+rol_32_33|-|rol eax, 33
+rol_64_cl7|-|mov ecx, 7; rol rax, cl
+ror_8_1|-|ror al, 1
+ror_8_3|-|ror al, 3
+ror_16_1|-|ror ax, 1
+ror_16_3|-|ror ax, 3
+ror_32_1|-|ror eax, 1
+ror_32_3|-|ror eax, 3
+ror_64_1|-|ror rax, 1
+ror_64_3|-|ror rax, 3
+ror_32_0|-|ror eax, 0
+ror_32_33|-|ror eax, 33
+ror_64_cl7|-|mov ecx, 7; ror rax, cl
+rcl_8_1|-|rcl al, 1
+rcl_8_3|-|rcl al, 3
+rcl_16_1|-|rcl ax, 1
+rcl_16_3|-|rcl ax, 3
+rcl_32_1|-|rcl eax, 1
+rcl_32_3|-|rcl eax, 3
+rcl_64_1|-|rcl rax, 1
+rcl_64_3|-|rcl rax, 3
+rcl_32_0|-|rcl eax, 0
+rcl_32_33|-|rcl eax, 33
+rcl_64_cl7|-|mov ecx, 7; rcl rax, cl
+rcr_8_1|-|rcr al, 1
+rcr_8_3|-|rcr al, 3
+rcr_16_1|-|rcr ax, 1
+rcr_16_3|-|rcr ax, 3
+rcr_32_1|-|rcr eax, 1
+rcr_32_3|-|rcr eax, 3
+rcr_64_1|-|rcr rax, 1
+rcr_64_3|-|rcr rax, 3
+rcr_32_0|-|rcr eax, 0
+rcr_32_33|-|rcr eax, 33
+rcr_64_cl7|-|mov ecx, 7; rcr rax, cl
+rcl_32_cl1|-|mov ecx, 1; rcl eax, cl
+rcr_64_65|-|rcr rax, 65
+rol_64_65|-|rol rax, 65
+shr_32_cl1|-|mov ecx, 1; shr eax, cl
+mul_8|-|mul bl
+imul1_8|-|imul bl
+div_8|D|div bl
+idiv_8|S|idiv bl
+mul_16|-|mul bx
+imul1_16|-|imul bx
+div_16|D|div bx
+idiv_16|S|idiv bx
+mul_32|-|mul ebx
+imul1_32|-|imul ebx
+div_32|D|div ebx
+idiv_32|S|idiv ebx
+mul_64|-|mul rbx
+imul1_64|-|imul rbx
+div_64|D|div rbx
+idiv_64|S|idiv rbx
+imul2_16|-|imul ax, bx
+imul2_32|-|imul eax, ebx
+imul2_64|-|imul rax, rbx
+imul3_32|-|imul eax, ebx, 7
+imul3_64|-|imul rax, rbx, -300
+mul_mem64|P|mul qword ptr [rsi]
+bsf_16|N|bsf ax, bx
+bsr_16|N|bsr ax, bx
+tzcnt_16|-|tzcnt ax, bx
+lzcnt_16|-|lzcnt ax, bx
+popcnt_16|-|popcnt ax, bx
+bsf_32|N|bsf eax, ebx
+bsr_32|N|bsr eax, ebx
+tzcnt_32|-|tzcnt eax, ebx
+lzcnt_32|-|lzcnt eax, ebx
+popcnt_32|-|popcnt eax, ebx
+bsf_64|N|bsf rax, rbx
+bsr_64|N|bsr rax, rbx
+tzcnt_64|-|tzcnt rax, rbx
+lzcnt_64|-|lzcnt rax, rbx
+popcnt_64|-|popcnt rax, rbx
+bsf_zero_32|-|xor ebx, ebx; bsf eax, ebx|rax
+bsr_zero_64|-|xor ebx, ebx; bsr rax, rbx|rax
+tzcnt_zero_64|-|xor ebx, ebx; tzcnt rax, rbx
+lzcnt_zero_16|-|xor ebx, ebx; lzcnt ax, bx
+movzx_32_8|-|movzx eax, bl
+movzx_32_16|-|movzx eax, bx
+movzx_64_8|-|movzx rax, bl
+movzx_64_16|-|movzx rax, bx
+movzx_16_8|-|movzx ax, bl
+movzx_32_ah|-|movzx eax, bh
+movsx_32_8|-|movsx eax, bl
+movsx_32_16|-|movsx eax, bx
+movsx_64_8|-|movsx rax, bl
+movsx_64_16|-|movsx rax, bx
+movsx_16_8|-|movsx ax, bl
+movsxd_64|-|movsxd rax, ebx
+cbw|-|cbw
+cwde|-|cwde
+cdqe|-|cdqe
+cwd|-|cwd
+cdq|-|cdq
+cqo|-|cqo
+movzx_mem8|P|movzx eax, byte ptr [rsi]
+movsx_mem16|P|movsx rax, word ptr [rsi]
+mov_32|-|mov eax, ebx
+mov_32_imm|-|mov eax, -1
+mov_16|-|mov ax, bx
+mov_8|-|mov al, bl
+mov_8_ah|-|mov ah, bl
+mov_r8d|-|mov r8d, r9d
+xchg_32_eax|-|xchg eax, ebx
+xchg_32|-|xchg ecx, edx
+xchg_32_self|-|xchg eax, eax
+xchg_16|-|xchg ax, bx
+xchg_64|-|xchg rcx, rdx
+cmovne_32_false|-|cmp eax, eax; cmovne eax, ebx
+cmove_32_true|-|cmp eax, eax; cmove eax, ebx
+cmovne_64_false|-|cmp eax, eax; cmovne rax, rbx
+cmovne_16_false|-|cmp eax, eax; cmovne ax, bx
+mov_mem32|P|mov eax, dword ptr [rsi]
+seto|-|seto al
+cmovo_32|-|cmovo eax, ebx
+cmovo_64|-|cmovo rax, rbx
+setno|-|setno al
+cmovno_32|-|cmovno eax, ebx
+cmovno_64|-|cmovno rax, rbx
+setb|-|setb al
+cmovb_32|-|cmovb eax, ebx
+cmovb_64|-|cmovb rax, rbx
+setae|-|setae al
+cmovae_32|-|cmovae eax, ebx
+cmovae_64|-|cmovae rax, rbx
+sete|-|sete al
+cmove_32|-|cmove eax, ebx
+cmove_64|-|cmove rax, rbx
+setne|-|setne al
+cmovne_32|-|cmovne eax, ebx
+cmovne_64|-|cmovne rax, rbx
+setbe|-|setbe al
+cmovbe_32|-|cmovbe eax, ebx
+cmovbe_64|-|cmovbe rax, rbx
+seta|-|seta al
+cmova_32|-|cmova eax, ebx
+cmova_64|-|cmova rax, rbx
+sets|-|sets al
+cmovs_32|-|cmovs eax, ebx
+cmovs_64|-|cmovs rax, rbx
+setns|-|setns al
+cmovns_32|-|cmovns eax, ebx
+cmovns_64|-|cmovns rax, rbx
+setp|-|setp al
+cmovp_32|-|cmovp eax, ebx
+cmovp_64|-|cmovp rax, rbx
+setnp|-|setnp al
+cmovnp_32|-|cmovnp eax, ebx
+cmovnp_64|-|cmovnp rax, rbx
+setl|-|setl al
+cmovl_32|-|cmovl eax, ebx
+cmovl_64|-|cmovl rax, rbx
+setge|-|setge al
+cmovge_32|-|cmovge eax, ebx
+cmovge_64|-|cmovge rax, rbx
+setle|-|setle al
+cmovle_32|-|cmovle eax, ebx
+cmovle_64|-|cmovle rax, rbx
+setg|-|setg al
+cmovg_32|-|cmovg eax, ebx
+cmovg_64|-|cmovg rax, rbx
+setne_r10b|-|setne r10b
+cmove_16|-|cmove ax, bx
+cmovb_mem32|P|cmovb eax, dword ptr [rsi]
+xadd_8|-|xadd al, cl
+xadd_mem8|P|xadd byte ptr [rdi], cl
+cmpxchg_8|PE|cmpxchg bl, cl
+cmpxchg_mem8|PE|cmpxchg byte ptr [rdi], cl
+xadd_16|-|xadd ax, cx
+xadd_mem16|P|xadd word ptr [rdi], cx
+cmpxchg_16|PE|cmpxchg bx, cx
+cmpxchg_mem16|PE|cmpxchg word ptr [rdi], cx
+xadd_32|-|xadd eax, ecx
+xadd_mem32|P|xadd dword ptr [rdi], ecx
+cmpxchg_32|PE|cmpxchg ebx, ecx
+cmpxchg_mem32|PE|cmpxchg dword ptr [rdi], ecx
+xadd_64|-|xadd rax, rcx
+xadd_mem64|P|xadd qword ptr [rdi], rcx
+cmpxchg_64|PE|cmpxchg rbx, rcx
+cmpxchg_mem64|PE|cmpxchg qword ptr [rdi], rcx
+lock_cmpxchg_mem64|PE|lock cmpxchg qword ptr [rdi], rcx
+lock_xadd_mem32|P|lock xadd dword ptr [rdi], ecx
+lodsb|P|lodsb
+lodsw|P|lodsw
+lodsd|P|lodsd
+lodsq|P|lodsq
+stosb|P|stosb
+stosw|P|stosw
+stosd|P|stosd
+stosq|P|stosq
+movsb|P|movsb
+movsw|P|movsw
+movsd|P|movsd
+movsq|P|movsq
+scasb|P|scasb
+scasw|P|scasw
+scasd|P|scasd
+scasq|P|scasq
+cmpsb|P|cmpsb
+cmpsw|P|cmpsw
+cmpsd|P|cmpsd
+cmpsq|P|cmpsq
+addsd|F|addsd xmm0, xmm1
+subsd|F|subsd xmm0, xmm1
+mulsd|F|mulsd xmm0, xmm1
+divsd|F|divsd xmm0, xmm1
+sqrtsd|F|sqrtsd xmm0, xmm1
+addss|F|addss xmm2, xmm3
+cvtsi2sd_64|F|cvtsi2sd xmm0, rax
+cvtsi2sd_32|F|cvtsi2sd xmm0, eax
+cvtsi2ss_64|F|cvtsi2ss xmm0, rax
+cvttsd2si_64|F|cvttsd2si rax, xmm1
+cvttsd2si_32|F|cvttsd2si eax, xmm1
+cvtsd2ss|F|cvtsd2ss xmm0, xmm1
+cvtss2sd|F|cvtss2sd xmm0, xmm1
+ucomisd|F|ucomisd xmm0, xmm1
+movq_x_r|F|movq xmm0, rax
+movq_r_x|F|movq rax, xmm1
+movsd_x_x|F|movsd xmm0, xmm1
