@@ -67,7 +67,7 @@ uint64_t _init(void)
             rax_3 = rax_1;
         } else {
             r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401014:4 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
-            r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401014:10 covering 1 op (render::values) */
+            r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401014:11 covering 1 op (render::values) */
             rax_3 = r2sleigh_residual_u64(3);
         }
         {
@@ -123,11 +123,11 @@ CMDS=aa; pdd @ 0x00401090
 EXPECT=<<EOF
 void _start(void)
 {
-    uint64_t tmp_aa300_2;
+    uint64_t tmp_ab000_2;
 
     /* r2dec proof: 5 constructs are marked below; 28 source obligations: 0 rendered, 6 elided, 0 refused, 22 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0) */
     {
-        tmp_aa300_2 = r2sleigh_residual_u64(1);
+        tmp_ab000_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x401090:29 covering 1 op (render::values) */
         r2sleigh_residual_void(3); /* r2dec gap: StoreNotSpelled at 0x401090:32 covering 1 op (render::values) */
         r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x401090:68 covering 1 op (render::values): call to __libc_start_main: the import's declaration has an argument this convention does not place */
@@ -226,12 +226,12 @@ uint64_t __do_global_dtors_aux(void)
     void deregister_tm_clones(void);
     extern char __TMC_END__[];
 
-    uint8_t tmp_7c100_1;
+    uint8_t tmp_7da00_1;
 
     /* r2dec proof: 2 constructs are marked below; 24 source obligations: 8 rendered, 12 elided, 0 refused, 4 residual; 6 statements rendered; 1 data object type refused */
     {
-        tmp_7c100_1 = r2sleigh_load_u8((void*)&__TMC_END__);
-        if ((uint8_t)((uint8_t)tmp_7c100_1 != (uint8_t)0U)) {
+        tmp_7da00_1 = r2sleigh_load_u8((void*)&__TMC_END__);
+        if ((uint8_t)((uint8_t)tmp_7da00_1 != (uint8_t)0U)) {
             return r2sleigh_residual_u64(1);
         } else {
             deregister_tm_clones();
@@ -395,7 +395,7 @@ uint64_t vfold(uint32_t arg0, ...)
     uint64_t rax_13;
     uint64_t rax_14;
     uint64_t tmp_23d00_5;
-    uint32_t tmp_d300_9;
+    uint32_t tmp_d300_7;
     _Alignas(16) uint8_t frame[248];
 
     /* r2dec proof: 15 constructs are marked below; 125 source obligations: 62 rendered, 41 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 17 residual; 44 statements rendered; 8 held from entry, read as residuals (XMM0_0, XMM1_0, XMM2_0, XMM3_0, XMM4_0, XMM5_0, XMM6_0, XMM7_0); 6 variadic tail registers, read as residuals (R8_0, R9_0, RAX_0, RCX_0, RDX_0, RSI_0); the result's second register is open: no call read decides it */
@@ -445,8 +445,8 @@ uint64_t vfold(uint32_t arg0, ...)
                     {
                         tmp_23d00_5 = r2sleigh_load_u64((void*)rax_14);
                         r2sleigh_store_u64((void*)(uint64_t)(frame + 24U), (uint64_t)((uint64_t)tmp_23d00_5 + (uint64_t)rcx_2));
-                        tmp_d300_9 = r2sleigh_load_u32((void*)(uint64_t)(frame + 20U));
-                        r2sleigh_store_u32((void*)(uint64_t)(frame + 20U), (uint32_t)((uint32_t)tmp_d300_9 + (uint32_t)1U));
+                        tmp_d300_7 = r2sleigh_load_u32((void*)(uint64_t)(frame + 20U));
+                        r2sleigh_store_u32((void*)(uint64_t)(frame + 20U), (uint32_t)((uint32_t)tmp_d300_7 + (uint32_t)1U));
                     }
                 } else {
                     break;
@@ -480,17 +480,17 @@ uint64_t shape_variadic_local(void)
 
     /* r2dec proof: 12 constructs are marked below; 70 source obligations: 11 rendered, 22 elided, 0 refused, 37 residual; 4 statements rendered; 4 never assigned, read as residuals (RAX_13, RAX_22, RAX_34, RAX_6) */
     {
-        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401515:91 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
-        r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401515:95 covering 1 op (render::values) */
+        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401515:97 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
+        r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401515:102 covering 1 op (render::values) */
         rax_7 = r2sleigh_residual_u64(3);
-        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x401515:183 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
-        r2sleigh_residual_void(5); /* r2dec gap: ValueNotComputed at 0x401515:187 covering 1 op (render::values) */
+        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x401515:197 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
+        r2sleigh_residual_void(5); /* r2dec gap: ValueNotComputed at 0x401515:202 covering 1 op (render::values) */
         rax_14 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_7 * (uint64_t)8U) + (uint64_t)r2sleigh_residual_u64(6)) - (uint64_t)rax_7);
-        r2sleigh_residual_void(7); /* r2dec gap: CallNotRendered at 0x401515:290 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
-        r2sleigh_residual_void(8); /* r2dec gap: ValueNotComputed at 0x401515:294 covering 1 op (render::values) */
+        r2sleigh_residual_void(7); /* r2dec gap: CallNotRendered at 0x401515:312 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
+        r2sleigh_residual_void(8); /* r2dec gap: ValueNotComputed at 0x401515:317 covering 1 op (render::values) */
         rax_23 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_14 * (uint64_t)8U) + (uint64_t)r2sleigh_residual_u64(9)) - (uint64_t)rax_14);
-        r2sleigh_residual_void(10); /* r2dec gap: CallNotRendered at 0x401515:423 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
-        r2sleigh_residual_void(11); /* r2dec gap: ValueNotComputed at 0x401515:427 covering 1 op (render::values) */
+        r2sleigh_residual_void(10); /* r2dec gap: CallNotRendered at 0x401515:453 covering 1 op (render::values): call to vfold: variadic, its argument count unproven (missing_format_parameter) */
+        r2sleigh_residual_void(11); /* r2dec gap: ValueNotComputed at 0x401515:458 covering 1 op (render::values) */
         return (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_23 * (uint64_t)8U) + (uint64_t)r2sleigh_residual_u64(12)) - (uint64_t)rax_23);
     }
 }
@@ -1058,37 +1058,37 @@ uint64_t shape_signed_divmod(uint64_t arg0, uint64_t arg1)
 {
     uint64_t stack_m48_1;
     uint64_t stack_m48_2;
-    __uint128_t tmp_7ae00_1;
+    __uint128_t tmp_7c700_1;
     uint64_t rdx_1;
-    __uint128_t tmp_93800_1;
-    __uint128_t tmp_93900_1;
-    __uint128_t tmp_93a00_1;
-    __uint128_t tmp_93b00_1;
-    __uint128_t tmp_93d00_1;
-    __uint128_t tmp_93f00_1;
+    __uint128_t tmp_94b00_1;
+    __uint128_t tmp_94c00_1;
+    __uint128_t tmp_94d00_1;
+    __uint128_t tmp_94e00_1;
+    __uint128_t tmp_95000_1;
+    __uint128_t tmp_95200_1;
     uint64_t rax_5;
-    __uint128_t tmp_7ae00_2;
+    __uint128_t tmp_7c700_2;
     uint64_t rdx_3;
-    __uint128_t tmp_93800_2;
-    __uint128_t tmp_93900_2;
-    __uint128_t tmp_93a00_2;
-    __uint128_t tmp_93b00_2;
-    __uint128_t tmp_93d00_2;
-    __uint128_t tmp_94200_2;
+    __uint128_t tmp_94b00_2;
+    __uint128_t tmp_94c00_2;
+    __uint128_t tmp_94d00_2;
+    __uint128_t tmp_94e00_2;
+    __uint128_t tmp_95000_2;
+    __uint128_t tmp_95500_2;
     uint64_t rdx_4;
     uint32_t stack_m64_1;
     uint32_t stack_m64_2;
-    uint64_t tmp_92b00_1;
-    uint64_t tmp_93000_1;
-    uint64_t tmp_93200_1;
+    uint64_t tmp_93e00_1;
+    uint64_t tmp_94300_1;
+    uint64_t tmp_94500_1;
     uint32_t tmp_lane_401d93_f_7_1;
-    uint64_t tmp_92b00_2;
-    uint64_t tmp_93000_2;
-    uint64_t tmp_93500_2;
+    uint64_t tmp_93e00_2;
+    uint64_t tmp_94300_2;
+    uint64_t tmp_94800_2;
     uint32_t tmp_lane_401d93_29_10_1;
-    uint64_t tmp_d400_16;
+    uint64_t tmp_d400_13;
     uint64_t rax_24;
-    uint64_t tmp_d400_23;
+    uint64_t tmp_d400_15;
     uint64_t rax_28;
 
     /* r2dec proof: 4 constructs are marked below; 119 source obligations: 106 rendered, 7 elided, 0 refused, 6 residual; 43 statements rendered; the result's second register is open: no call read decides it */
@@ -1101,26 +1101,26 @@ uint64_t shape_signed_divmod(uint64_t arg0, uint64_t arg1)
                 stack_m48_2 = (uint8_t)((uint64_t)arg0 != (uint64_t)0x8000000000000000U) ? stack_m48_1 : 3;
             }
             {
-                tmp_7ae00_1 = (__uint128_t)(int64_t)arg0;
-                rdx_1 = (uint64_t)((__uint128_t)tmp_7ae00_1 >> 64U);
-                tmp_93800_1 = (__uint128_t)(int64_t)stack_m48_2;
-                tmp_93900_1 = (__uint128_t)(uint64_t)rdx_1;
-                tmp_93a00_1 = (__uint128_t)(uint32_t)64U >= (__uint128_t)128U ? (__uint128_t)0U : (__uint128_t)((__uint128_t)tmp_93900_1 << (__uint128_t)(uint32_t)64U);
-                tmp_93b00_1 = (__uint128_t)(uint64_t)arg0;
-                tmp_93d00_1 = (__uint128_t)((__uint128_t)tmp_93a00_1 | (__uint128_t)tmp_93b00_1);
-                tmp_93f00_1 = (__uint128_t)tmp_93d00_1 == (__uint128_t)((__uint128_t)0x8000000000000000U << 64U | (__uint128_t)0U) && (__uint128_t)tmp_93800_1 == (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffffffffffffULL) ? r2sleigh_residual_u128(1) : (__uint128_t)((__int128_t)tmp_93d00_1 / (__int128_t)tmp_93800_1);
-                rax_5 = (uint64_t)((__uint128_t)tmp_93f00_1 >> 0U);
-                (void)((__uint128_t)tmp_93800_1 == (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffffffffffffULL) ? (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0U) : (__uint128_t)((__int128_t)tmp_93d00_1 % (__int128_t)tmp_93800_1));
-                tmp_7ae00_2 = (__uint128_t)(int64_t)arg0;
-                rdx_3 = (uint64_t)((__uint128_t)tmp_7ae00_2 >> 64U);
-                tmp_93800_2 = (__uint128_t)(int64_t)stack_m48_2;
-                tmp_93900_2 = (__uint128_t)(uint64_t)rdx_3;
-                tmp_93a00_2 = (__uint128_t)(uint32_t)64U >= (__uint128_t)128U ? (__uint128_t)0U : (__uint128_t)((__uint128_t)tmp_93900_2 << (__uint128_t)(uint32_t)64U);
-                tmp_93b00_2 = (__uint128_t)(uint64_t)arg0;
-                tmp_93d00_2 = (__uint128_t)((__uint128_t)tmp_93a00_2 | (__uint128_t)tmp_93b00_2);
-                (void)((__uint128_t)tmp_93d00_2 == (__uint128_t)((__uint128_t)0x8000000000000000U << 64U | (__uint128_t)0U) && (__uint128_t)tmp_93800_2 == (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffffffffffffULL) ? r2sleigh_residual_u128(2) : (__uint128_t)((__int128_t)tmp_93d00_2 / (__int128_t)tmp_93800_2));
-                tmp_94200_2 = (__uint128_t)tmp_93800_2 == (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffffffffffffULL) ? (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0U) : (__uint128_t)((__int128_t)tmp_93d00_2 % (__int128_t)tmp_93800_2);
-                rdx_4 = (uint64_t)((__uint128_t)tmp_94200_2 >> 0U);
+                tmp_7c700_1 = (__uint128_t)(int64_t)arg0;
+                rdx_1 = (uint64_t)((__uint128_t)tmp_7c700_1 >> 64U);
+                tmp_94b00_1 = (__uint128_t)(int64_t)stack_m48_2;
+                tmp_94c00_1 = (__uint128_t)(uint64_t)rdx_1;
+                tmp_94d00_1 = (__uint128_t)(uint32_t)64U >= (__uint128_t)128U ? (__uint128_t)0U : (__uint128_t)((__uint128_t)tmp_94c00_1 << (__uint128_t)(uint32_t)64U);
+                tmp_94e00_1 = (__uint128_t)(uint64_t)arg0;
+                tmp_95000_1 = (__uint128_t)((__uint128_t)tmp_94d00_1 | (__uint128_t)tmp_94e00_1);
+                tmp_95200_1 = (__uint128_t)tmp_95000_1 == (__uint128_t)((__uint128_t)0x8000000000000000U << 64U | (__uint128_t)0U) && (__uint128_t)tmp_94b00_1 == (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffffffffffffULL) ? r2sleigh_residual_u128(1) : (__uint128_t)((__int128_t)tmp_95000_1 / (__int128_t)tmp_94b00_1);
+                rax_5 = (uint64_t)((__uint128_t)tmp_95200_1 >> 0U);
+                (void)((__uint128_t)tmp_94b00_1 == (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffffffffffffULL) ? (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0U) : (__uint128_t)((__int128_t)tmp_95000_1 % (__int128_t)tmp_94b00_1));
+                tmp_7c700_2 = (__uint128_t)(int64_t)arg0;
+                rdx_3 = (uint64_t)((__uint128_t)tmp_7c700_2 >> 64U);
+                tmp_94b00_2 = (__uint128_t)(int64_t)stack_m48_2;
+                tmp_94c00_2 = (__uint128_t)(uint64_t)rdx_3;
+                tmp_94d00_2 = (__uint128_t)(uint32_t)64U >= (__uint128_t)128U ? (__uint128_t)0U : (__uint128_t)((__uint128_t)tmp_94c00_2 << (__uint128_t)(uint32_t)64U);
+                tmp_94e00_2 = (__uint128_t)(uint64_t)arg0;
+                tmp_95000_2 = (__uint128_t)((__uint128_t)tmp_94d00_2 | (__uint128_t)tmp_94e00_2);
+                (void)((__uint128_t)tmp_95000_2 == (__uint128_t)((__uint128_t)0x8000000000000000U << 64U | (__uint128_t)0U) && (__uint128_t)tmp_94b00_2 == (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffffffffffffULL) ? r2sleigh_residual_u128(2) : (__uint128_t)((__int128_t)tmp_95000_2 / (__int128_t)tmp_94b00_2));
+                tmp_95500_2 = (__uint128_t)tmp_94b00_2 == (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffffffffffffULL) ? (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0U) : (__uint128_t)((__int128_t)tmp_95000_2 % (__int128_t)tmp_94b00_2);
+                rdx_4 = (uint64_t)((__uint128_t)tmp_95500_2 >> 0U);
                 stack_m64_1 = (uint8_t)((uint32_t)((uint64_t)arg1 >> 0U) != (uint32_t)0U) ? (uint32_t)((uint64_t)arg1 >> 0U) : (uint32_t)0xfffffffdU;
                 {
                     if ((uint8_t)((uint32_t)((uint32_t)stack_m64_1 + (uint32_t)1U) != (uint32_t)0U)) {
@@ -1129,23 +1129,23 @@ uint64_t shape_signed_divmod(uint64_t arg0, uint64_t arg1)
                         stack_m64_2 = (uint8_t)((uint32_t)((uint64_t)arg0 >> 0U) != (uint32_t)0x80000000U) ? stack_m64_1 : 5;
                     }
                     {
-                        tmp_92b00_1 = (uint64_t)(int32_t)stack_m64_2;
-                        tmp_93000_1 = (uint64_t)((uint64_t)(uint32_t)((uint64_t)arg0 >> 0U) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)(uint32_t)((uint64_t)(int32_t)((uint64_t)arg0 >> 0U) >> 32U) << (uint64_t)(uint32_t)32U)));
-                        tmp_93200_1 = (uint64_t)tmp_93000_1 == (uint64_t)0x8000000000000000U && (uint64_t)tmp_92b00_1 == (uint64_t)-0x1 ? r2sleigh_residual_u64(3) : (uint64_t)((int64_t)tmp_93000_1 / (int64_t)tmp_92b00_1);
-                        tmp_lane_401d93_f_7_1 = (uint32_t)((uint64_t)tmp_93200_1 >> 0U);
-                        (void)((uint64_t)tmp_92b00_1 == (uint64_t)-0x1 ? (uint64_t)0U : (uint64_t)((int64_t)tmp_93000_1 % (int64_t)tmp_92b00_1));
-                        tmp_92b00_2 = (uint64_t)(int32_t)stack_m64_2;
-                        tmp_93000_2 = (uint64_t)((uint64_t)(uint32_t)((uint64_t)arg0 >> 0U) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)(uint32_t)((uint64_t)(int32_t)((uint64_t)arg0 >> 0U) >> 32U) << (uint64_t)(uint32_t)32U)));
-                        (void)((uint64_t)tmp_93000_2 == (uint64_t)0x8000000000000000U && (uint64_t)tmp_92b00_2 == (uint64_t)-0x1 ? r2sleigh_residual_u64(4) : (uint64_t)((int64_t)tmp_93000_2 / (int64_t)tmp_92b00_2));
-                        tmp_93500_2 = (uint64_t)tmp_92b00_2 == (uint64_t)-0x1 ? (uint64_t)0U : (uint64_t)((int64_t)tmp_93000_2 % (int64_t)tmp_92b00_2);
-                        tmp_lane_401d93_29_10_1 = (uint32_t)((uint64_t)tmp_93500_2 >> 0U);
-                        tmp_d400_16 = (uint64_t)((uint64_t)(uint32_t)tmp_lane_401d93_29_10_1 ^ (uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)(uint32_t)tmp_lane_401d93_f_7_1 << (uint64_t)(uint32_t)32U)) ^ (uint64_t)((uint64_t)((uint64_t)rax_5 * (uint64_t)0xf4243U) + (uint64_t)rdx_4)));
+                        tmp_93e00_1 = (uint64_t)(int32_t)stack_m64_2;
+                        tmp_94300_1 = (uint64_t)((uint64_t)(uint32_t)((uint64_t)arg0 >> 0U) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)(uint32_t)((uint64_t)(int32_t)((uint64_t)arg0 >> 0U) >> 32U) << (uint64_t)(uint32_t)32U)));
+                        tmp_94500_1 = (uint64_t)tmp_94300_1 == (uint64_t)0x8000000000000000U && (uint64_t)tmp_93e00_1 == (uint64_t)-0x1 ? r2sleigh_residual_u64(3) : (uint64_t)((int64_t)tmp_94300_1 / (int64_t)tmp_93e00_1);
+                        tmp_lane_401d93_f_7_1 = (uint32_t)((uint64_t)tmp_94500_1 >> 0U);
+                        (void)((uint64_t)tmp_93e00_1 == (uint64_t)-0x1 ? (uint64_t)0U : (uint64_t)((int64_t)tmp_94300_1 % (int64_t)tmp_93e00_1));
+                        tmp_93e00_2 = (uint64_t)(int32_t)stack_m64_2;
+                        tmp_94300_2 = (uint64_t)((uint64_t)(uint32_t)((uint64_t)arg0 >> 0U) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)(uint32_t)((uint64_t)(int32_t)((uint64_t)arg0 >> 0U) >> 32U) << (uint64_t)(uint32_t)32U)));
+                        (void)((uint64_t)tmp_94300_2 == (uint64_t)0x8000000000000000U && (uint64_t)tmp_93e00_2 == (uint64_t)-0x1 ? r2sleigh_residual_u64(4) : (uint64_t)((int64_t)tmp_94300_2 / (int64_t)tmp_93e00_2));
+                        tmp_94800_2 = (uint64_t)tmp_93e00_2 == (uint64_t)-0x1 ? (uint64_t)0U : (uint64_t)((int64_t)tmp_94300_2 % (int64_t)tmp_93e00_2);
+                        tmp_lane_401d93_29_10_1 = (uint32_t)((uint64_t)tmp_94800_2 >> 0U);
+                        tmp_d400_13 = (uint64_t)((uint64_t)(uint32_t)tmp_lane_401d93_29_10_1 ^ (uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)(uint32_t)tmp_lane_401d93_f_7_1 << (uint64_t)(uint32_t)32U)) ^ (uint64_t)((uint64_t)((uint64_t)rax_5 * (uint64_t)0xf4243U) + (uint64_t)rdx_4)));
                         rax_24 = (uint8_t)((int64_t)0U <= (int64_t)arg0) ? 34 : 17;
                         {
-                            tmp_d400_23 = (uint64_t)((uint64_t)tmp_d400_16 + (uint64_t)rax_24);
+                            tmp_d400_15 = (uint64_t)((uint64_t)tmp_d400_13 + (uint64_t)rax_24);
                             rax_28 = (uint8_t)((int32_t)tmp_lane_401d93_29_10_1 <= (int32_t)tmp_lane_401d93_f_7_1) ? 0x4400 : 0x3300;
                             {
-                                return (uint64_t)((uint64_t)tmp_d400_23 + (uint64_t)rax_28);
+                                return (uint64_t)((uint64_t)tmp_d400_15 + (uint64_t)rax_28);
                             }
                         }
                     }
@@ -1280,15 +1280,15 @@ uint64_t shape_pointer_to_pointer(uint64_t arg0, uint64_t arg1)
     uint64_t rax_25;
     uint32_t tmp_23c00_5;
     uint64_t tmp_d400_15;
-    uint32_t tmp_d300_12;
+    uint32_t tmp_d300_5;
     uint64_t tmp_23d00_8;
     uint32_t tmp_23c00_2;
     uint64_t tmp_23d00_9;
     uint64_t rax_16;
-    uint32_t tmp_d300_4;
+    uint32_t tmp_d300_2;
     _Alignas(16) uint8_t frame[168];
 
-    /* r2dec proof: no individual construct is marked; 211 source obligations: 111 rendered, 66 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 29 assumed (frame extent unproven); 65 statements rendered; the result's second register is open: no call read decides it */
+    /* r2dec proof: no individual construct is marked; 198 source obligations: 108 rendered, 66 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 19 assumed (frame extent unproven); 52 statements rendered; the result's second register is open: no call read decides it */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 24U), (uint64_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)arg1);
@@ -1315,13 +1315,8 @@ uint64_t shape_pointer_to_pointer(uint64_t arg0, uint64_t arg1)
                 tmp_23d00_9 = r2sleigh_load_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)40U));
                 rax_16 = indirect_load(tmp_23d00_9, (uint32_t)tmp_23c00_2);
                 r2sleigh_store_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)32U), (uint64_t)((uint64_t)((uint64_t)tmp_23d00_8 * (uint64_t)0xf4243U) + (uint64_t)rax_16));
-                (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 40U));
-                (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 40U));
-                tmp_d300_4 = r2sleigh_load_u32((void*)(uint64_t)(frame + 40U));
-                r2sleigh_store_u32((void*)(uint64_t)(frame + 40U), (uint32_t)((uint32_t)tmp_d300_4 + (uint32_t)1U));
-                (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 40U));
-                (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 40U));
-                (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 40U));
+                tmp_d300_2 = r2sleigh_load_u32((void*)(uint64_t)(frame + 40U));
+                r2sleigh_store_u32((void*)(uint64_t)(frame + 40U), (uint32_t)((uint32_t)tmp_d300_2 + (uint32_t)1U));
             } else {
                 break;
             }
@@ -1345,16 +1340,8 @@ uint64_t shape_pointer_to_pointer(uint64_t arg0, uint64_t arg1)
                     tmp_23c00_5 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
                     tmp_d400_15 = r2sleigh_load_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)32U));
                     r2sleigh_store_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)32U), (uint64_t)((uint64_t)((uint64_t)(uint8_t)((uint32_t)(uint8_t)((uint32_t)((uint32_t)((uint32_t)tmp_23c00_5 + (uint32_t)tmp_23c00_5) + (uint32_t)tmp_23c00_5) >> 0U) & (uint32_t)(uint8_t)63U) >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_25 << (uint64_t)(uint8_t)((uint32_t)(uint8_t)((uint32_t)((uint32_t)((uint32_t)tmp_23c00_5 + (uint32_t)tmp_23c00_5) + (uint32_t)tmp_23c00_5) >> 0U) & (uint32_t)(uint8_t)63U))) ^ (uint64_t)tmp_d400_15));
-                    (void)r2sleigh_load_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)32U));
-                    (void)r2sleigh_load_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)32U));
-                    (void)r2sleigh_load_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)32U));
-                    (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
-                    (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
-                    tmp_d300_12 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
-                    r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)tmp_d300_12 + (uint32_t)1U));
-                    (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
-                    (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
-                    (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
+                    tmp_d300_5 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
+                    r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)tmp_d300_5 + (uint32_t)1U));
                 } else {
                     break;
                 }
@@ -1438,11 +1425,11 @@ uint64_t shape_function_pointer(uint64_t arg0, uint64_t arg1)
     uint32_t tmp_23c00_2;
     uint64_t tmp_23d00_3;
     uint64_t tmp_9400_1;
-    __uint128_t tmp_a7300_1;
-    __uint128_t tmp_a7600_1;
+    __uint128_t tmp_a8000_1;
+    __uint128_t tmp_a8300_1;
     uint64_t rdx_3;
     uint64_t rdx_4;
-    uint32_t tmp_d300_4;
+    uint32_t tmp_d300_2;
     _Alignas(16) uint8_t frame[104];
 
     /* r2dec proof: 3 constructs are marked below; 105 source obligations: 45 rendered, 33 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 22 residual; 25 statements rendered; 1 never assigned, read as residuals (RAX_13); the result's second register is open: no call read decides it */
@@ -1460,16 +1447,16 @@ uint64_t shape_function_pointer(uint64_t arg0, uint64_t arg1)
                 tmp_23c00_2 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
                 tmp_23d00_3 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
                 tmp_9400_1 = (uint64_t)((uint64_t)(uint32_t)tmp_23c00_2 + (uint64_t)tmp_23d00_3);
-                tmp_a7300_1 = (__uint128_t)(uint64_t)tmp_9400_1;
-                tmp_a7600_1 = (__uint128_t)((__uint128_t)tmp_a7300_1 * (__uint128_t)0xaaaaaaaaaaaaaaabU);
-                rdx_3 = (uint64_t)((__uint128_t)tmp_a7600_1 >> 64U);
+                tmp_a8000_1 = (__uint128_t)(uint64_t)tmp_9400_1;
+                tmp_a8300_1 = (__uint128_t)((__uint128_t)tmp_a8000_1 * (__uint128_t)0xaaaaaaaaaaaaaaabU);
+                rdx_3 = (uint64_t)((__uint128_t)tmp_a8300_1 >> 64U);
                 rdx_4 = (uint64_t)(uint32_t)1U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_3 >> (uint64_t)(uint32_t)1U);
                 r2sleigh_store_u64((void*)(uint64_t)(frame + 56U), (uint64_t)r2sleigh_load_u64((void*)((uint64_t)(frame + 64U) + (uint64_t)((uint64_t)((uint64_t)((uint64_t)tmp_9400_1 - (uint64_t)rdx_4) - (uint64_t)rdx_4) - (uint64_t)rdx_4) * 8U)));
-                r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x402125:92 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
-                r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x402125:98 covering 1 op (render::values) */
+                r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x402125:103 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
+                r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x402125:110 covering 1 op (render::values) */
                 r2sleigh_store_u64((void*)(uint64_t)(frame + 48U), (uint64_t)r2sleigh_residual_u64(3));
-                tmp_d300_4 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
-                r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)tmp_d300_4 + (uint32_t)1U));
+                tmp_d300_2 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
+                r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)tmp_d300_2 + (uint32_t)1U));
             } else {
                 break;
             }
@@ -1578,8 +1565,8 @@ uint64_t fcn_402206(void)
     {
         rax_4 = shape_variadic((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
         printf("%016llx\n", rax_4);
-        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x402206:126 covering 1 op (render::values): call to shape_variadic_local: its arity is only at least 0 (a floor), and this call writes 3 */
-        r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x402206:132 covering 1 op (render::values) */
+        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x402206:131 covering 1 op (render::values): call to shape_variadic_local: its arity is only at least 0 (a floor), and this call writes 3 */
+        r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x402206:138 covering 1 op (render::values) */
         printf("%016llx\n", r2sleigh_residual_u64(3));
         rax_12 = shape_call_chain((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
         printf("%016llx\n", rax_12);

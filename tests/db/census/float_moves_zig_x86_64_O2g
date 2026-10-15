@@ -22,11 +22,11 @@ CMDS=aa; pdd @ 0x010014b0
 EXPECT=<<EOF
 void _start(void)
 {
-    uint64_t tmp_aa300_2;
+    uint64_t tmp_ab000_2;
 
     /* r2dec proof: 5 constructs are marked below; 27 source obligations: 0 rendered, 5 elided, 0 refused, 22 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0) */
     {
-        tmp_aa300_2 = r2sleigh_residual_u64(1);
+        tmp_ab000_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x10014b0:29 covering 1 op (render::values) */
         r2sleigh_residual_void(3); /* r2dec gap: StoreNotSpelled at 0x10014b0:32 covering 1 op (render::values) */
         r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x10014b0:46 covering 1 op (render::values): call to __libc_start_main: the import's declaration has an argument this convention does not place */
@@ -119,7 +119,7 @@ void __libc_csu_init(int32_t argc, char** argv, char** envp)
             for (; ; ) {
                 tmp_23d00_1 = r2sleigh_load_u64((void*)r12_2);
                 r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1001570:13 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
-                r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x1001570:19 covering 1 op (render::values) */
+                r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x1001570:20 covering 1 op (render::values) */
                 r13_6 = (uint64_t)((uint64_t)r13_5 - (uint64_t)1U);
                 if ((uint8_t)((uint64_t)r13_6 != (uint64_t)0U)) {
                     r12_2 = (uint64_t)((uint64_t)r12_2 + (uint64_t)8U);

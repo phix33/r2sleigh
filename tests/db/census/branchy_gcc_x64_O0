@@ -70,7 +70,7 @@ uint64_t _init(void)
             rax_3 = rax_1;
         } else {
             r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401014:4 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
-            r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401014:10 covering 1 op (render::values) */
+            r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401014:11 covering 1 op (render::values) */
             rax_3 = r2sleigh_residual_u64(3);
         }
         {
@@ -114,11 +114,11 @@ CMDS=aa; pdd @ 0x00401070
 EXPECT=<<EOF
 void _start(void)
 {
-    uint64_t tmp_aa300_2;
+    uint64_t tmp_ab000_2;
 
     /* r2dec proof: 5 constructs are marked below; 28 source obligations: 0 rendered, 6 elided, 0 refused, 22 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0) */
     {
-        tmp_aa300_2 = r2sleigh_residual_u64(1);
+        tmp_ab000_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x401070:29 covering 1 op (render::values) */
         r2sleigh_residual_void(3); /* r2dec gap: StoreNotSpelled at 0x401070:32 covering 1 op (render::values) */
         r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x401070:68 covering 1 op (render::values): call to __libc_start_main: the import's declaration has an argument this convention does not place */
@@ -217,12 +217,12 @@ uint64_t __do_global_dtors_aux(void)
     void deregister_tm_clones(void);
     extern char __TMC_END__[];
 
-    uint8_t tmp_7c100_1;
+    uint8_t tmp_7da00_1;
 
     /* r2dec proof: 2 constructs are marked below; 24 source obligations: 8 rendered, 12 elided, 0 refused, 4 residual; 6 statements rendered; 1 data object type refused */
     {
-        tmp_7c100_1 = r2sleigh_load_u8((void*)&__TMC_END__);
-        if ((uint8_t)((uint8_t)tmp_7c100_1 != (uint8_t)0U)) {
+        tmp_7da00_1 = r2sleigh_load_u8((void*)&__TMC_END__);
+        if ((uint8_t)((uint8_t)tmp_7da00_1 != (uint8_t)0U)) {
             return r2sleigh_residual_u64(1);
         } else {
             deregister_tm_clones();
@@ -346,18 +346,18 @@ CMDS=aa; pdd @ 0x004011d7
 EXPECT=<<EOF
 uint64_t paired_sum_diff(uint32_t arg0, uint32_t arg1)
 {
-    uint32_t tmp_lane_4011d7_29_b_1;
+    uint32_t tmp_lane_4011d7_2e_b_1;
     uint64_t rax_7;
 
     /* r2dec proof: no individual construct is marked; 25 source obligations: 18 rendered, 7 elided, 0 refused; 7 statements rendered; the result's second register is open: no call read decides it */
     {
-        tmp_lane_4011d7_29_b_1 = (uint32_t)((uint32_t)arg0 - (uint32_t)arg1);
+        tmp_lane_4011d7_2e_b_1 = (uint32_t)((uint32_t)arg0 - (uint32_t)arg1);
         if ((uint8_t)((uint32_t)((uint32_t)arg1 + (uint32_t)arg0) != (uint32_t)250U)) {
             {
                 rax_7 = 0;
             }
         } else {
-            if ((uint8_t)((uint32_t)tmp_lane_4011d7_29_b_1 != (uint32_t)30U)) {
+            if ((uint8_t)((uint32_t)tmp_lane_4011d7_2e_b_1 != (uint32_t)30U)) {
                 {
                     rax_7 = 0;
                 }
@@ -697,12 +697,12 @@ CMDS=aa; pdd @ 0x00401453
 EXPECT=<<EOF
 uint32_t triple_temp(uint32_t arg0)
 {
-    uint32_t tmp_lane_401453_d_3_1;
+    uint32_t tmp_lane_401453_11_3_1;
 
     /* r2dec proof: no individual construct is marked; 12 source obligations: 5 rendered, 7 elided, 0 refused; 2 statements rendered; the result's second register is open: no call read decides it */
     {
-        tmp_lane_401453_d_3_1 = (uint32_t)((uint32_t)arg0 + (uint32_t)2U);
-        return (uint32_t)((uint32_t)((uint32_t)tmp_lane_401453_d_3_1 + (uint32_t)tmp_lane_401453_d_3_1) + (uint32_t)tmp_lane_401453_d_3_1);
+        tmp_lane_401453_11_3_1 = (uint32_t)((uint32_t)arg0 + (uint32_t)2U);
+        return (uint32_t)((uint32_t)((uint32_t)tmp_lane_401453_11_3_1 + (uint32_t)tmp_lane_401453_11_3_1) + (uint32_t)tmp_lane_401453_11_3_1);
     }
 }
 
@@ -813,15 +813,15 @@ uint32_t constant_branch(uint32_t arg0)
 {
     extern char g_sink[];
 
-    uint32_t tmp_lane_401578_37_10_1;
+    uint32_t tmp_lane_401578_3a_10_1;
     uint64_t rax_7;
 
     /* r2dec proof: no individual construct is marked; 22 source obligations: 15 rendered, 7 elided, 0 refused; 6 statements rendered; 1 data object type refused */
     {
         if ((uint8_t)0U) {
             r2sleigh_store_u32((void*)&g_sink, (uint32_t)((uint32_t)((uint32_t)arg0 * (uint32_t)8U) - (uint32_t)arg0));
-            tmp_lane_401578_37_10_1 = r2sleigh_load_u32((void*)&g_sink);
-            rax_7 = (uint64_t)(uint32_t)tmp_lane_401578_37_10_1;
+            tmp_lane_401578_3a_10_1 = r2sleigh_load_u32((void*)&g_sink);
+            rax_7 = (uint64_t)(uint32_t)tmp_lane_401578_3a_10_1;
         } else {
             rax_7 = (uint64_t)(uint32_t)((uint32_t)arg0 + (uint32_t)25U);
         }
@@ -1062,26 +1062,26 @@ CMDS=aa; pdd @ 0x0040170f
 EXPECT=<<EOF
 uint64_t bool_relay(uint32_t arg0, uint32_t arg1)
 {
-    uint32_t tmp_lane_40170f_1a_4_1;
-    uint32_t tmp_lane_40170f_2f_8_1;
+    uint32_t tmp_lane_40170f_1d_4_1;
+    uint32_t tmp_lane_40170f_35_8_1;
     uint64_t rax_8;
 
     /* r2dec proof: no individual construct is marked; 32 source obligations: 25 rendered, 7 elided, 0 refused; 13 statements rendered */
     {
-        tmp_lane_40170f_1a_4_1 = (uint32_t)(uint8_t)((int32_t)0U < (int32_t)arg0);
-        tmp_lane_40170f_2f_8_1 = (uint32_t)(uint8_t)((int32_t)0U < (int32_t)arg1);
-        if ((uint8_t)((uint32_t)tmp_lane_40170f_1a_4_1 == (uint32_t)0U)) {
+        tmp_lane_40170f_1d_4_1 = (uint32_t)(uint8_t)((int32_t)0U < (int32_t)arg0);
+        tmp_lane_40170f_35_8_1 = (uint32_t)(uint8_t)((int32_t)0U < (int32_t)arg1);
+        if ((uint8_t)((uint32_t)tmp_lane_40170f_1d_4_1 == (uint32_t)0U)) {
         } else {
-            if ((uint8_t)((uint32_t)tmp_lane_40170f_2f_8_1 == (uint32_t)0U)) {
+            if ((uint8_t)((uint32_t)tmp_lane_40170f_35_8_1 == (uint32_t)0U)) {
             } else {
                 rax_8 = 2;
                 goto L2;
             }
         }
         {
-            if ((uint8_t)((uint32_t)tmp_lane_40170f_1a_4_1 != (uint32_t)0U)) {
+            if ((uint8_t)((uint32_t)tmp_lane_40170f_1d_4_1 != (uint32_t)0U)) {
             } else {
-                if ((uint8_t)((uint32_t)tmp_lane_40170f_2f_8_1 == (uint32_t)0U)) {
+                if ((uint8_t)((uint32_t)tmp_lane_40170f_35_8_1 == (uint32_t)0U)) {
                     rax_8 = 0;
                     goto L2;
                 } else {

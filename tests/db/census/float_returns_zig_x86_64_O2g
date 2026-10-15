@@ -23,11 +23,11 @@ CMDS=aa; pdd @ 0x010014f0
 EXPECT=<<EOF
 void _start(void)
 {
-    uint64_t tmp_aa300_2;
+    uint64_t tmp_ab000_2;
 
     /* r2dec proof: 5 constructs are marked below; 27 source obligations: 0 rendered, 5 elided, 0 refused, 22 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0) */
     {
-        tmp_aa300_2 = r2sleigh_residual_u64(1);
+        tmp_ab000_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x10014f0:29 covering 1 op (render::values) */
         r2sleigh_residual_void(3); /* r2dec gap: StoreNotSpelled at 0x10014f0:32 covering 1 op (render::values) */
         r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x10014f0:46 covering 1 op (render::values): call to __libc_start_main: the import's declaration has an argument this convention does not place */
@@ -66,17 +66,17 @@ double twice_half(double x)
     double half(double);
 
     __uint128_t xmm0_1;
-    uint64_t tmp_lane_1001530_14_1_1;
+    uint64_t tmp_lane_1001530_17_1_1;
     __uint128_t xmm0_5;
-    uint64_t tmp_lane_1001530_21_6_1;
+    uint64_t tmp_lane_1001530_24_6_1;
 
     /* r2dec proof: no individual construct is marked; 28 source obligations: 14 rendered, 14 elided, 0 refused; 5 statements rendered; 2 callee prototypes supplied by the source */
     {
         xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(half(x));
-        tmp_lane_1001530_14_1_1 = (uint64_t)((__uint128_t)xmm0_1 >> 0U);
+        tmp_lane_1001530_17_1_1 = (uint64_t)((__uint128_t)xmm0_1 >> 0U);
         xmm0_5 = (__uint128_t)r2sleigh_float_to_bits_64(half(x + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U)));
-        tmp_lane_1001530_21_6_1 = (uint64_t)((__uint128_t)xmm0_5 >> 0U);
-        return (double)(r2sleigh_float_from_bits_64(tmp_lane_1001530_21_6_1) + r2sleigh_float_from_bits_64(tmp_lane_1001530_14_1_1));
+        tmp_lane_1001530_24_6_1 = (uint64_t)((__uint128_t)xmm0_5 >> 0U);
+        return (double)(r2sleigh_float_from_bits_64(tmp_lane_1001530_24_6_1) + r2sleigh_float_from_bits_64(tmp_lane_1001530_17_1_1));
     }
 }
 
@@ -91,7 +91,7 @@ CMDS=aa; pdd @ 0x01001570
 EXPECT=<<EOF
 double loop_sum(const double* v, int32_t n)
 {
-    uint32_t tmp_e0200_1;
+    uint32_t tmp_e0f00_1;
     uint64_t rax_2;
     __uint128_t xmm0_1;
     uint64_t rdx_2;
@@ -139,8 +139,8 @@ double loop_sum(const double* v, int32_t n)
 
     /* r2dec proof: no individual construct is marked; 138 source obligations: 126 rendered, 12 elided, 0 refused; 65 statements rendered */
     {
-        tmp_e0200_1 = (uint32_t)n;
-        if ((uint8_t)((int32_t)tmp_e0200_1 <= (int32_t)0U)) {
+        tmp_e0f00_1 = (uint32_t)n;
+        if ((uint8_t)((int32_t)tmp_e0f00_1 <= (int32_t)0U)) {
             xmm0_18 = (__uint128_t)(((__uint128_t)0U & (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffff00000000U)) | ((__uint128_t)(uint32_t)0U & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 0U);
             return (double)r2sleigh_float_from_bits_64((uint64_t)(((__uint128_t)xmm0_18 & (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffffU)) | ((__uint128_t)(uint32_t)0U & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 32U));
         } else {
@@ -239,24 +239,24 @@ int32_t main(int32_t argc, char** argv)
     double loop_sum(const double*, int32_t);
     double twice_half(double);
 
-    double tmp_lane_1001600_d_1_1;
+    double tmp_lane_1001600_10_1_1;
     __uint128_t xmm0_2;
     __uint128_t xmm0_3;
     uint64_t tmp_d400_4;
-    uint64_t tmp_lane_1001600_23_4_1;
+    uint64_t tmp_lane_1001600_26_4_1;
     _Alignas(16) uint8_t frame[56];
 
     /* r2dec proof: 1 construct is marked below; 42 source obligations: 23 rendered, 15 elided, 0 refused, 2 assumed (frame extent unproven), 2 residual; 9 statements rendered; 2 callee prototypes supplied by the source */
     {
-        tmp_lane_1001600_d_1_1 = (double)(int32_t)argc;
-        r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)r2sleigh_float_to_bits_64(tmp_lane_1001600_d_1_1));
+        tmp_lane_1001600_10_1_1 = (double)(int32_t)argc;
+        r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)r2sleigh_float_to_bits_64(tmp_lane_1001600_10_1_1));
         r2sleigh_store_u64((void*)((uint64_t)(frame + 16U) + (uint64_t)8U), (uint64_t)0x4000000000000000U);
-        xmm0_2 = (__uint128_t)r2sleigh_float_to_bits_64(twice_half(tmp_lane_1001600_d_1_1));
+        xmm0_2 = (__uint128_t)r2sleigh_float_to_bits_64(twice_half(tmp_lane_1001600_10_1_1));
         r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)((__uint128_t)xmm0_2 >> 0U));
         xmm0_3 = (__uint128_t)r2sleigh_float_to_bits_64(loop_sum((const double*)(uint64_t)(frame + 16U), 2));
         tmp_d400_4 = r2sleigh_load_u64((void*)(uint64_t)(frame + 40U));
-        tmp_lane_1001600_23_4_1 = (uint64_t)((__uint128_t)xmm0_3 >> 0U);
-        return (int32_t)(r2sleigh_float_from_bits_64(tmp_lane_1001600_23_4_1) + r2sleigh_float_from_bits_64(tmp_d400_4) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_lane_1001600_23_4_1) + r2sleigh_float_from_bits_64(tmp_d400_4) < 2147483648.0 ? (int32_t)(r2sleigh_float_from_bits_64(tmp_lane_1001600_23_4_1) + r2sleigh_float_from_bits_64(tmp_d400_4)) : r2sleigh_residual_i32(1));
+        tmp_lane_1001600_26_4_1 = (uint64_t)((__uint128_t)xmm0_3 >> 0U);
+        return (int32_t)(r2sleigh_float_from_bits_64(tmp_lane_1001600_26_4_1) + r2sleigh_float_from_bits_64(tmp_d400_4) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_lane_1001600_26_4_1) + r2sleigh_float_from_bits_64(tmp_d400_4) < 2147483648.0 ? (int32_t)(r2sleigh_float_from_bits_64(tmp_lane_1001600_26_4_1) + r2sleigh_float_from_bits_64(tmp_d400_4)) : r2sleigh_residual_i32(1));
     }
 }
 
@@ -285,7 +285,7 @@ void __libc_csu_init(int32_t argc, char** argv, char** envp)
             for (; ; ) {
                 tmp_23d00_1 = r2sleigh_load_u64((void*)r12_2);
                 r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1001690:13 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
-                r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x1001690:19 covering 1 op (render::values) */
+                r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x1001690:20 covering 1 op (render::values) */
                 r13_6 = (uint64_t)((uint64_t)r13_5 - (uint64_t)1U);
                 if ((uint8_t)((uint64_t)r13_6 != (uint64_t)0U)) {
                     r12_2 = (uint64_t)((uint64_t)r12_2 + (uint64_t)8U);
