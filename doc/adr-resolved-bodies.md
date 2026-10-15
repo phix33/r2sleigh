@@ -222,7 +222,10 @@ full, then again where the first folded text it points at (AArch64's
 read none of the first's facts unless a declared frame was restated off
 them. The first preparation stops at its seal (`r2ssa::TrustedSeal`: the
 machine context, the owners, the folded table), and its facts are collected
-only where they are the answer or a declared frame reads them. Discovery's
+only where they are the answer or a declared frame reads them. A refusal
+the first fact pass would have raised (an exhausted pass, an unbound span)
+now comes from the second preparation, under the same budget; none moved
+on the census or certification. Discovery's
 handed functions and the dispatch tables read a seal built against the
 convention, recovering nothing: a constant that reaches a call's argument or
 a table is the body's, which no interface decides. Output md5-identical, and
