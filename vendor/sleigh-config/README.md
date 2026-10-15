@@ -3,7 +3,7 @@
 This crate contains precompiled `.sla` and `.pspec` configuration files for use with
 [libsla](https://crates.io/crates/libsla) or other crates that interface with 
 [Ghidra](https://github.com/NationalSecurityAgency/ghidra) SLEIGH. The configuration files are
-sourced from Ghidra version **11.4**.
+sourced from Ghidra master **918acd744d** (2026-10-13), with the corrections `vendor/README.md` lists.
 
 ## Example
 

@@ -1,5 +1,5 @@
-//! Ghidra's parser holds a fixed number of constructor states and a fixed
-//! operand path; a parse deeper than either is refused, not written past them.
+//! Ghidra's parser holds a fixed operand path and a fixed number of operands a state
+//! (GP-6554); a parse deeper than either is refused, not written past them.
 #![cfg(feature = "arm")]
 
 fn lifted(word: u32) -> Option<u32> {
