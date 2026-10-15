@@ -686,9 +686,8 @@ impl InstructionTempAllocator {
     }
 }
 
-/// Rewrite the exclusive-access idioms, a monitor mark before a load and a
-/// monitor test skipping a store, into `LoadLinked` and `StoreConditional`;
-/// the atomic bracket the walk meets, typed after `skips`.
+/// The exclusive-access idioms as `LoadLinked` and `StoreConditional`, and the
+/// atomic bracket the walk meets, which is typed after `skips`.
 fn rewrite_atomic_idioms(
     block: &mut R2ILBlock,
     names: &dyn Fn(u32) -> Option<String>,

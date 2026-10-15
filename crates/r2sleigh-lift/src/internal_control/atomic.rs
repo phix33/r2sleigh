@@ -1,10 +1,5 @@
-//! An atomic bracket the specification states (AArch64's `AtomicBegin`/`AtomicEnd`, x86's
-//! `LOCK`/`UNLOCK`) typed as one `Atomic` access, or marked `IndivisibleAccess` where its accesses
-//! are not one fetch or compare-and-exchange of one cell.
-//!
-//! Runs after `skips`, so the bracket holds no local branch: a compare-and-exchange's store is
-//! already `StoreGuarded`. Every walk is over one instruction's operations, and the operand and
-//! old-value traces stop at [`DEPTH`] definitions, refusing past it.
+//! A specification's atomic bracket (`AtomicBegin`/`AtomicEnd`, `LOCK`/`UNLOCK`) as one `Atomic`
+//! access, else `IndivisibleAccess`; run after `skips`, each trace refusing past [`DEPTH`].
 
 use std::collections::BTreeMap;
 
@@ -145,18 +140,16 @@ impl Region<'_> {
         varnode: &Varnode,
         at: usize,
         depth: usize,
-        temps: &mut InstructionTempAllocator,
-        prelude: &mut Vec<R2ILOp>,
+        out: &mut Recomputed,
     ) -> Option<Varnode> {
         let (index, op) = match self.writer(varnode, at) {
             Writer::Before => return Some(varnode.clone()),
             Writer::Partial => return None,
             Writer::Op(index, op) => (index, op),
             Writer::Low(index, _, whole) => {
-                let whole =
-                    self.materialize(whole, index + 1, depth.checked_sub(1)?, temps, prelude)?;
-                let low = temps.allocate(varnode.size)?;
-                prelude.push(R2ILOp::Subpiece {
+                let whole = self.materialize(whole, index + 1, depth.checked_sub(1)?, out)?;
+                let low = out.temps.allocate(varnode.size)?;
+                out.prelude.push(R2ILOp::Subpiece {
                     dst: low.clone(),
                     src: whole,
                     offset: 0,
@@ -172,35 +165,29 @@ impl Region<'_> {
         let inputs = op
             .inputs()
             .into_iter()
-            .map(|input| self.materialize(input, index, depth, temps, prelude))
+            .map(|input| self.materialize(input, index, depth, out))
             .collect::<Option<Vec<_>>>()?;
         for (slot, input) in clone.inputs_mut().into_iter().zip(inputs) {
             *slot = input;
         }
-        let fresh = temps.allocate(varnode.size)?;
+        let fresh = out.temps.allocate(varnode.size)?;
         *clone.output_mut()? = fresh.clone();
-        prelude.push(clone);
+        out.prelude.push(clone);
         Some(fresh)
     }
 
     /// `varnode` at `at` as an operand of the access's width: itself, or the low part of a value
     /// no part of which reads the cell.
-    fn operand(
-        &self,
-        varnode: &Varnode,
-        at: usize,
-        temps: &mut InstructionTempAllocator,
-        prelude: &mut Vec<R2ILOp>,
-    ) -> Option<Varnode> {
-        let value = self.materialize(varnode, at, DEPTH, temps, prelude)?;
+    fn operand(&self, varnode: &Varnode, at: usize, out: &mut Recomputed) -> Option<Varnode> {
+        let value = self.materialize(varnode, at, DEPTH, out)?;
         if value.size == self.bytes {
             return Some(value);
         }
         if value.size < self.bytes {
             return None;
         }
-        let low = temps.allocate(self.bytes)?;
-        prelude.push(R2ILOp::Subpiece {
+        let low = out.temps.allocate(self.bytes)?;
+        out.prelude.push(R2ILOp::Subpiece {
             dst: low.clone(),
             src: value,
             offset: 0,
@@ -214,14 +201,10 @@ impl Region<'_> {
         &self,
         stored: &Varnode,
         at: usize,
-        temps: &mut InstructionTempAllocator,
-        prelude: &mut Vec<R2ILOp>,
+        out: &mut Recomputed,
     ) -> Option<(AtomicFetchOp, Varnode)> {
         if !self.reads_old(stored, at, DEPTH) {
-            return Some((
-                AtomicFetchOp::Swap,
-                self.operand(stored, at, temps, prelude)?,
-            ));
+            return Some((AtomicFetchOp::Swap, self.operand(stored, at, out)?));
         }
         let (mut index, mut op) = match self.writer(stored, at) {
             Writer::Op(index, op) | Writer::Low(index, op, _) => (index, op),
@@ -239,7 +222,7 @@ impl Region<'_> {
         {
             (index, op) = (wide, wider);
         }
-        if let Some(found) = self.min_max(op, index, temps, prelude) {
+        if let Some(found) = self.min_max(op, index, out) {
             return Some(found);
         }
         let (fetch, a, b, commutes) = match op {
@@ -256,7 +239,7 @@ impl Region<'_> {
             _ => return None,
         };
         (!self.reads_old(other, index, DEPTH)).then_some(())?;
-        Some((fetch, self.operand(other, index, temps, prelude)?))
+        Some((fetch, self.operand(other, index, out)?))
     }
 
     /// The specification's select-by-multiplication, `zext(c1) * x1 + zext(c2) * x2`, where `c1`
@@ -265,15 +248,14 @@ impl Region<'_> {
         &self,
         op: &R2ILOp,
         at: usize,
-        temps: &mut InstructionTempAllocator,
-        prelude: &mut Vec<R2ILOp>,
+        out: &mut Recomputed,
     ) -> Option<(AtomicFetchOp, Varnode)> {
         let R2ILOp::IntAdd { a, b, .. } = op else {
             return None;
         };
         let (a, b) = (self.selected(a, at)?, self.selected(b, at)?);
-        self.ordered_min_max(a, b, at, temps, prelude)
-            .or_else(|| self.ordered_min_max(b, a, at, temps, prelude))
+        self.ordered_min_max(a, b, at, out)
+            .or_else(|| self.ordered_min_max(b, a, at, out))
     }
 
     /// [`Self::min_max`] with `c1` the strict comparison.
@@ -282,8 +264,7 @@ impl Region<'_> {
         (c1, x1): (&Varnode, &Varnode),
         (c2, x2): (&Varnode, &Varnode),
         at: usize,
-        temps: &mut InstructionTempAllocator,
-        prelude: &mut Vec<R2ILOp>,
+        out: &mut Recomputed,
     ) -> Option<(AtomicFetchOp, Varnode)> {
         let (strict, data, value, signed) = self.comparison(c1, at)?;
         let (inclusive, low, high, signed_too) = self.comparison(c2, at)?;
@@ -319,7 +300,7 @@ impl Region<'_> {
             (false, true) => AtomicFetchOp::SignedMin,
             (false, false) => AtomicFetchOp::UnsignedMin,
         };
-        Some((fetch, self.operand(&core, read_at, temps, prelude)?))
+        Some((fetch, self.operand(&core, read_at, out)?))
     }
 
     /// `zext(c) * x`, either way round.
@@ -466,17 +447,18 @@ pub(super) fn type_bracket(
     block.op_metadata = BTreeMap::new();
 }
 
-/// The instruction's operations with the bracket typed, where its accesses are one fetch or
-/// compare-and-exchange of one cell.
-fn typed(
-    ops: &[R2ILOp],
-    (open, close): (usize, usize),
-    bracket: Bracket,
-    big_endian: bool,
-) -> Option<Vec<R2ILOp>> {
-    let inside = open + 1..close;
-    let accesses: Vec<usize> = inside
-        .clone()
+/// The bracket's accesses where they are one cell's: a first load, one store at the same address,
+/// every other access a load of it, and nothing but values beside them.
+struct Shape<'a> {
+    region: Region<'a>,
+    accesses: Vec<usize>,
+    store: usize,
+    /// A guarded store's value and guard.
+    guarded: Option<(&'a Varnode, &'a Varnode)>,
+}
+
+fn shape(ops: &[R2ILOp], (open, close): (usize, usize), big_endian: bool) -> Option<Shape<'_>> {
+    let accesses: Vec<usize> = (open + 1..close)
         .filter(|at| ops[*at].is_memory_read() || ops[*at].is_memory_write())
         .collect();
     let first = *accesses.first()?;
@@ -496,7 +478,7 @@ fn typed(
     let [store] = stores[..] else {
         return None;
     };
-    let (bytes, written) = match &ops[store] {
+    let (bytes, guarded) = match &ops[store] {
         R2ILOp::Store {
             addr: at,
             val,
@@ -518,8 +500,7 @@ fn typed(
         bytes,
         big_endian,
     };
-    // Every other access reads the cell at the width written, from an address nothing in the
-    // bracket moves after the first load.
+    // Nothing in the bracket moves the address after the first load.
     let reads_cell = accesses
         .iter()
         .filter(|at| **at != store)
@@ -529,66 +510,44 @@ fn typed(
             .output()
             .is_some_and(|output| super::overlaps(output, addr))
     });
-    if !reads_cell || address_moves || inside.clone().any(|at| !allowed(&ops[at])) {
+    if !reads_cell || address_moves || (open + 1..close).any(|at| !allowed(&ops[at])) {
         return None;
     }
-    let mut temps = InstructionTempAllocator::for_ops(ops);
-    let mut prelude = Vec::new();
-    let update = match (&ops[store], written) {
-        (R2ILOp::Store { val, .. }, None) => {
-            let (op, operand) = region.fetch(val, store, &mut temps, &mut prelude)?;
-            AtomicUpdate::Fetch { op, operand }
-        }
-        (_, Some((replacement, guard))) => {
-            let (expected, read_at) = region.expected(guard, store)?;
-            if region.reads_old(&expected, read_at, DEPTH)
-                || region.reads_old(replacement, store, DEPTH)
-            {
-                return None;
-            }
-            let expected = region.operand(&expected, read_at, &mut temps, &mut prelude)?;
-            let replacement = region.operand(replacement, store, &mut temps, &mut prelude)?;
-            AtomicUpdate::CompareExchange {
-                expected,
-                replacement,
-            }
-        }
-        _ => return None,
+    Some(Shape {
+        region,
+        accesses,
+        store,
+        guarded,
+    })
+}
+
+/// The instruction's operations with the bracket typed, where its accesses are one fetch or
+/// compare-and-exchange of one cell.
+fn typed(
+    ops: &[R2ILOp],
+    (open, close): (usize, usize),
+    bracket: Bracket,
+    big_endian: bool,
+) -> Option<Vec<R2ILOp>> {
+    let Shape {
+        region,
+        accesses,
+        store,
+        guarded,
+    } = shape(ops, (open, close), big_endian)?;
+    let (first, addr, bytes) = (region.first, region.addr, region.bytes);
+    let mut out = Recomputed {
+        temps: InstructionTempAllocator::for_ops(ops),
+        prelude: Vec::new(),
     };
-    let (release, acquire) = match bracket {
-        Bracket::Lock => (None, None),
-        Bracket::Arm => (
-            (0..open).find(|at| {
-                matches!(
-                    ops[*at],
-                    R2ILOp::Fence {
-                        ordering: MemoryOrdering::Release
-                    }
-                )
-            }),
-            (close + 1..ops.len()).find(|at| {
-                matches!(
-                    ops[*at],
-                    R2ILOp::Fence {
-                        ordering: MemoryOrdering::Acquire
-                    }
-                )
-            }),
-        ),
-    };
-    let ordering = match (bracket, release.is_some(), acquire.is_some()) {
-        (Bracket::Lock, ..) => MemoryOrdering::SeqCst,
-        (Bracket::Arm, true, true) => MemoryOrdering::AcqRel,
-        (Bracket::Arm, true, false) => MemoryOrdering::Release,
-        (Bracket::Arm, false, true) => MemoryOrdering::Acquire,
-        (Bracket::Arm, false, false) => MemoryOrdering::Relaxed,
-    };
-    let old = temps.allocate(bytes)?;
+    let update = update(&region, store, guarded, &mut out)?;
+    let (release, acquire, ordering) = ordering(ops, (open, close), bracket);
+    let old = out.temps.allocate(bytes)?;
     let reread_after_store = accesses.iter().any(|at| *at > store);
     let new = match (&update, reread_after_store) {
         (_, false) => None,
         (AtomicUpdate::Fetch { op, operand }, true) => {
-            Some(updated(*op, &old, operand, temps.allocate(bytes)?)?)
+            Some(updated(*op, &old, operand, out.temps.allocate(bytes)?)?)
         }
         (AtomicUpdate::CompareExchange { .. }, true) => return None,
     };
@@ -599,29 +558,82 @@ fn typed(
         update,
         ordering,
     }));
-    let mut out = Vec::with_capacity(ops.len() + prelude.len() + 2);
+    let mut rewritten = Vec::with_capacity(ops.len() + out.prelude.len() + 2);
     for (at, op) in ops.iter().enumerate() {
         match at {
             _ if at == open || at == close || Some(at) == release || Some(at) == acquire => {}
             _ if at == store => {}
             _ if at == first => {
-                out.append(&mut prelude);
-                out.push(access.clone());
-                out.extend(new.iter().cloned());
-                out.push(copy_of(op, &old));
+                rewritten.append(&mut out.prelude);
+                rewritten.push(access.clone());
+                rewritten.extend(new.iter().cloned());
+                rewritten.push(copy_of(op, &old));
             }
-            _ if inside.contains(&at) && accesses.contains(&at) => {
+            _ if at > open && at < close && accesses.contains(&at) => {
                 let from = if at < store {
                     &old
                 } else {
                     new.as_ref()?.output()?
                 };
-                out.push(copy_of(op, from));
+                rewritten.push(copy_of(op, from));
             }
-            _ => out.push(op.clone()),
+            _ => rewritten.push(op.clone()),
         }
     }
-    Some(out)
+    Some(rewritten)
+}
+
+/// The operands recomputed before the access, and the temporaries they and it take.
+struct Recomputed {
+    temps: InstructionTempAllocator,
+    prelude: Vec<R2ILOp>,
+}
+
+/// What the bracket's one store writes back: a fetch, or a compare-and-exchange where it is guarded.
+fn update(
+    region: &Region<'_>,
+    store: usize,
+    guarded: Option<(&Varnode, &Varnode)>,
+    out: &mut Recomputed,
+) -> Option<AtomicUpdate> {
+    let Some((replacement, guard)) = guarded else {
+        let R2ILOp::Store { val, .. } = &region.ops[store] else {
+            return None;
+        };
+        let (op, operand) = region.fetch(val, store, out)?;
+        return Some(AtomicUpdate::Fetch { op, operand });
+    };
+    let (expected, read_at) = region.expected(guard, store)?;
+    if region.reads_old(&expected, read_at, DEPTH) || region.reads_old(replacement, store, DEPTH) {
+        return None;
+    }
+    Some(AtomicUpdate::CompareExchange {
+        expected: region.operand(&expected, read_at, out)?,
+        replacement: region.operand(replacement, store, out)?,
+    })
+}
+
+/// The release fence before the bracket and the acquire fence after it, and the ordering they
+/// make; x86's LOCK is sequentially consistent on its own.
+fn ordering(
+    ops: &[R2ILOp],
+    (open, close): (usize, usize),
+    bracket: Bracket,
+) -> (Option<usize>, Option<usize>, MemoryOrdering) {
+    if bracket == Bracket::Lock {
+        return (None, None, MemoryOrdering::SeqCst);
+    }
+    let fence =
+        |at: &usize, wanted| matches!(ops[*at], R2ILOp::Fence { ordering } if ordering == wanted);
+    let release = (0..open).find(|at| fence(at, MemoryOrdering::Release));
+    let acquire = (close + 1..ops.len()).find(|at| fence(at, MemoryOrdering::Acquire));
+    let ordering = match (release.is_some(), acquire.is_some()) {
+        (true, true) => MemoryOrdering::AcqRel,
+        (true, false) => MemoryOrdering::Release,
+        (false, true) => MemoryOrdering::Acquire,
+        (false, false) => MemoryOrdering::Relaxed,
+    };
+    (release, acquire, ordering)
 }
 
 /// What the bracket may hold beside its accesses: values, which run whichever way it goes.

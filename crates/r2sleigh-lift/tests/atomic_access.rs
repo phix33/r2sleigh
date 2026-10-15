@@ -1,7 +1,5 @@
-//! Each atomic read-modify-write the specifications bracket is one typed `Atomic` access: AArch64's
-//! LSE forms and `cas` (Arm ARM C6.2, `MemAtomic`), x86's locked operations (Intel SDM Vol. 3A
-//! 9.1.2). A bracket whose accesses are not one fetch or compare-and-exchange of one cell is
-//! `IndivisibleAccess` beside them, never plain accesses alone.
+//! AArch64's LSE and `cas` (Arm ARM `MemAtomic`) and x86's locked operations as one typed `Atomic`,
+//! or `IndivisibleAccess` beside accesses that are not one cell's fetch or compare-and-exchange.
 
 use r2il::{AtomicFetchOp as Op, AtomicUpdate, MemoryOrdering, R2ILOp};
 

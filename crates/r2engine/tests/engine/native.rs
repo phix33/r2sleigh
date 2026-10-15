@@ -1662,9 +1662,8 @@ fn an_aarch64_exclusive_loop_returns_the_value_it_loaded() {
     }
 }
 
-/// An atomic read-modify-write renders as the C11 builtin's helper at the ordering the machine
-/// states (AArch64: its acquire and release marks; x86: LOCK, sequentially consistent), the value
-/// it read assigned, never as a plain load and store.
+/// An atomic read-modify-write renders as its builtin's helper at the machine's ordering (AArch64's
+/// marks, x86's seq_cst LOCK), its value read assigned, never as a plain load and store.
 #[test]
 fn an_atomic_read_modify_write_renders_as_its_builtin_at_the_stated_ordering() {
     let aarch64 = Machine::new("aarch64", "aarch64", 64);

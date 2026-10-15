@@ -1,6 +1,5 @@
-//! One atomic access as a call to the helper wrapping the GCC and Clang builtin for its operation,
-//! width and ordering (`prelude`), its value read assigned where something reads it. A maximum, a
-//! minimum, 128 bits or an unstated ordering has no builtin and stays a gap.
+//! An atomic access as a call to the `prelude` helper wrapping its builtin, the value read assigned;
+//! one with no builtin (a maximum, 128 bits, an unstated ordering) stays a gap.
 
 use r2ssa::{AtomicOp, AtomicUpdateOp, InstId, MachineType, SemanticObligationKind, ValueId};
 
