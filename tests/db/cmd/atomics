@@ -1,7 +1,8 @@
 # Atomic read-modify-writes (tests/gold/atomics.c, clang 18 -O2 -g): each renders as the helper
 # wrapping its C11 builtin at the ordering the machine states. AArch64's LSE forms take their
 # acquire and release marks (ldadd relaxed, ldseta acquire, ldclrl release, ldaddal, swpal and
-# casal acq_rel); x86's LOCK is seq_cst whatever the source asked.
+# casal acq_rel); x86's LOCK is seq_cst whatever the source asked, and its lock cmpxchg retry
+# loops carry the value a failed exchange read back to the next pass.
 
 NAME=aarch64 lse fetch operations
 FILE=tests/fixtures/atomics_clang_aarch64_O2g
@@ -118,6 +119,9 @@ FILE=tests/fixtures/atomics_clang_x86_64_O2g
 CMDS=<<EOF
 pdd @ sym.counter_next
 pdd @ sym.total_add
+pdd @ sym.flags_set
+pdd @ sym.flags_clear
+pdd @ sym.parity_toggle
 pdd @ sym.slot_swap
 pdd @ sym.lock_try
 pdd @ sym.reference_release
@@ -125,12 +129,12 @@ EOF
 EXPECT=<<EOF
 uint32_t counter_next(uint32_t* counter)
 {
-    uint32_t tmp_1a2208_1;
+    uint32_t tmp_1a2708_1;
 
     /* r2dec proof: no individual construct is marked; 10 source obligations: 7 rendered, 3 elided, 0 refused; 2 statements rendered */
     {
-        tmp_1a2208_1 = r2sleigh_atomic_fetch_add_u32_seq_cst((void*)(uint64_t)counter, (uint32_t)1U);
-        return (uint32_t)tmp_1a2208_1;
+        tmp_1a2708_1 = r2sleigh_atomic_fetch_add_u32_seq_cst((void*)(uint64_t)counter, (uint32_t)1U);
+        return (uint32_t)tmp_1a2708_1;
     }
 }
 
@@ -143,36 +147,130 @@ void total_add(uint64_t* total, uint64_t amount)
     }
 }
 
+uint32_t flags_set(uint32_t* flags, uint32_t bits)
+{
+    uint32_t tmp_23c00_1;
+    uint64_t rax_2;
+    uint32_t tmp_lane_401150_d_8_1;
+    uint32_t tmp_19dd28_1;
+    uint8_t zf_2;
+    uint64_t rax_4;
+
+    /* r2dec proof: no individual construct is marked; 28 source obligations: 25 rendered, 3 elided, 0 refused; 11 statements rendered */
+    {
+        tmp_23c00_1 = r2sleigh_load_u32((void*)(uint64_t)flags);
+        rax_2 = (uint64_t)(uint32_t)tmp_23c00_1;
+        for (; ; ) {
+            tmp_lane_401150_d_8_1 = (uint32_t)((uint64_t)rax_2 >> 0U);
+            tmp_19dd28_1 = r2sleigh_atomic_compare_exchange_u32_seq_cst((void*)(uint64_t)flags, (uint32_t)tmp_lane_401150_d_8_1, (uint32_t)((uint32_t)((uint64_t)rax_2 >> 0U) | (uint32_t)bits));
+            zf_2 = (uint8_t)((uint32_t)tmp_lane_401150_d_8_1 == (uint32_t)tmp_19dd28_1);
+            rax_4 = zf_2 ? (uint64_t)((uint64_t)(uint32_t)((uint64_t)rax_2 >> 32U) << 32U | (uint64_t)(zf_2 ? (uint32_t)tmp_lane_401150_d_8_1 : (uint32_t)tmp_19dd28_1)) : (uint64_t)(uint32_t)tmp_19dd28_1;
+            if ((uint8_t)((uint32_t)zf_2 ^ (uint32_t)(uint8_t)1U)) {
+                rax_2 = rax_4;
+            } else {
+                break;
+            }
+        }
+        {
+            return (uint32_t)rax_4;
+        }
+    }
+}
+
+uint32_t flags_clear(uint32_t* flags, uint32_t bits)
+{
+    uint32_t tmp_lane_401160_0_1_1;
+    uint32_t tmp_23c00_1;
+    uint64_t rax_2;
+    uint32_t tmp_lane_401170_d_a_1;
+    uint32_t tmp_19dd28_1;
+    uint8_t zf_2;
+    uint64_t rax_4;
+
+    /* r2dec proof: no individual construct is marked; 29 source obligations: 26 rendered, 3 elided, 0 refused; 12 statements rendered */
+    {
+        tmp_lane_401160_0_1_1 = (uint32_t)~(uint32_t)bits;
+        tmp_23c00_1 = r2sleigh_load_u32((void*)(uint64_t)flags);
+        rax_2 = (uint64_t)(uint32_t)tmp_23c00_1;
+        for (; ; ) {
+            tmp_lane_401170_d_a_1 = (uint32_t)((uint64_t)rax_2 >> 0U);
+            tmp_19dd28_1 = r2sleigh_atomic_compare_exchange_u32_seq_cst((void*)(uint64_t)flags, (uint32_t)tmp_lane_401170_d_a_1, (uint32_t)((uint32_t)((uint64_t)rax_2 >> 0U) & (uint32_t)tmp_lane_401160_0_1_1));
+            zf_2 = (uint8_t)((uint32_t)tmp_lane_401170_d_a_1 == (uint32_t)tmp_19dd28_1);
+            rax_4 = zf_2 ? (uint64_t)((uint64_t)(uint32_t)((uint64_t)rax_2 >> 32U) << 32U | (uint64_t)(zf_2 ? (uint32_t)tmp_lane_401170_d_a_1 : (uint32_t)tmp_19dd28_1)) : (uint64_t)(uint32_t)tmp_19dd28_1;
+            if ((uint8_t)((uint32_t)zf_2 ^ (uint32_t)(uint8_t)1U)) {
+                rax_2 = rax_4;
+            } else {
+                break;
+            }
+        }
+        {
+            return (uint32_t)rax_4;
+        }
+    }
+}
+
+uint16_t parity_toggle(uint16_t* word, uint16_t mask)
+{
+    uint64_t rsi_1;
+    uint16_t tmp_23b00_1;
+    uint64_t rax_2;
+    uint16_t tmp_lane_401190_d_8_1;
+    uint16_t tmp_19da20_1;
+    uint8_t zf_2;
+    uint16_t tmp_lane_401190_1d_9_1;
+
+    /* r2dec proof: no individual construct is marked; 30 source obligations: 27 rendered, 3 elided, 0 refused; 12 statements rendered */
+    {
+        rsi_1 = (uint64_t)(uint16_t)mask;
+        tmp_23b00_1 = r2sleigh_load_u16((void*)(uint64_t)word);
+        rax_2 = (uint64_t)(uint16_t)tmp_23b00_1;
+        for (; ; ) {
+            tmp_lane_401190_d_8_1 = (uint16_t)((uint64_t)rax_2 >> 0U);
+            tmp_19da20_1 = r2sleigh_atomic_compare_exchange_u16_seq_cst((void*)(uint64_t)word, (uint16_t)tmp_lane_401190_d_8_1, (uint16_t)((uint32_t)((uint32_t)((uint64_t)rax_2 >> 0U) ^ (uint32_t)((uint64_t)rsi_1 >> 0U)) >> 0U));
+            zf_2 = (uint8_t)((uint16_t)tmp_lane_401190_d_8_1 == (uint16_t)tmp_19da20_1);
+            tmp_lane_401190_1d_9_1 = zf_2 ? (uint16_t)tmp_lane_401190_d_8_1 : (uint16_t)tmp_19da20_1;
+            if ((uint8_t)((uint32_t)zf_2 ^ (uint32_t)(uint8_t)1U)) {
+                rax_2 = (uint64_t)(((uint64_t)rax_2 & (uint64_t)0xffffffffffff0000U) | ((uint64_t)tmp_lane_401190_1d_9_1 & (uint64_t)0xffffU) << 0U);
+            } else {
+                break;
+            }
+        }
+        {
+            return (uint16_t)tmp_lane_401190_1d_9_1;
+        }
+    }
+}
+
 uint8_t slot_swap(uint8_t* slot, uint8_t value)
 {
-    uint8_t tmp_1a2510_1;
+    uint8_t tmp_1a2a10_1;
 
     /* r2dec proof: no individual construct is marked; 10 source obligations: 7 rendered, 3 elided, 0 refused; 2 statements rendered */
     {
-        tmp_1a2510_1 = r2sleigh_atomic_exchange_u8_seq_cst((void*)(uint64_t)slot, (uint8_t)value);
-        return (uint8_t)tmp_1a2510_1;
+        tmp_1a2a10_1 = r2sleigh_atomic_exchange_u8_seq_cst((void*)(uint64_t)slot, (uint8_t)value);
+        return (uint8_t)tmp_1a2a10_1;
     }
 }
 
 int32_t lock_try(int32_t* lock)
 {
-    uint32_t tmp_19d028_1;
+    uint32_t tmp_19dd28_1;
 
     /* r2dec proof: no individual construct is marked; 15 source obligations: 12 rendered, 3 elided, 0 refused; 2 statements rendered */
     {
-        tmp_19d028_1 = r2sleigh_atomic_compare_exchange_u32_seq_cst((void*)(uint64_t)lock, (uint32_t)0U, (uint32_t)1U);
-        return (int32_t)((uint64_t)(uint8_t)((uint32_t)((uint32_t)0U - (uint32_t)tmp_19d028_1) == (uint32_t)0U) >> 0U);
+        tmp_19dd28_1 = r2sleigh_atomic_compare_exchange_u32_seq_cst((void*)(uint64_t)lock, (uint32_t)0U, (uint32_t)1U);
+        return (int32_t)((uint64_t)(uint8_t)((uint32_t)((uint32_t)0U - (uint32_t)tmp_19dd28_1) == (uint32_t)0U) >> 0U);
     }
 }
 
 int32_t reference_release(int32_t* count)
 {
-    uint32_t tmp_58408_1;
+    uint32_t tmp_5b808_1;
 
     /* r2dec proof: no individual construct is marked; 14 source obligations: 11 rendered, 3 elided, 0 refused; 2 statements rendered */
     {
-        tmp_58408_1 = r2sleigh_atomic_fetch_sub_u32_seq_cst((void*)(uint64_t)count, (uint32_t)1U);
-        return (int32_t)(uint8_t)((uint32_t)tmp_58408_1 == (uint32_t)1U);
+        tmp_5b808_1 = r2sleigh_atomic_fetch_sub_u32_seq_cst((void*)(uint64_t)count, (uint32_t)1U);
+        return (int32_t)(uint8_t)((uint32_t)tmp_5b808_1 == (uint32_t)1U);
     }
 }
 
