@@ -270,9 +270,9 @@ reason = "an import's flag keeps characters radare2's flag filter rewrites (spac
 
 [[judged]]
 command = "pd"
-binaries = "armeb_hello_static"
+binaries = ["armeb_hello_static", "arm-plt-lld-be8.so"]
 verdict = "r2s-right"
-reason = "e_flags 0x5800202 states BE8: code is little-endian; radare2 decodes it big-endian"
+reason = "e_flags 0x5800202 and 0x5800200 state BE8: code is little-endian; radare2 decodes it big-endian"
 
 [[judged]]
 command = "pd"
@@ -677,6 +677,14 @@ r2 = 'mov[wt] rext, 0x0$'
 r2s = 'mov[wt] r0, 0x0$'
 verdict = "r2s-right"
 reason = "the encoded register is r0 (movw r0, #:lower16:ext); radare2 substitutes the relocation's symbol into the register name"
+
+[[judged]]
+command = "pd"
+binaries = "arm-thumb-movw-be.o"
+r2 = 'bne\.w reloc\.back$'
+r2s = 'bne\.w 0x800003e$'
+verdict = "unfilled"
+reason = "BE32 Thumb (W26): the field holds R_ARM_THM_JUMP19's addend to `back`, which r2image places no value for (ROADMAP I: ARM instruction-field encoders); radare2 names the relocation's symbol"
 
 [[judged]]
 command = "pd"
