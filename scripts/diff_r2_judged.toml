@@ -292,9 +292,9 @@ reason = "processor-specific types (ARM_EXIDX, ARM_ATTRIBUTES by e_machine): r2s
 [[judged]]
 command = "iS"
 binaries = "*"
-values = ["0x60000002"]
+values = ["0x60000001", "0x60000002"]
 verdict = "unfilled"
-reason = "an OS-specific type (Android's packed RELA): r2s prints the number, radare2 `----`; both owe the name"
+reason = "an OS-specific type (Android's packed REL and RELA, SHT_ANDROID_REL and SHT_ANDROID_RELA): r2s prints the number, radare2 `----`; both owe the name"
 
 [[judged]]
 command = "is"
@@ -425,11 +425,19 @@ reason = "a call through a relocated slot outside a stub is spelled as a number;
 
 [[judged]]
 command = "pd"
-binaries = "libcurl.so*"
-r2 = 'b loc\.imp\.'
-r2s = 'b sym\.imp\.'
+binaries = ["libcurl.so*", "x86_64-tailrela.so"]
+r2 = '(b|call) loc\.imp\.'
+r2s = '(b|call) sym\.imp\.'
 verdict = "deliberate"
-reason = "0x77cc is a linkage stub reading __gmon_start__'s slot; r2s names every stub sym.imp., whatever the import's binding"
+reason = "a linkage stub reading a weak or NOTYPE import's slot (libcurl's 0x77cc, __gmon_start__; tailrela's ext_fn): radare2 spells it loc.imp., r2s names every stub sym.imp., whatever the import's binding or type"
+
+[[judged]]
+command = "pd"
+binaries = "x86_64-tailrela.so"
+r2 = 'qword \[ext_obj\]$'
+r2s = 'qword \[reloc\.ext_obj\]$'
+verdict = "r2s-right"
+reason = "0x10ce0 is ext_obj's R_X86_64_GLOB_DAT slot (objdump -R), which r2s names reloc.ext_obj; radare2 flags each record reloc.<symbol> and the last of the three naming ext_obj takes the flag, so its reloc.ext_obj sits on 0x10d20, the R_X86_64_64 word holding ext_obj+8, and here it prints the record's bare symbol (master too)"
 
 [[judged]]
 command = "pd"
@@ -465,6 +473,37 @@ reason = "a relocatable states no addresses: r2s places a NOBITS .bss past the a
 
 [[judged]]
 command = "is"
+binaries = ["x86_64-abs-sym.o", "arm-abs-thumb.o", "arm-abs-thumb-blx.o"]
+columns = ["vaddr"]
+r2 = '^<missing>$'
+r2s = '^\d+ -{10} 0x[0-9a-f]+ GLOBAL NOTYPE 0 (absval|abshit|romfn)$'
+verdict = "r2s-right"
+reason = "SHN_ABS symbols (readelf: absval 0x1234, abshit 0x400100, romfn 0x08000101, a Thumb function at 0x08000100): a value, not an offset in any section; r2s states it unplaced, radare2 (master too) lists each at the object's base, paddr 0, its value dropped"
+
+[[judged]]
+command = "is"
+binaries = ["x86_64-common-code.o", "x86_64-common-sym.o", "aarch64-common-got.o"]
+columns = ["vaddr"]
+r2s = '^\d+ -{10} 0x08[0-9a-f]{6} GLOBAL OBJ 8 [cl]buf$'
+verdict = "r2s-right"
+reason = "a common symbol (SHN_COMMON, x86-64's SHN_X86_64_LCOMMON) has no address before the link; its st_value is its alignment (gABI). r2s allocates it past the sections as the static linker allocates .bss (W5); radare2 (master too) lists it at the object's base, paddr 0, the ELF header"
+
+[[judged]]
+command = "pd"
+binaries = ["x86_64-abs-sym.o", "x86_64-common-sym.o", "x86_64-common-code.o", "arm-abs-thumb-blx.o"]
+r2 = '(\.[dq]word 0x[0-9a-f]+|ff +invalid)$'
+verdict = "unfilled"
+reason = "a data section's relocated words: radare2 marks each relocation's word data and lists it .qword or .dword, the file's 0 (relocs unapplied), then its fill; r2s decodes them as instructions as the link leaves them (xor al, 0x12 is absval's 0x1234, stmdaeq r0, {r0, r8} is romfn's 0x08000101), and one starting inside a written word reads the file's bytes (stated::code encodes a write only whole); owner r2engine's listing (ROADMAP P11)"
+
+[[judged]]
+command = ["px", "pd"]
+binaries = "x86_64-abs-sym-noshdr.so"
+r2 = '^0x0*[0-9a-f]{1,2} '
+verdict = "r2s-right"
+reason = "no section headers and e_entry 0: radare2 seeks nothing and dumps its 0xff fill at 0, which nothing maps (the base is 0x400000); r2s starts at the first mapped byte, the ELF header at 0x400000"
+
+[[judged]]
+command = "is"
 binaries = ["*.o", "*_o", "*.ko"]
 columns = ["vaddr"]
 r2s = ' imp\.'
@@ -497,15 +536,15 @@ reason = "ARM32 (ungraded): e_entry 0x132700 points at text; r2s steps one byte 
 
 [[judged]]
 command = "pd"
-binaries = ["libflutterapp.so", "r2pay-arm32.so", "swift-klass"]
+binaries = ["libflutterapp.so", "r2pay-arm32.so", "swift-klass", "x86_64-abs-sym.so"]
 verdict = "unfilled"
-reason = "a shared object's e_entry 0 names no entry (radare2 guesses .text's start), so the two list different places"
+reason = "a shared object's e_entry 0 names no entry, so the two list different places: radare2 guesses .text's start (x86_64-abs-sym.so's empty .text by its file offset 0x350, which LOAD1 maps at .dynamic, 0x402350), r2s starts at the first code, or the first mapped byte where there is none"
 
 [[judged]]
 command = "px"
-binaries = "swift-klass"
+binaries = ["swift-klass", "x86_64-abs-sym.so"]
 verdict = "unfilled"
-reason = "a shared object's e_entry 0 names no entry (radare2 guesses .text's start, 0xe20), so the two dump different places"
+reason = "a shared object's e_entry 0 names no entry (radare2 guesses .text's start, 0xe20, or 0x402350 for x86_64-abs-sym.so's empty .text), so the two dump different places"
 
 [[judged]]
 command = "ie"
@@ -538,18 +577,18 @@ reason = "a fat file's offsets are the file's: radare2 states the entry header f
 [[judged]]
 command = "pd"
 binaries = "*"
-r2 = '(lea|mov) r\w+, (qword )?\[?(str|sym|section|segment|loc)\.'
-r2s = '(lea|mov) r\w+, (qword )?\[0x'
+r2 = '(lea|mov) [re]\w+, ([dq]word )?\[?(str|sym|section|segment|loc)\.'
+r2s = '(lea|mov) [re]\w+, ([dq]word )?\[0x'
 verdict = "deliberate"
 reason = "a number is named only where the engine claims it as an address; pd claims no lea or load target radare2 flags"
 
 [[judged]]
 command = "pd"
 binaries = "*"
-r2 = '(lea|mov) r\w+, (qword )?\[?(sym|str|section)\.'
-r2s = '(lea|mov) r\w+, (qword )?\[?(reloc|obj)\.'
+r2 = '((lea|mov) r\w+, (qword )?\[?|adrp x\d+, )(sym|str|section)\.'
+r2s = '((lea|mov) r\w+, (qword )?\[?|adrp x\d+, )(reloc|obj)\.'
 verdict = "deliberate"
-reason = "of several names at one address r2s takes a relocation's before a symbol's, and calls a data symbol obj."
+reason = "of several names at one address r2s takes a relocation's before a symbol's, and calls a data symbol obj. (radare2 master spells anal-globals' adrp obj._global_count too: that row flips when the pin moves)"
 
 [[judged]]
 command = "pd"
@@ -672,27 +711,27 @@ reason = "ARM32 (ungraded): Sleigh names r9 where radare2 writes its APCS name s
 
 [[judged]]
 command = "pd"
-binaries = "arm-thumb-movw.o"
-r2 = 'mov[wt] rext, 0x0$'
+binaries = ["arm-thumb-movw.o", "arm-thumb-bit.o"]
+r2 = 'mov[wt] r(ext|tf), 0x0$'
 r2s = 'mov[wt] r0, 0x0$'
 verdict = "r2s-right"
-reason = "the encoded register is r0 (movw r0, #:lower16:ext); radare2 substitutes the relocation's symbol into the register name"
+reason = "the encoded register is r0 (movw r0, #:lower16:ext, :lower16:tf); radare2 substitutes the relocation's symbol into the register name (master too). Both leave the immediate the file's 0, which r2image's ARM encoders owe (ROADMAP I)"
 
 [[judged]]
 command = "pd"
-binaries = "arm-thumb-movw-be.o"
-r2 = 'bne\.w reloc\.back$'
-r2s = 'bne\.w 0x800003e$'
+binaries = ["arm-*.o", "aarch64-*.o"]
+r2 = '\b(blx?|b(eq|ne)?\.w|adrp x\d+,|ldr x\d+,) '
+r2s = '\b(blx?|b(eq|ne)?\.w|adrp x\d+,|ldr x\d+,) 0x[0-9a-f]+$'
 verdict = "unfilled"
-reason = "BE32 Thumb (W26): the field holds R_ARM_THM_JUMP19's addend to `back`, which r2image places no value for (ROADMAP I: ARM instruction-field encoders); radare2 names the relocation's symbol"
+reason = "an ARM or AArch64 object's instruction field (R_ARM_THM_CALL, THM_JUMP19 and JUMP24, BE32 too; R_AARCH64_ADR_GOT_PAGE, LD_PREL_LO19) is stated typed but no encoder writes it, so r2s decodes the file's field: a branch to itself or by its addend (beq.w 0x810003e), an adrp to its own page; owner r2image (ROADMAP I: ARM and AArch64 instruction-field encoders). radare2 also lists the file's field, naming the relocation or the address (bl sym.f is the unrelocated self-target; adrp obj.cbuf names the page after the common symbol it lists at the base)"
 
 [[judged]]
 command = "pd"
 binaries = ["*.o", "*_o", "*.ko"]
-r2 = '(call|push|b\.w|beq\.w|ldr x\d+,) '
-r2s = '(call|push|b\.w|beq\.w|ldr x\d+,) (0x|sym\.|loc\.|obj\.|fcn\.|section\.)'
+r2 = '(call|push|mov r\w+, qword) '
+r2s = '(call|push|mov r\w+, qword) \[?(0x|sym\.|loc\.|obj\.|fcn\.|section\.)'
 verdict = "deliberate"
-reason = "r2s decodes an object's instruction as a static link leaves it (W5): the field's bytes hold the relocated value and the operand names its target; radare2 lists the file's zeros and the relocation's name (bin.relocs.apply off)"
+reason = "r2s decodes an x86 object's instruction as a static link leaves it (W5): the field's bytes hold the relocated value (a common symbol's allocation, an import's stub) and the operand names its target; radare2 lists the file's zeros and the relocation's name (bin.relocs.apply off)"
 
 [[judged]]
 command = "pd"
