@@ -339,6 +339,51 @@ fn under_aa_a_two_member_cycle_rises_to_its_least_fixpoint() {
     assert!(!text.contains("a floor"), "{text}");
 }
 
+/// `p` and `q`: `test edi, edi; je ret; sub edi, 1; call <next>; ret`, each handing on the `rsi`
+/// it never wrote, `p` to `q` and `q` to `r`; `r`: `test esi, esi; je ret; sub edi, 1; call p;
+/// ret`; `caller` writes `edi`, `esi` and `edx` and calls `p`.
+const RISE_THROUGH_A_CHAIN: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x08, // 1002 je 0x100c
+    0x83, 0xef, 0x01, // 1004 sub edi, 1
+    0xe8, 0x04, 0x00, 0x00, 0x00, // 1007 call 0x1010
+    0xc3, // 100c ret
+    0xcc, 0xcc, 0xcc, // 100d padding
+    0x85, 0xff, // 1010 test edi, edi
+    0x74, 0x08, // 1012 je 0x101c
+    0x83, 0xef, 0x01, // 1014 sub edi, 1
+    0xe8, 0x04, 0x00, 0x00, 0x00, // 1017 call 0x1020
+    0xc3, // 101c ret
+    0xcc, 0xcc, 0xcc, // 101d padding
+    0x85, 0xf6, // 1020 test esi, esi
+    0x74, 0x08, // 1022 je 0x102c
+    0x83, 0xef, 0x01, // 1024 sub edi, 1
+    0xe8, 0xd4, 0xff, 0xff, 0xff, // 1027 call 0x1000
+    0xc3, // 102c ret
+    0xcc, 0xcc, 0xcc, // 102d padding
+    0xbf, 0x05, 0x00, 0x00, 0x00, // 1030 mov edi, 5
+    0xbe, 0x07, 0x00, 0x00, 0x00, // 1035 mov esi, 7
+    0xba, 0x09, 0x00, 0x00, 0x00, // 103a mov edx, 9
+    0xe8, 0xbc, 0xff, 0xff, 0xff, // 103f call 0x1000
+    0xc3, // 1044 ret
+];
+
+/// Resolved first against `q`'s seed of one, `p` stays at one; `q` then rises to two against `r`,
+/// so `p`, which calls it, is resolved again and rises too: `p(5, 7)`, never `p(5)`.
+#[test]
+fn under_aa_a_rise_resolves_again_the_members_that_call_it() {
+    let functions = [
+        ("p", BASE, 0x0d),
+        ("q", BASE + 0x10, 0x0d),
+        ("r", BASE + 0x20, 0x0d),
+        ("caller", BASE + 0x30, 0x15),
+    ];
+    let text = surveyed(RISE_THROUGH_A_CHAIN, &functions, BASE + 0x30);
+    assert!(text.contains("p(5, 7)"), "{text}");
+    assert!(!text.contains(", 9)"), "{text}");
+    assert!(!text.contains("a floor"), "{text}");
+}
+
 /// `f`: `call [rdi]; call g; ret`, its result `g`'s; `g`: `test edi, edi; je ret; call f; ret`;
 /// `caller`: `mov edi, 5; mov esi, 7; call g; ret`.
 const CYCLE_THROUGH_AN_INDIRECT_CALL: &[u8] = &[
