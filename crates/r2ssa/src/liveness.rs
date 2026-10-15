@@ -890,6 +890,15 @@ fn first_overlap(
     }
 }
 
+/// Whether a phi reads `value`.
+fn read_by_a_merge(graph: &crate::graph::SsaGraph, value: crate::graph::ValueId) -> bool {
+    let phi = |site: &crate::graph::UseSite| {
+        let inst = graph.inst(site.inst);
+        inst.is_some_and(|inst| matches!(inst.payload, crate::graph::InstPayload::Phi { .. }))
+    };
+    graph.use_sites(value).iter().any(phi)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1498,13 +1507,4 @@ mod tests {
             }
         }
     }
-}
-
-/// Whether a phi reads `value`.
-fn read_by_a_merge(graph: &crate::graph::SsaGraph, value: crate::graph::ValueId) -> bool {
-    let phi = |site: &crate::graph::UseSite| {
-        let inst = graph.inst(site.inst);
-        inst.is_some_and(|inst| matches!(inst.payload, crate::graph::InstPayload::Phi { .. }))
-    };
-    graph.use_sites(value).iter().any(phi)
 }
