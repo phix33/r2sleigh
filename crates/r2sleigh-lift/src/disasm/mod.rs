@@ -2674,6 +2674,7 @@ impl Disassembler {
             .map_err(translate_err)?;
         let ops = translate::canonicalize_memory_operands(ops, address_size, &mut temp_base);
         let ops = translate::split_odd_register_zeroes(ops);
+        let ops = translate::forward_repeated_loads(ops);
 
         // A trap ends the instruction. Sleigh writes `brk` as a user operation
         // that produces `pc` followed by a branch through it, so the branch's

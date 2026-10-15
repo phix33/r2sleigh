@@ -423,6 +423,82 @@ pub fn canonicalize_memory_operands(
     out
 }
 
+/// One machine access Sleigh spells as several (x86's `add [m], r` reads `[m]` for each flag): a
+/// plain load of an address this instruction already loaded or stored, with no write to the
+/// address, the value or memory between, reads the value held. Straight-line only. O(n·k).
+pub fn forward_repeated_loads(ops: Vec<R2ILOp>) -> Vec<R2ILOp> {
+    let local_branch = |op: &R2ILOp| {
+        matches!(op, R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. }
+            if target.space == SpaceId::Const)
+    };
+    let (mut loads, mut stores) = (0, 0);
+    for op in &ops {
+        loads += usize::from(matches!(op, R2ILOp::Load { .. }));
+        stores += usize::from(matches!(op, R2ILOp::Store { .. }));
+    }
+    // Nothing to forward without a second load, or a load after a store.
+    if loads == 0 || (loads == 1 && stores == 0) || ops.iter().any(local_branch) {
+        return ops;
+    }
+    // Each (space, address, size) whose value a varnode still holds.
+    let mut held: Vec<(SpaceId, Varnode, Varnode)> = Vec::new();
+    let mut out = Vec::with_capacity(ops.len());
+    for op in ops {
+        match op {
+            R2ILOp::Load { dst, space, addr } => {
+                let known = held
+                    .iter()
+                    .find(|(at, address, value)| {
+                        *at == space && *address == addr && value.size == dst.size
+                    })
+                    .map(|(.., value)| value.clone());
+                match known {
+                    Some(value) if value == dst => {}
+                    Some(value) => {
+                        forget(&mut held, &dst);
+                        out.push(R2ILOp::Copy { dst, src: value });
+                    }
+                    None => {
+                        forget(&mut held, &dst);
+                        if !overlaps(&dst, &addr) {
+                            held.push((space, addr.clone(), dst.clone()));
+                        }
+                        out.push(R2ILOp::Load { dst, space, addr });
+                    }
+                }
+            }
+            R2ILOp::Store { space, addr, val } => {
+                // Another address may be the same bytes, so only this store's value stays known.
+                held.clear();
+                held.push((space, addr.clone(), val.clone()));
+                out.push(R2ILOp::Store { space, addr, val });
+            }
+            op if op.is_speculatable_value() => {
+                if let Some(written) = op.output() {
+                    forget(&mut held, written);
+                }
+                out.push(op);
+            }
+            op => {
+                held.clear();
+                out.push(op);
+            }
+        }
+    }
+    out
+}
+
+fn overlaps(a: &Varnode, b: &Varnode) -> bool {
+    a.space == b.space
+        && a.offset < b.offset.saturating_add(u64::from(b.size))
+        && b.offset < a.offset.saturating_add(u64::from(a.size))
+}
+
+/// Drop what `written` overwrites: a held value, or the address it was read from.
+fn forget(held: &mut Vec<(SpaceId, Varnode, Varnode)>, written: &Varnode) {
+    held.retain(|(_, address, value)| !overlaps(address, written) && !overlaps(value, written));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,6 +526,92 @@ mod tests {
             src: Varnode::constant(0, 8),
         };
         assert_eq!(split_odd_register_zeroes(vec![wide]).len(), 1);
+    }
+
+    fn load(dst: Varnode, addr: Varnode) -> R2ILOp {
+        R2ILOp::Load {
+            dst,
+            space: SpaceId::Ram,
+            addr,
+        }
+    }
+
+    /// `add dword [rbp - 0xdc], 0x1`: Sleigh loads the cell for CF, OF, AF, the sum, then SF, ZF
+    /// and PF after the store; the machine reads it once and the flags read the stored value.
+    #[test]
+    fn a_repeated_load_of_one_address_reads_the_value_held() {
+        let (address, cell) = (Varnode::unique(0x9000, 8), Varnode::unique(0xd300, 4));
+        let flag = |offset| Varnode::register(offset, 1);
+        let one = Varnode::constant(1, 4);
+        let ops = forward_repeated_loads(vec![
+            load(cell.clone(), address.clone()),
+            R2ILOp::IntCarry {
+                dst: flag(0x200),
+                a: cell.clone(),
+                b: one.clone(),
+            },
+            load(cell.clone(), address.clone()),
+            R2ILOp::IntAdd {
+                dst: cell.clone(),
+                a: cell.clone(),
+                b: one.clone(),
+            },
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: address.clone(),
+                val: cell.clone(),
+            },
+            load(cell.clone(), address.clone()),
+            R2ILOp::IntSLess {
+                dst: flag(0x207),
+                a: cell.clone(),
+                b: Varnode::constant(0, 4),
+            },
+        ]);
+        let loads = ops
+            .iter()
+            .filter(|op| matches!(op, R2ILOp::Load { .. }))
+            .count();
+        assert_eq!((ops.len(), loads), (5, 1), "{ops:?}");
+    }
+
+    /// A load into its own address register, a store elsewhere and a value overwritten between
+    /// each leave the next load in place.
+    #[test]
+    fn a_load_after_its_address_value_or_memory_changed_stays() {
+        let (address, value) = (Varnode::register(0x38, 8), Varnode::unique(0x100, 8));
+        let other = Varnode::register(0x30, 8);
+        for between in [
+            R2ILOp::Copy {
+                dst: address.clone(),
+                src: other.clone(),
+            },
+            R2ILOp::Copy {
+                dst: value.clone(),
+                src: other.clone(),
+            },
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: other.clone(),
+                val: other.clone(),
+            },
+        ] {
+            let ops = forward_repeated_loads(vec![
+                load(value.clone(), address.clone()),
+                between,
+                load(value.clone(), address.clone()),
+            ]);
+            let loads = ops
+                .iter()
+                .filter(|op| matches!(op, R2ILOp::Load { .. }))
+                .count();
+            assert_eq!(loads, 2, "{ops:?}");
+        }
+        let chased = vec![
+            load(address.clone(), address.clone()),
+            load(address.clone(), address.clone()),
+        ];
+        assert_eq!(forward_repeated_loads(chased.clone()), chased);
     }
 
     fn pieces(ops: Vec<R2ILOp>, big_endian: bool) -> Result<Vec<R2ILOp>> {
