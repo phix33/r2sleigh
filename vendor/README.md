@@ -21,5 +21,20 @@ fraction bits with `Imm_shr_imm16` and `Imm_shr_imm64`, as `fcvtzs` does, where
 Ghidra read `Imm_shr_imm32`: `fcvtzu d0, d1, #8` decoded as `#-0x38` and
 `fcvtzu h0, h1, #8` as `#0x28`.
 
+Carried in this tree, not yet in the forks (fork pull requests owed to
+0verflowme/libsla-sys, its Ghidra branch, and 0verflowme/libsla; audit W2):
+Ghidra's `ParserContext::applyCommits` writes only a commit aimed at the
+instruction's fall-through into the context database. One aimed elsewhere
+(a Thumb or ARM `blx`'s `globalset` of `TMode` at its target, MIPS `jalx`'s
+`ISA_MODE`) goes to `Sleigh::contextTargets()` with the bits the database holds
+there, so a continued run no longer decodes everything above a backward
+target in the target's set, and `contextCommitted` no longer counts it
+(`context.hh`, `context.cc`, `sleigh.hh`, `sleigh.cc`). Java's
+`DisassemblerContextImpl` already keeps such a value for that address alone,
+and the decompiler never commits, so this is a fork change, not a Ghidra one.
+libsla-sys passes the record through as `context_targets` (`bridge.hh`,
+`bridge.cc`, `sys.rs`), and libsla as `PcodeDisassembly::context_targets`
+(`ContextTarget`, with `differs`).
+
 Licences: Apache-2.0 (each crate's `LICENSE`), with Ghidra's `NOTICE`,
 `DISCLAIMER.md` and `licenses/` kept beside its sources.
