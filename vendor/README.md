@@ -36,5 +36,13 @@ libsla-sys passes the record through as `context_targets` (`bridge.hh`,
 `bridge.cc`, `sys.rs`), and libsla as `PcodeDisassembly::context_targets`
 (`ContextTarget`, with `differs`).
 
+Carried in this tree, not yet in the forks (fork and Ghidra pull requests
+owed): `ParserContext::allocateOperand` throws `BadDataError` when a parse is
+deeper than the 75 constructor states, the walker's 32-entry operand path or a
+state's 20 operands hold, where it wrote past them (`context.hh`). An ARM VFP
+`vldm`/`vstm` whose count is beyond the register file, such as libflutter's
+`0x7cd6ea9f` (a count of 159), recursed through its register list past both
+and crashed the process; it now decodes as invalid.
+
 Licences: Apache-2.0 (each crate's `LICENSE`), with Ghidra's `NOTICE`,
 `DISCLAIMER.md` and `licenses/` kept beside its sources.
