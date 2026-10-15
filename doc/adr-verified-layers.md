@@ -32,7 +32,7 @@ structural decisions that close each gap.
 |---|---|---|---|
 | Container (`r2image`) | bytes, sections, symbols, relocations, byte orders | `diff_r2` against radare2, DWARF | present; field relocations open (I) |
 | Decoder (Sleigh, vendored) | instruction length and text | `diff_r2 pd`; `decode_sweep` (random words per language, no fault) | present |
-| Lift semantics (specs) | each instruction's effect | the CPU oracle: AArch64 present (Apple M5); **x86-64 missing** (D35); ARM32 refused (D32) | partial |
+| Lift semantics (specs) | each instruction's effect | the CPU oracle: AArch64 (Apple M5) and x86-64 (contabo, D35) present; ARM32 refused (D32) | present |
 | Lift passes (`translate.rs`, `internal_control`) | a rewrite of one instruction's ops | **none**: no eval before and after (D34) | missing |
 | Register effects | reads and writes per instruction | AO against radare2's `aeaj` | present (#284) |
 | r2ssa rewrites | value-preserving IR edits | `EditPlan` with stable ids ([stable identity](adr-stable-identity.md)), the semantic kernel | present |
@@ -60,11 +60,12 @@ evidence.** Owner: VC.
 - The AArch64 harness's format (case, input state, the CPU's result, replayed
   through the trusted lift on every host) is reused on x86-64. contabo runs x86-64
   natively; the cases are recorded there and replayed everywhere.
-- Gate: CI fails a pull request that changes a `.sinc` or `.pspec` under
+- Gate: CI fails a pull request that changes a `.sinc`, `.slaspec` or `.pspec` under
   `vendor/sleigh-config` unless it also adds or changes an oracle case or an
   `r2il::eval` test, as D28 requires.
 - Order: before further x86 spec fixes; the AF and `lodsd` fixes gain cases
   when it lands.
+- Done (2026-10-16): 374 cases, 12 listed (VC row); `scripts/spec_evidence.py`.
 
 **D36. A temporary's name comes from where it is defined, not from its
 unique-space offset.** Owner: r2ssa (`naming.rs`); r2dec spells it.
