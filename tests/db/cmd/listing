@@ -376,7 +376,7 @@ EOF
 RUN
 
 # ARM 32-bit: the register roles (`fp`, `ip`, `sp`, `lr`, `pc`), `mov` for Sleigh's `cpy`, and a
-# BE8 Thumb-2 decode (little-endian code, big-endian data), which radare2 reads big-endian.
+# BE8 Thumb-2 decode (little-endian code, big-endian data); radare2 reads it big-endian.
 NAME=arm listing
 FILE=crates/r2image/tests/data/arm_thumb_entry.elf
 CMDS=pd 12
