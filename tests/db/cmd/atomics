@@ -1,0 +1,180 @@
+# Atomic read-modify-writes (tests/gold/atomics.c, clang 18 -O2 -g): each renders as the helper
+# wrapping its C11 builtin at the ordering the machine states. AArch64's LSE forms take their
+# acquire and release marks (ldadd relaxed, ldseta acquire, ldclrl release, ldaddal, swpal and
+# casal acq_rel); x86's LOCK is seq_cst whatever the source asked.
+
+NAME=aarch64 lse fetch operations
+FILE=tests/fixtures/atomics_clang_aarch64_O2g
+CMDS=<<EOF
+pdd @ sym.counter_next
+pdd @ sym.total_add
+pdd @ sym.flags_set
+pdd @ sym.flags_clear
+pdd @ sym.slot_swap
+pdd @ sym.reference_release
+EOF
+EXPECT=<<EOF
+uint32_t counter_next(uint32_t* counter)
+{
+    uint32_t tmp_0_1;
+
+    /* r2dec proof: no individual construct is marked; 7 source obligations: 7 rendered, 0 elided, 0 refused; 2 statements rendered */
+    {
+        tmp_0_1 = r2sleigh_atomic_fetch_add_u32_relaxed((void*)(uint64_t)counter, (uint32_t)1U);
+        return (uint32_t)tmp_0_1;
+    }
+}
+
+void total_add(uint64_t* total, uint64_t amount)
+{
+    /* r2dec proof: no individual construct is marked; 5 source obligations: 5 rendered, 0 elided, 0 refused; 2 statements rendered */
+    {
+        r2sleigh_atomic_fetch_add_u64_relaxed((void*)(uint64_t)total, (uint64_t)amount);
+        return;
+    }
+}
+
+uint32_t flags_set(uint32_t* flags, uint32_t bits)
+{
+    uint32_t tmp_0_1;
+
+    /* r2dec proof: no individual construct is marked; 7 source obligations: 7 rendered, 0 elided, 0 refused; 2 statements rendered */
+    {
+        tmp_0_1 = r2sleigh_atomic_fetch_or_u32_acquire((void*)(uint64_t)flags, (uint32_t)bits);
+        return (uint32_t)tmp_0_1;
+    }
+}
+
+uint32_t flags_clear(uint32_t* flags, uint32_t bits)
+{
+    uint32_t tmp_41d10_1;
+
+    /* r2dec proof: no individual construct is marked; 8 source obligations: 8 rendered, 0 elided, 0 refused; 2 statements rendered */
+    {
+        tmp_41d10_1 = r2sleigh_atomic_fetch_and_u32_release((void*)(uint64_t)flags, (uint32_t)~(uint32_t)bits);
+        return (uint32_t)tmp_41d10_1;
+    }
+}
+
+uint8_t slot_swap(uint8_t* slot, uint8_t value)
+{
+    uint8_t tmp_41618_1;
+
+    /* r2dec proof: no individual construct is marked; 7 source obligations: 7 rendered, 0 elided, 0 refused; 2 statements rendered */
+    {
+        tmp_41618_1 = r2sleigh_atomic_exchange_u8_acq_rel((void*)(uint64_t)slot, (uint8_t)value);
+        return (uint8_t)tmp_41618_1;
+    }
+}
+
+int32_t reference_release(int32_t* count)
+{
+    uint32_t tmp_0_1;
+
+    /* r2dec proof: no individual construct is marked; 9 source obligations: 9 rendered, 0 elided, 0 refused; 2 statements rendered */
+    {
+        tmp_0_1 = r2sleigh_atomic_fetch_add_u32_acq_rel((void*)(uint64_t)count, (uint32_t)0xffffffffU);
+        return (int32_t)(uint8_t)((uint32_t)tmp_0_1 == (uint32_t)1U);
+    }
+}
+
+EOF
+RUN
+
+NAME=aarch64 cas
+FILE=tests/fixtures/atomics_clang_aarch64_O2g
+CMDS=<<EOF
+pdd @ sym.lock_try
+pdd @ sym.cell_exchange
+EOF
+EXPECT=<<EOF
+int32_t lock_try(int32_t* lock)
+{
+    uint32_t tmp_30310_1;
+
+    /* r2dec proof: no individual construct is marked; 9 source obligations: 9 rendered, 0 elided, 0 refused; 2 statements rendered */
+    {
+        tmp_30310_1 = r2sleigh_atomic_compare_exchange_u32_acquire((void*)(uint64_t)lock, (uint32_t)0U, (uint32_t)1U);
+        return (int32_t)(uint8_t)((uint32_t)tmp_30310_1 == (uint32_t)0U);
+    }
+}
+
+uint64_t cell_exchange(uint64_t* cell, uint64_t expected, uint64_t desired)
+{
+    uint64_t tmp_30910_1;
+
+    /* r2dec proof: no individual construct is marked; 8 source obligations: 8 rendered, 0 elided, 0 refused; 2 statements rendered */
+    {
+        tmp_30910_1 = r2sleigh_atomic_compare_exchange_u64_acq_rel((void*)(uint64_t)cell, (uint64_t)expected, (uint64_t)desired);
+        return (uint64_t)tmp_30910_1;
+    }
+}
+
+EOF
+RUN
+
+NAME=x86-64 locked operations
+FILE=tests/fixtures/atomics_clang_x86_64_O2g
+CMDS=<<EOF
+pdd @ sym.counter_next
+pdd @ sym.total_add
+pdd @ sym.slot_swap
+pdd @ sym.lock_try
+pdd @ sym.reference_release
+EOF
+EXPECT=<<EOF
+uint32_t counter_next(uint32_t* counter)
+{
+    uint32_t tmp_1a2208_1;
+
+    /* r2dec proof: no individual construct is marked; 10 source obligations: 7 rendered, 3 elided, 0 refused; 2 statements rendered */
+    {
+        tmp_1a2208_1 = r2sleigh_atomic_fetch_add_u32_seq_cst((void*)(uint64_t)counter, (uint32_t)1U);
+        return (uint32_t)tmp_1a2208_1;
+    }
+}
+
+void total_add(uint64_t* total, uint64_t amount)
+{
+    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered */
+    {
+        r2sleigh_atomic_fetch_add_u64_seq_cst((void*)(uint64_t)total, (uint64_t)amount);
+        return;
+    }
+}
+
+uint8_t slot_swap(uint8_t* slot, uint8_t value)
+{
+    uint8_t tmp_1a2510_1;
+
+    /* r2dec proof: no individual construct is marked; 10 source obligations: 7 rendered, 3 elided, 0 refused; 2 statements rendered */
+    {
+        tmp_1a2510_1 = r2sleigh_atomic_exchange_u8_seq_cst((void*)(uint64_t)slot, (uint8_t)value);
+        return (uint8_t)tmp_1a2510_1;
+    }
+}
+
+int32_t lock_try(int32_t* lock)
+{
+    uint32_t tmp_19d028_1;
+
+    /* r2dec proof: no individual construct is marked; 15 source obligations: 12 rendered, 3 elided, 0 refused; 2 statements rendered */
+    {
+        tmp_19d028_1 = r2sleigh_atomic_compare_exchange_u32_seq_cst((void*)(uint64_t)lock, (uint32_t)0U, (uint32_t)1U);
+        return (int32_t)((uint64_t)(uint8_t)((uint32_t)((uint32_t)0U - (uint32_t)tmp_19d028_1) == (uint32_t)0U) >> 0U);
+    }
+}
+
+int32_t reference_release(int32_t* count)
+{
+    uint32_t tmp_58408_1;
+
+    /* r2dec proof: no individual construct is marked; 14 source obligations: 11 rendered, 3 elided, 0 refused; 2 statements rendered */
+    {
+        tmp_58408_1 = r2sleigh_atomic_fetch_sub_u32_seq_cst((void*)(uint64_t)count, (uint32_t)1U);
+        return (int32_t)(uint8_t)((uint32_t)tmp_58408_1 == (uint32_t)1U);
+    }
+}
+
+EOF
+RUN
