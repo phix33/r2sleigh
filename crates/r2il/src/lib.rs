@@ -28,6 +28,7 @@
 //! ```
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 
+pub mod access;
 pub mod allocation;
 pub mod endianness;
 pub mod eval;
@@ -42,6 +43,7 @@ pub mod validate;
 pub mod varnode;
 
 // Re-export main types at crate root
+pub use access::{RegisterAccesses, join_tiles, register_accesses};
 pub use endianness::Endianness;
 pub use memory::{AtomicKind, MemoryOrdering, MemoryPermissions, MemoryRange};
 pub use metadata::{
