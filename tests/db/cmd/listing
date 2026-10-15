@@ -387,3 +387,22 @@ EXPECT=<<EOF
             0x0001005e      6a46           mov r2, sp
 EOF
 RUN
+
+# ARM 32-bit, audit W2: a Thumb `blx` back into ARM code states the target's set for the target
+# alone, so the run after it stays Thumb and reads 0x476 as a fresh decode does.
+NAME=thumb after a backward blx
+FILE=tests/fixtures/special_sym_with_dot
+CMDS=pd 6 @ 0x46e; ?e --fresh--; pd 3 @ 0x476
+EXPECT=<<EOF
+            0x0000046e      0548           ldr r0, [0x484] ; [0x484:4]=0x1c (decoded)
+            0x00000470      7844           add r0, pc
+            0x00000472      fff7a6ef       blx sym.imp.printf
+            0x00000476      4ff0000e       mov.w lr, 0x0
+            0x0000047a      0190           str r0, [sp, 0x4]
+            0x0000047c      7046           mov r0, lr
+--fresh--
+            0x00000476      4ff0000e       mov.w lr, 0x0
+            0x0000047a      0190           str r0, [sp, 0x4]
+            0x0000047c      7046           mov r0, lr
+EOF
+RUN
