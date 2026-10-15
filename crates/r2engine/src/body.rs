@@ -60,13 +60,16 @@ pub trait Program {
         &[]
     }
 
-    /// Whether nothing can write any byte of `range` once the program runs:
-    /// a segment mapped without write permission, or one the loader seals
-    /// after it is done. Where the program says nothing of sealing, only the
-    /// region's own permission answers.
-    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
-        self.region(range.start)
-            .is_some_and(|region| !region.write && range.end <= region.end)
+    /// How long `range` keeps what the loader leaves there; where the program states no seal,
+    /// the region's own permission answers.
+    fn permanence(&self, range: &std::ops::Range<u64>) -> crate::program::Permanence {
+        let read_only = self
+            .region(range.start)
+            .is_some_and(|region| !region.write && range.end <= region.end);
+        match read_only {
+            true => crate::program::Permanence::ReadOnly,
+            false => crate::program::Permanence::Writable,
+        }
     }
 
     /// Whether another function begins here.

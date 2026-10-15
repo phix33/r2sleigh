@@ -7,7 +7,8 @@
 //! not the file's word, is what the program starts with. A listing's word, a
 //! dispatch table's entries and a string's bytes all read through here, so a
 //! rebased pointer is read as the address it is and a chained fixup is never
-//! read as the link it encodes.
+//! read as the link it encodes. Whether a word keeps that value for the run is
+//! `native::TableBytes`'s question.
 
 use std::ops::Range;
 
@@ -32,15 +33,16 @@ impl StatedWord {
 }
 
 /// The import a call through the word at `slot` reaches: the loader binds it there as a pointer
-/// word and seals it, so nothing rebinds it once the program runs (RELRO, a read-only Mach-O
-/// segment). A lazily bound slot names none. O(log W) in the loader's writes (audit W8).
+/// word and seals it (RELRO, a read-only Mach-O segment), and its stated write is what stays.
+/// A lazily bound slot names none. O(log W) in the loader's writes (audit W8).
 pub fn sealed_import(program: &dyn crate::body::Program, slot: u64) -> Option<&str> {
     let write = r2abi::statement::write_at(program.loader_writes(), slot)?;
     let r2abi::statement::WriteKind::Import { symbol, .. } = &write.kind else {
         return None;
     };
     let word = write.place == slot && write.encoding == r2abi::statement::Encoding::Word;
-    (word && program.immutable(&(slot..write.end()))).then_some(symbol.as_str())
+    let kept = program.permanence(&(slot..write.end())) != crate::program::Permanence::Writable;
+    (word && kept).then_some(symbol.as_str())
 }
 
 /// Whether the loader writes any byte of `range`: one search.

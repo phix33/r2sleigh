@@ -483,8 +483,8 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         &self.source().container().loader_writes
     }
 
-    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
-        self.source().container().immutable(range)
+    fn permanence(&self, range: &std::ops::Range<u64>) -> Permanence {
+        self.source().container().permanence(range)
     }
 
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {

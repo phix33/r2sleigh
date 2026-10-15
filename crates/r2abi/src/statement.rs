@@ -170,15 +170,10 @@ impl Container {
         write_at(&self.loader_writes, place)
     }
 
-    /// Whether nothing can write any byte of `range` once the program runs.
-    ///
-    /// A segment mapped without write permission is immutable for the whole
-    /// run; a writable one is immutable after load only where the loader
-    /// seals it. Either way what the loader wrote first is what stays, so a
-    /// word here holds its stated value for the whole run. `O(log S)`.
-    pub fn immutable(&self, range: &Range<u64>) -> bool {
+    /// How long the bytes of `range` keep what the loader leaves there. `O(log S)`.
+    pub fn permanence(&self, range: &Range<u64>) -> Permanence {
         if range.start >= range.end {
-            return true;
+            return Permanence::ReadOnly;
         }
         let read_only = self
             .segment_at(range.start)
@@ -190,7 +185,11 @@ impl Container {
             .checked_sub(1)
             .and_then(|at| self.sealed.get(at))
             .is_some_and(|sealed| range.end <= sealed.end);
-        read_only || sealed
+        match (read_only, sealed) {
+            (true, _) => Permanence::ReadOnly,
+            (false, true) => Permanence::Sealed,
+            (false, false) => Permanence::Writable,
+        }
     }
 
     /// The bytes the loader writes, as sorted, disjoint ranges with touching ones made one.
@@ -310,6 +309,19 @@ impl Permissions {
     pub const fn mapped(self) -> bool {
         self.read || self.write || self.execute
     }
+}
+
+/// How long a range keeps what the loader leaves there, as the container states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Permanence {
+    /// Mapped without write permission: the bytes are the program's for its whole run.
+    ReadOnly,
+    /// Writable until start-up seals it (`PT_GNU_RELRO`, `SG_READ_ONLY`). The loader writes it
+    /// first, and so may an image's own start-up code (ld.so, a static binary), which the
+    /// container does not state: only the loader's stated writes are known to stay.
+    Sealed,
+    /// The program may write it for its whole run.
+    Writable,
 }
 
 /// One run of addresses the loader maps, and what the program may do there.

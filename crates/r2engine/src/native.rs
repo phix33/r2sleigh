@@ -1335,55 +1335,48 @@ impl Callees {
     }
 }
 
-/// What the container states about whether a table's bytes, as the file holds
-/// them, are what the dispatch reads when it runs.
-///
-/// The seam immutability arrives through. A writable region is `Unsealed`:
-/// the container has not yet been asked whether anything seals it after load
-/// (a RELRO range, a read-only Mach-O segment), and that statement is what
-/// turns it into one the program cannot change or refuses it. Until then the
-/// table is read as before, the refusal evidence says it was read unsealed,
-/// and every table carries this statement -- on `DispatchTable` and so on the
-/// listing's `Switch` -- for that check to consume rather than recompute.
+/// What the container states about whether a table's bytes, as the file holds them, are what
+/// the dispatch reads when it runs; carried on `DispatchTable` and the listing's `Switch`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableBytes {
-    /// Nothing writes them once the program runs, and the loader leaves them
-    /// alone: the bytes are the program's for its whole run.
+    /// Mapped without write permission, and the loader leaves them alone: the bytes are the
+    /// program's for its whole run.
     ReadOnly,
-    /// The program may write them once it runs, and nothing the container
-    /// states seals them after load: what the file holds is not what a
-    /// dispatch reads, so the table is refused.
+    /// The program may write them once it runs, and nothing the container states seals them
+    /// after load: what the file holds is not what a dispatch reads, so the table is refused.
     Unsealed,
-    /// Nothing writes them once the program runs, and the loader writes some
-    /// -- a rebased pointer, a chained fixup -- before it seals them: each
-    /// entry is what the container states the loader writes there, or the
-    /// table is refused.
+    /// Mapped without write permission, and the loader writes some -- a rebased pointer, a
+    /// chained fixup: each entry is what the container states the loader writes there, or the
+    /// file's where it writes nothing.
     LoaderWritten,
+    /// Writable until start-up seals them (RELRO, `SG_READ_ONLY`), and start-up code may write
+    /// them first: each entry is a word the container states the loader writes, or the table is
+    /// refused (ld.so's `__rtld_malloc` holds 0 in the file and its own code fills it).
+    Sealed,
 }
 
 impl TableBytes {
     /// O(log n): one search in the loader's writes and one in what it seals.
     fn of(program: &dyn Program, range: std::ops::Range<u64>) -> Self {
-        match (
-            program.immutable(&range),
-            crate::stated::written(program, &range),
-        ) {
-            (false, _) => Self::Unsealed,
-            (true, true) => Self::LoaderWritten,
-            (true, false) => Self::ReadOnly,
+        use crate::program::Permanence;
+        match program.permanence(&range) {
+            Permanence::Writable => Self::Unsealed,
+            Permanence::Sealed => Self::Sealed,
+            Permanence::ReadOnly if crate::stated::written(program, &range) => Self::LoaderWritten,
+            Permanence::ReadOnly => Self::ReadOnly,
         }
+    }
+
+    /// Whether the word `stated` is what the run reads, for a table of these bytes.
+    fn holds(self, stated: crate::stated::StatedWord) -> bool {
+        self != Self::Sealed || matches!(stated, crate::stated::StatedWord::Loaded(_))
     }
 
     /// Whether the table at `at` may be read as the run's, saying why
     /// wherever the answer is not a plain yes.
-    ///
-    /// A table the loader writes is read as the container states the loader
-    /// writes it, entry by entry; an entry whose value it does not state
-    /// refuses the table there. A table the program may write is refused
-    /// whole: the entries the file holds need not be the ones it jumps by.
     fn read_as_run(self, at: u64) -> bool {
         match self {
-            Self::LoaderWritten => {
+            Self::LoaderWritten | Self::Sealed => {
                 r2il::refusal_evidence!(
                     "dispatch-table",
                     "{at:#x}: {self:?}: read as the values the container states the loader writes"
@@ -1611,6 +1604,7 @@ impl Native<'_> {
         &self,
         read: &r2ssa::indirect::DispatchTableRead,
         count: usize,
+        stated: TableBytes,
     ) -> Result<Vec<u64>, (usize, u64)> {
         let endian = match self.machine.endianness {
             SourceEndianness::Little => r2il::Endianness::Little,
@@ -1620,6 +1614,7 @@ impl Native<'_> {
             .map(|k| {
                 let place = read.address + k as u64 * read.stride;
                 crate::stated::stated_word(self.program, place, read.size, endian)
+                    .filter(|word| stated.holds(*word))
                     .map(|word| read.transform.target(word.value(), read.size))
                     .ok_or((k, place))
             })
@@ -1694,7 +1689,7 @@ impl Native<'_> {
         if !stated.read_as_run(at) {
             return None;
         }
-        let targets = match self.stated_targets(read, count) {
+        let targets = match self.stated_targets(read, count, stated) {
             Ok(targets) => targets,
             Err((k, place)) => {
                 refused(format_args!(

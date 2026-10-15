@@ -79,8 +79,8 @@ impl crate::body::Program for Knowing<'_> {
         self.program.loader_writes()
     }
 
-    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
-        self.program.immutable(range)
+    fn permanence(&self, range: &std::ops::Range<u64>) -> super::Permanence {
+        self.program.permanence(range)
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {

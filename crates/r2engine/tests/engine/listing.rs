@@ -772,13 +772,11 @@ fn a_table_the_loader_writes_is_read_as_the_values_the_container_states() {
     assert_eq!(tables_of(&lines), []);
 }
 
+/// A writable table's file entries need not be the ones it holds when the dispatch runs. A
+/// sealed one (RELRO, `SG_READ_ONLY`) is read only through the words the loader states it writes:
+/// start-up code may write the rest before the seal, as ld.so writes its own RELRO.
 #[test]
-fn a_dispatch_table_in_memory_the_program_may_write_is_refused_unless_the_loader_seals_it() {
-    // The file's entries need not be the ones a writable table holds when the
-    // dispatch runs, so reading them resolved the switch on a guess about
-    // the program's own stores. The same table the loader seals after it is
-    // done -- a RELRO range, a Mach-O `SG_READ_ONLY` segment -- is the
-    // program's for its whole run, and is read.
+fn a_dispatch_table_in_memory_the_program_may_write_is_read_only_through_the_loaders_writes() {
     let table = BASE + 0x30;
     let writable = table_switch().writable_data_after(table);
     let lines = OpenProgram::of(writable).function_listing(BASE);
@@ -790,13 +788,37 @@ fn a_dispatch_table_in_memory_the_program_may_write_is_refused_unless_the_loader
         .any(|annotation| annotation.kind == AnnotationKind::Unresolved);
     assert!(unresolved, "the dispatch is said to be unresolved");
 
-    let sealed = table_switch()
-        .writable_data_after(table)
-        .sealed(table..table + 0x20);
-    let lines = OpenProgram::of(sealed).function_listing(BASE);
+    let sealed = || {
+        table_switch()
+            .writable_data_after(table)
+            .sealed(table..table + 0x20)
+    };
+    let lines = OpenProgram::of(sealed()).function_listing(BASE);
     let lines = lines.expect("it lists").lines.value;
-    let read_only = r2engine::native::TableBytes::ReadOnly;
-    assert_eq!(tables_of(&lines), [(table, 4, read_only)]);
+    assert_eq!(tables_of(&lines), [], "the loader writes no entry");
+
+    // The first `n` entries relocated over zeros, the rest the file's arms.
+    let relocated = |n: usize| {
+        let mut literal = sealed();
+        literal.write(table, &vec![0; 8 * n]);
+        for (k, target) in [0x100e, 0x1014, 0x101a, 0x1026]
+            .into_iter()
+            .enumerate()
+            .take(n)
+        {
+            literal = literal.loader_written(LoaderWrite {
+                place: table + 8 * k as u64,
+                width: 8,
+                kind: WriteKind::Relative(target),
+                encoding: r2engine::program::Encoding::Word,
+            });
+        }
+        let lines = OpenProgram::of(literal).function_listing(BASE);
+        tables_of(&lines.expect("it lists").lines.value)
+    };
+    assert_eq!(relocated(3), [], "the last entry is the file's");
+    let sealed = r2engine::native::TableBytes::Sealed;
+    assert_eq!(relocated(4), [(table, 4, sealed)]);
 }
 
 #[test]

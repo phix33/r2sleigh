@@ -198,6 +198,24 @@ fn a_call_through_a_sealed_import_slot_calls_the_import() {
     assert!(!text.contains("puts("), "{text}");
 }
 
+/// ld.so's `call [__rtld_malloc]`: a sealed slot no relocation fills holds 0 in the file, and
+/// start-up code may write it before the seal, so the call goes through memory, never to `fcn_0`.
+#[test]
+fn a_call_through_a_sealed_slot_the_loader_leaves_is_a_call_through_memory() {
+    let slot = BASE + 0x20;
+    let literal = Literal::of_code(CALL_THROUGH_A_SLOT, &[("caller", BASE, 0x11)])
+        .writable_data_after(slot)
+        .sealed(slot..slot + 8);
+    let text = OpenProgram::of(literal)
+        .rendered(BASE)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(!text.contains("fcn_0"), "{text}");
+    assert!(text.contains("call to an indirect target"), "{text}");
+}
+
 /// A send to `objc_msgSend`, variadic as objc4 declares it, states no argument count: the call is
 /// a gap naming the import and why, never an unsupported instruction (audit M3, RF's W10 case).
 #[test]
