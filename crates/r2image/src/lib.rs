@@ -776,10 +776,14 @@ impl Image {
                     (None, object::SymbolKind::Tls) => SymbolKind::Tls,
                     (None, _) => SymbolKind::Other,
                 },
-                // A name is defined here when it sits in a section of this image; `object` counts only STT_FUNC and STT_OBJECT, so every NASM label went unlisted.
-                // An absolute symbol sits in no section and a thread-local one is an offset into its block, so neither value is an address.
+                // Defined where it sits in a section (`object` counts only STT_FUNC and STT_OBJECT); an absolute value is an address only
+                // for a function inside a linked image's code (gABI SHN_ABS), and a thread-local one is an offset into its block.
                 defined: (matches!(symbol.section(), object::SymbolSection::Section(_))
-                    || common.is_some())
+                    || common.is_some()
+                    || (symbol.section() == object::SymbolSection::Absolute
+                        && symbol.kind() == object::SymbolKind::Text
+                        && !relocatable
+                        && executable(address)))
                     && symbol.kind() != object::SymbolKind::Tls,
                 import,
                 // ELF sets the address's low bit; Mach-O states `N_ARM_THUMB_DEF` in `n_desc`.

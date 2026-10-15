@@ -27,6 +27,7 @@ answer.
 | `arm_plt_lld_be8.so` | radare2-testbins `elf/arm-plt-lld-be8.so` | ARM BE8 (`EF_ARM_BE8`) shared object from lld: little-endian instructions under big-endian data |
 | `x86_64_common_code.o` | radare2-testbins `elf/x86_64-common-code.o` | x86-64 object with an `SHN_COMMON` and an `SHN_X86_64_LCOMMON` (`.largecomm`) symbol, each allocated past the sections as a static link allocates it |
 | `x86_64_abs_sym.o` | radare2-testbins `elf/x86_64-abs-sym.o` | x86-64 object of data alone (an empty `.text`) whose words relocate against `SHN_ABS` symbols, written unchanged |
+| `abs_func_mapped` | radare2-testbins `elf/abs_func_mapped` | x86-64 executable whose `absfn` is an `STT_FUNC` with an `SHN_ABS` value inside `.text`: a function the container states |
 | `fuzzed_elf9`, `fuzzed_file12` | radare2-testbins `fuzzed/elf9`, `fuzzed/file12` (not executable, so the census skips them) | hostile headers: an `.init_array` and a `__cstring` stating sizes far past the file's end, which once hung on open and read 2 GB |
 
 `src/` holds sources the equivalence gate must not build as programs of their
