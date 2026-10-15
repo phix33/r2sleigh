@@ -34,6 +34,8 @@ fn a_session_starts_at_the_declared_entry_then_any_entry_then_the_code() {
         };
         assert_eq!(start(Literal::new().preceded_by(first)), Some(BASE));
     }
+    // With no code at all it starts at the first mapped byte, not at an unmapped 0.
+    assert_eq!(start(Literal::new().with_data_after(BASE)), Some(BASE));
 }
 
 #[test]

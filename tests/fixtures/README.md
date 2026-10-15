@@ -25,6 +25,7 @@ answer.
 | `special_sym_with_dot` | radare2-testbins `elf/special-sym-with-dot.bin` (not executable, so the census skips it) | ARM32 with `$a`/`$t` mapping symbols: a Thumb `blx` back into the ARM PLT at 0x472, after which a continued run once read Thumb as ARM (audit W2) |
 | `arm_thumb_movw_be.o` | radare2-testbins `elf/arm-thumb-movw-be.o` | ARM BE32 (big-endian, no `EF_ARM_BE8`) Thumb object: its instructions read most significant byte first (audit W26) |
 | `arm_plt_lld_be8.so` | radare2-testbins `elf/arm-plt-lld-be8.so` | ARM BE8 (`EF_ARM_BE8`) shared object from lld: little-endian instructions under big-endian data |
+| `x86_64_abs_sym.o` | radare2-testbins `elf/x86_64-abs-sym.o` | x86-64 object of data alone (an empty `.text`) whose words relocate against `SHN_ABS` symbols, written unchanged |
 | `fuzzed_elf9`, `fuzzed_file12` | radare2-testbins `fuzzed/elf9`, `fuzzed/file12` (not executable, so the census skips them) | hostile headers: an `.init_array` and a `__cstring` stating sizes far past the file's end, which once hung on open and read 2 GB |
 
 `src/` holds sources the equivalence gate must not build as programs of their
