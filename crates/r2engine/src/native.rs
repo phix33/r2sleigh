@@ -1475,7 +1475,8 @@ impl Native<'_> {
                     signature: declared_root.signature,
                     slot_names: declared_root.slot_names,
                 };
-                self.prepare_restated(root, callees, folded, restatement, tables, reads)?
+                let seal = self.seal(root, callees, folded, restatement, tables, reads)?;
+                self.collected(seal)?
             }
         };
         Ok((artifact, owners))
@@ -1753,26 +1754,6 @@ impl Native<'_> {
         Declared::body(self.target, address)
             .map(|declared| Placement::new(self.target, &self.machine).restatement(declared, true))
             .unwrap_or_default()
-    }
-
-    fn prepare_restated(
-        &self,
-        walked: &Walked,
-        callees: &Callees,
-        extra_literals: Vec<(u64, String)>,
-        restatement: Restatement,
-        tables: &[NativePointerTable],
-        result_reads: Option<r2source::SourceResultReads>,
-    ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
-        let seal = self.seal(
-            walked,
-            callees,
-            extra_literals,
-            restatement,
-            tables,
-            result_reads,
-        )?;
-        self.collected(seal)
     }
 
     /// One body captured, built and sealed, its facts not yet collected.
