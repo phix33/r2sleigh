@@ -12,6 +12,7 @@ use r2ssa::{
     SemanticObligationKind, SsaArtifact, SsaGraph, StructuredAccessId, ValueId,
 };
 
+mod atomic;
 mod transfer;
 
 use super::RenderInput;
@@ -1284,7 +1285,10 @@ impl<'a> Values<'a> {
                 {
                     Ok(Vec::new())
                 }
-                Some(SemanticInstructionState::LiveObligation) if reads_beside_effect(op) => {
+                Some(SemanticInstructionState::LiveObligation)
+                    if reads_beside_effect(op)
+                        || (matches!(op, SSAOp::Load { .. }) && self.owes_atomicity(inst.id)) =>
+                {
                     self.effect_gap(&mut out, (addr, at), inst.id);
                     self.value(inst.id, inst.output)
                 }
@@ -1391,10 +1395,16 @@ impl<'a> Values<'a> {
             | SSAOp::Switch { .. }
             | SSAOp::Return { .. }
             | SSAOp::BranchInd { .. } => Ok(Vec::new()),
+            // A store inside an access no typed statement holds is no plain C store.
+            SSAOp::Store { .. } if self.owes_atomicity(inst) => Err(Gap::Effect),
             SSAOp::Store { addr, val, .. } => self
                 .store(inst, *addr, *val)
                 .map(|stmt| vec![stmt])
                 .ok_or(Gap::Store),
+            SSAOp::Atomic(access) => self
+                .atomic(inst, access, output)
+                .map(|stmt| vec![stmt])
+                .ok_or(Gap::Effect),
             SSAOp::Call { .. } | SSAOp::CallInd { .. } => self.call(inst).map_err(Gap::Call),
             SSAOp::BlockTransfer(transfer) => self
                 .block_transfer(inst, transfer)

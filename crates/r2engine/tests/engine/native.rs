@@ -1662,6 +1662,83 @@ fn an_aarch64_exclusive_loop_returns_the_value_it_loaded() {
     }
 }
 
+/// An atomic read-modify-write renders as the C11 builtin's helper at the ordering the machine
+/// states (AArch64: its acquire and release marks; x86: LOCK, sequentially consistent), the value
+/// it read assigned, never as a plain load and store.
+#[test]
+fn an_atomic_read_modify_write_renders_as_its_builtin_at_the_stated_ordering() {
+    let aarch64 = Machine::new("aarch64", "aarch64", 64);
+    let x86 = Machine::new("x86-64", "x86-64", 64);
+    let ret = [0xc0, 0x03, 0x5f, 0xd6];
+    for (machine, bytes, call) in [
+        // ldadd w1, w0, [x0]
+        (
+            &aarch64,
+            [&[0x00, 0x00, 0x21, 0xb8][..], &ret].concat(),
+            "r2sleigh_atomic_fetch_add_u32_relaxed((void*)(uint64_t)arg0, (uint32_t)arg1)",
+        ),
+        // ldaddal x1, x0, [x0]
+        (
+            &aarch64,
+            [&[0x00, 0x00, 0xe1, 0xf8][..], &ret].concat(),
+            "r2sleigh_atomic_fetch_add_u64_acq_rel((void*)(uint64_t)arg0, (uint64_t)arg1)",
+        ),
+        // casal w1, w2, [x0]
+        (
+            &aarch64,
+            [
+                &[0x02, 0xfc, 0xe1, 0x88][..],
+                &[0xe0, 0x03, 0x01, 0x2a],
+                &ret,
+            ]
+            .concat(),
+            "r2sleigh_atomic_compare_exchange_u32_acq_rel((void*)(uint64_t)arg0, (uint32_t)arg1, (uint32_t)arg2)",
+        ),
+        // mov eax, esi; lock xadd [rdi], eax; ret
+        (
+            &x86,
+            vec![0x89, 0xf0, 0xf0, 0x0f, 0xc1, 0x07, 0xc3],
+            "r2sleigh_atomic_fetch_add_u32_seq_cst((void*)(uint64_t)arg0, (uint32_t)arg1)",
+        ),
+    ] {
+        let program = Fixture {
+            bytes,
+            name: "fetch_add",
+        };
+        let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+        let output = response.output.text();
+        assert!(output.contains(call), "{call}: {output}");
+        for absent in [
+            "r2sleigh_load",
+            "r2sleigh_store",
+            "r2sleigh_residual",
+            "r2dec gap",
+        ] {
+            assert!(!output.contains(absent), "{call}: {absent}: {output}");
+        }
+    }
+}
+
+/// `casp` of X registers writes two cells, which no builtin's helper states: each of its accesses
+/// is a gap, and no plain store of either cell is printed.
+#[test]
+fn an_atomic_access_with_no_typed_statement_prints_no_plain_store() {
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let program = Fixture {
+        // casp x0, x1, x2, x3, [x9]; ret
+        bytes: vec![0x22, 0x7d, 0x20, 0x48, 0xc0, 0x03, 0x5f, 0xd6],
+        name: "casp",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(
+        output.contains("r2dec gap: EffectNotRendered at 0x1000:0"),
+        "{output}"
+    );
+    assert!(!output.contains("r2sleigh_store"), "{output}");
+    assert!(!output.contains("r2sleigh_atomic"), "{output}");
+}
+
 /// `dmb` is a user operation with no output, and p-code says it writes nothing else: the value
 /// before it is returned, and the barrier itself is a gap by its name.
 #[test]

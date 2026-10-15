@@ -156,6 +156,69 @@ impl ResidualType {
     }
 }
 
+/// What one atomic helper does, by the builtin that does it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum AtomicOp {
+    /// `__atomic_fetch_<op>`, `__atomic_exchange_n` for a swap: the value read.
+    Fetch(r2il::AtomicFetchOp),
+    /// `__atomic_compare_exchange_n`, answering the value read whether or not it wrote.
+    CompareExchange,
+}
+
+/// The C11 order an atomic helper passes, as the access's ordering states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum AtomicOrder {
+    Relaxed,
+    Acquire,
+    Release,
+    AcqRel,
+    SeqCst,
+}
+
+impl AtomicOrder {
+    /// The order an access states; `Unknown` states none.
+    pub fn of(ordering: r2il::MemoryOrdering) -> Option<Self> {
+        use r2il::MemoryOrdering as Ordering;
+        match ordering {
+            Ordering::Relaxed => Some(Self::Relaxed),
+            Ordering::Acquire => Some(Self::Acquire),
+            Ordering::Release => Some(Self::Release),
+            Ordering::AcqRel => Some(Self::AcqRel),
+            Ordering::SeqCst => Some(Self::SeqCst),
+            Ordering::Unknown => None,
+        }
+    }
+
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::Relaxed => "relaxed",
+            Self::Acquire => "acquire",
+            Self::Release => "release",
+            Self::AcqRel => "acq_rel",
+            Self::SeqCst => "seq_cst",
+        }
+    }
+
+    const fn builtin(self) -> &'static str {
+        match self {
+            Self::Relaxed => "__ATOMIC_RELAXED",
+            Self::Acquire => "__ATOMIC_ACQUIRE",
+            Self::Release => "__ATOMIC_RELEASE",
+            Self::AcqRel => "__ATOMIC_ACQ_REL",
+            Self::SeqCst => "__ATOMIC_SEQ_CST",
+        }
+    }
+
+    /// A failed compare-and-exchange only reads, so it keeps no release (C17 7.17.7.4).
+    const fn on_failure(self) -> Self {
+        match self {
+            Self::Release => Self::Relaxed,
+            Self::AcqRel => Self::Acquire,
+            order => order,
+        }
+    }
+}
+
 /// A scalar operation spelled as a call to a helper the rendering defines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Helper {
@@ -177,6 +240,12 @@ pub enum Helper {
     Load(ResidualType),
     /// The matching write.
     Store(ResidualType),
+    /// One atomic access of an unsigned integer of `bits` (8 to 64) at an address.
+    Atomic {
+        op: AtomicOp,
+        bits: u32,
+        order: AtomicOrder,
+    },
 }
 
 impl Helper {
@@ -205,6 +274,19 @@ impl Helper {
         matches!(bits, 8 | 16 | 32 | 64).then_some(Self::LeadingZeros { bits })
     }
 
+    /// An atomic helper, where a GCC and Clang builtin states the operation at that width: no
+    /// builtin takes a maximum or a minimum, and 128 bits needs a library.
+    pub fn atomic(op: AtomicOp, bits: u32, order: AtomicOrder) -> Option<Self> {
+        use r2il::AtomicFetchOp as Fetch;
+        let stated = !matches!(
+            op,
+            AtomicOp::Fetch(
+                Fetch::SignedMax | Fetch::SignedMin | Fetch::UnsignedMax | Fetch::UnsignedMin
+            )
+        );
+        (stated && matches!(bits, 8 | 16 | 32 | 64)).then_some(Self::Atomic { op, bits, order })
+    }
+
     /// The helper's name.
     pub fn name(self) -> String {
         match self {
@@ -216,6 +298,13 @@ impl Helper {
             Self::Residual(ty) => format!("r2sleigh_residual_{}", ty.tag()),
             Self::Load(ty) => format!("r2sleigh_load_{}", ty.tag()),
             Self::Store(ty) => format!("r2sleigh_store_{}", ty.tag()),
+            Self::Atomic { op, bits, order } => {
+                format!(
+                    "r2sleigh_atomic_{}_u{bits}_{}",
+                    atomic_verb(op),
+                    order.tag()
+                )
+            }
         }
     }
 
@@ -296,7 +385,50 @@ impl Helper {
                      }}\n"
                 )
             }
+            Self::Atomic { op, bits, order } => atomic_definition(&name, op, bits, order),
         }
+    }
+}
+
+/// The verb an atomic helper's name and builtin share.
+fn atomic_verb(op: AtomicOp) -> &'static str {
+    use r2il::AtomicFetchOp as Fetch;
+    match op {
+        AtomicOp::Fetch(Fetch::Add) => "fetch_add",
+        AtomicOp::Fetch(Fetch::Sub) => "fetch_sub",
+        AtomicOp::Fetch(Fetch::And) => "fetch_and",
+        AtomicOp::Fetch(Fetch::Or) => "fetch_or",
+        AtomicOp::Fetch(Fetch::Xor) => "fetch_xor",
+        AtomicOp::Fetch(Fetch::Swap) => "exchange",
+        AtomicOp::Fetch(_) => "fetch_unstated",
+        AtomicOp::CompareExchange => "compare_exchange",
+    }
+}
+
+/// The builtin at the access's width and order; a compare-and-exchange answers what it read.
+fn atomic_definition(name: &str, op: AtomicOp, bits: u32, order: AtomicOrder) -> String {
+    let (ty, verb, at) = (format!("uint{bits}_t"), atomic_verb(op), order.builtin());
+    match op {
+        AtomicOp::CompareExchange => format!(
+            "static inline {ty} {name}(void *at, {ty} expected, {ty} desired)\n\
+             {{\n\
+             \x20   __atomic_compare_exchange_n(({ty} *)at, &expected, desired, 0, {at}, {});\n\
+             \x20   return expected;\n\
+             }}\n",
+            order.on_failure().builtin()
+        ),
+        AtomicOp::Fetch(r2il::AtomicFetchOp::Swap) => format!(
+            "static inline {ty} {name}(void *at, {ty} value)\n\
+             {{\n\
+             \x20   return __atomic_exchange_n(({ty} *)at, value, {at});\n\
+             }}\n"
+        ),
+        AtomicOp::Fetch(_) => format!(
+            "static inline {ty} {name}(void *at, {ty} value)\n\
+             {{\n\
+             \x20   return __atomic_{verb}(({ty} *)at, value, {at});\n\
+             }}\n"
+        ),
     }
 }
 
@@ -604,6 +736,49 @@ pub(crate) const INCLUDES: &[&str] = &["#include <stdint.h>"];
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// Each atomic helper wraps its builtin at the access's order; a failed compare-and-exchange
+    /// keeps only the acquire; no builtin states a maximum, a minimum or 128 bits.
+    #[test]
+    fn an_atomic_helper_wraps_its_builtin_at_the_stated_order() {
+        use r2il::AtomicFetchOp as Fetch;
+        let helper = |op, bits, order| Helper::atomic(op, bits, order).expect("a stated helper");
+        let add = helper(AtomicOp::Fetch(Fetch::Add), 32, AtomicOrder::Relaxed);
+        assert_eq!(add.name(), "r2sleigh_atomic_fetch_add_u32_relaxed");
+        assert!(
+            add.definition()
+                .contains("return __atomic_fetch_add((uint32_t *)at, value, __ATOMIC_RELAXED);")
+        );
+        let swap = helper(AtomicOp::Fetch(Fetch::Swap), 8, AtomicOrder::AcqRel);
+        assert!(
+            swap.definition()
+                .contains("return __atomic_exchange_n((uint8_t *)at, value, __ATOMIC_ACQ_REL);")
+        );
+        for (order, success, failure) in [
+            (AtomicOrder::Release, "__ATOMIC_RELEASE", "__ATOMIC_RELAXED"),
+            (AtomicOrder::AcqRel, "__ATOMIC_ACQ_REL", "__ATOMIC_ACQUIRE"),
+            (AtomicOrder::SeqCst, "__ATOMIC_SEQ_CST", "__ATOMIC_SEQ_CST"),
+        ] {
+            let cas = helper(AtomicOp::CompareExchange, 64, order).definition();
+            assert!(
+                cas.contains(&format!(
+                    "__atomic_compare_exchange_n((uint64_t *)at, &expected, desired, 0, {success}, {failure});"
+                )) && cas.contains("return expected;"),
+                "{cas}"
+            );
+        }
+        for op in [
+            AtomicOp::Fetch(Fetch::SignedMax),
+            AtomicOp::Fetch(Fetch::UnsignedMin),
+        ] {
+            assert_eq!(Helper::atomic(op, 32, AtomicOrder::SeqCst), None);
+        }
+        assert_eq!(
+            Helper::atomic(AtomicOp::CompareExchange, 128, AtomicOrder::SeqCst),
+            None
+        );
+        assert_eq!(AtomicOrder::of(r2il::MemoryOrdering::Unknown), None);
+    }
 
     /// The range a truncation is defined on: the bound below is `-2^(n-1) - 1` exclusive where the
     /// float format holds it, else `-2^(n-1)` inclusive; above, `2^(n-1)` exclusive.
