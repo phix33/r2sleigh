@@ -6397,3 +6397,144 @@ fn a_parameter_read_once_or_by_index_lays_out_no_structure() {
         assert!(!output.text().contains("struct fcn_"), "{name}:\n{output}");
     }
 }
+
+/// Whether the `RAX` a block of the prepared tier begins with merges its ways in.
+fn merges_rax_at(dump: &str, block: u64) -> bool {
+    let header = format!("Block {block:#x}:");
+    dump.split("\n\n")
+        .find(|section| section.trim_start().starts_with(&header))
+        .is_some_and(|section| {
+            section
+                .lines()
+                .any(|line| line.trim_start().starts_with("RAX_") && line.contains("= phi("))
+        })
+}
+
+/// Whether a `rax` the C assigns before its loop is assigned again inside it: the value the
+/// back edge carries, rather than the one the loop was entered with on every pass.
+fn loop_carries_rax(output: &str) -> bool {
+    let Some((before, inside)) = output.split_once("for (; ; ) {") else {
+        return false;
+    };
+    let assigned = |text: &str| {
+        text.lines()
+            .filter_map(|line| line.trim_start().split_once(" = ").map(|(name, _)| name))
+            .filter(|name| name.starts_with("rax_"))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+    };
+    !assigned(before).is_disjoint(&assigned(inside))
+}
+
+/// A loop that writes its accumulator only by `cmpxchg`'s or `cmovcc`'s `SELECT` carries it to its
+/// header: a retry compares against what the failed compare loaded, which equivalence never runs.
+#[test]
+fn a_loop_carries_a_register_only_a_conditional_write_defines() {
+    for (name, header, bytes) in [
+        (
+            "cmpxchg32",
+            0x1002,
+            &[
+                0x8b, 0x07, // 1000 mov eax, [rdi]
+                0x89, 0xc1, // 1002 mov ecx, eax
+                0x09, 0xf1, // 1004 or ecx, esi
+                0x0f, 0xb1, 0x0f, // 1006 cmpxchg [rdi], ecx
+                0x75, 0xf7, // 1009 jne 0x1002
+                0xc3, // 100b ret
+            ][..],
+        ),
+        (
+            "cmpxchg64",
+            0x1003,
+            &[
+                0x48, 0x8b, 0x07, // 1000 mov rax, [rdi]
+                0x48, 0x89, 0xc1, // 1003 mov rcx, rax
+                0x48, 0x09, 0xf1, // 1006 or rcx, rsi
+                0x48, 0x0f, 0xb1, 0x0f, // 1009 cmpxchg [rdi], rcx
+                0x75, 0xf4, // 100d jne 0x1003
+                0xc3, // 100f ret
+            ][..],
+        ),
+        (
+            "cmpxchg16",
+            0x1003,
+            &[
+                0x66, 0x8b, 0x07, // 1000 mov ax, [rdi]
+                0x89, 0xc1, // 1003 mov ecx, eax
+                0x09, 0xf1, // 1005 or ecx, esi
+                0x66, 0x0f, 0xb1, 0x0f, // 1007 cmpxchg [rdi], cx
+                0x75, 0xf6, // 100b jne 0x1003
+                0xc3, // 100d ret
+            ][..],
+        ),
+        (
+            "cmov64",
+            0x1002,
+            &[
+                0x31, 0xc0, // 1000 xor eax, eax
+                0x48, 0x8b, 0x17, // 1002 mov rdx, [rdi]
+                0x48, 0x39, 0xc2, // 1005 cmp rdx, rax
+                0x48, 0x0f, 0x4f, 0xc2, // 1008 cmovg rax, rdx
+                0x48, 0x83, 0xc7, 0x08, // 100c add rdi, 8
+                0xff, 0xce, // 1010 dec esi
+                0x75, 0xee, // 1012 jne 0x1002
+                0xc3, // 1014 ret
+            ][..],
+        ),
+        (
+            "cmov16",
+            0x1002,
+            &[
+                0x31, 0xc0, // 1000 xor eax, eax
+                0x66, 0x8b, 0x17, // 1002 mov dx, [rdi]
+                0x66, 0x39, 0xc2, // 1005 cmp dx, ax
+                0x66, 0x0f, 0x4f, 0xc2, // 1008 cmovg ax, dx
+                0x48, 0x83, 0xc7, 0x02, // 100c add rdi, 2
+                0xff, 0xce, // 1010 dec esi
+                0x75, 0xee, // 1012 jne 0x1002
+                0xc3, // 1014 ret
+            ][..],
+        ),
+    ] {
+        let machine = Machine::new("x86-64", "x86-64", 64);
+        let target = machine.target();
+        let program = Fixture {
+            bytes: bytes.to_vec(),
+            name,
+        };
+        let artifact = r2engine::native::prepared(&target, &program, BASE).expect("prepared");
+        let dump = artifact.artifact().dump();
+        assert!(merges_rax_at(&dump, header), "{name}: {dump}");
+        let response = decompile(&target, &program, BASE).expect("decompile");
+        let output = response.output.text();
+        assert!(loop_carries_rax(output), "{name}: {output}");
+    }
+}
+
+/// `xor eax, eax; test rsi, rsi; je ret; cmpxchg [rdi], edx; ret`: the return reads `rax` merged
+/// from the skipped arm and the compare's, rather than refusing the function as unsupported.
+#[test]
+fn a_conditional_write_on_one_arm_merges_where_the_arms_join() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: vec![
+            0x31, 0xc0, // 1000 xor eax, eax
+            0x48, 0x85, 0xf6, // 1002 test rsi, rsi
+            0x74, 0x03, // 1005 je 0x100a
+            0x0f, 0xb1, 0x17, // 1007 cmpxchg [rdi], edx
+            0xc3, // 100a ret
+        ],
+        name: "exchange_if",
+    };
+    let artifact = r2engine::native::prepared(&target, &program, BASE).expect("prepared");
+    let dump = artifact.artifact().dump();
+    assert!(merges_rax_at(&dump, 0x100a), "{dump}");
+    let output = decompile(&target, &program, BASE)
+        .expect("decompile")
+        .output;
+    let text = output.text();
+    for absent in ["UnsupportedInstruction", "r2sleigh_residual_u64"] {
+        assert!(!text.contains(absent), "{absent}: {text}");
+    }
+}

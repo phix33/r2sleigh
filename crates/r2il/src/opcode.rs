@@ -600,6 +600,100 @@ pub enum R2ILOp {
     },
 }
 
+/// Every operation's output, named once for [`R2ILOp::output`] and [`R2ILOp::output_mut`]: an
+/// operation added without an arm fails to compile, so phi placement never misses a definition.
+macro_rules! output_of {
+    ($op:expr, $as:ident) => {
+        match $op {
+            R2ILOp::Copy { dst, .. }
+            | R2ILOp::Load { dst, .. }
+            | R2ILOp::LoadLinked { dst, .. }
+            | R2ILOp::LoadGuarded { dst, .. }
+            | R2ILOp::AtomicCAS { dst, .. }
+            | R2ILOp::IntAdd { dst, .. }
+            | R2ILOp::IntSub { dst, .. }
+            | R2ILOp::IntMult { dst, .. }
+            | R2ILOp::IntDiv { dst, .. }
+            | R2ILOp::IntSDiv { dst, .. }
+            | R2ILOp::IntRem { dst, .. }
+            | R2ILOp::IntSRem { dst, .. }
+            | R2ILOp::IntNegate { dst, .. }
+            | R2ILOp::IntCarry { dst, .. }
+            | R2ILOp::IntSCarry { dst, .. }
+            | R2ILOp::IntSBorrow { dst, .. }
+            | R2ILOp::IntAnd { dst, .. }
+            | R2ILOp::IntOr { dst, .. }
+            | R2ILOp::IntXor { dst, .. }
+            | R2ILOp::IntNot { dst, .. }
+            | R2ILOp::IntLeft { dst, .. }
+            | R2ILOp::IntRight { dst, .. }
+            | R2ILOp::IntSRight { dst, .. }
+            | R2ILOp::IntEqual { dst, .. }
+            | R2ILOp::IntNotEqual { dst, .. }
+            | R2ILOp::IntLess { dst, .. }
+            | R2ILOp::IntSLess { dst, .. }
+            | R2ILOp::IntLessEqual { dst, .. }
+            | R2ILOp::IntSLessEqual { dst, .. }
+            | R2ILOp::IntZExt { dst, .. }
+            | R2ILOp::IntSExt { dst, .. }
+            | R2ILOp::BoolNot { dst, .. }
+            | R2ILOp::BoolAnd { dst, .. }
+            | R2ILOp::BoolOr { dst, .. }
+            | R2ILOp::BoolXor { dst, .. }
+            | R2ILOp::Piece { dst, .. }
+            | R2ILOp::Subpiece { dst, .. }
+            | R2ILOp::PopCount { dst, .. }
+            | R2ILOp::Lzcount { dst, .. }
+            | R2ILOp::FloatAdd { dst, .. }
+            | R2ILOp::FloatSub { dst, .. }
+            | R2ILOp::FloatMult { dst, .. }
+            | R2ILOp::FloatDiv { dst, .. }
+            | R2ILOp::FloatNeg { dst, .. }
+            | R2ILOp::FloatAbs { dst, .. }
+            | R2ILOp::FloatSqrt { dst, .. }
+            | R2ILOp::FloatCeil { dst, .. }
+            | R2ILOp::FloatFloor { dst, .. }
+            | R2ILOp::FloatRound { dst, .. }
+            | R2ILOp::FloatNaN { dst, .. }
+            | R2ILOp::FloatEqual { dst, .. }
+            | R2ILOp::FloatNotEqual { dst, .. }
+            | R2ILOp::FloatLess { dst, .. }
+            | R2ILOp::FloatLessEqual { dst, .. }
+            | R2ILOp::Int2Float { dst, .. }
+            | R2ILOp::Float2Int { dst, .. }
+            | R2ILOp::FloatFloat { dst, .. }
+            | R2ILOp::Trunc { dst, .. }
+            | R2ILOp::CpuId { dst }
+            | R2ILOp::Multiequal { dst, .. }
+            | R2ILOp::Indirect { dst, .. }
+            | R2ILOp::PtrAdd { dst, .. }
+            | R2ILOp::PtrSub { dst, .. }
+            | R2ILOp::SegmentOp { dst, .. }
+            | R2ILOp::New { dst, .. }
+            | R2ILOp::Cast { dst, .. }
+            | R2ILOp::Extract { dst, .. }
+            | R2ILOp::Insert { dst, .. }
+            | R2ILOp::Select { dst, .. } => Some(dst),
+            R2ILOp::StoreConditional { result, .. } => result.$as(),
+            R2ILOp::CallOther { output, .. } => output.$as(),
+            R2ILOp::BlockTransfer(transfer) => transfer.answer.$as(),
+            R2ILOp::Store { .. }
+            | R2ILOp::StoreGuarded { .. }
+            | R2ILOp::Fence { .. }
+            | R2ILOp::ClearExclusive
+            | R2ILOp::Branch { .. }
+            | R2ILOp::CBranch { .. }
+            | R2ILOp::BranchInd { .. }
+            | R2ILOp::Call { .. }
+            | R2ILOp::CallInd { .. }
+            | R2ILOp::Return { .. }
+            | R2ILOp::Nop
+            | R2ILOp::Unimplemented
+            | R2ILOp::Breakpoint => None,
+        }
+    };
+}
+
 impl R2ILOp {
     /// What this operation does with the numbers it reads.
     pub fn value_use(&self) -> ValueUse {
@@ -764,162 +858,14 @@ impl R2ILOp {
         )
     }
 
-    /// Returns the output varnode if this operation has one.
+    /// The output varnode, if any: the one list renaming and phi placement both read.
     pub fn output(&self) -> Option<&Varnode> {
-        match self {
-            R2ILOp::Copy { dst, .. }
-            | R2ILOp::Load { dst, .. }
-            | R2ILOp::LoadLinked { dst, .. }
-            | R2ILOp::LoadGuarded { dst, .. }
-            | R2ILOp::AtomicCAS { dst, .. }
-            | R2ILOp::IntAdd { dst, .. }
-            | R2ILOp::IntSub { dst, .. }
-            | R2ILOp::IntMult { dst, .. }
-            | R2ILOp::IntDiv { dst, .. }
-            | R2ILOp::IntSDiv { dst, .. }
-            | R2ILOp::IntRem { dst, .. }
-            | R2ILOp::IntSRem { dst, .. }
-            | R2ILOp::IntNegate { dst, .. }
-            | R2ILOp::IntCarry { dst, .. }
-            | R2ILOp::IntSCarry { dst, .. }
-            | R2ILOp::IntSBorrow { dst, .. }
-            | R2ILOp::IntAnd { dst, .. }
-            | R2ILOp::IntOr { dst, .. }
-            | R2ILOp::IntXor { dst, .. }
-            | R2ILOp::IntNot { dst, .. }
-            | R2ILOp::IntLeft { dst, .. }
-            | R2ILOp::IntRight { dst, .. }
-            | R2ILOp::IntSRight { dst, .. }
-            | R2ILOp::IntEqual { dst, .. }
-            | R2ILOp::IntNotEqual { dst, .. }
-            | R2ILOp::IntLess { dst, .. }
-            | R2ILOp::IntSLess { dst, .. }
-            | R2ILOp::IntLessEqual { dst, .. }
-            | R2ILOp::IntSLessEqual { dst, .. }
-            | R2ILOp::IntZExt { dst, .. }
-            | R2ILOp::IntSExt { dst, .. }
-            | R2ILOp::BoolNot { dst, .. }
-            | R2ILOp::BoolAnd { dst, .. }
-            | R2ILOp::BoolOr { dst, .. }
-            | R2ILOp::BoolXor { dst, .. }
-            | R2ILOp::Piece { dst, .. }
-            | R2ILOp::Subpiece { dst, .. }
-            | R2ILOp::PopCount { dst, .. }
-            | R2ILOp::Lzcount { dst, .. }
-            | R2ILOp::FloatAdd { dst, .. }
-            | R2ILOp::FloatSub { dst, .. }
-            | R2ILOp::FloatMult { dst, .. }
-            | R2ILOp::FloatDiv { dst, .. }
-            | R2ILOp::FloatNeg { dst, .. }
-            | R2ILOp::FloatAbs { dst, .. }
-            | R2ILOp::FloatSqrt { dst, .. }
-            | R2ILOp::FloatCeil { dst, .. }
-            | R2ILOp::FloatFloor { dst, .. }
-            | R2ILOp::FloatRound { dst, .. }
-            | R2ILOp::FloatNaN { dst, .. }
-            | R2ILOp::FloatEqual { dst, .. }
-            | R2ILOp::FloatNotEqual { dst, .. }
-            | R2ILOp::FloatLess { dst, .. }
-            | R2ILOp::FloatLessEqual { dst, .. }
-            | R2ILOp::Int2Float { dst, .. }
-            | R2ILOp::Float2Int { dst, .. }
-            | R2ILOp::FloatFloat { dst, .. }
-            | R2ILOp::Trunc { dst, .. }
-            | R2ILOp::CpuId { dst }
-            | R2ILOp::Multiequal { dst, .. }
-            | R2ILOp::Indirect { dst, .. }
-            | R2ILOp::PtrAdd { dst, .. }
-            | R2ILOp::PtrSub { dst, .. }
-            | R2ILOp::SegmentOp { dst, .. }
-            | R2ILOp::New { dst, .. }
-            | R2ILOp::Cast { dst, .. }
-            | R2ILOp::Extract { dst, .. }
-            | R2ILOp::Insert { dst, .. }
-            | R2ILOp::Select { dst, .. } => Some(dst),
-            R2ILOp::StoreConditional { result, .. } => result.as_ref(),
-            R2ILOp::CallOther { output, .. } => output.as_ref(),
-            R2ILOp::BlockTransfer(transfer) => transfer.answer.as_ref(),
-            _ => None,
-        }
+        output_of!(self, as_ref)
     }
 
-    /// Returns the output varnode mutably if this operation has one.
+    /// The output varnode mutably, from the same list as [`Self::output`].
     pub fn output_mut(&mut self) -> Option<&mut Varnode> {
-        match self {
-            R2ILOp::Copy { dst, .. }
-            | R2ILOp::Load { dst, .. }
-            | R2ILOp::LoadLinked { dst, .. }
-            | R2ILOp::LoadGuarded { dst, .. }
-            | R2ILOp::AtomicCAS { dst, .. }
-            | R2ILOp::IntAdd { dst, .. }
-            | R2ILOp::IntSub { dst, .. }
-            | R2ILOp::IntMult { dst, .. }
-            | R2ILOp::IntDiv { dst, .. }
-            | R2ILOp::IntSDiv { dst, .. }
-            | R2ILOp::IntRem { dst, .. }
-            | R2ILOp::IntSRem { dst, .. }
-            | R2ILOp::IntNegate { dst, .. }
-            | R2ILOp::IntCarry { dst, .. }
-            | R2ILOp::IntSCarry { dst, .. }
-            | R2ILOp::IntSBorrow { dst, .. }
-            | R2ILOp::IntAnd { dst, .. }
-            | R2ILOp::IntOr { dst, .. }
-            | R2ILOp::IntXor { dst, .. }
-            | R2ILOp::IntNot { dst, .. }
-            | R2ILOp::IntLeft { dst, .. }
-            | R2ILOp::IntRight { dst, .. }
-            | R2ILOp::IntSRight { dst, .. }
-            | R2ILOp::IntEqual { dst, .. }
-            | R2ILOp::IntNotEqual { dst, .. }
-            | R2ILOp::IntLess { dst, .. }
-            | R2ILOp::IntSLess { dst, .. }
-            | R2ILOp::IntLessEqual { dst, .. }
-            | R2ILOp::IntSLessEqual { dst, .. }
-            | R2ILOp::IntZExt { dst, .. }
-            | R2ILOp::IntSExt { dst, .. }
-            | R2ILOp::BoolNot { dst, .. }
-            | R2ILOp::BoolAnd { dst, .. }
-            | R2ILOp::BoolOr { dst, .. }
-            | R2ILOp::BoolXor { dst, .. }
-            | R2ILOp::Piece { dst, .. }
-            | R2ILOp::Subpiece { dst, .. }
-            | R2ILOp::PopCount { dst, .. }
-            | R2ILOp::Lzcount { dst, .. }
-            | R2ILOp::FloatAdd { dst, .. }
-            | R2ILOp::FloatSub { dst, .. }
-            | R2ILOp::FloatMult { dst, .. }
-            | R2ILOp::FloatDiv { dst, .. }
-            | R2ILOp::FloatNeg { dst, .. }
-            | R2ILOp::FloatAbs { dst, .. }
-            | R2ILOp::FloatSqrt { dst, .. }
-            | R2ILOp::FloatCeil { dst, .. }
-            | R2ILOp::FloatFloor { dst, .. }
-            | R2ILOp::FloatRound { dst, .. }
-            | R2ILOp::FloatNaN { dst, .. }
-            | R2ILOp::FloatEqual { dst, .. }
-            | R2ILOp::FloatNotEqual { dst, .. }
-            | R2ILOp::FloatLess { dst, .. }
-            | R2ILOp::FloatLessEqual { dst, .. }
-            | R2ILOp::Int2Float { dst, .. }
-            | R2ILOp::Float2Int { dst, .. }
-            | R2ILOp::FloatFloat { dst, .. }
-            | R2ILOp::Trunc { dst, .. }
-            | R2ILOp::CpuId { dst }
-            | R2ILOp::Multiequal { dst, .. }
-            | R2ILOp::Indirect { dst, .. }
-            | R2ILOp::PtrAdd { dst, .. }
-            | R2ILOp::PtrSub { dst, .. }
-            | R2ILOp::SegmentOp { dst, .. }
-            | R2ILOp::New { dst, .. }
-            | R2ILOp::Cast { dst, .. }
-            | R2ILOp::Extract { dst, .. }
-            | R2ILOp::Insert { dst, .. }
-            | R2ILOp::Select { dst, .. } => Some(dst),
-            R2ILOp::StoreConditional { result, .. } => result.as_mut(),
-            R2ILOp::CallOther { output, .. } => output.as_mut(),
-            R2ILOp::BlockTransfer(transfer) => transfer.answer.as_mut(),
-            _ => None,
-        }
+        output_of!(self, as_mut)
     }
 
     /// Returns the input varnodes for this operation.

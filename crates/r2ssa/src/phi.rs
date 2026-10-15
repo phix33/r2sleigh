@@ -210,7 +210,7 @@ pub fn collect_defs_from_cfg_with_names_storage_and_control<C: SsaWorkControl + 
                     storage_by_identity.insert(identity.clone(), identity.storage);
                 }
             }
-            if let Some(varnode) = get_op_output_varnode(op) {
+            if let Some(varnode) = op.output() {
                 let identity = RenameIdentity::for_varnode(varnode, reg_names, families);
                 defs.entry(identity.clone()).or_default().insert(block.addr);
                 storage_by_identity.insert(identity.clone(), identity.storage);
@@ -609,7 +609,7 @@ impl IdentityNumbers<'_> {
 
     /// What one operation reads and defines, as renaming writes it.
     fn effect(&mut self, op: &r2il::R2ILOp) -> LivenessOpEffect {
-        let kill = get_op_output_varnode(op).map(|varnode| self.bytes(varnode));
+        let kill = op.output().map(|varnode| self.bytes(varnode));
         let reads = op
             .inputs()
             .into_iter()
@@ -660,79 +660,150 @@ enum LivenessBoundary {
     Return,
 }
 
-fn get_op_output_varnode(op: &r2il::R2ILOp) -> Option<&r2il::Varnode> {
-    use r2il::R2ILOp::*;
+#[cfg(test)]
+mod tests {
+    use r2il::{MemoryOrdering, R2ILBlock, R2ILOp, SpaceId, Varnode};
 
-    match op {
-        Copy { dst, .. }
-        | Load { dst, .. }
-        | IntAdd { dst, .. }
-        | IntSub { dst, .. }
-        | IntMult { dst, .. }
-        | IntDiv { dst, .. }
-        | IntSDiv { dst, .. }
-        | IntRem { dst, .. }
-        | IntSRem { dst, .. }
-        | IntNegate { dst, .. }
-        | IntCarry { dst, .. }
-        | IntSCarry { dst, .. }
-        | IntSBorrow { dst, .. }
-        | IntAnd { dst, .. }
-        | IntOr { dst, .. }
-        | IntXor { dst, .. }
-        | IntNot { dst, .. }
-        | IntLeft { dst, .. }
-        | IntRight { dst, .. }
-        | IntSRight { dst, .. }
-        | IntEqual { dst, .. }
-        | IntNotEqual { dst, .. }
-        | IntLess { dst, .. }
-        | IntSLess { dst, .. }
-        | IntLessEqual { dst, .. }
-        | IntSLessEqual { dst, .. }
-        | IntZExt { dst, .. }
-        | IntSExt { dst, .. }
-        | BoolNot { dst, .. }
-        | BoolAnd { dst, .. }
-        | BoolOr { dst, .. }
-        | BoolXor { dst, .. }
-        | Piece { dst, .. }
-        | Subpiece { dst, .. }
-        | PopCount { dst, .. }
-        | Lzcount { dst, .. }
-        | FloatAdd { dst, .. }
-        | FloatSub { dst, .. }
-        | FloatMult { dst, .. }
-        | FloatDiv { dst, .. }
-        | FloatNeg { dst, .. }
-        | FloatAbs { dst, .. }
-        | FloatSqrt { dst, .. }
-        | FloatCeil { dst, .. }
-        | FloatFloor { dst, .. }
-        | FloatRound { dst, .. }
-        | FloatNaN { dst, .. }
-        | FloatEqual { dst, .. }
-        | FloatNotEqual { dst, .. }
-        | FloatLess { dst, .. }
-        | FloatLessEqual { dst, .. }
-        | Int2Float { dst, .. }
-        | Float2Int { dst, .. }
-        | FloatFloat { dst, .. }
-        | Trunc { dst, .. }
-        | CpuId { dst }
-        | Multiequal { dst, .. }
-        | Indirect { dst, .. }
-        | PtrAdd { dst, .. }
-        | PtrSub { dst, .. }
-        | SegmentOp { dst, .. }
-        | New { dst, .. }
-        | Cast { dst, .. }
-        | Extract { dst, .. }
-        | Insert { dst, .. } => Some(dst),
-        CallOther { output, .. } => output.as_ref(),
-        _ => None,
+    fn varnode(space: SpaceId, offset: u64, size: u32) -> Varnode {
+        Varnode {
+            space,
+            offset,
+            size,
+        }
+    }
+
+    /// Each operation that writes a register without an arithmetic opcode: the
+    /// loop below defines `r0` only through it.
+    fn conditional_writers() -> Vec<(&'static str, R2ILOp)> {
+        let r0 = || varnode(SpaceId::Register, 0, 8);
+        let r8 = || varnode(SpaceId::Register, 8, 8);
+        let flag = || varnode(SpaceId::Unique, 0x100, 1);
+        let ordering = MemoryOrdering::Relaxed;
+        vec![
+            (
+                "select",
+                R2ILOp::Select {
+                    dst: r0(),
+                    cond: flag(),
+                    if_true: r0(),
+                    if_false: r8(),
+                },
+            ),
+            (
+                "load linked",
+                R2ILOp::LoadLinked {
+                    dst: r0(),
+                    space: SpaceId::Ram,
+                    addr: r8(),
+                    ordering,
+                },
+            ),
+            (
+                "guarded load",
+                R2ILOp::LoadGuarded {
+                    dst: r0(),
+                    space: SpaceId::Ram,
+                    addr: r8(),
+                    guard: flag(),
+                    ordering,
+                },
+            ),
+            (
+                "store conditional",
+                R2ILOp::StoreConditional {
+                    result: Some(r0()),
+                    space: SpaceId::Ram,
+                    addr: r8(),
+                    val: r8(),
+                    ordering,
+                },
+            ),
+            (
+                "compare and swap",
+                R2ILOp::AtomicCAS {
+                    dst: r0(),
+                    space: SpaceId::Ram,
+                    addr: r8(),
+                    expected: r0(),
+                    replacement: r8(),
+                    ordering,
+                },
+            ),
+        ]
+    }
+
+    /// A register a loop reads on entry and writes only through a conditional
+    /// write merges at the header: the back edge carries the written value.
+    #[test]
+    fn a_register_only_a_conditional_write_defines_merges_at_the_loop_header() {
+        for (name, writer) in conditional_writers() {
+            let r0 = || varnode(SpaceId::Register, 0, 8);
+            let flag = || varnode(SpaceId::Unique, 0x100, 1);
+            let blocks = vec![
+                R2ILBlock {
+                    addr: 0x1000,
+                    size: 4,
+                    ops: vec![R2ILOp::Copy {
+                        dst: r0(),
+                        src: varnode(SpaceId::Const, 0, 8),
+                    }],
+                    ..Default::default()
+                },
+                R2ILBlock {
+                    addr: 0x1004,
+                    size: 8,
+                    ops: vec![
+                        R2ILOp::IntEqual {
+                            dst: flag(),
+                            a: r0(),
+                            b: varnode(SpaceId::Const, 7, 8),
+                        },
+                        writer,
+                        R2ILOp::CBranch {
+                            target: varnode(SpaceId::Ram, 0x1004, 8),
+                            cond: flag(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                R2ILBlock {
+                    addr: 0x100c,
+                    size: 4,
+                    ops: vec![R2ILOp::Return {
+                        target: varnode(SpaceId::Const, 0, 8),
+                    }],
+                    ..Default::default()
+                },
+            ];
+            let function =
+                crate::function::SSAFunction::from_blocks_raw(&blocks, None).expect("raw SSA");
+            let header = function.named_block(0x1004).expect("loop header");
+            let merged = header
+                .phis()
+                .iter()
+                .find(|phi| phi.dst.name() == r0_name(&function));
+            let phi =
+                merged.unwrap_or_else(|| panic!("{name}: no merge of r0:\n{}", function.dump()));
+            let defined = header
+                .ops()
+                .iter()
+                .find_map(|op| op.dst().filter(|dst| dst.name() == phi.dst.name()).cloned());
+            let carried = phi
+                .sources
+                .iter()
+                .find(|(pred, _)| *pred == 0x1004)
+                .map(|(_, var)| var.clone());
+            assert_eq!(
+                carried,
+                defined,
+                "{name}: the back edge carries the write:\n{}",
+                function.dump()
+            );
+        }
+    }
+
+    fn r0_name(function: &crate::function::SSAFunction) -> String {
+        let entry = function.named_block(0x1000).expect("entry");
+        entry.ops()[0].dst().expect("r0 written").name().to_owned()
     }
 }
-
-#[cfg(test)]
-mod tests {}
