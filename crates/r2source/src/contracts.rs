@@ -1552,6 +1552,18 @@ impl SourceFunctionInterface {
         self
     }
 
+    /// What a cycle's least fixpoint assumes of a member: these parameters, exactly or as a floor,
+    /// and no result (doc/adr-resolved-bodies.md, "Arity").
+    #[must_use]
+    pub fn assumed_arity(mut self, floor: bool) -> Self {
+        self.arity_floor = floor;
+        self.return_kind = SourceFunctionReturn::Unproven;
+        self.return_logical_value = None;
+        self.result_carriers = None;
+        self.body_proven_return_address = false;
+        self
+    }
+
     /// How many arguments a call hands this function: its parameters exactly, or at least them.
     pub fn arity(&self) -> SourceArity {
         match self.arity_floor {

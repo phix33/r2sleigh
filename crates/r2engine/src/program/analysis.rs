@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use super::{ProgramInputs, Source, View};
-use crate::native::{CalleeRead, NativeRefusal, Prepared, Unreadable};
+use crate::native::{CalleeRead, NativeRefusal, Prepared, Stated, Unreadable};
 use crate::query::db::{Db, Hold, Query, Retention};
 use crate::{EngineDecompileResponse, EngineSession, SealedFunctionAnalysis};
 
@@ -147,7 +147,11 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeReads {
     const RETENTION: Retention = Retention::Held;
 
     fn compute(db: &Db<ProgramInputs<S>>, &(address, thumb): &(u64, bool)) -> Shared<CalleeRead> {
-        Shared(Arc::new(callee_read(db, (address, thumb), &[])))
+        Shared(Arc::new(callee_read(
+            db,
+            (address, thumb),
+            Stated::default(),
+        )))
     }
 
     fn hold(value: &Shared<CalleeRead>) -> Hold {
@@ -158,11 +162,11 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeReads {
     }
 }
 
-/// One callee resolved on its walk against its imports and the given resolved owners of its result.
+/// One callee resolved on its walk against its imports and what else is `stated` of its callees.
 pub(super) fn callee_read<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,
     (address, thumb): (u64, bool),
-    owners: &[(u64, Arc<CalleeRead>)],
+    stated: Stated<'_>,
 ) -> CalleeRead {
     let unread = |reason| CalleeRead {
         interface: None,
@@ -180,7 +184,7 @@ pub(super) fn callee_read<S: Source + 'static>(
         (_, Err(refusal)) if refusal.stopped() => unread(Unreadable::Stopped),
         (_, Err(_)) => unread(Unreadable::NotWalked),
         (Some(Ok(target)), Ok(walked)) => {
-            crate::native::callee_read(&target, &view, address, walked, owners)
+            crate::native::callee_read(&target, &view, address, walked, stated)
         }
         _ => unread(Unreadable::NotPrepared),
     }

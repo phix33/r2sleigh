@@ -506,6 +506,11 @@ impl Walk {
         &self.root.body
     }
 
+    /// Every function the body reaches, in address order, as its resolution declares them.
+    pub(crate) fn reaches(&self, program: &dyn Program) -> Vec<u64> {
+        reached(&self.root.body, program)
+    }
+
     /// The lift of each block of the body, dispatches followed.
     pub fn lifted(&self) -> Vec<r2il::R2ILBlock> {
         (self.root.body.blocks.iter())
@@ -939,11 +944,26 @@ fn prepare_callee(
         _ => (native, target),
     };
     let walked = walk(target, native.program, address).map_err(|_| Unreadable::NotWalked)?;
-    resolved_alone(native, target, address, ptr_bits, &walked, &[])
+    resolved_alone(
+        native,
+        target,
+        address,
+        ptr_bits,
+        &walked,
+        Stated::default(),
+    )
 }
 
 /// A resolved body, and the callees whose statement could prove what it leaves open.
 type Resolution = (Arc<TrustedSsaArtifact>, Owners);
+
+/// What a body is resolved against beside its imports: its owners resolved, and the arities a
+/// cycle's least fixpoint assumes of its members (doc/adr-resolved-bodies.md, "Arity").
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Stated<'a> {
+    pub(crate) owners: &'a [(u64, Arc<CalleeRead>)],
+    pub(crate) assumed: &'a [(u64, r2source::SourceFunctionInterface)],
+}
 
 /// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md).
 fn resolved_alone(
@@ -952,16 +972,20 @@ fn resolved_alone(
     address: u64,
     ptr_bits: u32,
     walked: &Walk,
-    owners: &[(u64, Arc<CalleeRead>)],
+    stated: Stated<'_>,
 ) -> Result<Resolution, Unreadable> {
     let mut imports = Callees::default();
     let targets = reached(&walked.root.body, native.program);
     declare_imports(native, target, &targets, ptr_bits, &mut imports);
     // Each resolved owner of its result or arity, read as any callee's statement.
-    for (owner, read) in owners {
+    for (owner, read) in stated.owners {
         if let Ok(facts) = &read.facts {
             imports.record(*owner, facts);
         }
+    }
+    // An assumed member states its interface alone: nothing it preserves or reaches.
+    for (member, interface) in stated.assumed {
+        imports.interfaces.insert(*member, interface.clone());
     }
     let resolved = native.resolve(address, walked, &imports, false);
     resolved.map_err(|refusal| match refusal.stopped() {
@@ -985,7 +1009,14 @@ pub(crate) fn callee_summary(
     };
     let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
     let resolved = crate::isolation::isolated(|| {
-        resolved_alone(&native, target, address, ptr_bits, walked, &[])
+        resolved_alone(
+            &native,
+            target,
+            address,
+            ptr_bits,
+            walked,
+            Stated::default(),
+        )
     });
     let (artifact, _) = resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)))?;
     let shared = artifact.shared_artifact();
@@ -1000,7 +1031,7 @@ pub(crate) fn callee_read(
     program: &dyn Program,
     address: u64,
     walked: &Walk,
-    owners: &[(u64, Arc<CalleeRead>)],
+    stated: Stated<'_>,
 ) -> CalleeRead {
     let native = match machine(target) {
         Ok(machine) => Native {
@@ -1019,7 +1050,7 @@ pub(crate) fn callee_read(
     };
     let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
     let resolved = crate::isolation::isolated(|| {
-        resolved_alone(&native, target, address, ptr_bits, walked, owners)
+        resolved_alone(&native, target, address, ptr_bits, walked, stated)
     });
     read_of(
         resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked))),
