@@ -98,6 +98,7 @@ Decisions
 | D37 | r2ssa states why an arity is a floor (an indirect call, an unresolved cycle member, a missing prototype); r2engine reads the cause, and a cycle's results are the same fixpoint as its arities | P7 |
 | D38 | The cost verdict counts retired user-space instructions (`perf_event_open`, CPU time under emulation); each record states its measure and the ratchet never compares across measures | GT |
 | D39 | A scheduled CI job reports how far the Ghidra base, `TESTBINS_REF` and the judged radare2 release are behind upstream and fails past a stated budget | GT, VC |
+| D41 | A property of an `R2ILOp` has one owner in r2il, stated as an exhaustive list; a match elsewhere that derives one is a Dylint error (`r2il_op_property_outside_r2il`; #287 showed the class) | standing (GT, r2il) |
 
 The Sleigh crates (`libsla`, `libsla-sys`, `sleigh-config`) are vendored (`vendor/`).
 
