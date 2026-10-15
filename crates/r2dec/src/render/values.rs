@@ -387,6 +387,12 @@ impl Demand<'_> {
                     self.operand(value, inst.id);
                 }
             }
+            SSAOp::Atomic(access) => {
+                self.operand(access.addr, inst.id);
+                for value in access.operands() {
+                    self.operand(*value, inst.id);
+                }
+            }
             // A tail transfer reads its arguments, and its target where it goes through one.
             SSAOp::BranchInd { target, .. } if planned.get(inst.id).is_some() => {
                 let plan = planned.get(inst.id).expect("planned above");
