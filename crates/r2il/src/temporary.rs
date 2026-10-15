@@ -25,6 +25,17 @@ pub fn number_temporaries(ops: &mut [R2ILOp]) {
         op.inputs_mut().into_iter().for_each(&mut place);
         op.output_mut().into_iter().for_each(&mut place);
     }
+    debug_assert!(disjoint(placed.keys()), "temporaries overlap: {placed:?}");
+}
+
+/// Whether no two temporaries share a byte, which makes the layout a renaming (`whole_unique_reads`).
+fn disjoint<'a>(sorted: impl Iterator<Item = &'a (u64, u32)>) -> bool {
+    let mut end = 0u64;
+    sorted.into_iter().all(|&(offset, size)| {
+        let fits = offset >= end;
+        end = end.max(offset + u64::from(size.max(1)));
+        fits
+    })
 }
 
 #[cfg(test)]
