@@ -152,6 +152,10 @@ pub struct RenderedResidualJson {
     pub cause: &'static str,
     /// For a gap, the kind its marker names.
     pub gap: Option<String>,
+    /// For a call gap, who the call reaches: a name, a hex address, or `indirect`.
+    pub callee: Option<String>,
+    /// For a call gap, why no statement states it: a `CallRefusal` tag, such as `arity-floor`.
+    pub reason: Option<&'static str>,
     pub line: usize,
 }
 
@@ -274,12 +278,23 @@ impl RenderedFunctionJson {
                     ty: residual.ty.tag(),
                     cause: residual.cause.tag(),
                     gap: residual.gap.as_ref().map(ToString::to_string),
+                    callee: call_gap(residual).map(|call| match &call.callee {
+                        r2dec::ast::GapCallee::Named(name) => name.clone(),
+                        r2dec::ast::GapCallee::Address(addr) => format!("{addr:#x}"),
+                        r2dec::ast::GapCallee::Indirect => "indirect".to_owned(),
+                    }),
+                    reason: call_gap(residual).map(|call| call.reason.tag()),
                     line: residual.line,
                 })
                 .collect(),
             calls: emission.calls().iter().map(call_json).collect(),
         }
     }
+}
+
+/// The call a residual's gap stands for.
+fn call_gap(residual: &r2dec::ResidualSite) -> Option<&r2dec::ast::CallGap> {
+    residual.gap.as_ref()?.call()
 }
 
 /// One rendered call, as `pddj` spells it.

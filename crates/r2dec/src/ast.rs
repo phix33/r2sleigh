@@ -1441,7 +1441,8 @@ pub enum GapKind {
     /// A transfer the text cannot make: control does not go on past it.
     UnresolvedIndirectBranch,
     TransferNotFollowed,
-    TailTransferNotRendered,
+    /// A tail transfer with no C; the call it stands for where its plan was refused.
+    TailTransferNotRendered(Option<CallGap>),
 }
 
 impl GapKind {
@@ -1451,7 +1452,7 @@ impl GapKind {
             self,
             Self::UnresolvedIndirectBranch
                 | Self::TransferNotFollowed
-                | Self::TailTransferNotRendered
+                | Self::TailTransferNotRendered(_)
         )
     }
 
@@ -1470,7 +1471,7 @@ impl GapKind {
             Self::UnprovenReturn => "UnprovenReturn",
             Self::UnresolvedIndirectBranch => "UnresolvedIndirectBranch",
             Self::TransferNotFollowed => "TransferNotFollowed",
-            Self::TailTransferNotRendered => "TailTransferNotRendered",
+            Self::TailTransferNotRendered(_) => "TailTransferNotRendered",
         };
         fixed.into()
     }
@@ -1478,7 +1479,7 @@ impl GapKind {
     /// The call a call gap stands for.
     pub const fn call(&self) -> Option<&CallGap> {
         match self {
-            Self::CallNotRendered(call) => Some(call),
+            Self::CallNotRendered(call) | Self::TailTransferNotRendered(Some(call)) => Some(call),
             _ => None,
         }
     }

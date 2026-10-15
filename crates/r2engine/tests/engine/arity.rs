@@ -110,6 +110,44 @@ fn a_call_past_a_floor_is_a_gap_naming_its_callee_and_floor() {
     assert!(!text.contains("f(5"), "{text}");
 }
 
+/// `HANDED_ON_ONE` with `tail`: `mov edi, 5; mov esi, 7; jmp f` in place of `caller`.
+const TAIL_PAST_A_FLOOR: &[u8] = &[
+    0xe8, 0x0b, 0x00, 0x00, 0x00, // 1000 call 0x1010
+    0x83, 0xc0, 0x01, // 1005 add eax, 1
+    0xc3, // 1008 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1009 padding
+    0x8b, 0x07, // 1010 mov eax, [rdi]
+    0xc3, // 1012 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1013 padding
+    0xbf, 0x05, 0x00, 0x00, 0x00, // 1020 mov edi, 5
+    0xbe, 0x07, 0x00, 0x00, 0x00, // 1025 mov esi, 7
+    0xe9, 0xd1, 0xff, 0xff, 0xff, // 102a jmp 0x1000
+];
+
+/// A tail jump past `f`'s floor leaves a gap naming `f` (audit M3), not a bare
+/// `TailTransferNotRendered`.
+#[test]
+fn a_tail_jump_past_a_floor_is_a_gap_naming_its_callee() {
+    let text = OpenProgram::of(Literal::of_code(
+        TAIL_PAST_A_FLOOR,
+        &[
+            ("f", BASE, 0x09),
+            ("g", BASE + 0x10, 0x03),
+            ("tail", BASE + 0x20, 0x0f),
+        ],
+    ))
+    .rendered(BASE + 0x20)
+    .expect("it renders")
+    .response
+    .output
+    .into_text();
+    assert!(
+        text.contains("TailTransferNotRendered at 0x1020 (render::control): call to f:"),
+        "{text}"
+    );
+}
+
 /// `caller`: `mov edi, 5; mov esi, 7; call [rip + 0x10]; ret`, the slot at 0x1020 the loader binds
 /// to `puts`, in a segment the program may write.
 const CALL_THROUGH_A_SLOT: &[u8] = &[
@@ -124,8 +162,16 @@ const CALL_THROUGH_A_SLOT: &[u8] = &[
 
 /// `caller` over the slot bound to `import`, sealed after load or not.
 fn slot_caller(import: &str, sealed: bool) -> String {
+    slot_caller_in(
+        Literal::of_code(CALL_THROUGH_A_SLOT, &[("caller", BASE, 0x11)]),
+        import,
+        sealed,
+    )
+}
+
+fn slot_caller_in(literal: Literal, import: &str, sealed: bool) -> String {
     let slot = BASE + 0x20;
-    let mut literal = Literal::of_code(CALL_THROUGH_A_SLOT, &[("caller", BASE, 0x11)])
+    let mut literal = literal
         .writable_data_after(slot)
         .loader_written(common::import_write(slot, 8, import))
         .relocated(common::import_slot(slot, import));
@@ -156,7 +202,8 @@ fn a_call_through_a_sealed_import_slot_calls_the_import() {
 /// a gap naming the import and why, never an unsupported instruction (audit M3, RF's W10 case).
 #[test]
 fn a_variadic_call_with_no_count_is_a_gap_naming_its_callee() {
-    let text = slot_caller("objc_msgSend", true);
+    let darwin = Literal::of_code(CALL_THROUGH_A_SLOT, &[("caller", BASE, 0x11)]).mach_o();
+    let text = slot_caller_in(darwin, "objc_msgSend", true);
     assert!(
         text.contains(
             "call to objc_msgSend: variadic, its argument count unproven (missing_format_parameter) */"

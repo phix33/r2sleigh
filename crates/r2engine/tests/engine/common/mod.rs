@@ -679,6 +679,12 @@ impl Literal {
         self
     }
 
+    /// The same program as a Mach-O, which states Darwin by its format.
+    pub fn mach_o(mut self) -> Self {
+        self.container.format = Format::MachO;
+        self
+    }
+
     /// The same program, its container stating this of the platform it runs on.
     pub fn running_on(mut self, evidence: &[PlatformEvidence]) -> Self {
         self.container.platform = evidence.iter().copied().collect();

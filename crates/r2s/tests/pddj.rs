@@ -220,6 +220,31 @@ fn check_residual(label: &str, residual: &Value, text: &[&str]) {
             "{label}: {call} is a {kind} gap"
         );
     }
+    // A call gap names its callee and its reason's tag, as its comment does; no other residual does.
+    let callee = residual["callee"].as_str();
+    let reason = residual["reason"].as_str();
+    if residual["gap"] == "CallNotRendered" {
+        let callee = callee.expect("a call gap's callee");
+        let spelled = if callee == "indirect" {
+            "an indirect target"
+        } else {
+            callee
+        };
+        assert!(
+            line.contains(&format!(": call to {spelled}: ")),
+            "{label}: {call} calls {callee}"
+        );
+        assert!(
+            reason.is_some_and(|tag| !tag.is_empty()),
+            "{label}: {call} has no reason"
+        );
+    } else {
+        assert_eq!(
+            (callee, reason),
+            (None, None),
+            "{label}: {call} is no call gap"
+        );
+    }
 }
 
 /// Every link and every variable is a name the code spells.

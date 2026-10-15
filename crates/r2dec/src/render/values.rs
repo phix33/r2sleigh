@@ -1670,6 +1670,22 @@ impl<'a> Values<'a> {
         Ok(CExpr::call_at(inst, callee, arguments))
     }
 
+    /// The call a tail transfer at `addr` stands for: the refusal of its plan, or no call site.
+    pub(super) fn tail_gap(
+        &self,
+        addr: u64,
+        resolution: Option<&r2types::CalleeResolutionFacts>,
+    ) -> Option<CallGap> {
+        let (inst, op) = self.terminator(addr)?;
+        if let Some(gap) = self.unplanned.get(inst) {
+            return Some(gap.clone());
+        }
+        matches!(op, SSAOp::Branch { .. } | SSAOp::BranchInd { .. }).then(|| CallGap {
+            callee: calls::gap_callee(self.artifact, resolution, inst),
+            reason: CallRefusal::NoCallSite,
+        })
+    }
+
     /// A tail transfer as C: the call and a bare `return` where the function returns nothing, else
     /// the return of what the callee leaves in the function's own result register.
     pub(super) fn tail_call(

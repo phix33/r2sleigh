@@ -487,20 +487,28 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
     assert!(!call_store.contains("r2sleigh_residual"), "{call_store}");
 }
 
-/// An indirect call nothing describes takes no arity from the registers written before it: `_init`
-/// calls `__gmon_start__` through the pointer it loads, and the call is a residual, never
-/// `((uint64_t(*)(void))rax_1)()` (audit D3).
+/// `_init`'s call through the `__gmon_start__` pointer is a residual naming whom and why, never
+/// `((uint64_t(*)(void))rax_1)()`: no arity from the registers written (audit D3, M3).
 #[test]
 fn an_indirect_call_nothing_describes_is_a_residual() {
     let staged = r2s("pdd @ 0x401000");
     assert!(!staged.out.contains("(*)("), "{}", staged.out);
     assert!(
-        staged
-            .out
-            .contains("r2dec gap: CallNotRendered at 0x401014"),
+        staged.out.contains(
+            "r2dec gap: CallNotRendered at 0x401014:4 covering 1 op (render::values): call to an \
+             indirect target: no arity is stated, only the registers written before it */"
+        ),
         "{}",
         staged.out
     );
+    let answer: serde_json::Value =
+        serde_json::from_str(r2s("pddj @ 0x401000").out.trim()).expect("pddj is JSON");
+    let residuals = answer["residuals"].as_array().expect("residuals");
+    let call = (residuals.iter())
+        .find(|residual| residual["gap"] == "CallNotRendered")
+        .expect("the call's gap");
+    assert_eq!(call["callee"], "indirect", "{call}");
+    assert_eq!(call["reason"], "count-from-registers", "{call}");
 }
 
 /// siphash24's tail switch dispatches through a table on `len & 7`, a value only the elided
