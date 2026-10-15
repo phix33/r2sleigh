@@ -1194,32 +1194,14 @@ reason = "Sleigh folds the instruction's own address into a constant (a pc-relat
 [[judged]]
 command = "aoj"
 binaries = "*"
-arch = '^x86'
-fields = ["writes"]
-registers = ["af"]
-lacking = "r2s"
-verdict = "r2-right"
-reason = "Ghidra's x86 specification declares AF and leaves it unwritten by the arithmetic it is defined for (Intel SDM: ADD, SUB, CMP, INC, DEC, NEG set AF); owner VC, a vendored-spec change across the arithmetic macros (D28), recorded in ROADMAP AO"
-
-[[judged]]
-command = "aoj"
-binaries = "*"
-arch = '^(ARM|AArch64)'
-lacking = "r2"
-registers = ["tmpcy", "tmpov", "tmpng", "tmpzr", "shift_carry", "mult_addr", "isamodeswitch"]
-verdict = "r2-right"
-reason = "Sleigh's ARM and AArch64 scratch registers (the flags an instruction computes before its S bit commits them, the shifter's carry, the LDM/STM address, the interworking switch) live in the register space unmarked, so the IL writes registers the machine does not have; owners VC (mark them hidden in the vendored pspecs, a fork PR owed), M (the profile reads `hidden`), then AO drops a hidden register's dead write as it drops a dead temporary (ROADMAP AO)"
-
-[[judged]]
-command = "aoj"
-binaries = "*"
 arch = '^ARM'
 fields = ["reads"]
 registers = ["cy", "ov"]
+r2s = '^\w+s(eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le)?(\.w)? '
 lacking = "r2"
 theirs = '^(?!.*\b(cf|vf)\b)'
 verdict = "r2-right"
-reason = "read only to carry the old C or V flag into Sleigh's scratch (shift_carry, tmpCY, tmpOV), which a flag-preserving instruction never commits; goes with the scratch registers (owners VC, M, AO)"
+reason = "a flag-setting instruction reads C only under Sleigh's shifter `count == 0` select with a constant count (lsls r3, r5, 0x1f; the rotation carry of an ANDS immediate), and V to write it back unchanged (ANDS leaves V); owner r2sleigh-lift, the instruction-local constant fold (ROADMAP AO)"
 
 [[judged]]
 command = "aoj"
