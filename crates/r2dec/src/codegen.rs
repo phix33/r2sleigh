@@ -606,9 +606,8 @@ impl<'c> CodeGenerator<'c> {
         }
 
         if func.params.is_empty() {
-            // An empty list is only `void` when it was actually recovered.
-            // Otherwise leave it unspecified rather than asserting the function
-            // takes no arguments; a tail with no named parameter has no C spelling either.
+            // `void` only where the empty list was recovered and no tail follows: else unspecified,
+            // never a claim the function takes no arguments.
             if func.params_known && !func.variadic {
                 self.output.push_str("void");
             }

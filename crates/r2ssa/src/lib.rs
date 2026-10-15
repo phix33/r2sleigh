@@ -67,6 +67,7 @@ pub(crate) mod reaching_rules;
 pub(crate) mod read_only;
 pub mod recover_interface;
 pub(crate) mod rename;
+pub(crate) mod save_area;
 pub(crate) mod semantic;
 mod slice;
 pub(crate) mod slot_promotion;

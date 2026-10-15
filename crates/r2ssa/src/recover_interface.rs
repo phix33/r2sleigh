@@ -173,6 +173,9 @@ pub struct RecoveredInterface {
     result_carriers: Option<r2source::SourceResultCarriers>,
     /// Whether an argument slot past the parameters is read, or a call's arguments are unproven.
     reads_past_parameters: bool,
+    /// Whether the body saves the argument registers past its parameters to the convention's
+    /// register save area: arguments continue past them, which each call counts (`save_area`).
+    variadic: bool,
     /// Whether the result is void because no call reads it, which holds under a closed world only.
     closed_world: bool,
     /// The first pass over recovery's own facts that moved a state past its height.
@@ -204,6 +207,11 @@ impl RecoveredInterface {
     /// Whether the body writes both result registers and nothing said which a caller reads.
     pub const fn result_ambiguous(&self) -> bool {
         self.result_ambiguous
+    }
+
+    /// Whether arguments continue past the parameters, as the body's register save area proves.
+    pub const fn is_variadic(&self) -> bool {
+        self.variadic
     }
 
     /// Parameter slots in convention order, contiguous from index zero, each
@@ -493,6 +501,7 @@ fn observed_entry_read_storages(
     func: &SSAFunction,
     graph: &SsaGraph,
     observations: &crate::deadphi::ProvenProgramObservations,
+    saved: Option<&crate::dense::IdSet<crate::ValueId>>,
 ) -> Vec<CanonicalStorageId> {
     let mut reads = Vec::new();
     let mut note = |storage: CanonicalStorageId| {
@@ -503,6 +512,7 @@ fn observed_entry_read_storages(
     for value in &graph.values {
         if observations.contains(value.id)
             && graph.def_inst(value.id).is_none()
+            && saved.is_none_or(|saved| !saved.contains(value.id))
             && let Some(root) = is_entry_read(func, &value.var)
         {
             // Every register value is its root, so the width the program
@@ -1566,7 +1576,9 @@ fn recover_interface_inner(
         );
         return None;
     };
-    let mut reads = observed_entry_read_storages(func, graph, &observations);
+    // A variadic prologue's saves to the register save area are its tail, not parameter reads.
+    let mut save_area = prep
+        .and_then(|prep| crate::save_area::register_save_area(graph, prep, slots, &observations));
     // A carrier passed straight to a call is read by that call, so it belongs
     // in the same evidence as an explicit entry read. The prefix rule below is
     // unchanged and still stops at the first candidate slot nothing observes.
@@ -1575,13 +1587,32 @@ fn recover_interface_inner(
     // either case a preserved carrier is a real entry read by the call. Final
     // preparation materializes its source-declared boundary value so every
     // consumer can use the same identity.
-    for storage in passed_through_entry_storages(&facts.boundaries, graph)
-        .into_iter()
-        .chain(returned_argument)
-    {
-        if !reads.contains(&storage) {
-            reads.push(storage);
+    let entry_reads = |saved: Option<&crate::dense::IdSet<crate::ValueId>>| {
+        let mut reads = observed_entry_read_storages(func, graph, &observations, saved);
+        for storage in passed_through_entry_storages(&facts.boundaries, graph)
+            .into_iter()
+            .chain(returned_argument)
+        {
+            if !reads.contains(&storage) {
+                reads.push(storage);
+            }
         }
+        reads
+    };
+    let mut reads = entry_reads(save_area.as_ref().map(|area| &area.saved));
+    // A tail slot read past its save contradicts the area.
+    if let Some(area) = &save_area
+        && slots.argument_slots()[area.named..].iter().any(|slot| {
+            (reads.iter()).any(|read| observed_in_slot(*read, *slot, machine_context).is_some())
+        })
+    {
+        r2il::refusal_evidence!(
+            "interface-recovery",
+            "a register past the {} named slots is read beside its save, so no save area is proven",
+            area.named
+        );
+        save_area = None;
+        reads = entry_reads(None);
     }
     // The slots fill in order, and the first unread one ends them.
     let in_order = |class: &[CanonicalStorageId]| {
@@ -1600,7 +1631,17 @@ fn recover_interface_inner(
             })
             .collect::<Vec<_>>()
     };
-    let parameters = in_order(slots.argument_slots());
+    let mut parameters = in_order(slots.argument_slots());
+    // The save area starts at the first unnamed slot, so each slot below it is a parameter.
+    if let Some(area) = &save_area {
+        let unread = slots.argument_slots()[..area.named]
+            .iter()
+            .skip(parameters.len());
+        parameters.extend(unread.map(|slot| RecoveredParameter {
+            slot: *slot,
+            observed: *slot,
+        }));
+    }
     let integers = parameters.len();
     let return_mechanism = recovered_return_mechanism(&facts);
     let result_is_return_address = result.register().is_some()
@@ -1643,12 +1684,14 @@ fn recover_interface_inner(
         (true, Some(area)) => area.clone(),
         _ => Vec::new(),
     };
-    // Past the prefix, a read of the argument area, or an area no exit places, is a floor.
-    let area_unread = match (every_register, &argument_area) {
-        (true, None) => true,
-        (false, Some(area)) => !area.is_empty(),
-        _ => false,
-    };
+    // Past the prefix, a read of the argument area, or an area no exit places, is a floor; a
+    // variadic tail continues there.
+    let area_unread = save_area.is_none()
+        && match (every_register, &argument_area) {
+            (true, None) => true,
+            (false, Some(area)) => !area.is_empty(),
+            _ => false,
+        };
     // A supervisor call reads registers no operation names, so what it is handed is no read here.
     let enters_supervisor = (graph.insts.iter()).any(|inst| {
         matches!(&inst.payload, crate::graph::InstPayload::Op(op) if func.enters_supervisor(op))
@@ -1661,15 +1704,13 @@ fn recover_interface_inner(
                 .iter()
                 .any(|read| observed_in_slot(*read, *slot, machine_context).is_some())
         });
-    let handed_on =
-        entry_reaches_unproven_call(
-            func,
-            prep,
-            graph,
-            &facts,
-            machine_context,
-            slots.argument_slots().get(integers),
-        ) || read_for_an_unproven_call(graph, &facts, slots.argument_slots().get(integers));
+    // A tail register is the variadic tail's, which no call is handed but through the `va_list`.
+    let next = slots
+        .argument_slots()
+        .get(integers)
+        .filter(|_| save_area.is_none());
+    let handed_on = entry_reaches_unproven_call(func, prep, graph, &facts, machine_context, next)
+        || read_for_an_unproven_call(graph, &facts, next);
     let reads_past_parameters = read_past || handed_on;
     // A floor only calls of unproven arity cause is one their callees' stated arity can lift.
     let arity_owners = match handed_on && !read_past {
@@ -1704,6 +1745,7 @@ fn recover_interface_inner(
         result_ambiguous,
         result_carriers,
         reads_past_parameters,
+        variadic: save_area.is_some(),
         closed_world,
         exhausted: facts.exhausted(),
     })
@@ -1953,6 +1995,10 @@ pub fn mint_recovered_interface(
                 } else {
                     interface
                 }
+            })
+            .map(|interface| match recovered.variadic {
+                true => interface.with_variadic_tail(),
+                false => interface,
             })
             .map(|interface| match recovered.result_carriers {
                 Some(carriers) => interface.with_result_carriers(carriers),

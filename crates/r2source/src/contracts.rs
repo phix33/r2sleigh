@@ -287,9 +287,8 @@ impl SourceAbiParameterSpec {
     }
 }
 
-/// How many fixed arguments a function takes, as its body proves it (ROADMAP P7): exactly its
-/// parameters, or at least them where a slot past them may be read or handed on. A variadic
-/// tail is not counted here: each call counts its own (`SourceFunctionInterface::is_variadic`).
+/// How many fixed arguments a function takes (ROADMAP P7): exactly its parameters, or at least them
+/// where a slot past them may be read or handed on; each call counts a variadic tail (`is_variadic`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum SourceArity {
     Exact(usize),
@@ -851,12 +850,8 @@ pub struct SourceFunctionInterface {
     /// property of the function, unlike the per-callsite count rule a
     /// literal decides.
     format_parameter: Option<crate::confidence::Fact<u32>>,
-    /// Whether arguments continue past the fixed ones: the declaration says so, or the body saves
-    /// the registers past them to the convention's register save area.
-    ///
-    /// A fact of the callee's contract: a caller of a variadic function hands
-    /// it a tail the fixed parameters do not describe, and only a proven count
-    /// (a literal format string's conversions) says how long that tail is.
+    /// Whether arguments continue past the fixed ones, as a declaration or a body's register save
+    /// area states; only a proven count (a literal format's conversions) says how many a call passes.
     variadic: bool,
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.

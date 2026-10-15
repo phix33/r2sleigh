@@ -3067,7 +3067,11 @@ impl CalleeStatement {
             (
                 *address,
                 Self {
-                    arity: interface.arity(),
+                    // A statement counts no call's variadic tail, so its parameters are only a floor.
+                    arity: match interface.is_variadic() {
+                        true => crate::SourceArity::AtLeast(interface.parameters().len()),
+                        false => interface.arity(),
+                    },
                     result: match interface.return_kind() {
                         crate::SourceFunctionReturn::Void => Some(crate::SourceCallResult::Void),
                         crate::SourceFunctionReturn::Register { storage } => {
