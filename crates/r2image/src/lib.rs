@@ -425,7 +425,7 @@ impl Placement {
         }
         let mut common = BTreeMap::new();
         let commons = file.symbols().filter(|_| relocatable);
-        for symbol in commons.filter(|symbol| symbol.section() == object::SymbolSection::Common) {
+        for symbol in commons.filter(|symbol| loader::common(file, symbol)) {
             // A common symbol's value is its alignment.
             let align = symbol.address().clamp(1, 1 << 16);
             let at = end.checked_next_multiple_of(align);

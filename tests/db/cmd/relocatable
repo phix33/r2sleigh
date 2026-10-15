@@ -45,6 +45,23 @@ EXPECT=<<EOF
 EOF
 RUN
 
+# A large common symbol (SHN_X86_64_LCOMMON) is common: allocated after `cbuf`, not listed at its
+# alignment, and `lptr`'s word against it holds that address (0x08000450, low byte 0x50).
+NAME=relocatable object large common
+FILE=tests/fixtures/x86_64_common_code.o
+CMDS=is; pd 1 @ 0x8000059
+EXPECT=<<EOF
+nth paddr      vaddr      bind   type   size lib name
+------------------------------------------------------------
+1   ---------- 0x08000448 GLOBAL OBJ    8        cbuf
+2   ---------- 0x08000450 GLOBAL OBJ    8        lbuf
+3   0x00000040 0x08000040 GLOBAL NOTYPE 0        f
+5   0x00000059 0x08000059 GLOBAL NOTYPE 0        lptr
+4   ---------- 0x08001000 GLOBAL NOTYPE 8        imp.ext
+            0x08000059      50             push rax
+EOF
+RUN
+
 # An object with no code starts at its first mapped byte, not at an unmapped 0; its words against
 # SHN_ABS symbols hold their values unchanged (absval 0x1234).
 NAME=relocatable object of data alone
