@@ -994,7 +994,7 @@ pub(crate) fn convention_call_boundary(
         });
     }
     // A variadic or unprototyped call counts no argument past its callee's floor from registers.
-    if count_register_set(function, prep, graph, machine_context, block_addr, op_index) {
+    if count_register_set(at, machine_context) {
         arguments.truncate(at_least);
         unproven = Some(CallBoundaryRefusal::CountRegisterSet);
     }
@@ -1996,14 +1996,14 @@ pub(crate) fn reaching_source_return_register_in_block(
 
 /// Whether the body sets the convention's vector count for the call at `(block_addr, op_index)` and
 /// for nothing else: a constant at most 8 only that call reads (psABI 3.5.7, ADR "Variadic tail").
-fn count_register_set(
-    function: &SSAFunction,
-    prep: Option<&crate::DecompilePrepFacts>,
-    graph: &SsaGraph,
-    machine_context: &SourceMachineContext,
-    block_addr: u64,
-    op_index: usize,
-) -> bool {
+fn count_register_set(at: CallPosition<'_>, machine_context: &SourceMachineContext) -> bool {
+    let CallPosition {
+        prep,
+        graph,
+        block_addr,
+        op_index,
+        ..
+    } = at;
     let (Some(prep), Some(count)) = (
         prep,
         (machine_context.convention_slots()).and_then(|slots| slots.variadic_count_register()),
@@ -2025,7 +2025,7 @@ fn count_register_set(
         && graph.written_by_body(value)
         && !value_is_call_clobber(graph, value)
         && (graph.use_sites(value).iter()).all(|site| reads.contains(&site.inst))
-        && !scrubs_the_guard(function, prep, graph, machine_context, value, count);
+        && !scrubs_the_guard(at, machine_context, value, count);
     r2il::refusal_evidence!(
         "convention-arity-unproven",
         "callsite ({block_addr:#x}, {op_index}) count register {value:?} set for it alone: {set}"
@@ -2036,20 +2036,24 @@ fn count_register_set(
 /// Whether `value` overwrites the stack guard the protector loaded into the count register (gcc's
 /// `xor eax, eax` after the guard's store): the protector's, not a count. One reaching search.
 fn scrubs_the_guard(
-    function: &SSAFunction,
-    prep: &crate::DecompilePrepFacts,
-    graph: &SsaGraph,
+    at: CallPosition<'_>,
     machine_context: &SourceMachineContext,
     value: ValueId,
     count: CanonicalStorageId,
 ) -> bool {
+    let CallPosition {
+        function,
+        prep,
+        graph,
+        ..
+    } = at;
     let Some((block_addr, op_index)) = graph.def_inst(value).and_then(|def| graph.walk_start(def))
     else {
         return false;
     };
     let previous = reaching_abi_value_in_block_with_policy(
         function,
-        Some(prep),
+        prep,
         graph,
         machine_context,
         block_addr,

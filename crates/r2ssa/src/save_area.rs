@@ -168,12 +168,7 @@ mod tests {
 
     /// `sp -= 0x20`, then each `(register, sp offset)` stored, then `sp + anchor` stored to a global,
     /// and each of `read` stored to another.
-    fn area(saves: &[(u64, u64)], anchor: u64, read: &[u64]) -> Option<SaveArea> {
-        let mut arch = ArchSpec::new("save-area");
-        arch.addr_size = 8;
-        for (name, offset) in [("x0", 0), ("x1", 8), ("x2", 16), ("sp", SP), ("lr", 0x108)] {
-            arch.add_register(RegisterDef::new(name, offset, 8));
-        }
+    fn body(saves: &[(u64, u64)], anchor: u64, read: &[u64]) -> R2ILBlock {
         let mut block = R2ILBlock::new(0x1000, 4);
         block.push(R2ILOp::IntSub {
             dst: Varnode::register(SP, 8),
@@ -219,6 +214,16 @@ mod tests {
         block.push(R2ILOp::Return {
             target: Varnode::register(0x108, 8),
         });
+        block
+    }
+
+    /// The save area `body` proves, prepared under an interface naming its stack pointer.
+    fn area(saves: &[(u64, u64)], anchor: u64, read: &[u64]) -> Option<SaveArea> {
+        let mut arch = ArchSpec::new("save-area");
+        arch.addr_size = 8;
+        for (name, offset) in [("x0", 0), ("x1", 8), ("x2", 16), ("sp", SP), ("lr", 0x108)] {
+            arch.add_register(RegisterDef::new(name, offset, 8));
+        }
         let interface = SourceFunctionInterface::new_exact(
             b"save-area".to_vec(),
             "test",
@@ -232,7 +237,7 @@ mod tests {
         .with_stack_pointer_storage(register(SP))
         .expect("stack pointer");
         let artifact = crate::testing::prepared(
-            &[block],
+            &[body(saves, anchor, read)],
             &crate::Arch::from(arch),
             Some(interface),
             Vec::new(),
