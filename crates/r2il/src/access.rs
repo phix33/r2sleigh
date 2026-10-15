@@ -24,7 +24,7 @@ pub fn register_accesses(
     }
     let scratch =
         |vn: &Varnode| vn.space == SpaceId::Unique || (vn.space == SpaceId::Register && hidden(vn));
-    let straight_line = !ops.iter().any(local_branch);
+    let straight_line = !ops.iter().any(R2ILOp::is_local_branch);
     let used = match straight_line {
         true => effective(ops, scratch),
         false => vec![true; ops.len()],
@@ -113,14 +113,6 @@ pub fn join_tiles(ranges: Vec<Varnode>, declared: impl Fn(&Varnode) -> bool) -> 
         start = end;
     }
     joined.into_iter().flatten().collect()
-}
-
-/// A branch to an operation of the same instruction: Sleigh states its target in the constant space.
-fn local_branch(op: &R2ILOp) -> bool {
-    matches!(
-        op,
-        R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. } if target.space == SpaceId::Const
-    )
 }
 
 fn range(vn: &Varnode) -> (u64, u64) {
