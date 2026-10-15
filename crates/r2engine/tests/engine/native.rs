@@ -3755,15 +3755,17 @@ fn a_clear_direction_flag_survives_a_call() {
             .iter()
             .map(|site| site.cause)
             .collect::<Vec<_>>();
-        assert_eq!(causes.len(), 4, "{convention}\n{text}");
+        // No declaration states the import's arguments, so its call is a gap, never `f()` (P7).
+        assert_eq!(causes.len(), 5, "{convention}\n{text}");
+        assert_eq!(causes[0], ResidualCause::Gap, "{convention}\n{text}");
         assert_eq!(
-            causes[..3],
+            causes[1..4],
             [ResidualCause::HeldFromEntry; 3],
             "{convention}\n{text}"
         );
         // The interface proves no result, so the return's residual says so, not that it is a gap.
         assert_eq!(
-            causes[3],
+            causes[4],
             ResidualCause::UnprovenReturn,
             "{convention}\n{text}"
         );

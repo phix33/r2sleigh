@@ -1167,11 +1167,12 @@ fn stated_call_arguments(
 }
 
 /// The boundary a convention built for a callee that mints no contract, beside what the callee's
-/// body `stated`, where it states anything (CalleeStatement).
+/// body `stated`, where it states anything (CalleeStatement), or why an import states nothing.
 fn adopt_convention(
     boundary: &mut SourceCallBoundaryFact,
     convention: ConventionCallBoundary,
     stated: Option<&crate::machine_context::CalleeStatement>,
+    unstated: Option<crate::UnstatedImport>,
 ) {
     boundary.calling_convention = Some(convention.calling_convention);
     // Nothing said this callee is variadic, and the count came from the machine rather than from a
@@ -1193,10 +1194,12 @@ fn adopt_convention(
     boundary.arguments_proven = arguments_proven && stated.is_some();
     boundary.results_complete = true;
     boundary.complete = arguments_proven;
-    boundary.refusal = match (convention.unproven, stated) {
-        (Some(refusal), _) => Some(refusal),
-        (None, None) => Some(CallBoundaryRefusal::CountFromRegisters),
-        (None, Some(_)) => None,
+    // An import states its arguments only through a declaration; a count read for it is moot.
+    boundary.refusal = match (unstated, convention.unproven, stated) {
+        (Some(import), _, None) => Some(CallBoundaryRefusal::ImportUnstated(import)),
+        (_, Some(refusal), _) => Some(refusal),
+        (_, None, None) => Some(CallBoundaryRefusal::CountFromRegisters),
+        (_, None, Some(_)) => None,
     };
 }
 
@@ -1522,7 +1525,12 @@ pub(crate) fn collect_source_boundary_facts(
             );
             match convention {
                 Err(refusal) => boundary.refusal = Some(refusal),
-                Ok(convention) => adopt_convention(&mut boundary, convention, stated),
+                Ok(convention) => {
+                    let unstated = call_site
+                        .direct_target
+                        .and_then(|target| machine_context.unstated_import(target));
+                    adopt_convention(&mut boundary, convention, stated, unstated);
+                }
             }
         }
         debug_assert_eq!(

@@ -680,6 +680,18 @@ pub enum CallBoundaryRefusal {
     ResultPassedOn { slot: u32 },
     /// No callee states an arity: the count is only the registers written before the call.
     CountFromRegisters,
+    /// The callee is an import, which has no body here, and no placed declaration states its
+    /// arguments; its stub's arity is the loader's, never the import's (ROADMAP P7).
+    ImportUnstated(UnstatedImport),
+}
+
+/// Why an import states no interface: the engine reads one only off its declaration (ROADMAP P7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UnstatedImport {
+    /// No table declares it.
+    Undeclared,
+    /// Its declaration names an argument this convention does not place.
+    Unplaced,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

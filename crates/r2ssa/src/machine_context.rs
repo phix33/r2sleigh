@@ -499,6 +499,8 @@ pub struct SourceMachineContext {
     callee_library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
     /// The callees a runtime model says re-enter their caller at its entry.
     reentering_callees: BTreeSet<u64>,
+    /// The imports this body calls whose declaration states no interface, and why.
+    unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
     /// The register saves the container's call-frame information states.
     frame_saves: Vec<r2source::SourceFrameSave>,
     /// The premises the engine grants its derivations (`r2engine::premises`).
@@ -886,6 +888,7 @@ impl SourceMachineContext {
             callee_argument_reach: BTreeMap::new(),
             callee_library: BTreeMap::new(),
             reentering_callees: BTreeSet::new(),
+            unstated_imports: BTreeMap::new(),
             frame_saves: Vec::new(),
             accepted_premises: BTreeSet::new(),
             code_pointer_entries: BTreeMap::new(),
@@ -1224,6 +1227,15 @@ impl SourceMachineContext {
     /// Whether a call to `target` re-enters its caller at the caller's entry, by a runtime model.
     pub(crate) fn reenters_caller(&self, target: u64) -> bool {
         self.reentering_callees.contains(&target)
+    }
+
+    pub(crate) fn set_unstated_imports(&mut self, imports: BTreeMap<u64, crate::UnstatedImport>) {
+        self.unstated_imports = imports;
+    }
+
+    /// Why the import at `target` states no interface, where it is one that states none.
+    pub(crate) fn unstated_import(&self, target: u64) -> Option<crate::UnstatedImport> {
+        self.unstated_imports.get(&target).copied()
     }
 
     /// The library model of the import at `target`, where the engine named one.

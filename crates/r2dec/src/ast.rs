@@ -1568,6 +1568,8 @@ impl CallRefusal {
                 B::SlotSkipped { .. } => "slot-skipped",
                 B::ResultPassedOn { .. } => "result-passed-on",
                 B::CountFromRegisters => "count-from-registers",
+                B::ImportUnstated(r2ssa::UnstatedImport::Undeclared) => "import-undeclared",
+                B::ImportUnstated(r2ssa::UnstatedImport::Unplaced) => "import-unplaced",
             },
             Self::NoCallSite => "no-call-site",
             Self::NoCertificate => "no-certificate",
@@ -1634,6 +1636,12 @@ impl std::fmt::Display for CallRefusal {
                     );
                 }
                 B::CountFromRegisters => "no arity is stated, only the registers written before it",
+                B::ImportUnstated(r2ssa::UnstatedImport::Undeclared) => {
+                    "the import has no declaration to state its arguments"
+                }
+                B::ImportUnstated(r2ssa::UnstatedImport::Unplaced) => {
+                    "the import's declaration has an argument this convention does not place"
+                }
             },
             Self::NoCallSite => "r2ssa states no call site here",
             Self::NoCertificate => "no callsite certificate",

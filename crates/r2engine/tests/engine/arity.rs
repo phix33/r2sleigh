@@ -212,3 +212,52 @@ fn a_variadic_call_with_no_count_is_a_gap_naming_its_callee() {
     );
     assert!(!text.contains("UnsupportedInstruction"), "{text}");
 }
+
+/// `caller` writes `edi` and calls the `.plt` stub bound to `import`, in a program the container
+/// says runs on glibc.
+fn plt_caller(import: &str) -> String {
+    let glibc = r2engine::program::PlatformEvidence::Interpreter(r2engine::program::Libc::Glibc);
+    OpenProgram::of(Literal::plt_passing(import).running_on(&[glibc]))
+        .rendered(common::PLT_CALLER)
+        .expect("it renders")
+        .response
+        .output
+        .into_text()
+}
+
+/// An import's arity is its declaration's, never its stub's: `_Znwm` is operator new as the C++
+/// runtime declares it, so the call renders with its one argument (P7, C++ runtime).
+#[test]
+fn an_import_takes_its_arity_from_its_declaration() {
+    let text = plt_caller("_Znwm");
+    assert!(text.contains("_Znwm(16"), "{text}");
+    assert!(!text.contains("a floor"), "{text}");
+}
+
+/// An import no declaration states is a gap that says so, never a floor of 0 read off the
+/// `jmp [slot]` its stub is (P7, C++ runtime).
+#[test]
+fn an_undeclared_import_is_a_gap_naming_its_missing_declaration() {
+    let text = plt_caller("_ZN3Foo3barEv");
+    assert!(
+        text.contains(
+            "call to _ZN3Foo3barEv: the import has no declaration to state its arguments */"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("_ZN3Foo3barEv(16"), "{text}");
+}
+
+/// glibc declares `__libc_start_main` with seven arguments, and x86-64 passes six in registers:
+/// a declaration this convention does not place states nothing, and the gap says so.
+#[test]
+fn an_import_whose_declaration_is_not_placed_is_a_gap_saying_so() {
+    let text = plt_caller("__libc_start_main");
+    assert!(
+        text.contains(
+            "call to __libc_start_main: the import's declaration has an argument this convention \
+             does not place */"
+        ),
+        "{text}"
+    );
+}

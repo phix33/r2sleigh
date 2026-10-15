@@ -163,6 +163,19 @@ const PLT: [u8; 0x26] = [
     0xc3, // ret
 ];
 
+/// [`PLT`] with a caller that passes one register: `mov edi, 16; call stub; ret`.
+const PLT_PASSING: [u8; 0x2b] = [
+    0xff, 0x35, 0xea, 0x0f, 0x00, 0x00, // push qword [rip + 0xfea]
+    0xff, 0x25, 0xec, 0x0f, 0x00, 0x00, // jmp qword [rip + 0xfec]
+    0x00, 0x00, 0x00, 0x00, // the pad
+    0xff, 0x25, 0xea, 0x0f, 0x00, 0x00, // jmp qword [rip + 0xfea], the slot
+    0x68, 0x00, 0x00, 0x00, 0x00, // push 0
+    0xe9, 0xe0, 0xff, 0xff, 0xff, // jmp PLT0
+    0xbf, 0x10, 0x00, 0x00, 0x00, // mov edi, 16
+    0xe8, 0xe6, 0xff, 0xff, 0xff, // call stub
+    0xc3, // ret
+];
+
 /// A CET `.plt` of PLT0 and one lazy entry, which names no stub, then `.plt.sec`'s stub and a caller.
 const PLT_CET: [u8; 0x36] = [
     0xff, 0x35, 0xea, 0x0f, 0x00, 0x00, // push qword [rip + 0xfea]
@@ -620,6 +633,15 @@ impl Literal {
             },
             import_write(PLT_SLOT, 8, import),
         ];
+        program
+    }
+
+    /// [`Self::plt_importing`], its caller writing `edi` before the call.
+    pub fn plt_passing(import: &str) -> Self {
+        let mut program = Self::plt_importing(import);
+        program.code = &PLT_PASSING;
+        program.container.segments = vec![code_segment(BASE, PLT_PASSING.len() as u64)];
+        program.container.sections[1].vsize = 0x0b;
         program
     }
 

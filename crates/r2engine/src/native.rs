@@ -876,11 +876,17 @@ fn declare_imports(
             continue;
         };
         let Some(declared) = Declared::import(target, &name) else {
+            callees
+                .unstated
+                .insert(*address, r2ssa::UnstatedImport::Undeclared);
             continue;
         };
         // An import has no body here, so nothing it declares about its own
         // frame is about anything this program can see.
         let Some(interface) = placement.restatement(declared, false).interface else {
+            callees
+                .unstated
+                .insert(*address, r2ssa::UnstatedImport::Unplaced);
             continue;
         };
         if let Some(signature) = placement.function_type(declared)
@@ -1077,13 +1083,13 @@ fn read_callees(
     let targets = reached(&root.body, native.program);
     let declared = declare_imports(native, target, &targets, ptr_bits, &mut callees);
     let mut facts = Vec::new();
-    // A stub is not a body: walking one recovers an interface with no
-    // parameters, which would displace the declaration that has them. A sealed
-    // import slot is a word of data, its import declared or not.
+    // An import has no body here, declared or not: its stub's arity is the loader's (P7). A
+    // sealed import slot is a word of data.
     let bodies: Vec<u64> = targets
         .iter()
         .copied()
         .filter(|address| *address != entry && !callees.interfaces.contains_key(address))
+        .filter(|address| native.program.import_at(*address).is_none())
         .filter(|address| crate::stated::sealed_import(native.program, *address).is_none())
         .collect();
     let mut unread = Vec::new();
@@ -1253,6 +1259,8 @@ struct Callees {
     /// What each callee reaches through each pointer it is handed, which is
     /// what makes the bytes one callee covers one object in the caller.
     reach: BTreeMap<u64, BTreeMap<usize, ArgumentReach>>,
+    /// The imports whose declaration states no interface: they have no body to read one off.
+    unstated: BTreeMap<u64, r2ssa::UnstatedImport>,
 }
 
 impl Callees {
@@ -1270,6 +1278,7 @@ impl Callees {
             library,
             reentering,
             exits,
+            unstated_imports: self.unstated.clone(),
         }
     }
 

@@ -2343,6 +2343,7 @@ impl TrustedSsaArtifact {
             library,
             reentering,
             exits,
+            unstated_imports,
         } = evidence;
         let callee_statements = crate::machine_context::CalleeStatement::of(callee_interfaces);
         let source = lifted.source().clone();
@@ -2479,6 +2480,7 @@ impl TrustedSsaArtifact {
                 provisional_machine_context
                     .set_slot_targets(correlated_call_sites.slot_targets.clone());
                 provisional_machine_context.set_reentering_callees(reentering.clone());
+                provisional_machine_context.set_unstated_imports(unstated_imports.clone());
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
                 let Ok(preliminary) =
@@ -2600,6 +2602,7 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
         machine_context.set_callee_library(library.clone());
         machine_context.set_reentering_callees(reentering.clone());
+        machine_context.set_unstated_imports(unstated_imports.clone());
         machine_context.set_callee_preserved(callees.preserved().clone());
         machine_context.set_result_owners(result_owners);
         machine_context.set_arity_owners(arity_owners);
@@ -3592,6 +3595,8 @@ pub struct CalleeEvidence {
     pub reentering: BTreeSet<u64>,
     /// The calls the walk ended the body at because a model says the callee never returns.
     pub exits: AssumedExits,
+    /// The imports called whose declaration states no interface, and why.
+    pub unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
 }
 
 /// Calls whose fall-through a body's walk ended because a model, not the program, says the callee
