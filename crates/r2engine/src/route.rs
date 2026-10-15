@@ -338,6 +338,7 @@ mod admission {
             name: name.to_owned(),
             bits,
             endian,
+            instructions: None,
         };
         super::admitted(&arch).map_err(|refusal| {
             assert_eq!(refusal.kind(), "architecture");

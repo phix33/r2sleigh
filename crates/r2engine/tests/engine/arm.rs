@@ -104,6 +104,7 @@ fn arm_only(code: &'static [u8], endian: Endian) -> Mixed {
                 name: "arm".to_owned(),
                 bits: 32,
                 endian,
+                instructions: None,
             },
             segments: vec![Segment {
                 vaddr: ARM,

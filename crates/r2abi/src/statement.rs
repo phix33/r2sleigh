@@ -285,6 +285,9 @@ pub struct Arch {
     /// How a word in memory reads, which on ARM BE8 is not how an instruction
     /// does.
     pub endian: Endian,
+    /// How an instruction reads where the container states it apart from `endian`
+    /// (ARM's `EF_ARM_BE8`); `None` is the language's own order for `endian`.
+    pub instructions: Option<Endian>,
 }
 
 /// What a segment permits, as the container states it.

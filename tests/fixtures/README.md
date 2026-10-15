@@ -23,6 +23,8 @@ answer.
 | `float_moves_zig_x86_64_O2g`, `float_moves_zig_aarch64_O2g` | `src/float_moves.c` | `zig cc` 0.17.0 `-O2 -g`: two `double` arguments swapped by whole-register moves (`movaps`, `fmov`) before a tail call |
 | `float_compares_zig_x86_64_O2g`, `float_compares_zig_aarch64_O2g` | `src/float_compares.c` | `zig cc` 0.17.0 `-O2 -g -fno-sanitize=all`: ordered comparisons of `double` in conditions and results, including `!(a < b)` and `a == b \|\| a < b`, which a NaN makes differ from their integer negations |
 | `special_sym_with_dot` | radare2-testbins `elf/special-sym-with-dot.bin` (not executable, so the census skips it) | ARM32 with `$a`/`$t` mapping symbols: a Thumb `blx` back into the ARM PLT at 0x472, after which a continued run once read Thumb as ARM (audit W2) |
+| `arm_thumb_movw_be.o` | radare2-testbins `elf/arm-thumb-movw-be.o` | ARM BE32 (big-endian, no `EF_ARM_BE8`) Thumb object: its instructions read most significant byte first (audit W26) |
+| `arm_plt_lld_be8.so` | radare2-testbins `elf/arm-plt-lld-be8.so` | ARM BE8 (`EF_ARM_BE8`) shared object from lld: little-endian instructions under big-endian data |
 | `fuzzed_elf9`, `fuzzed_file12` | radare2-testbins `fuzzed/elf9`, `fuzzed/file12` (not executable, so the census skips them) | hostile headers: an `.init_array` and a `__cstring` stating sizes far past the file's end, which once hung on open and read 2 GB |
 
 `src/` holds sources the equivalence gate must not build as programs of their

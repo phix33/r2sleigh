@@ -564,7 +564,8 @@ impl Image {
         };
         let file = object::File::parse(&*data).map_err(|e| ImageError::Parse(e.to_string()))?;
 
-        let arch = map_architecture(file.architecture(), file.is_64(), file.endianness())?;
+        let mut arch = map_architecture(file.architecture(), file.is_64(), file.endianness())?;
+        arch.instructions = instruction_order(&file);
         let format = map_format(file.format());
         // A header may state bytes past the file's end; only the bytes the file holds are its.
         let held = |(offset, size): (u64, u64)| {
@@ -1520,6 +1521,19 @@ fn map_permissions(flags: object::SegmentFlags) -> Permissions {
     }
 }
 
+/// The order an instruction reads in where the header states it apart from the data's:
+/// ARM's `EF_ARM_BE8`, little-endian code in a big-endian program.
+fn instruction_order(file: &object::File<'_>) -> Option<Endian> {
+    match (file.architecture(), file.flags()) {
+        (object::Architecture::Arm, object::FileFlags::Elf { e_flags, .. })
+            if e_flags.contains(object::elf::EF_ARM_BE8) =>
+        {
+            Some(Endian::Little)
+        }
+        _ => None,
+    }
+}
+
 fn map_architecture(
     arch: object::Architecture,
     is_64: bool,
@@ -1542,6 +1556,7 @@ fn map_architecture(
         name: name.to_owned(),
         bits: if is_64 { 64 } else { 32 },
         endian,
+        instructions: None,
     })
 }
 
@@ -1575,6 +1590,7 @@ mod tests {
                     name: "x86-64".to_owned(),
                     bits: 64,
                     endian: Endian::Little,
+                    instructions: None,
                 },
                 segments,
                 ..Container::default()
