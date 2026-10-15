@@ -45,9 +45,8 @@ fn annotated(answered: &Answered<'_>, request: Listing, work: Work) -> Run {
     run
 }
 
-/// Decode and lift a run of instructions, each with what its operations read, write and are.
-///
-/// Each line is read and annotated as a listing at `work` reads it, so `ao` and `pd` say the same of one address.
+/// A run of instructions, each with what its operations read, write and are, read and annotated
+/// as a listing at `work` reads it, so `ao` and `pd` say the same of one address.
 pub fn instructions(
     answered: &Answered<'_>,
     request: Listing,

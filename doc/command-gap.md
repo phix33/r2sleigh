@@ -1,7 +1,7 @@
 # Unmigrated radare2 commands: what is worth taking
 
 Draft 2026-10-06, reviewed 2026-10-09, folded into `ROADMAP.md` 2026-10-15: rank
-2 is item AO, ranks 3 and 5 and the parity tier are S1's, rank 1 is E's, rank 4
+2 is item AO (done 2026-10-15), ranks 3 and 5 and the parity tier are S1's, rank 1 is E's, rank 4
 P7's (conditional), and the rest is the roadmap's "Not taken". The roadmap owns
 the order; this file keeps the method and the measurements. The counts below
 are the 2026-10-09 run of `scripts/command_gap.py`; the 2026-10-15 rerun (`ar`
@@ -118,4 +118,16 @@ cannot gate either rank, and a verb added without its own gate would have none.
 - `ao`: the fields radare2 states from the instruction (size, address, bytes,
   the read and written registers by name) diff against radare2; the semantics
   field is the lifted IL that `pdil` already prints, gated by the lift's own
-  tests, never by text equality with an ESIL string.
+  tests, never by text equality with an ESIL string. Done (2026-10-15): `ao`
+  and `aoj` print `address`, `opcode`, `disasm`, `mnemonic`, `bytes` and
+  `size` as radare2 does, then `reads`, `writes` and `il`, or `refused` with
+  the reason. `r2il::register_accesses` states the sets: a read is a register
+  whose value on entry the instruction's effects use, so bytes an earlier
+  operation wrote are its own result (`EDX = ZEXT(..); RDX = ZEXT(EDX)` reads
+  no `edx`) and a value into a temporary nothing reads is no effect (`nop dword
+  [rax + rax]` reads no `rax`); a write is any register output. Overlapping
+  ranges are one register, the widest, and adjacent lanes that fill a declared
+  register are that register (`movups` writes `xmm6`, not its four lanes). radare2's
+  `aoj` states no register set, so `diff_r2.py` compares against `aeaj 1`'s
+  `I` (read before written) and `W` after `aei; aeim`; its classes are in
+  `scripts/diff_r2_judged.toml` and the defects they name in ROADMAP AO.

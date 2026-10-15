@@ -1,9 +1,5 @@
-//! `ao` and `aoj`: one instruction at a time, as its lift states it.
-//!
-//! radare2's field names where the fact is the same (`opcode`, `disasm`,
-//! `mnemonic`, `bytes`, `size`); `reads`, `writes` and `il` are the lifted
-//! operations' own statement, where radare2 prints a hand-written ESIL string.
-//! No `type`, `esil` or `cycles`: the engine states none of them.
+//! `ao` and `aoj`: radare2's field names where the fact is the same, then the lift's own
+//! `reads`, `writes` and `il`; no `type`, `esil` or `cycles`, which the engine does not state.
 
 use crate::commands::parse_count;
 use crate::session::Session;

@@ -1,11 +1,5 @@
-//! Which registers one instruction's operations read and write.
-//!
-//! A read is a register whose value on entry the instruction's effects use:
-//! bytes an earlier operation wrote are its own result (`EDX = ZEXT(..);
-//! RDX = ZEXT(EDX)` reads no `edx`), and a value computed into a temporary
-//! nothing uses is no effect (`nop dword [rax + rax]` reads no `rax`).
-//! Overlapping accesses are one register, the widest range they cover.
-//! Cost: O(n · r) over the operations and the distinct ranges they touch.
+//! Which registers one instruction reads on entry and writes, as `ao` states
+//! them (doc/command-gap.md, rank 2). O(n · r): operations by distinct ranges.
 
 use crate::opcode::R2ILOp;
 use crate::space::SpaceId;
@@ -19,10 +13,8 @@ pub struct RegisterAccesses {
     pub writes: Vec<Varnode>,
 }
 
-/// What `ops`, one instruction's operations in order, read and write in the register space;
-/// `None` where one is `Unimplemented`, whose accesses nothing states.
-///
-/// A local branch can skip a write or repeat a use, so past one nothing is killed and nothing dropped.
+/// What `ops`, one instruction's operations in order, read on entry and write; `None` over an
+/// `Unimplemented` one. A local branch can skip a write, so past one nothing is killed or dropped.
 pub fn register_accesses(ops: &[R2ILOp]) -> Option<RegisterAccesses> {
     if ops.iter().any(|op| matches!(op, R2ILOp::Unimplemented)) {
         return None;
@@ -81,9 +73,8 @@ fn overlaps_any(ranges: &[(u64, u64)], (start, end): (u64, u64)) -> bool {
     ranges.iter().any(|&(from, to)| from < end && start < to)
 }
 
-/// `ranges`, disjoint, with each maximal run of adjacent ones that exactly fills
-/// a register `declared` names joined into it, at its first member's place:
-/// `movups` writing four lanes of `xmm6` writes `xmm6`. O(r log r).
+/// Disjoint `ranges` with each run of adjacent ones that exactly fills a `declared` register
+/// joined into it at its first member's place (four lanes of `xmm6` are `xmm6`). O(r log r).
 pub fn join_tiles(ranges: Vec<Varnode>, declared: impl Fn(&Varnode) -> bool) -> Vec<Varnode> {
     let mut order: Vec<usize> = (0..ranges.len()).collect();
     order.sort_by_key(|&index| ranges[index].offset);
@@ -143,9 +134,8 @@ fn covered(written: &[(u64, u64)], wanted: (u64, u64)) -> bool {
     true
 }
 
-/// Add `vn` to `found`, joined with every entry it overlaps at the first one's place.
-///
-/// The entries are disjoint, so the ranges `vn` overlaps and `vn` itself cover one interval.
+/// Add `vn` to `found`, joined with every entry it overlaps at the first one's place: the
+/// entries are disjoint, so those and `vn` cover one interval.
 fn merge(found: &mut Vec<Varnode>, vn: &Varnode) {
     let (mut start, mut end) = range(vn);
     let overlapping: Vec<usize> = (0..found.len())
