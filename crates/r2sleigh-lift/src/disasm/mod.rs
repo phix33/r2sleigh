@@ -76,6 +76,8 @@ struct LoadedSpecification {
     authority: Option<GenuineLiftAuthority>,
     /// The stamp of the last change to the Sleigh instance's decode state.
     decode_state: Cell<u64>,
+    /// The unique space's byte order (Ghidra's is the translator's), which places a truncated read.
+    unique_big_endian: bool,
 }
 
 /// Stamps every change to any specification's decode state, so no two changes share one.
@@ -1538,6 +1540,9 @@ fn translate_err(e: translate::TranslateError) -> LiftError {
         translate::TranslateError::InvalidSpace(idx) => {
             LiftError::Parse(format!("Invalid space index: {}", idx))
         }
+        error @ translate::TranslateError::UniqueStraddles(_) => {
+            LiftError::Unsupported(error.to_string())
+        }
     }
 }
 
@@ -1579,6 +1584,13 @@ impl LoadedSpecification {
         extracted.arch.tracked_entry_values = crate::sleigh::processor_spec_tracked_values(pspec);
         extracted.arch.program_counter = crate::sleigh::processor_spec_program_counter(pspec);
         let arch = Arc::new(extracted.arch);
+        let unique_big_endian = arch
+            .spaces
+            .iter()
+            .find(|space| space.id == SpaceId::Unique)
+            .and_then(|space| space.endianness)
+            .unwrap_or(arch.memory_endianness)
+            == r2il::Endianness::Big;
         let modelled_user_ops = user_operation::resolve_modelled_user_operations(&arch.user_ops);
         let authority = certifying.then(|| {
             GenuineLiftAuthority::new(
@@ -1600,6 +1612,7 @@ impl LoadedSpecification {
             authority,
             // No stamp is zero, so a fresh specification continues nothing.
             decode_state: Cell::new(0),
+            unique_big_endian,
         })
     }
 }
@@ -2532,6 +2545,8 @@ impl Disassembler {
             .unwrap_or(0);
         let address_size = u32::try_from(self.default_code_space().address_size)
             .map_err(|_| LiftError::Parse("default code space address size".into()))?;
+        let ops = translate::whole_unique_reads(ops, self.spec.unique_big_endian, &mut temp_base)
+            .map_err(translate_err)?;
         let ops = translate::canonicalize_memory_operands(ops, address_size, &mut temp_base);
         let ops = translate::split_odd_register_zeroes(ops);
 

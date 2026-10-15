@@ -3,6 +3,8 @@
 //! Opcode dispatch lives in `disasm`; these helpers validate the common operand
 //! shapes used by its translation arms.
 
+use std::collections::BTreeMap;
+
 use r2il::{R2ILOp, SpaceId, Varnode};
 
 /// A validated view of operands from a libsla P-code instruction.
@@ -29,6 +31,8 @@ pub enum TranslateError {
     MissingOutput(&'static str),
     MissingInput(&'static str, usize),
     InvalidSpace(u64),
+    /// A unique read or written across the bytes of more than one write.
+    UniqueStraddles(Varnode),
 }
 
 impl std::fmt::Display for TranslateError {
@@ -39,6 +43,11 @@ impl std::fmt::Display for TranslateError {
                 write!(f, "{} requires input at index {}", op, idx)
             }
             TranslateError::InvalidSpace(idx) => write!(f, "Invalid space index: {}", idx),
+            TranslateError::UniqueStraddles(node) => write!(
+                f,
+                "unique {:#x}:{} straddles the temporaries the instruction wrote",
+                node.offset, node.size
+            ),
         }
     }
 }
@@ -178,6 +187,151 @@ pub fn split_odd_register_zeroes(ops: Vec<R2ILOp>) -> Vec<R2ILOp> {
     out
 }
 
+/// Read each unique where it was written (gotcha 2), though GP-5581 reads a truncated one in place:
+/// a piece of a live write becomes its `Subpiece`; a straddle refuses; an unwritten read stays.
+pub fn whole_unique_reads(
+    ops: Vec<R2ILOp>,
+    big_endian: bool,
+    next_temp: &mut u64,
+) -> Result<Vec<R2ILOp>> {
+    // Live writes by first byte; they never overlap, so the one before a read is its only holder.
+    let mut live: BTreeMap<u64, u32> = BTreeMap::new();
+    let mut out = Vec::with_capacity(ops.len());
+    // Where each operation's expansion begins, and where the operation itself lands.
+    let (mut starts, mut at) = (
+        Vec::with_capacity(ops.len() + 1),
+        Vec::with_capacity(ops.len()),
+    );
+    for mut op in ops {
+        starts.push(out.len());
+        let mut pieces: Vec<(Varnode, Varnode, u32)> = Vec::new();
+        for read in op
+            .inputs()
+            .into_iter()
+            .filter(|v| v.space == SpaceId::Unique)
+        {
+            if let Some((holder, shift)) = holder_of(&live, read, big_endian)?
+                && !pieces.iter().any(|(seen, ..)| seen == read)
+            {
+                pieces.push((read.clone(), holder, shift));
+            }
+        }
+        op = take_pieces(op, pieces, &mut out, next_temp);
+        if let Some(output) = op.output().filter(|v| v.space == SpaceId::Unique) {
+            note_write(&mut live, output)?;
+        }
+        at.push(out.len());
+        out.push(op);
+    }
+    starts.push(out.len());
+    if out.len() + 1 != starts.len() {
+        relabel_local_branches(&mut out, &at, &starts);
+    }
+    Ok(out)
+}
+
+/// The live write holding `read` strictly inside it, and the piece's offset from its low end.
+fn holder_of(
+    live: &BTreeMap<u64, u32>,
+    read: &Varnode,
+    big_endian: bool,
+) -> Result<Option<(Varnode, u32)>> {
+    let read_end = read.offset + u64::from(read.size);
+    let straddles = || Err(TranslateError::UniqueStraddles(read.clone()));
+    let before = live.range(..=read.offset).next_back();
+    let Some((&start, &size)) =
+        before.filter(|(start, size)| **start + u64::from(**size) > read.offset)
+    else {
+        // Nothing holds its first byte; a write beginning inside it would be straddled.
+        return match live.range(read.offset..read_end).next() {
+            Some(_) => straddles(),
+            None => Ok(None),
+        };
+    };
+    let end = start + u64::from(size);
+    if read_end > end {
+        return straddles();
+    }
+    if (start, size) == (read.offset, read.size) {
+        return Ok(None);
+    }
+    let shift = if big_endian {
+        end - read_end
+    } else {
+        read.offset - start
+    };
+    let shift = u32::try_from(shift).expect("a piece lies inside a temporary");
+    Ok(Some((Varnode::unique(start, size), shift)))
+}
+
+/// A copy of one piece is the `SUBPIECE` GP-5581 folded; any other read takes its piece first.
+fn take_pieces(
+    op: R2ILOp,
+    pieces: Vec<(Varnode, Varnode, u32)>,
+    out: &mut Vec<R2ILOp>,
+    next_temp: &mut u64,
+) -> R2ILOp {
+    if let (R2ILOp::Copy { dst, .. }, [(_, src, offset)]) = (&op, pieces.as_slice()) {
+        return R2ILOp::Subpiece {
+            dst: dst.clone(),
+            src: src.clone(),
+            offset: *offset,
+        };
+    }
+    let mut op = op;
+    for (read, src, offset) in pieces {
+        let piece = Varnode::unique(*next_temp, read.size);
+        *next_temp += u64::from(read.size).max(1);
+        out.push(R2ILOp::Subpiece {
+            dst: piece.clone(),
+            src,
+            offset,
+        });
+        for input in op.inputs_mut().into_iter().filter(|input| **input == read) {
+            *input = piece.clone();
+        }
+    }
+    op
+}
+
+/// Record a unique write; one overlapping a live write it does not replace exactly refuses.
+fn note_write(live: &mut BTreeMap<u64, u32>, output: &Varnode) -> Result<()> {
+    let end = output.offset + u64::from(output.size);
+    let overlapped = live
+        .range(..end)
+        .next_back()
+        .filter(|&(&start, &size)| start + u64::from(size) > output.offset);
+    match overlapped {
+        Some((&start, &size)) if (start, size) != (output.offset, output.size) => {
+            Err(TranslateError::UniqueStraddles(output.clone()))
+        }
+        _ => {
+            live.insert(output.offset, output.size);
+            Ok(())
+        }
+    }
+}
+
+/// Keep each P-code-relative label on the operation it named after operations were inserted;
+/// a label naming operation `t` now names the start of `t`'s expansion, which computes its reads.
+fn relabel_local_branches(out: &mut [R2ILOp], at: &[usize], starts: &[usize]) {
+    for (old, &new) in at.iter().enumerate() {
+        let (R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. }) = &mut out[new] else {
+            continue;
+        };
+        if target.space != SpaceId::Const || !(1..=8).contains(&target.size) {
+            continue;
+        }
+        let shift = 64 - 8 * target.size;
+        let relative = ((target.offset << shift) as i64) >> shift;
+        let named = old.checked_add_signed(relative as isize);
+        let Some(&label) = named.and_then(|named| starts.get(named)) else {
+            continue;
+        };
+        target.offset = ((label as i64 - new as i64) as u64) & (u64::MAX >> shift);
+    }
+}
+
 /// Rewrite every direct-address memory operand into an explicit access.
 ///
 /// Sleigh spells a memory operand with a constant address as a varnode in the
@@ -283,6 +437,126 @@ mod tests {
             src: Varnode::constant(0, 8),
         };
         assert_eq!(split_odd_register_zeroes(vec![wide]).len(), 1);
+    }
+
+    fn pieces(ops: Vec<R2ILOp>, big_endian: bool) -> Result<Vec<R2ILOp>> {
+        whole_unique_reads(ops, big_endian, &mut 0x1000)
+    }
+
+    /// `XMM0_Qb = COPY uniq:0x88[8]` of a 16-byte load at 0x80 is `SUBPIECE(uniq:0x80, 8)` again.
+    #[test]
+    fn a_copy_of_a_piece_is_a_subpiece_of_the_write() {
+        let wide = Varnode::unique(0x80, 16);
+        let ops = pieces(
+            vec![
+                R2ILOp::Copy {
+                    dst: wide.clone(),
+                    src: Varnode::register(0x1200, 16),
+                },
+                R2ILOp::Copy {
+                    dst: Varnode::register(0x1100, 8),
+                    src: Varnode::unique(0x80, 8),
+                },
+                R2ILOp::Copy {
+                    dst: Varnode::register(0x1108, 8),
+                    src: Varnode::unique(0x88, 8),
+                },
+            ],
+            false,
+        )
+        .expect("pieces of one write");
+        let offsets = ops[1..]
+            .iter()
+            .map(|op| match op {
+                R2ILOp::Subpiece { src, offset, .. } => (src.clone(), *offset),
+                other => panic!("{other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(offsets, [(wide.clone(), 0), (wide, 8)]);
+    }
+
+    /// Big-endian `result:4` of an 8-byte `result` at 0x80 is its bytes 0x84..0x88, the low half.
+    #[test]
+    fn a_big_endian_piece_counts_from_the_low_end() {
+        let ops = pieces(
+            vec![
+                R2ILOp::Copy {
+                    dst: Varnode::unique(0x80, 8),
+                    src: Varnode::register(0x20, 8),
+                },
+                R2ILOp::IntSExt {
+                    dst: Varnode::register(0x30, 8),
+                    src: Varnode::unique(0x84, 4),
+                },
+            ],
+            true,
+        )
+        .expect("a piece of one write");
+        let [
+            _,
+            R2ILOp::Subpiece { dst, offset, .. },
+            R2ILOp::IntSExt { src, .. },
+        ] = ops.as_slice()
+        else {
+            panic!("{ops:?}");
+        };
+        assert_eq!((*offset, dst), (0, src));
+    }
+
+    /// `stxrb`'s skip over `*addr = tmp:1` still lands past the store once the piece is taken.
+    #[test]
+    fn a_skip_over_a_piece_lands_where_it_did() {
+        let ops = pieces(
+            vec![
+                R2ILOp::Copy {
+                    dst: Varnode::unique(0x80, 4),
+                    src: Varnode::register(0x20, 4),
+                },
+                R2ILOp::CBranch {
+                    target: Varnode::constant(2, 4),
+                    cond: Varnode::unique(0x90, 1),
+                },
+                R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr: Varnode::register(0x28, 8),
+                    val: Varnode::unique(0x80, 1),
+                },
+                R2ILOp::Copy {
+                    dst: Varnode::register(0x30, 1),
+                    src: Varnode::constant(0, 1),
+                },
+            ],
+            false,
+        )
+        .expect("a piece of one write");
+        let R2ILOp::CBranch { target, .. } = &ops[1] else {
+            panic!("{ops:?}");
+        };
+        assert!(matches!(ops[2], R2ILOp::Subpiece { .. }));
+        assert_eq!(
+            target.offset, 3,
+            "the skip lands on the copy after the store"
+        );
+    }
+
+    #[test]
+    fn a_read_across_two_writes_refuses() {
+        let write = |offset| R2ILOp::Copy {
+            dst: Varnode::unique(offset, 4),
+            src: Varnode::constant(0, 4),
+        };
+        let straddle = R2ILOp::Copy {
+            dst: Varnode::register(0x20, 4),
+            src: Varnode::unique(0x82, 4),
+        };
+        assert!(matches!(
+            pieces(vec![write(0x80), write(0x84), straddle], false),
+            Err(TranslateError::UniqueStraddles(_))
+        ));
+        assert!(matches!(
+            pieces(vec![write(0x80), write(0x82)], false),
+            Err(TranslateError::UniqueStraddles(_))
+        ));
     }
 
     // Mock implementation for testing
