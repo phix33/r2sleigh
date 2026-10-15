@@ -407,3 +407,9 @@ stlrb|P|stlrb w1, [x9]
 ldarh|P|ldarh w0, [x9]
 ldaxrb_stlxrb|P|ldaxrb w0, [x9]; stlxrb w2, w3, [x9]
 ldaxp_stlxp_w|P|ldaxp w0, w1, [x9]; stlxp w4, w2, w3, [x9]
+fcvtzu_ws_sat|F|fmov s1, #-1.0; fcvtzu w0, s1; movz w2, #0x4f80, lsl #16; fmov s3, w2; fcvtzu w4, s3; movz w5, #0x7fc0, lsl #16; fmov s6, w5; fcvtzu w7, s6; movz w8, #0x7f80, lsl #16; fmov s12, w8; fcvtzu w13, s12; movz w14, #0x4f40, lsl #16; fmov s15, w14; fcvtzu w16, s15; fmov s17, #-0.5; fcvtmu w19, s17
+fcvtzu_wd_sat|F|fmov d1, #-1.0; fcvtzu w0, d1; movz x2, #0x41f0, lsl #48; fmov d3, x2; fcvtzu w4, d3; movz x5, #0x7ff8, lsl #48; fmov d6, x5; fcvtzu w7, d6; movz x8, #0x43f0, lsl #48; fmov d12, x8; fcvtzu w13, d12; movz x14, #0x41e8, lsl #48; fmov d15, x14; fcvtzu w16, d15; movz x17, #0x41ef, lsl #48; movk x17, #0xffff, lsl #32; movk x17, #0xfff0, lsl #16; fmov d19, x17; fcvtau w20, d19
+fcvtzu_xs_sat|F|fmov s1, #-1.0; fcvtzu x0, s1; movz w2, #0x5f80, lsl #16; fmov s3, w2; fcvtzu x4, s3; movz w5, #0x5f40, lsl #16; fmov s6, w5; fcvtzu x7, s6; movz w8, #0x7fc0, lsl #16; fmov s12, w8; fcvtzu x13, s12; movz w14, #0xff80, lsl #16; fmov s15, w14; fcvtzu x16, s15
+fcvtzu_xd_sat|F|fmov d1, #-1.0; fcvtzu x0, d1; movz x2, #0x43f0, lsl #48; fmov d3, x2; fcvtzu x4, d3; movz x5, #0x43e8, lsl #48; fmov d6, x5; fcvtzu x7, d6; movz x8, #0x7ff8, lsl #48; fmov d12, x8; fcvtzu x13, d12; movz x14, #0x7ff0, lsl #48; fmov d15, x14; fcvtzu x16, d15; movz x17, #0x43e0, lsl #48; fmov d19, x17; fcvtzu x20, d19
+fcvtzu_fix_s_sat|F|fmov s1, #-1.0; fcvtzu s0, s1, #8; fmov w0, s0; movz w2, #0x4b80, lsl #16; fmov s3, w2; fcvtzu s4, s3, #8; fmov w4, s4; movz w5, #0x4b40, lsl #16; fmov s6, w5; fcvtzu s7, s6, #8; fmov w7, s7
+fcvtzu_fix_d_sat|F|fmov d1, #-1.0; fcvtzu d0, d1, #8; fmov x0, d0; movz x2, #0x4370, lsl #48; fmov d3, x2; fcvtzu d4, d3, #8; fmov x4, d4; movz x5, #0x4368, lsl #48; fmov d6, x5; fcvtzu d7, d6, #8; fmov x7, d7

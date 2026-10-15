@@ -6091,6 +6091,33 @@ fcvt_rnd64: is b_1920=0b10 & b_18=0 & Rn_FPR64 { local r:8 = floor(Rn_FPR64); ex
 fcvt_rnd64: is b_1920=0b11 & b_18=0 & Rn_FPR64 { export Rn_FPR64; }
 fcvt_rnd64: is b_1920=0b00 & b_18=1 & Rn_FPR64 { local one:8 = int2float(1:8); local r:8 = 0; fp_round_a(Rn_FPR64, one, r); export r; }
 
+# FPToFixed, unsigned: NaN and x below 0 give 0, x at or above lim (2^N, N < 64) gives ones.
+# trunc sees only 0 or a value in (0, lim), so it is defined on every path.
+macro fp_to_unsigned(x, zero, lim, ones, out)
+{
+	local big:1 = x f>= lim;
+	local c = zero;
+	if (!(x f> zero) || big) goto <clamped>;
+	c = x;
+<clamped>
+	out = trunc(c) | (zext(big) * ones);
+}
+
+# The same into 64 bits; trunc is signed, so [2^63, 2^64) truncates as x - 2^63.
+macro fp_to_unsigned64(x, zero, two63, out)
+{
+	local big:1 = x f>= two63 f+ two63;
+	local c = zero;
+	if (!(x f> zero) || big) goto <clamped>;
+	c = x;
+<clamped>
+	local high:1 = c f>= two63;
+	if (!high) goto <low>;
+	c = c f- two63;
+<low>
+	out = trunc(c) | (zext(high) << 63) | (zext(big) * 0xffffffffffffffff);
+}
+
 # C7.2.70 FCVTAS (vector) page C7-2174 line 126882 MATCH x5e79c800/mask=xfffffc00
 # C7.2.72 FCVTAU (vector) page C7-2179 line 127203 MATCH x7e79c800/mask=xfffffc00
 # CONSTRUCT x5e79c800/mask=xdffffc00 MATCHED 2 DOCUMENTED OPCODES
@@ -6246,12 +6273,13 @@ is b_31=0 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_17=0 & b_16=0 & b_1015=0
 	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
 }
 
-# Unsigned: values in [0, 2^32) convert exactly through a 64-bit signed conversion
+# Unsigned saturates as FPToFixed states
 :^fcvt_smnemonic Rd_GPR32, Rn_FPR16
 is b_31=0 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_17=0 & b_16=1 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd16 & Rd_GPR32 & Rn_FPR16 & Rd_GPR64
 {
-	local wide:8 = trunc(fcvt_rnd16);
-	Rd_GPR64 = zext(wide:4);
+	local zero:2 = int2float(0:2);
+	local lim:2 = int2float(0x100000000:8);
+	fp_to_unsigned(fcvt_rnd16, zero, lim, 0xffffffff:8, Rd_GPR64);
 }
 
 # C7.2.71 FCVTAS (scalar) page C7-2177 line 127075 MATCH x1e240000/mask=x7f3ffc00
@@ -6268,10 +6296,13 @@ is b_31=1 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_17=0 & b_16=0 & b_1015=0
 	Rd_GPR64 = trunc(fcvt_rnd16);
 }
 
+# Unsigned saturates as FPToFixed states
 :^fcvt_smnemonic Rd_GPR64, Rn_FPR16
 is b_31=1 & b_2430=0b0011110 & b_2223=0b11 & b_21=1 & b_17=0 & b_16=1 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd16 & Rd_GPR64 & Rn_FPR16
 {
-	Rd_GPR64 = trunc(fcvt_rnd16);
+	local zero:2 = int2float(0:2);
+	local two63:2 = int2float(0x4000000000000000:8) f* int2float(2:2);
+	fp_to_unsigned64(fcvt_rnd16, zero, two63, Rd_GPR64);
 }
 
 # C7.2.71 FCVTAS (scalar) page C7-2177 line 127075 MATCH x1e240000/mask=x7f3ffc00
@@ -6289,12 +6320,13 @@ is b_31=0 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_17=0 & b_16=0 & b_1015=0
 	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
 }
 
-# Unsigned: values in [0, 2^32) convert exactly through a 64-bit signed conversion
+# Unsigned saturates as FPToFixed states
 :^fcvt_smnemonic Rd_GPR32, Rn_FPR32
 is b_31=0 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_17=0 & b_16=1 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd32 & Rd_GPR32 & Rn_FPR32 & Rd_GPR64
 {
-	local wide:8 = trunc(fcvt_rnd32);
-	Rd_GPR64 = zext(wide:4);
+	local zero:4 = int2float(0:4);
+	local lim:4 = int2float(0x100000000:8);
+	fp_to_unsigned(fcvt_rnd32, zero, lim, 0xffffffff:8, Rd_GPR64);
 }
 
 # C7.2.71 FCVTAS (scalar) page C7-2177 line 127075 MATCH x1e240000/mask=x7f3ffc00
@@ -6311,17 +6343,13 @@ is b_31=1 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_17=0 & b_16=0 & b_1015=0
 	Rd_GPR64 = trunc(fcvt_rnd32);
 }
 
-# Unsigned: values in [2^63, 2^64) convert as (x - 2^63) + 2^63
+# Unsigned saturates as FPToFixed states
 :^fcvt_smnemonic Rd_GPR64, Rn_FPR32
 is b_31=1 & b_2430=0b0011110 & b_2223=0b00 & b_21=1 & b_17=0 & b_16=1 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd32 & Rd_GPR64 & Rn_FPR32
 {
-	local r:4 = fcvt_rnd32;
+	local zero:4 = int2float(0:4);
 	local two63:4 = int2float(0x4000000000000000:8) f* int2float(2:4);
-	if (r f>= two63) goto <high>;
-	Rd_GPR64 = trunc(r);
-	goto inst_next;
-<high>
-	Rd_GPR64 = trunc(r f- two63) + 0x8000000000000000;
+	fp_to_unsigned64(fcvt_rnd32, zero, two63, Rd_GPR64);
 }
 
 # C7.2.71 FCVTAS (scalar) page C7-2177 line 127075 MATCH x1e240000/mask=x7f3ffc00
@@ -6339,12 +6367,13 @@ is b_31=0 & b_2430=0b0011110 & b_2223=0b01 & b_21=1 & b_17=0 & b_16=0 & b_1015=0
 	zext_rs(Rd_GPR64); # zero upper 28 bytes of Rd_GPR64
 }
 
-# Unsigned: values in [0, 2^32) convert exactly through a 64-bit signed conversion
+# Unsigned saturates as FPToFixed states
 :^fcvt_smnemonic Rd_GPR32, Rn_FPR64
 is b_31=0 & b_2430=0b0011110 & b_2223=0b01 & b_21=1 & b_17=0 & b_16=1 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd64 & Rd_GPR32 & Rn_FPR64 & Rd_GPR64
 {
-	local wide:8 = trunc(fcvt_rnd64);
-	Rd_GPR64 = zext(wide:4);
+	local zero:8 = int2float(0:8);
+	local lim:8 = int2float(0x100000000:8);
+	fp_to_unsigned(fcvt_rnd64, zero, lim, 0xffffffff:8, Rd_GPR64);
 }
 
 # C7.2.71 FCVTAS (scalar) page C7-2177 line 127075 MATCH x1e240000/mask=x7f3ffc00
@@ -6361,17 +6390,13 @@ is b_31=1 & b_2430=0b0011110 & b_2223=0b01 & b_21=1 & b_17=0 & b_16=0 & b_1015=0
 	Rd_GPR64 = trunc(fcvt_rnd64);
 }
 
-# Unsigned: values in [2^63, 2^64) convert as (x - 2^63) + 2^63
+# Unsigned saturates as FPToFixed states
 :^fcvt_smnemonic Rd_GPR64, Rn_FPR64
 is b_31=1 & b_2430=0b0011110 & b_2223=0b01 & b_21=1 & b_17=0 & b_16=1 & b_1015=0b000000 & fcvt_smnemonic & fcvt_rnd64 & Rd_GPR64 & Rn_FPR64
 {
-	local r:8 = fcvt_rnd64;
+	local zero:8 = int2float(0:8);
 	local two63:8 = int2float(0x4000000000000000:8) f* int2float(2:8);
-	if (r f>= two63) goto <high>;
-	Rd_GPR64 = trunc(r);
-	goto inst_next;
-<high>
-	Rd_GPR64 = trunc(r f- two63) + 0x8000000000000000;
+	fp_to_unsigned64(fcvt_rnd64, zero, two63, Rd_GPR64);
 }
 
 # C7.2.74 FCVTL, FCVTL2 page C7-2184 line 127524 MATCH x0e217800/mask=xbfbffc00
@@ -7099,7 +7124,10 @@ is b_2331=0b011111110 & b_2022=0b001 & b_1015=0b111111 & Imm_shr_imm32 & Rn_FPR1
 	local tmp1:4 = 1:4 << Imm_shr_imm32;
 	local tmp2:2 = int2float(tmp1);
 	local tmp3:2 = Rn_FPR16 f* tmp2;
-	local wide:8 = trunc(tmp3);
+	local zero:2 = int2float(0:2);
+	local lim:2 = int2float(0x10000:8);
+	local wide:8 = 0;
+	fp_to_unsigned(tmp3, zero, lim, 0xffff:8, wide);
 	Rd_FPR16 = wide:2;
 	zext_zh(Zd); # zero upper 30 bytes of Zd
 }
@@ -7117,7 +7145,10 @@ is b_2331=0b011111110 & b_2122=0b01 & b_1015=0b111111 & Imm_shr_imm32 & Rn_FPR32
 	local tmp1:8 = 1:8 << Imm_shr_imm32;
 	local tmp2:4 = int2float(tmp1);
 	local tmp3:4 = Rn_FPR32 f* tmp2;
-	local wide:8 = trunc(tmp3);
+	local zero:4 = int2float(0:4);
+	local lim:4 = int2float(0x100000000:8);
+	local wide:8 = 0;
+	fp_to_unsigned(tmp3, zero, lim, 0xffffffff:8, wide);
 	Rd_FPR32 = wide:4;
 	zext_zs(Zd); # zero upper 28 bytes of Zd
 }
@@ -7136,13 +7167,9 @@ is b_2331=0b011111110 & b_22=1 & b_1015=0b111111 & Imm_shr_imm32 & Rn_FPR64 & Rd
 	local tmp2:8 = 1:8 << tmp1;
 	local tmp3:8 = int2float(tmp2);
 	local tmp4:8 = Rn_FPR64 f* tmp3;
+	local zero:8 = int2float(0:8);
 	local two63:8 = int2float(0x4000000000000000:8) f* int2float(2:8);
-	if (tmp4 f>= two63) goto <high>;
-	Rd_FPR64 = trunc(tmp4);
-	goto <done>;
-<high>
-	Rd_FPR64 = trunc(tmp4 f- two63) + 0x8000000000000000;
-<done>
+	fp_to_unsigned64(tmp4, zero, two63, Rd_FPR64);
 	zext_zd(Zd); # zero upper 24 bytes of Zd
 }
 

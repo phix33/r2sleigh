@@ -14,8 +14,6 @@ fcvtzs_xd: stop Undefined
 fcvtzs_wd: stop Undefined
 fcvtzs_ws: stop Undefined
 fcvtzs_xs: stop Undefined
-fcvtzu_xd: stop Undefined
-fcvtzu_ws: stop Undefined; wrong x0
 fcvtzs_fix: stop Undefined
 fcvtas_xd: stop Undefined
 fcvtms_xd: stop Undefined
@@ -25,3 +23,4 @@ fcvtzs_v4s: stop Undefined
 frintx_d: stop unmodelled CALLOTHER NEON_frintx
 frinti_d: stop unmodelled CALLOTHER NEON_frinti
 fmla_elem: wrong v0
+fcvtzu_fix_d_sat: wrong v4; wrong v7; wrong x4; wrong x7
