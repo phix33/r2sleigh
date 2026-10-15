@@ -3,7 +3,7 @@
 # reports an entry nothing matched. The first entry that covers a disagreement
 # takes it, so a narrow entry goes before a broad one.
 #
-# command   the verb (`pd`, `px`, `iS`, `is`, `ie`), or a list of them
+# command   the verb (`pd`, `px`, `iS`, `is`, `ie`, `aoj`), or a list of them
 # binaries  a shell pattern over the file name, or a list of them
 # corpus    the corpus directory's name (`elf`, `mach0`, `pe`); absent is any
 # r2, r2s   for a listing: regular expressions each tool's line must match
@@ -17,6 +17,19 @@
 # columns   for a values listing: the columns r2s prints them in
 # key       for a values listing: radare2's row with r2s's value in this column
 #           holds r2s's value rounded up to an alignment (0x200 to 0x10000)
+# fields    for `aoj`: the fields judged: `reads` and `writes` (a register one
+#           side names and the other does not), or an instruction-level one:
+#           `size` (size or bytes differ), `decode` (the mnemonic differs),
+#           `refused` (r2s states no sets, and why), `halted` (radare2's ESIL
+#           never reached the memory the IL accesses), `missing`
+# registers for `aoj`: the registers judged, exactly; `register` a regular
+#           expression over the one judged
+# lacking   for `aoj`: the side whose set lacks the register, `r2` or `r2s`
+# arch, refused, ours, theirs
+#           for `aoj`: regular expressions over the architecture `i` names, r2s's
+#           refusal, and r2s's and radare2's whole set, sorted, space-separated;
+#           `{register}` in one is the register judged, `{suffix}` it without
+#           its first letter. `r2` and `r2s` match each tool's opcode
 # verdict   r2s-right: radare2's defect, an upstream candidate
 #           r2-right: r2s's defect, with its owner in the reason
 #           unfilled: r2s does not yet state what radare2 does
@@ -912,3 +925,636 @@ columns = ["paddr"]
 r2s = '^\d+ 0x0+ 0x0 0x[0-9a-f]+ 0x[0-9a-f]+ '
 verdict = "deliberate"
 reason = "a section with no raw data (SizeOfRawData 0, .bss and .tls): r2s states no file offset, radare2 the header's PointerToRawData"
+
+# ── aoj: each sampled instruction's size, bytes and the registers it reads and writes (ROADMAP AO) ──
+# radare2's sets are `aeaj 1`'s `I` (read before written) and `W`, from ESIL emulated on `aei; aeim`.
+
+# Where the two read different bytes or decode them differently, no set is compared.
+
+[[judged]]
+command = "aoj"
+binaries = ["a.out", "AppIOSEntitlements.ios", "BatteryLife", "cat-macos-arm64", "ired", "ls-m1", "ls-sequoia", "mac-ls3", "mac-ls4", "modernobjc-noarm64", "TestApp.ios", "TestApp.ios.stripped"]
+corpus = "mach0"
+fields = ["size", "decode", "missing"]
+verdict = "deliberate"
+reason = "a fat file: r2s reads its arm64 slice whatever the host; radare2 picks by the host, so the two read different code at each address"
+
+[[judged]]
+command = "aoj"
+binaries = "Lab01-03.exe"
+corpus = "pe"
+fields = ["size", "decode"]
+verdict = "r2s-right"
+reason = "as pd: sect_2's PointerToRawData 0xe00 rounds down to 0x200, not FileAlignment, so the entry is file 0xe00; radare2 decodes the MZ header there"
+
+[[judged]]
+command = "aoj"
+binaries = ["Reborn_Stub-strings.exe", "ch22.exe", "dotnet20.exe", "mitigation_dynamic.exe", "mitigation_nothing.exe", "pemixed.exe"]
+corpus = "pe"
+fields = ["size", "decode"]
+verdict = "deliberate"
+reason = "as pd: a .NET image's entry is the native stub for r2s and the managed method (CIL) for radare2"
+
+[[judged]]
+command = "aoj"
+binaries = ["ibnullXP.exe", "reloccryptXP.exe"]
+corpus = "pe"
+fields = ["size", "decode"]
+verdict = "deliberate"
+reason = "as pd: ImageBase 0: r2s keeps the stated base, radare2 rebases the image to 0x10000, so one address holds different bytes"
+
+[[judged]]
+command = "aoj"
+binaries = ["weirdsord.exe", "virtEP.exe", "memshared.dll", "foldedhdr.exe", "foldedhdrW7.exe", "no0code.exe"]
+corpus = "pe"
+fields = ["size", "decode"]
+verdict = "r2s-right"
+reason = "as pd: the loader maps these bytes there (PointerToRawData rounded down to 0x200, a shared or folded section, a sectionless image); radare2 maps other bytes or none"
+
+[[judged]]
+command = "aoj"
+binaries = "hello.obj"
+corpus = "pe"
+fields = ["size", "decode"]
+verdict = "deliberate"
+reason = "as pd: a COFF object states no addresses; r2s places a section at 0x08000000 plus its file offset, radare2 from 0"
+
+[[judged]]
+command = "aoj"
+binaries = ["armeb_hello_static", "arm-plt-lld-be8.so", "arm_be-be8-thumb-movw.o", "arm_be-be8-thumb-reloc.o"]
+fields = ["size", "decode"]
+verdict = "r2s-right"
+reason = "as pd: BE8 code is little-endian (e_flags EF_ARM_BE8); radare2 decodes it big-endian"
+
+[[judged]]
+command = "aoj"
+binaries = ["arm-thumb-*.o", "arm-abs-thumb*.o"]
+arch = '^ARM'
+fields = ["size", "decode"]
+r2 = '^unaligned$'
+verdict = "r2s-right"
+reason = "the object's $t mapping symbol states Thumb; radare2, with no analysis run, decodes ARM, so a 2-aligned address is `unaligned`"
+
+[[judged]]
+command = "aoj"
+binaries = ["*.o", "*_o", "*.ko", "*.obj"]
+fields = ["size"]
+verdict = "deliberate"
+reason = "as pd (W5): r2s decodes an object's instruction as a static link leaves it, the field holding the relocated value; radare2 decodes the file's zeros (bin.relocs.apply off)"
+
+[[judged]]
+command = "aoj"
+binaries = ["FileDP", "special-sym-with-dot.bin", "libflutter.so"]
+arch = '^ARM'
+fields = ["size"]
+r2s = '^invalid$'
+verdict = "r2-right"
+reason = "ARM32 (ungraded), as pd: past an undecodable ARM word r2s steps 2 bytes (the specification's Thumb alignment), not 4, so the next instruction is read mid-word; owner the listing"
+
+[[judged]]
+command = "aoj"
+binaries = ["FileDP", "special-sym-with-dot.bin", "libflutter.so"]
+arch = '^ARM'
+fields = ["size", "decode"]
+r2 = '^unaligned$'
+verdict = "r2-right"
+reason = "ARM32 (ungraded), as pd: the words after an undecodable ARM word, which r2s reads 2 bytes off and radare2 calls unaligned; owner the listing"
+
+[[judged]]
+command = "aoj"
+binaries = "ip-riscv"
+fields = ["decode"]
+verdict = "unfilled"
+reason = "as pd: RISC-V is outside the graded architectures; Sleigh spells compressed forms (c.mv) where radare2 writes the base mnemonic"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["decode"]
+r2s = '^adr \w+, 0x'
+r2 = '^add \w+, pc, '
+verdict = "deliberate"
+reason = "ADR is the UAL preferred disassembly of ADD Rd, PC, #imm (Arm ARM); Sleigh spells ADR with its target, radare2 the ADD with the rotated immediate"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["decode"]
+r2s = '^(push|pop)ad$'
+r2 = '^(push|pop)al$'
+verdict = "deliberate"
+reason = "as pd: Intel's mnemonics PUSHAD and POPAD; radare2 writes the AT&T pushal"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["decode"]
+r2s = '^mov '
+r2 = '^movabs '
+verdict = "r2-right"
+reason = "as pd: Intel names the 64-bit immediate (and moffs) load MOV, and radare2 writes movabs; a moffs load also drops its operand size, which radare2 spells; owner the Sleigh spelling (ROADMAP P11)"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["decode"]
+r2s = '^(push|pop) \{'
+r2 = '^(push|pop)\.w \{'
+verdict = "r2-right"
+reason = "as pd: Thumb-2's 32-bit PUSH/POP of a high register: radare2 spells the .w width, Sleigh drops it; owner the Sleigh spelling (ROADMAP P11, audit W28)"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["decode"]
+r2s = '^push\.w r\d+$'
+r2 = '^str r\d+, \[sp, -0x4\]!$'
+verdict = "deliberate"
+reason = "as pd: STR Rt, [sp, #-4]! is the encoding the ARM ARM disassembles as its PUSH.W alias; Sleigh spells the alias, radare2 the store"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["decode"]
+r2s = '^ldr\.w '
+r2 = '^ldr '
+verdict = "deliberate"
+reason = "a 32-bit Thumb-2 LDR whose offset a 16-bit one cannot hold: Sleigh writes the .w qualifier UAL permits, radare2 omits it"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["decode"]
+r2s = '^pop \{pc\}$'
+r2 = '^ldm sp!, \{pc\}$'
+verdict = "r2s-right"
+reason = "LDM SP!, {pc} is POP {pc}, the UAL preferred disassembly (Arm ARM); radare2 does not alias it"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["decode"]
+r2s = '^ldmia\w\w sp!, '
+r2 = '^pop\w\w '
+verdict = "r2-right"
+reason = "a conditional LDMIA SP! is POP<c>; the listing's ARM aliasing (r2sleigh-lift syntax `arm_alias`) only aliases the unconditional form; owner the Sleigh spelling (ROADMAP P11)"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["decode"]
+r2s = '^b\.cc '
+r2 = '^b\.lo '
+verdict = "deliberate"
+reason = "CC and LO are one condition (C clear); Sleigh writes cc, radare2 lo"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["decode"]
+r2s = '^orr x\d+, xzr, '
+r2 = '^mov x\d+, '
+verdict = "r2-right"
+reason = "ORR Xd, XZR, #imm is MOV (bitmask immediate), its preferred disassembly where MOVZ/MOVN cannot encode the value (Arm ARM C6.2); Sleigh spells the ORR; owner the Sleigh spelling (ROADMAP P11)"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["decode"]
+r2s = '^udf '
+r2 = '^invalid$'
+verdict = "r2s-right"
+reason = "as pd: an A64 word 0x0000xxxx is UDF #imm16, permanently undefined (Arm ARM C6.2); capstone 5 calls it invalid"
+
+[[judged]]
+command = "aoj"
+binaries = "main.elf"
+fields = ["decode"]
+r2s = '^msr msp, '
+r2 = '^invalid$'
+verdict = "r2s-right"
+reason = "as pd: Cortex-M (ungraded): Sleigh decodes msr msp, which radare2 calls invalid"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["decode"]
+r2s = '^cmpxchg\.lock '
+r2 = '^lock cmpxchg '
+verdict = "r2-right"
+reason = "the LOCK prefix is written before the mnemonic (Intel SDM); Sleigh's x86 spelling appends `.lock`; owner the Sleigh spelling (ROADMAP P11)"
+
+# What r2s states no sets for: a refusal, which `ao` prints.
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["refused"]
+refused = 'container does not state'
+verdict = "deliberate"
+reason = "W5: a field whose value the container does not state (an object's relocation, a PE import slot) is decoded as encoded and nothing is read from it, so no operation is stated"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^ARM'
+fields = ["refused"]
+refused = 'unimplemented'
+r2s = '^(bx|ldm\w*|pop|and)(eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le) '
+verdict = "r2-right"
+reason = "ARM32 (ungraded): a conditional transfer whose skipped run holds the T-bit writes or a load into pc (bxeq lr, ldmiane sp!, {.., pc}, andeq pc, ..) is poisoned to UNIMPLEMENTED by the local-branch if-conversion, which keeps only a straight skip over a bare transfer; owner r2sleigh-lift internal_control (ROADMAP LS)"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["halted"]
+verdict = "r2s-right"
+reason = "radare2's aea stops at the first memory access its emulated registers do not map (core's mymemread and mymemwrite return false for an invalid offset, so ESIL aborts the expression) and drops the instruction's remaining effects, and folds a call to __x86.get_pc_thunk into `ebx = return address` with no stack access; its sets say nothing there. Upstream: record the access and return true"
+
+# The register classes.
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["writes"]
+registers = ["rip", "eip", "pc"]
+lacking = "r2s"
+verdict = "deliberate"
+reason = "a transfer is a branch, call or return operation in the IL, not a write to the program counter, which ESIL models as one"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+fields = ["reads"]
+registers = ["rip", "eip", "pc"]
+lacking = "r2s"
+verdict = "deliberate"
+reason = "Sleigh folds the instruction's own address into a constant (a pc-relative operand, a call's return address), so the IL reads no program counter; ESIL reads the register"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^x86'
+fields = ["writes"]
+registers = ["af"]
+lacking = "r2s"
+verdict = "r2-right"
+reason = "Ghidra's x86 specification declares AF and leaves it unwritten by the arithmetic it is defined for (Intel SDM: ADD, SUB, CMP, INC, DEC, NEG set AF); owner VC, a vendored-spec change across the arithmetic macros (D28), recorded in ROADMAP AO"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^(ARM|AArch64)'
+lacking = "r2"
+registers = ["tmpcy", "tmpov", "tmpng", "tmpzr", "shift_carry", "mult_addr", "isamodeswitch"]
+verdict = "r2-right"
+reason = "Sleigh's ARM and AArch64 scratch registers (the flags an instruction computes before its S bit commits them, the shifter's carry, the LDM/STM address, the interworking switch) live in the register space unmarked, so the IL writes registers the machine does not have; owners VC (mark them hidden in the vendored pspecs, a fork PR owed), M (the profile reads `hidden`), then AO drops a hidden register's dead write as it drops a dead temporary (ROADMAP AO)"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^ARM'
+fields = ["reads"]
+registers = ["cy", "ov"]
+lacking = "r2"
+theirs = '^(?!.*\b(cf|vf)\b)'
+verdict = "r2-right"
+reason = "read only to carry the old C or V flag into Sleigh's scratch (shift_carry, tmpCY, tmpOV), which a flag-preserving instruction never commits; goes with the scratch registers (owners VC, M, AO)"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^ARM'
+fields = ["reads", "writes"]
+lacking = "r2"
+r2 = '^\w+?(eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le)(\.w)? '
+theirs = '^((cf|nf|vf|zf) ?)*$'
+verdict = "r2s-right"
+reason = "aea emulates one register state, with every flag clear: a condition that fails there (eq, le, ..) skips the instruction, so radare2 lists only the flags it tested and none of what the instruction does when it runs"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^ARM'
+fields = ["reads", "writes"]
+lacking = "r2"
+r2s = '^(ldc|stc|mcr|mrc|cdp)2?l? '
+verdict = "r2s-right"
+reason = "a coprocessor transfer (ldc, stc, mcr, mrc) reads or writes a coprocessor register and its base, with writeback; radare2 has no ESIL for it"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^(ARM|AArch64)'
+registers = ["ng", "zr", "cy", "ov"]
+lacking = "r2"
+theirs = '\b(nf|zf|cf|vf)\b'
+verdict = "deliberate"
+reason = "the same NZCV bits: Sleigh names them ng zr cy ov, radare2's register profile nf zf cf vf"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^(ARM|AArch64)'
+registers = ["nf", "zf", "cf", "vf"]
+lacking = "r2s"
+ours = '\b(ng|zr|cy|ov)\b'
+verdict = "deliberate"
+reason = "the same NZCV bits: Sleigh names them ng zr cy ov, radare2's register profile nf zf cf vf"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^ARM'
+registers = ["sb", "r9"]
+verdict = "r2-right"
+reason = "as pd: ARM32 (ungraded): Sleigh names r9 where radare2 writes its APCS name sb, though it spells sl and fp; owner the Sleigh spelling (ROADMAP P11)"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^ARM'
+fields = ["writes"]
+registers = ["ng", "zr"]
+lacking = "r2"
+r2s = '^movs(\.w)? '
+verdict = "r2s-right"
+reason = "MOVS sets N and Z from its result (Arm ARM); radare2's ESIL for it writes the destination alone"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^ARM'
+fields = ["reads"]
+lacking = "r2"
+r2s = '^ldr \w+, \[pc, \w+\]$'
+verdict = "r2s-right"
+reason = "as pd, 0xe79f1001 is LDR (register), pc plus the offset register, which it reads; radare2's ESIL reads a pool word and no register"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^ARM'
+fields = ["writes"]
+registers = ["tb"]
+lacking = "r2"
+verdict = "r2s-right"
+reason = "an interworking transfer (bx, blx, bl, a load into pc) writes CPSR.T, the instruction set the target runs in; the IL states it, ESIL does not"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^ARM'
+fields = ["reads"]
+lacking = "r2s"
+r2 = '^pop(\.w)? \{'
+verdict = "r2s-right"
+reason = "radare2's ESIL for a POP names each register it loads as an operand of `[*]`, which aea counts as a read"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^AArch64'
+registers = ["fp", "lr"]
+lacking = "r2s"
+ours = '\bx(29|30)\b'
+verdict = "deliberate"
+reason = "radare2's aea names x29 and x30 by its register profile's aliases fp and lr, while its listing writes x29 and x30; r2s names them as the listing does"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^AArch64'
+registers = ["x29", "x30"]
+lacking = "r2"
+theirs = '\b(fp|lr)\b'
+verdict = "deliberate"
+reason = "radare2's aea names x29 and x30 by its register profile's aliases fp and lr, while its listing writes x29 and x30; r2s names them as the listing does"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^AArch64'
+registers = ["tmp"]
+lacking = "r2s"
+verdict = "r2s-right"
+reason = "`tmp` is a register ESIL's AArch64 loads use as scratch; no A64 register is named so"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^AArch64'
+fields = ["reads"]
+registers = ["wzr", "xzr"]
+lacking = "r2s"
+verdict = "deliberate"
+reason = "the zero register reads as the constant 0, which is how Sleigh states it"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^AArch64'
+fields = ["writes"]
+register = 'w\d+'
+lacking = "r2s"
+ours = '\bx{suffix}\b'
+verdict = "deliberate"
+reason = "a write to a W register zeroes the upper 32 bits of its X register (Arm ARM), so the instruction writes the X register, which r2s names; radare2 names the operand"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^AArch64'
+fields = ["writes"]
+register = '[bhsdq]\d+'
+lacking = "r2s"
+ours = '\bz{suffix}\b'
+verdict = "deliberate"
+reason = "a scalar SIMD and FP write zeroes the vector register above it (Arm ARM), which Sleigh states over the whole SVE register z<n>; radare2 names the operand"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^AArch64'
+fields = ["writes"]
+register = 'z\d+'
+lacking = "r2"
+theirs = '\b[bhsdq]{suffix}\b'
+verdict = "deliberate"
+reason = "a scalar SIMD and FP write zeroes the vector register above it (Arm ARM), which Sleigh states over the whole SVE register z<n>; radare2 names the operand"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^AArch64'
+fields = ["reads"]
+lacking = "r2s"
+registers = ["lr"]
+r2s = '^ret x(?!30)\d+$'
+verdict = "r2s-right"
+reason = "RET Xn returns to Xn; radare2's ESIL for it reads lr whatever the operand"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^AArch64'
+fields = ["reads"]
+lacking = "r2"
+r2s = '^ret x(?!30)\d+$'
+verdict = "r2s-right"
+reason = "RET Xn returns to Xn; radare2's ESIL for it reads lr whatever the operand"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^AArch64'
+fields = ["reads", "writes"]
+registers = ["tpidr_el0", "tpidrro_el0"]
+lacking = "r2"
+verdict = "r2s-right"
+reason = "MRS reads the thread pointer system register into its destination; radare2 has no ESIL for MRS, so lists neither"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^AArch64'
+fields = ["writes"]
+register = 'x\d+'
+lacking = "r2"
+r2s = '^mrs x\d+, '
+theirs = '^$'
+verdict = "r2s-right"
+reason = "MRS writes its destination; radare2 has no ESIL for MRS"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^x86-64$'
+fields = ["writes"]
+register = 'e(ax|bx|cx|dx|si|di|bp|sp)'
+lacking = "r2s"
+ours = '\br{suffix}\b'
+verdict = "deliberate"
+reason = "a write to a 32-bit register zeroes the upper half of its 64-bit register (Intel SDM 3.4.1.1), so the instruction writes the 64-bit register, which r2s names; radare2 names the operand"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^x86-64$'
+fields = ["reads"]
+register = 'r(ax|bx|cx|dx|si|di|bp|sp)'
+lacking = "r2s"
+ours = '\be{suffix}\b'
+verdict = "r2s-right"
+reason = "a 32-bit operand reads the 32-bit register, which r2s names; radare2's ESIL reads the 64-bit register too, to write the result back zero-extended"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^x86-64$'
+fields = ["reads"]
+register = 'r(8|9|1[0-5])'
+lacking = "r2s"
+ours = '\b{register}d\b'
+verdict = "r2s-right"
+reason = "a 32-bit operand reads the 32-bit register, which r2s names; radare2's ESIL reads the 64-bit register too, to write the result back zero-extended"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^x86'
+fields = ["reads"]
+registers = ["al", "ah", "ax", "eax"]
+lacking = "r2s"
+ours = '\b[re]ax\b'
+verdict = "deliberate"
+reason = "overlapping reads are one register, the widest they cover: `add byte [rax], al` reads rax, which holds al"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^x86-64$'
+register = 'xmm\d+'
+lacking = "r2s"
+ours = '\b{register}_[dq]a\b'
+verdict = "deliberate"
+reason = "a scalar SSE operation reads or writes one lane, which Sleigh names (xmm0_da, xmm0_qa); radare2 names the whole register"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^x86-64$'
+register = 'xmm\d+_[dq]a'
+lacking = "r2"
+verdict = "deliberate"
+reason = "a scalar SSE operation reads or writes one lane, which Sleigh names (xmm0_da, xmm0_qa); radare2 names the whole register"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^x86-64$'
+register = '(xmm\d+[hl]|xmm\d+|ymm\d+|zmm\d+)'
+verdict = "deliberate"
+reason = "radare2's profile splits an XMM register into halves (xmm0l, xmm0h); a VEX write zeroes the register up to its widest form, which Sleigh states over zmm<n>"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^x86'
+fields = ["reads"]
+registers = ["cf", "of", "sf", "zf", "pf"]
+lacking = "r2"
+r2s = '^(sh[lr]|sa[lr]|ro[lr]|rc[lr]|sh[lr]d) '
+verdict = "r2-right"
+reason = "Sleigh keeps each flag's old value under a `count == 0` select, so a shift by a nonzero immediate reads the flags its result overwrites; owner r2sleigh-lift, which folds the select with the constant count (recorded in ROADMAP AO)"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^x86-64$'
+fields = ["reads"]
+registers = ["rax"]
+lacking = "r2s"
+r2s = '^syscall$'
+verdict = "r2s-right"
+reason = "SYSCALL reads no RAX: the kernel's convention does; the instruction writes RCX and R11 and transfers, which the IL states"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^x86'
+fields = ["writes"]
+registers = ["of"]
+lacking = "r2"
+r2s = '^(sh[lr]|sa[lr]|ro[lr]|rc[lr]) \w+, 0x([2-9a-f]|[0-9a-f]{2,})$'
+verdict = "deliberate"
+reason = "a shift or rotate by more than one leaves OF undefined (Intel SDM); Sleigh writes it, ESIL leaves it"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^x86-64$'
+registers = ["fs_offset"]
+lacking = "r2"
+verdict = "r2s-right"
+reason = "an fs: operand reads the FS base, which Sleigh states as fs_offset; radare2 adds no base"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^x86'
+fields = ["writes"]
+lacking = "r2"
+r2s = '^fninit$'
+verdict = "r2s-right"
+reason = "FNINIT resets the x87 control, status and tag words, pointers and condition codes; radare2's ESIL for it states nothing"
+
+[[judged]]
+command = "aoj"
+binaries = "*"
+arch = '^x86$'
+fields = ["writes"]
+registers = ["ax", "eax"]
+r2s = '^mov ax, [cdefgs]s$'
+verdict = "r2-right"
+reason = "as pd: 8c /r with a register destination and 32-bit operand size moves the selector zero-extended into the 32-bit register (Intel SDM MOV Sreg); Sleigh names the 16-bit register; owner r2sleigh-lift (ROADMAP LS)"
