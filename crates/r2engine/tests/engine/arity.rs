@@ -3,7 +3,7 @@
 
 use crate::common;
 
-use common::{BASE, Literal};
+use common::{BASE, GLIBC, Literal};
 use r2engine::program::OpenProgram;
 
 /// `f` writes both result registers and reads no argument (`xor eax, eax; pxor xmm0, xmm0`): its
@@ -300,6 +300,40 @@ fn under_aa_a_self_recursive_floor_is_its_least_fixpoint() {
     );
     assert!(!text.contains(", 7)"), "{text}");
     assert!(!text.contains("a floor"), "{text}");
+}
+
+/// gcc -O1's review.c `fact`: `mov eax, 1` before `cmp edi, 1`, so its call to itself is handed
+/// `al` as well as `edi`.
+const FACT_O1: &[u8] = &[
+    0xf3, 0x0f, 0x1e, 0xfa, // 1000 endbr64
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1004 mov eax, 1
+    0x83, 0xff, 0x01, // 1009 cmp edi, 1
+    0x7f, 0x01, // 100c jg 0x100f
+    0xc3, // 100e ret
+    0x53, // 100f push rbx
+    0x89, 0xfb, // 1010 mov ebx, edi
+    0x8d, 0x7f, 0xff, // 1012 lea edi, [rdi - 1]
+    0xe8, 0xe6, 0xff, 0xff, 0xff, // 1015 call 0x1000
+    0x0f, 0xaf, 0xc3, // 101a imul eax, ebx
+    0x5b, // 101d pop rbx
+    0xc3, // 101e ret
+];
+
+/// Under `aa` the root reads itself resolved, as its callers do: its recursive call takes the one
+/// argument `fact`'s least fixpoint states, never the `al` count W14 refuses on a floor.
+#[test]
+fn under_aa_a_recursive_root_calls_itself_with_its_resolved_arity() {
+    let mut open =
+        OpenProgram::of(Literal::of_code(FACT_O1, &[("fact", BASE, 0x1f)]).running_on(GLIBC));
+    open.analyse_program().expect("it surveys");
+    let text = open
+        .rendered(BASE)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(text.contains("= fact("), "{text}");
+    assert!(!text.contains("vector count"), "{text}");
 }
 
 /// `a`: `test edi, edi; je ret; sub edi, 1; call b; ret`, handing `b` the `rsi` it never wrote;

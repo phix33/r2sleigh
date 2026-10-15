@@ -1115,12 +1115,14 @@ fn read_callees(
     let targets = reached(&root.body, native.program);
     let declared = declare_imports(native, target, &targets, ptr_bits, &mut callees);
     let mut facts = Vec::new();
+    // Under `aa` a recursive root reads itself resolved, as its callers do ("Arity").
+    let own = callers == crate::program::Callers::Read;
     // An import has no body here, declared or not: its stub's arity is the loader's (P7). A
     // sealed import slot is a word of data.
     let bodies: Vec<u64> = targets
         .iter()
         .copied()
-        .filter(|address| *address != entry && !callees.interfaces.contains_key(address))
+        .filter(|address| (own || *address != entry) && !callees.interfaces.contains_key(address))
         .filter(|address| native.program.import_at(*address).is_none())
         .filter(|address| crate::stated::sealed_import(native.program, *address).is_none())
         .collect();

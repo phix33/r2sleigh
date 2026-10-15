@@ -571,7 +571,7 @@ int32_t fact(int32_t n)
     uint64_t rax_3;
     uint64_t rax_6;
 
-    /* r2dec proof: no individual construct is marked; 30 source obligations: 20 rendered, 10 elided, 0 refused; 5 statements rendered */
+    /* r2dec proof: no individual construct is marked; 30 source obligations: 20 rendered, 10 elided, 0 refused; 5 statements rendered; 1 callee prototype supplied by the source */
     {
         if ((uint8_t)((int32_t)n <= (int32_t)1U)) {
             rax_6 = 1;
