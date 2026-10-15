@@ -169,6 +169,9 @@ pub struct CallingConvention {
     /// The register a call passes a variadic callee's count of vector
     /// arguments in, which every call may therefore read.
     pub variadic_count_register: Option<&'static str>,
+    /// Where a variadic prologue saves argument register `i`, at area + slot width * i, and
+    /// which bound of that area its `va_list` holds; `None` where the convention has no area.
+    pub register_save_area: Option<SaveAreaAnchor>,
     /// The register a frame-keeping function holds its frame base in.
     pub frame_pointer: Option<&'static str>,
     /// The compiler specification and the prototype in it, where the convention is not the
@@ -187,6 +190,15 @@ pub struct CallingConvention {
     pub citation: &'static str,
 }
 
+/// The bound of the general register save area a `va_list` holds (doc/adr-resolved-bodies.md, "Variadic tail").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveAreaAnchor {
+    /// Its start: System V AMD64's `reg_save_area`.
+    Base,
+    /// The byte past its end: AAPCS64's `__gr_top`.
+    End,
+}
+
 /// `sp % alignment == residue` at a function's first instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntryStack {
@@ -200,6 +212,7 @@ const SYSTEM_V_AMD64: CallingConvention = CallingConvention {
     variadic_tail_on_stack: false,
     frame_pointer: Some("rbp"),
     variadic_count_register: Some("al"),
+    register_save_area: Some(SaveAreaAnchor::Base),
     prototype: None,
     refused: None,
     entry_stack: Some(EntryStack {
@@ -210,7 +223,7 @@ const SYSTEM_V_AMD64: CallingConvention = CallingConvention {
     citation: "System V AMD64 psABI 1.0, section 3.2.2: \"The 128-byte area beyond the \
                location pointed to by %rsp is considered to be reserved and shall not be \
                modified by signal or interrupt handlers\"; section 3.5.7: \"%al is used as \
-               hidden argument to specify the number of vector registers used\"; Figure 3.4: %rbp \"callee-saved register; optionally used as frame pointer\"; section 3.2.2: \"the value (%rsp + 8) is always a multiple of 16 when control is transferred to the function entry point\"",
+               hidden argument to specify the number of vector registers used\"; Figure 3.4: %rbp \"callee-saved register; optionally used as frame pointer\"; section 3.2.2: \"the value (%rsp + 8) is always a multiple of 16 when control is transferred to the function entry point\"; section 3.5.7, Figure 3.33: the register save area holds %rdi at offset 0 to %r9 at 40, and \"reg_save_area: The element points to the start of the register save area\"",
 };
 
 const MICROSOFT_X64: CallingConvention = CallingConvention {
@@ -219,6 +232,7 @@ const MICROSOFT_X64: CallingConvention = CallingConvention {
     variadic_tail_on_stack: false,
     frame_pointer: Some("rbp"),
     variadic_count_register: None,
+    register_save_area: None,
     prototype: None,
     refused: None,
     entry_stack: Some(EntryStack {
@@ -236,6 +250,7 @@ const I386_CDECL: CallingConvention = CallingConvention {
     variadic_tail_on_stack: false,
     frame_pointer: Some("ebp"),
     variadic_count_register: None,
+    register_save_area: None,
     prototype: None,
     refused: None,
     entry_stack: Some(EntryStack {
@@ -253,6 +268,7 @@ const AAPCS64: CallingConvention = CallingConvention {
     variadic_tail_on_stack: false,
     frame_pointer: Some("x29"),
     variadic_count_register: None,
+    register_save_area: Some(SaveAreaAnchor::End),
     prototype: None,
     refused: None,
     entry_stack: Some(EntryStack {
@@ -262,12 +278,13 @@ const AAPCS64: CallingConvention = CallingConvention {
     stack_bound: None,
     citation: "AAPCS64, \"Universal stack constraints\": \"A process may only access \
                (for reading or writing) the closed interval of the entire stack delimited \
-               by [SP, stack-base - 1]\"; its general-purpose register table names r29 FP, the frame pointer; \"Universal stack constraints\": \"SP mod 16 = 0\"",
+               by [SP, stack-base - 1]\"; its general-purpose register table names r29 FP, the frame pointer; \"Universal stack constraints\": \"SP mod 16 = 0\"; Appendix \"Variable argument lists\": the general register save area holds x0 to x7 in order, and \"__gr_top: set to the address of the byte immediately following the general register argument save area\"",
 };
 
 const AAPCS64_DARWIN: CallingConvention = CallingConvention {
     variadic_tail_on_stack: true,
     variadic_count_register: None,
+    register_save_area: None,
     citation: "Apple, \"Writing ARM64 code for Apple platforms\": \"the caller places \
                the arguments for the variadic portion of a function on the stack\"",
     ..AAPCS64
@@ -279,6 +296,7 @@ const AAPCS32: CallingConvention = CallingConvention {
     variadic_tail_on_stack: false,
     frame_pointer: Some("r11"),
     variadic_count_register: None,
+    register_save_area: None,
     prototype: None,
     refused: None,
     entry_stack: Some(EntryStack {
@@ -297,6 +315,7 @@ const RISCV_LP64: CallingConvention = CallingConvention {
     variadic_tail_on_stack: false,
     frame_pointer: Some("s0"),
     variadic_count_register: None,
+    register_save_area: None,
     prototype: None,
     refused: None,
     entry_stack: Some(EntryStack {
@@ -313,6 +332,7 @@ const GO_AMD64: CallingConvention = CallingConvention {
     red_zone_bytes: 0,
     variadic_tail_on_stack: false,
     variadic_count_register: None,
+    register_save_area: None,
     frame_pointer: Some("rbp"),
     prototype: Some(("golang", "abi-internal")),
     refused: None,
@@ -562,6 +582,16 @@ mod tests {
         let arm64 = |platform| calling_convention("aarch64", 64, platform).expect("a convention");
         assert!(arm64(Platform::Darwin).variadic_tail_on_stack);
         assert!(!arm64(Platform::Linux).variadic_tail_on_stack);
+        assert_eq!(
+            arm64(Platform::Linux).register_save_area,
+            Some(SaveAreaAnchor::End)
+        );
+        assert_eq!(arm64(Platform::Darwin).register_save_area, None);
+        assert_eq!(
+            x64(Platform::Linux).register_save_area,
+            Some(SaveAreaAnchor::Base)
+        );
+        assert_eq!(x64(Platform::Windows).register_save_area, None);
         assert_eq!(arm64(Platform::Darwin).name, "arm64");
         assert!(calling_convention("mips", 32, Platform::Linux).is_none());
     }
