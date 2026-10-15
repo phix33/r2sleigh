@@ -1291,6 +1291,7 @@ fn analysis_pcode_is_invalid_at_the_machine_lift_boundary() {
         libsla::AnalysisOp::Cast,
         libsla::AnalysisOp::Insert,
         libsla::AnalysisOp::Extract,
+        libsla::AnalysisOp::SignedExtract,
         libsla::AnalysisOp::SegmentOp,
     ] {
         let instruction = PcodeInstruction {

@@ -28,6 +28,25 @@ struct Run {
     ok: bool,
 }
 
+/// `text` with each Sleigh temporary's unique offset dropped (`tmp_23d00_3` is `tmp_3`): the
+/// specification's compiler lays that space out, so the offset is no fact a test can hold.
+fn unnumbered(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("tmp_") {
+        out.push_str(&rest[..at + 4]);
+        rest = &rest[at + 4..];
+        let digits = rest.len()
+            - rest
+                .trim_start_matches(|c: char| c.is_ascii_hexdigit())
+                .len();
+        if digits > 0 && rest[digits..].starts_with('_') {
+            rest = &rest[digits + 1..];
+        }
+    }
+    out + rest
+}
+
 fn r2s(script: &str) -> Run {
     on(fixture(), script)
 }
@@ -531,9 +550,7 @@ fn a_staged_call_passes_its_stack_arguments() {
     let pinned = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned");
     let staged = on(pinned.join("shapes_gcc_x64_O0"), "pdd @ sym.shape_variadic");
     assert!(
-        staged
-            .out
-            .contains("tmp_11f80_19, tmp_11f80_18, rax_45, tmp_4a00_1, rax_42);"),
+        unnumbered(&staged.out).contains("tmp_19, tmp_18, rax_45, tmp_1, rax_42);"),
         "{}",
         staged.out
     );
@@ -583,9 +600,10 @@ fn a_call_taking_a_pair_assigns_the_half_its_caller_reads() {
     for line in [
         "pair_401984 = mixed_from(arg0, arg1);",
         "rdx_2 = (uint64_t)((__uint128_t)pair_401984 >> 64U);",
-        "mixed_fold(tmp_11f80_3, rdx_2);",
+        "mixed_fold(tmp_3, rdx_2);",
     ] {
-        assert!(staged.out.contains(line), "{line}: {}", staged.out);
+        let text = unnumbered(&staged.out);
+        assert!(text.contains(line), "{line}: {}", staged.out);
     }
     assert!(!staged.out.contains("r2sleigh_residual"), "{}", staged.out);
 }

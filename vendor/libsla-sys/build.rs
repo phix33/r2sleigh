@@ -5,7 +5,7 @@ fn main() {
 
     // The following sources were pulled from the Makefile
     const LIBSLA_SOURCE_FILES: &[&str] = &[
-        // CORE=	xml marshal space float address pcoderaw translate opcodes globalcontext
+        // CORE=	xml marshal space float address pcoderaw translate opcodes metatype globalcontext
         "xml.cc",
         "marshal.cc",
         "space.cc",
@@ -14,6 +14,7 @@ fn main() {
         "pcoderaw.cc",
         "translate.cc",
         "opcodes.cc",
+        "metatype.cc",
         "globalcontext.cc",
         // SLEIGH=	sleigh pcodeparse pcodecompile sleighbase slghsymbol \
         // slghpatexpress slghpattern semantics context slaformat compression filemanage

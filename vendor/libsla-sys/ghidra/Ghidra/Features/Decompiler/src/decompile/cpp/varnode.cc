@@ -347,6 +347,25 @@ void Varnode::destroyDescend(void)
   descend.clear();
 }
 
+/// We assume the replacement Varnode is initially a singleton in its own HighVariable.
+/// We swap \b this and the replacement between their respective HighVariables.
+/// \param replacevn is the replacement Varnode
+void Varnode::replaceInHigh(Varnode *replacevn)
+
+{
+#ifdef CPUI_DEBUG
+  if (replacevn->high->inst.size() != 1)
+    throw LowlevelError("Attempting to replace with merged Varnode");
+#endif
+  high->remove(this);
+  HighVariable *replaceHigh = replacevn->high;
+  replacevn->high = (HighVariable *)0;
+  replaceHigh->inst[0] = this;
+  high->insert(replacevn,mergegroup);
+  high = replaceHigh;
+  mergegroup = 0;
+}
+
 /// Set desired boolean attributes on this Varnode and then set dirty bits if appropriate
 /// \param fl is the mask containing the list of attributes to set
 void Varnode::setFlags(uint4 fl) const
@@ -378,6 +397,11 @@ void Varnode::clearFlags(uint4 fl) const
 void Varnode::clearSymbolLinks(void)
 
 {
+  if (high == (HighVariable *)0) {
+    mapentry = (SymbolEntry *)0;
+    clearFlags(Varnode::namelock | Varnode::typelock | Varnode::mapped);
+    return;
+  }
   bool foundEntry = false;
   for(int4 i=0;i<high->numInstances();++i) {
     Varnode *vn = high->getInstance(i);
@@ -399,8 +423,16 @@ void Varnode::setDef(PcodeOp *op)
     setFlags(Varnode::coverdirty);
     clearFlags(Varnode::written);
   }
-  else
+  else {
+    if (isConstant()) {
+      ostringstream s;
+      const Address &addr(op->getAddr());
+      s << "Assignment to constant at " << addr.getShortcut();
+      addr.printRaw(s);
+      throw LowlevelError(s.str());
+    }
     setFlags(Varnode::coverdirty|Varnode::written);
+  }
 }
 
 /// The given Symbol's data-type and flags are inherited by \b this Varnode.
@@ -700,37 +732,6 @@ Address Varnode::getUsePoint(const Funcdata &fd) const
     return def->getAddr();
   return fd.getAddress()+-1;
   //  return loc.getSpace()->getTrans()->constant(0);
-}
-
-/// Print to the stream either the name of the Varnode, such as a register name, if it exists
-/// or print a shortcut character representing the AddrSpace and a hex representation of the offset.
-/// This function also computes and returns the \e expected size of the identifier it prints
-/// to facilitate the printing of size modifiers by other print routines
-/// \param s is the output stream
-/// \return the expected size
-int4 Varnode::printRawNoMarkup(ostream &s) const
-
-{
-  AddrSpace *spc = loc.getSpace();
-  const Translate *trans = spc->getTrans();
-  string name;
-  int4 expect;
-
-  name = trans->getRegisterName(spc,loc.getOffset(),size);
-  if (name.size()!=0) {
-    const VarnodeData &point(trans->getRegister(name));
-    uintb off = loc.getOffset()-point.offset;
-    s << name;
-    expect = point.size;
-    if (off != 0)
-      s << '+' << dec << off;
-  }
-  else {
-    s << loc.getShortcut();	// Print type shortcut character
-    expect = trans->getDefaultSize();
-    loc.printRaw(s);
-  }
-  return expect;
 }
 
 /// Print textual information about this Varnode including a base identifier along with enough
@@ -1387,13 +1388,6 @@ Varnode *VarnodeBank::setDef(Varnode *vn,PcodeOp *op)
     addr.printRaw(s);
     throw LowlevelError(s.str());
   }
-  if (vn->isConstant()) {
-    ostringstream s;
-    const Address &addr(op->getAddr());
-    s << "Assignment to constant at " << addr.getShortcut();
-    addr.printRaw(s);
-    throw LowlevelError(s.str());
-  }
 
   loc_tree.erase(vn->lociter);
   def_tree.erase(vn->defiter);
@@ -1528,6 +1522,29 @@ Varnode *VarnodeBank::findCoveringInput(int4 s,const Address &loc) const
       return vn;
   }
   return (Varnode *)0;
+}
+
+/// \param s is the number of bytes in the given range
+/// \param loc is the starting address of the given range
+/// \return \b true if there is an input Varnode that overlaps the range
+bool VarnodeBank::hasInputIntersection(int4 s,const Address &loc) const
+
+{
+  VarnodeDefSet::const_iterator iter;
+  Varnode *vn;
+  iter = beginDef(Varnode::input,loc);
+  if (iter != def_tree.end()) {
+    vn = *iter;
+    if (vn->isInput() && vn->intersects(loc, s))
+      return true;
+  }
+  if (iter != def_tree.begin()) {
+    --iter;
+    vn = *iter;
+    if (vn->isInput() && vn->intersects(loc,s))
+      return true;
+  }
+  return false;
 }
 
 /// \brief Beginning of Varnodes in given address space sorted by location
@@ -1982,30 +1999,6 @@ void VarnodeBank::verifyIntegrity(void) const
   }
 }
 #endif
-
-/// \brief Return \b true if the alternate path looks more valid than the main path.
-///
-/// Two different paths from a common Varnode each terminate at a CALL, CALLIND, or RETURN.
-/// Evaluate which path most likely represents actual parameter/return value passing,
-/// based on traversal information about each path.
-/// \param vn is the Varnode terminating the \e alternate path
-/// \param flags indicates traversals for both paths
-/// \return \b true if the alternate path is preferred
-bool TraverseNode::isAlternatePathValid(const Varnode *vn,uint4 flags)
-
-{
-  if ((flags & (indirect | indirectalt)) == indirect)
-    // If main path traversed an INDIRECT but the alternate did not
-    return true;	// Main path traversed INDIRECT, alternate did not
-  if ((flags & (indirect | indirectalt)) == indirectalt)
-    return false;	// Alternate path traversed INDIRECT, main did not
-  if ((flags & actionalt) != 0)
-    return true;	// Alternate path traversed a dedicated COPY
-  if (vn->loneDescend() == (PcodeOp*)0) return false;
-  const PcodeOp *op = vn->getDef();
-  if (op == (PcodeOp*)0) return true;
-  return !op->isMarker();	// MULTIEQUAL or INDIRECT indicates multiple values
-}
 
 /// Return true if \b vn1 contains the high part and \b vn2 the low part
 /// of what was(is) a single value.

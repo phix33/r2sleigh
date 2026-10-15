@@ -23,11 +23,11 @@ CMDS=aa; pdd @ 0x010014e0
 EXPECT=<<EOF
 void _start(void)
 {
-    uint64_t tmp_55400_2;
+    uint64_t tmp_aa300_2;
 
     /* r2dec proof: 5 constructs are marked below; 27 source obligations: 0 rendered, 5 elided, 0 refused, 22 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0) */
     {
-        tmp_55400_2 = r2sleigh_residual_u64(1);
+        tmp_aa300_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x10014e0:29 covering 1 op (render::values) */
         r2sleigh_residual_void(3); /* r2dec gap: StoreNotSpelled at 0x10014e0:32 covering 1 op (render::values) */
         r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x10014e0:46 covering 1 op (render::values): call to __libc_start_main: the import's declaration has an argument this convention does not place */
@@ -108,18 +108,18 @@ int32_t main(int32_t argc, char** argv)
     void call_store(double*);
     void forward(double, double*);
 
-    uint64_t tmp_6b00_1;
-    uint64_t tmp_6b00_2;
+    uint64_t tmp_d400_1;
+    uint64_t tmp_d400_2;
     _Alignas(16) uint8_t frame[40];
 
     /* r2dec proof: 2 constructs are marked below; 35 source obligations: 14 rendered, 18 elided, 0 refused, 3 residual; 6 statements rendered; 1 held from entry, read as residuals (RAX_0); 2 callee prototypes supplied by the source */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)r2sleigh_residual_u64(1));
         call_store((double*)(uint64_t)(frame + 16U));
-        tmp_6b00_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
-        forward(r2sleigh_float_from_bits_64(tmp_6b00_1), (double*)(uint64_t)(frame + 16U));
-        tmp_6b00_2 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
-        return (int32_t)(r2sleigh_float_from_bits_64(tmp_6b00_2) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_6b00_2) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_6b00_2) : r2sleigh_residual_i32(2));
+        tmp_d400_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        forward(r2sleigh_float_from_bits_64(tmp_d400_1), (double*)(uint64_t)(frame + 16U));
+        tmp_d400_2 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        return (int32_t)(r2sleigh_float_from_bits_64(tmp_d400_2) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_d400_2) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_d400_2) : r2sleigh_residual_i32(2));
     }
 }
 
@@ -136,7 +136,7 @@ void __libc_csu_init(int32_t argc, char** argv, char** envp)
 {
     uint64_t r12_2;
     uint64_t r13_5;
-    uint64_t tmp_11f80_1;
+    uint64_t tmp_23d00_1;
     uint64_t r13_6;
 
     /* r2dec proof: 2 constructs are marked below; 61 source obligations: 22 rendered, 30 elided, 0 refused, 9 residual; 11 statements rendered */
@@ -146,7 +146,7 @@ void __libc_csu_init(int32_t argc, char** argv, char** envp)
             r12_2 = 0x1000000;
             r13_5 = 1;
             for (; ; ) {
-                tmp_11f80_1 = r2sleigh_load_u64((void*)r12_2);
+                tmp_23d00_1 = r2sleigh_load_u64((void*)r12_2);
                 r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x10015e0:13 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
                 r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x10015e0:19 covering 1 op (render::values) */
                 r13_6 = (uint64_t)((uint64_t)r13_5 - (uint64_t)1U);

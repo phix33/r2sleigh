@@ -8,7 +8,7 @@ void SleighCompileProxy::setAllOptionsProxy(
         const std::vector<PreprocessorDefine> &defines, bool unnecessaryPcodeWarning,
         bool lenientConflict, bool allCollisionWarning,
         bool allNopWarning,bool deadTempWarning,bool enforceLocalKeyWord,
-        bool largeTemporaryWarning, bool caseSensitiveRegisterNames, bool debugOutput) {
+        bool caseSensitiveRegisterNames, bool debugOutput) {
 
     std::map<std::string, std::string> definesMap;
     for (auto &d : defines) {
@@ -18,7 +18,7 @@ void SleighCompileProxy::setAllOptionsProxy(
     setAllOptions(definesMap, unnecessaryPcodeWarning,
         lenientConflict, allCollisionWarning,
         allNopWarning, deadTempWarning, enforceLocalKeyWord,
-        largeTemporaryWarning, caseSensitiveRegisterNames, debugOutput);
+        caseSensitiveRegisterNames, debugOutput);
 }
 
 CompileResponse SleighCompileProxy::run_compilation_proxy(const std::string &filein, const std::string &fileout) {

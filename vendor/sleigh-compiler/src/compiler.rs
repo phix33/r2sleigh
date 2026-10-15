@@ -44,9 +44,6 @@ pub struct SleighCompilerOptions {
     /// Set to `true` to force all local variable definitions to use the `local` keyword
     pub enforce_local_keyword: bool,
 
-    /// Set to `true` for individual warnings about temporary varnodes that are too large
-    pub large_temporary_warning: bool,
-
     /// Set to `true` if register names are allowed to be case-sensitive
     pub case_sensitive_register_names: bool,
 
@@ -65,7 +62,6 @@ impl Default for SleighCompilerOptions {
             all_nop_warning: false,
             dead_temp_warning: false,
             enforce_local_keyword: false,
-            large_temporary_warning: false,
             case_sensitive_register_names: false,
             debug_output: false,
         }
@@ -91,7 +87,6 @@ impl SleighCompiler {
             options.all_nop_warning,
             options.dead_temp_warning,
             options.enforce_local_keyword,
-            options.large_temporary_warning,
             options.case_sensitive_register_names,
             options.debug_output,
         );

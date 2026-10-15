@@ -20,6 +20,7 @@
 /// \brief Utilities for merging low-level Varnodes into high-level variables
 
 #include "op.hh"
+#include "expression.hh"
 
 namespace ghidra {
 
@@ -131,6 +132,7 @@ public:
   bool hideShadows(HighVariable *high);
   void processCopyTrims(void);
   void markInternalCopies(void);
+  void markPurePaddingCopies(void);
   void registerProtoPartialRoot(Varnode *vn);
 #ifdef MERGEMULTI_DEBUG
   void verifyHighCovers(void);

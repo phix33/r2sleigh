@@ -19,6 +19,15 @@
 namespace ghidra {
 
 AttributeId ATTRIB_SIZES = AttributeId("sizes",151);
+AttributeId ATTRIB_BACKFILL = AttributeId("backfill", 152);
+AttributeId ATTRIB_MAX_PRIMITIVES = AttributeId("maxprimitives", 153);
+AttributeId ATTRIB_REVERSESIGNIF = AttributeId("reversesignif", 154);
+AttributeId ATTRIB_MATCHSIZE = AttributeId("matchsize", 155);
+AttributeId ATTRIB_AFTER_BYTES = AttributeId("afterbytes", 156);
+AttributeId ATTRIB_AFTER_STORAGE = AttributeId("afterstorage", 157);
+AttributeId ATTRIB_FILL_ALTERNATE = AttributeId("fillalternate", 158);
+AttributeId ATTRIB_MINELEMENTS = AttributeId("minelements", 159);
+AttributeId ATTRIB_MAXELEMENTS = AttributeId("maxelements", 160);
 
 ElementId ELEM_DATATYPE = ElementId("datatype",273);
 ElementId ELEM_CONSUME = ElementId("consume",274);
@@ -33,6 +42,7 @@ ElementId ELEM_HIDDEN_RETURN = ElementId("hidden_return",282);
 ElementId ELEM_JOIN_PER_PRIMITIVE = ElementId("join_per_primitive",283);
 ElementId ELEM_JOIN_DUAL_CLASS = ElementId("join_dual_class",285);
 ElementId ELEM_EXTRA_STACK = ElementId("extra_stack",287);
+ElementId ELEM_CONSUME_REMAINING = ElementId("consume_remaining",288);
 
 /// \brief Check that a big Primitive properly overlaps smaller Primitives
 ///
@@ -137,13 +147,14 @@ bool PrimitiveExtractor::handleUnion(TypeUnion *dt,int4 max,int4 offset)
   int4 num = dt->numDepend();
   if (num == 0)
     return false;
+  bool isArrayPrimitive = (flags & array_primitive) != 0;
   const TypeField *curField = dt->getField(0);
-  PrimitiveExtractor common(curField->type,false,offset + curField->offset,max);
+  PrimitiveExtractor common(curField->type,false,isArrayPrimitive,offset + curField->offset,max);
   if (!common.isValid())
     return false;
   for(int4 i=1;i<num;++i) {
     curField = dt->getField(i);
-    PrimitiveExtractor next(curField->type,false,offset + curField->offset,max);
+    PrimitiveExtractor next(curField->type,false,isArrayPrimitive,offset + curField->offset,max);
     if (!next.isValid())
       return false;
     if (!commonRefinement(common.primitives,next.primitives))
@@ -168,8 +179,9 @@ bool PrimitiveExtractor::handleUnion(TypeUnion *dt,int4 max,int4 offset)
 /// \param dt is the given data-type to extract primitives from
 /// \param max is the maximum number of primitives to extract before giving up
 /// \param offset is the starting offset to associate with the first primitive
+/// \param depth is the current depth of recursion
 /// \return \b true if all primitives were extracted
-bool PrimitiveExtractor::extract(Datatype *dt,int4 max,int4 offset)
+bool PrimitiveExtractor::extract(Datatype *dt,int4 max,int4 offset,int4 depth)
 
 {
   switch(dt->getMetatype()) {
@@ -189,10 +201,16 @@ bool PrimitiveExtractor::extract(Datatype *dt,int4 max,int4 offset)
       return true;
     case TYPE_ARRAY:
     {
+      if ((flags & array_primitive) != 0 && depth != 0) {
+	if (primitives.size() >= max)
+	  return false;
+	primitives.emplace_back(dt,offset);
+	return true;
+      }
       int4 numEls = ((TypeArray *)dt)->numElements();
       Datatype *base = ((TypeArray *)dt)->getBase();
       for(int4 i=0;i<numEls;++i) {
-	if (!extract(base,max,offset))
+	if (!extract(base,max,offset,depth+1))
 	  return false;
 	offset += base->getAlignSize();
       }
@@ -221,22 +239,25 @@ bool PrimitiveExtractor::extract(Datatype *dt,int4 max,int4 offset)
     if (expectedOff != curOff) {
       flags |= extra_space;
     }
-    if (!extract(compDt,max,curOff))
+    if (!extract(compDt,max,curOff,depth+1))
       return false;
     expectedOff = curOff + compDt->getAlignSize();
- }
+  }
   return true;
-}
+} 
 
 /// \param dt is data-type extract from
 /// \param unionIllegal is \b true if unions encountered during extraction are considered illegal
+/// \param arrayPrimitive is \b true if arrays should be treated as primitives
 /// \param offset is the starting offset to associate with the data-type
 /// \param max is the maximum number of primitives to extract before giving up
-PrimitiveExtractor::PrimitiveExtractor(Datatype *dt,bool unionIllegal,int offset,int4 max)
+PrimitiveExtractor::PrimitiveExtractor(Datatype *dt,bool unionIllegal,bool arrayPrimitive,int offset,int4 max)
 
 {
   flags = unionIllegal ? union_invalid : 0;
-  if (!extract(dt,max,offset))
+  if (arrayPrimitive)
+    flags |= array_primitive;
+  if (!extract(dt,max,offset,0))
     flags |= invalid;
 }
 
@@ -245,23 +266,26 @@ PrimitiveExtractor::PrimitiveExtractor(Datatype *dt,bool unionIllegal,int offset
 DatatypeFilter *DatatypeFilter::decodeFilter(Decoder &decoder)
 
 {
-  DatatypeFilter *filter;
+  unique_ptr<DatatypeFilter> filter;
   uint4 elemId = decoder.openElement(ELEM_DATATYPE);
   string nm = decoder.readString(ATTRIB_NAME);
   if (nm == "any") {
-    filter = new SizeRestrictedFilter();
+    filter.reset(new SizeRestrictedFilter());
   }
   else if (nm == "homogeneous-float-aggregate") {
-    filter = new HomogeneousAggregate(TYPE_FLOAT,4,0,0);
+    filter.reset(new HomogeneousAggregate(TYPE_FLOAT,4,0,0));
   }
   else {
     // If no other name matches, assume this is a metatype
     type_metatype meta = string2metatype(nm);
-    filter = new MetaTypeFilter(meta);
+    if (meta == TYPE_ARRAY)
+      filter.reset(new ArrayFilter());
+    else
+      filter.reset(new MetaTypeFilter(meta));
   }
   filter->decode(decoder);
   decoder.closeElement(elemId);
-  return filter;
+  return filter.release();
 }
 
 /// Parse the given string as a comma or space separated list of decimal integers,
@@ -381,15 +405,57 @@ bool MetaTypeFilter::filter(Datatype *dt) const
   return filterOnSize(dt);
 }
 
+ArrayFilter::ArrayFilter(int4 min,int4 max,int4 minEl,int4 maxEl)
+  : SizeRestrictedFilter(min,max)
+{
+  minElements = minEl;
+  maxElements = maxEl;
+}
+
+ArrayFilter::ArrayFilter(const ArrayFilter &op2)
+  : SizeRestrictedFilter(op2)
+{
+  minElements = op2.minElements;
+  maxElements = op2.maxElements;
+}
+
+bool ArrayFilter::filter(Datatype *dt) const
+
+{
+  if (dt->getMetatype() != TYPE_ARRAY) return false;
+  if (!filterOnSize(dt)) return false;
+  TypeArray *arr = (TypeArray *)dt;
+  if (arr->numElements() < minElements)
+    return false;
+  if (maxElements != 0 && arr->numElements() > maxElements)
+    return false;
+  return true;
+}
+
+void ArrayFilter::decode(Decoder &decoder)
+
+{
+  SizeRestrictedFilter::decode(decoder);
+  decoder.rewindAttributes();
+  for(;;) {
+    uint4 attribId = decoder.getNextAttributeId();
+    if (attribId == 0) break;
+    if (attribId == ATTRIB_MINELEMENTS)
+      minElements = decoder.readUnsignedInteger();
+    else if (attribId == ATTRIB_MAXELEMENTS)
+      maxElements = decoder.readUnsignedInteger();
+  }
+}
+
 HomogeneousAggregate::HomogeneousAggregate(type_metatype meta)
 
 {
   metaType = meta;
-  maxPrimitives = 2;
+  maxPrimitives = 4;
 }
 
-HomogeneousAggregate::HomogeneousAggregate(type_metatype meta,int4 maxPrim,int4 min,int4 max)
-  : SizeRestrictedFilter(min,max)
+HomogeneousAggregate::HomogeneousAggregate(type_metatype meta,int4 maxPrim,int4 minSize,int4 maxSize)
+  : SizeRestrictedFilter(minSize, maxSize)
 {
   metaType = meta;
   maxPrimitives = maxPrim;
@@ -408,7 +474,7 @@ bool HomogeneousAggregate::filter(Datatype *dt) const
   type_metatype meta = dt->getMetatype();
   if (meta != TYPE_ARRAY && meta != TYPE_STRUCT)
     return false;
-  PrimitiveExtractor primitives(dt,true,0,4);
+  PrimitiveExtractor primitives(dt,true,false,0,maxPrimitives);
   if (!primitives.isValid() || primitives.size() == 0 || primitives.containsUnknown()
       || !primitives.isAligned() || primitives.containsHoles())
     return false;
@@ -422,6 +488,21 @@ bool HomogeneousAggregate::filter(Datatype *dt) const
   return true;
 }
 
+void HomogeneousAggregate::decode(Decoder &decoder)
+
+{
+  SizeRestrictedFilter::decode(decoder);
+  decoder.rewindAttributes();
+  for(;;) {
+    uint4 attribId = decoder.getNextAttributeId();
+    if (attribId == 0) break;
+    if (attribId == ATTRIB_MAX_PRIMITIVES) {
+      uint4 xmlMaxPrim = decoder.readUnsignedInteger();
+      if (xmlMaxPrim > 0) maxPrimitives = xmlMaxPrim;
+    }
+  }
+}
+
 /// If the next element is a qualifier filter, decode it from the stream and return it.
 /// Otherwise return null
 /// \param decoder is the given stream decoder
@@ -429,18 +510,18 @@ bool HomogeneousAggregate::filter(Datatype *dt) const
 QualifierFilter *QualifierFilter::decodeFilter(Decoder &decoder)
 
 {
-  QualifierFilter *filter;
+  unique_ptr<QualifierFilter> filter;
   uint4 elemId = decoder.peekElement();
   if (elemId == ELEM_VARARGS)
-    filter = new VarargsFilter();
+    filter.reset(new VarargsFilter());
   else if (elemId == ELEM_POSITION)
-    filter = new PositionMatchFilter(-1);
+    filter.reset(new PositionMatchFilter(-1));
   else if (elemId == ELEM_DATATYPE_AT)
-    filter = new DatatypeMatchFilter();
+    filter.reset(new DatatypeMatchFilter());
   else
     return (QualifierFilter *)0;
   filter->decode(decoder);
-  return filter;
+  return filter.release();
 }
 
 /// The AndFilter assumes ownership of all the filters in the array and the original vector is cleared
@@ -570,37 +651,55 @@ bool AssignAction::fillinOutputMap(ParamActive *active) const
 AssignAction *AssignAction::decodeAction(Decoder &decoder,const ParamListStandard *res)
 
 {
-  AssignAction *action;
+  unique_ptr<AssignAction> action;
   uint4 elemId = decoder.peekElement();
   if (elemId == ELEM_GOTO_STACK)
-    action = new GotoStack(res,0);
+    action.reset(new GotoStack(res,0));
   else if (elemId == ELEM_JOIN) {
-    action = new MultiSlotAssign(res);
+    action.reset(new MultiSlotAssign(res));
   }
   else if (elemId == ELEM_CONSUME) {
-    action = new ConsumeAs(TYPECLASS_GENERAL,res);
+    action.reset(new ConsumeAs(TYPECLASS_GENERAL,res));
   }
   else if (elemId == ELEM_CONVERT_TO_PTR) {
-    action = new ConvertToPointer(res);
+    action.reset(new ConvertToPointer(res));
   }
   else if (elemId == ELEM_HIDDEN_RETURN) {
-    action = new HiddenReturnAssign(res,hiddenret_specialreg);
+    action.reset(new HiddenReturnAssign(res,hiddenret_specialreg));
   }
   else if (elemId == ELEM_JOIN_PER_PRIMITIVE) {
-    bool consumeMostSig = false;
-    AddrSpace *spc = res->getSpacebase();
-    if (spc != (AddrSpace *)0 && spc->isBigEndian()) {
-      consumeMostSig = true;
-     }
-    action = new MultiMemberAssign(TYPECLASS_GENERAL,false,consumeMostSig,res);
+    action.reset(new MultiMemberAssign(TYPECLASS_GENERAL,true,false,res->isBigEndian(),res));
   }
   else if (elemId == ELEM_JOIN_DUAL_CLASS) {
-    action = new MultiSlotDualAssign(res);
+    action.reset(new MultiSlotDualAssign(res));
   }
   else
     throw DecoderError("Expecting model rule action");
   action->decode(decoder);
-  return action;
+  return action.release();
+}
+
+/// \brief Read the next model rule precondition element from the stream
+///
+/// Allocate the precondition object corresponding to the element and configure it.
+/// If the next element is not a precondition, return null.
+/// \param decoder is the stream decoder
+/// \param res is the resource set for the new precondition
+/// \return the new precondition, or null if no more preconditions are in the stream
+AssignAction *AssignAction::decodePrecondition(Decoder &decoder,const ParamListStandard *res)
+{
+  unique_ptr<AssignAction> action;
+  uint4 elemId = decoder.peekElement();
+  
+  if (elemId == ELEM_CONSUME_EXTRA) {
+    action.reset(new ConsumeExtra(res));
+  }
+  else {
+    return (AssignAction *)0;
+  }
+  
+  action->decode(decoder);
+  return action.release();
 }
 
 /// \brief Read the next model rule sideeffect element from the stream
@@ -613,19 +712,44 @@ AssignAction *AssignAction::decodeAction(Decoder &decoder,const ParamListStandar
 AssignAction *AssignAction::decodeSideeffect(Decoder &decoder,const ParamListStandard *res)
 
 {
-  AssignAction *action;
+  unique_ptr<AssignAction> action;
   uint4 elemId = decoder.peekElement();
 
   if (elemId == ELEM_CONSUME_EXTRA) {
-    action = new ConsumeExtra(res);
+    action.reset(new ConsumeExtra(res));
   }
   else if (elemId == ELEM_EXTRA_STACK) {
-    action = new ExtraStack(res,0);
+    action.reset(new ExtraStack(res));
+  }
+  else if (elemId == ELEM_CONSUME_REMAINING) {
+    action.reset(new ConsumeRemaining(res));
   }
   else
     throw DecoderError("Expecting model rule sideeffect");
   action->decode(decoder);
-  return action;
+  return action.release();
+}
+
+/// \brief Truncate a tiling by a given number of bytes
+///
+/// The extra bytes are considered padding and removed from one end of the tiling.
+/// The bytes removed depend on the endianness and how the data is justified within the tiling.
+/// \param pieces is the tiling of 2 or more Varnodes
+/// \param offset is the given number of bytes to truncate
+/// \param isBigEndian is true for big endian architectures
+/// \param consumeMostSig is true if the first tile in the list covers the most significant bytes
+/// \param justifyRight is true if the data is right justified within the tiling
+void AssignAction::justifyPieces(vector<VarnodeData> &pieces,int4 offset,bool isBigEndian,
+				 bool consumeMostSig,bool justifyRight)
+{
+  bool addOffset = isBigEndian ^ consumeMostSig ^ justifyRight;
+  int pos = justifyRight ? 0 : pieces.size() - 1;
+
+  VarnodeData &vndata(pieces[pos]);
+  if (addOffset) {
+    vndata.offset += offset;
+  }
+  vndata.size -= offset;
 }
 
 void GotoStack::initializeEntry(void)
@@ -658,7 +782,7 @@ uint4 GotoStack::assignAddress(Datatype *dt,const PrototypePieces &proto,int4 po
 {
   int4 grp = stackEntry->getGroup();
   res.type = dt;
-  res.addr = stackEntry->getAddrBySlot(status[grp],dt->getSize(),dt->getAlignment());
+  res.addr = stackEntry->getAddrBySlot(status[grp],dt->getSize(),dt->getAlignment(),resource->getManager());
   res.flags = 0;
   return success;
 }
@@ -717,6 +841,44 @@ void ConvertToPointer::decode(Decoder &decoder)
   decoder.closeElement(elemId);
 }
 
+/// Test if a data-type of the given size will fit starting at a particular entry within
+/// the resource list.  If necessary, check
+///    1)  If the type will be properly aligned
+///    2)  If there are enough remaining registers, up to the end of the resource list, to
+///        cover the data-type and that have not been consumed.
+///
+/// \param iter is the first resource entry to use for the data-type
+/// \param sizeLeft initially holds the size of the data-type to cover in bytes
+/// \param align is the alignment requirement for the data-type
+/// \param resourcesConsumed is the number of bytes in resources already consumed/skipped
+/// \param tmpStatus is the current consumption status for the resource list
+/// \return \b true if the data-type will fit
+bool MultiSlotAssign::checkFit(int4 iter, int4 sizeLeft, int4 align, int4 resourcesConsumed,vector<int4> &tmpStatus) const
+
+{
+  const ParamEntry *entry = tiles[iter];
+  if (tmpStatus[entry->getGroup()] != 0) {
+    return false;
+  }
+  if (enforceAlignment) {
+    int4 regSize = entry->getSize();
+    if (align > regSize && (resourcesConsumed % align) != 0) {
+      return false;
+    }
+  }
+  if (!adjacentEntries) {
+    return true;
+  }
+  while (iter != tiles.size() && sizeLeft > 0) {
+    entry = tiles[iter];
+    if (tmpStatus[entry->getGroup()] != 0) {
+      return false;
+    }
+    sizeLeft -= entry->getSize();
+  }
+  return true;
+}
+
 /// Find the first ParamEntry matching the \b resourceType, and the ParamEntry
 /// corresponding to the \e stack if \b consumeFromStack is set.
 void MultiSlotAssign::initializeEntries(void)
@@ -736,6 +898,7 @@ MultiSlotAssign::MultiSlotAssign(const ParamListStandard *res)
   : AssignAction(res)
 {
   resourceType = TYPECLASS_GENERAL;	// Join general purpose registers
+  isBigEndian = res->isBigEndian();
   fillinOutputActive = true;
   uint4 listType = res->getType();
   // Consume from stack on input parameters by default
@@ -743,23 +906,28 @@ MultiSlotAssign::MultiSlotAssign(const ParamListStandard *res)
   consumeMostSig = false;
   enforceAlignment = false;
   justifyRight = false;
-  AddrSpace *spc = res->getSpacebase();
-  if (spc != (AddrSpace *)0 && spc->isBigEndian()) {
+  adjacentEntries = true;
+  allowBackfill = false;
+  if (isBigEndian) {
     consumeMostSig = true;
     justifyRight = true;
   }
   stackEntry = (const ParamEntry *)0;
 }
 
-MultiSlotAssign::MultiSlotAssign(type_class store,bool stack,bool mostSig,bool align,bool justRight,const ParamListStandard *res)
+MultiSlotAssign::MultiSlotAssign(type_class store,bool stack,bool mostSig,bool align,bool justRight,bool backfill,
+				 const ParamListStandard *res)
   : AssignAction(res)
 {
   resourceType = store;
+  isBigEndian = res->isBigEndian();
   fillinOutputActive = true;
   consumeFromStack = stack;
   consumeMostSig = mostSig;
   enforceAlignment = align;
   justifyRight = justRight;
+  adjacentEntries = true;
+  allowBackfill = backfill;
   stackEntry = (const ParamEntry *)0;
   initializeEntries();
 }
@@ -772,19 +940,18 @@ uint4 MultiSlotAssign::assignAddress(Datatype *dt,const PrototypePieces &proto,i
   int4 sizeLeft = dt->getSize();
   int4 align = dt->getAlignment();
   int4 iter = 0;
-  if (enforceAlignment) {
-    int4 resourcesConsumed = 0;
-    while(iter != tiles.size()) {
-      const ParamEntry *entry = tiles[iter];
-      if (tmpStatus[entry->getGroup()] == 0) {		// Not consumed
-	int4 regSize = entry->getSize();
-	if (align <= regSize || (resourcesConsumed % align) == 0)
-	  break;
-	tmpStatus[entry->getGroup()] = -1;	// Consume unaligned register
-      }
-      resourcesConsumed += entry->getSize();
-      ++iter;
+  int4 resourcesConsumed = 0;
+  while(iter != tiles.size()) {
+    if (checkFit(iter, sizeLeft, align, resourcesConsumed, tmpStatus)) {
+      break;
     }
+    const ParamEntry *entry = tiles[iter];
+    if (!allowBackfill) {
+      tmpStatus[entry->getGroup()] = -1;	// Consume unaligned register
+    }
+
+    resourcesConsumed += entry->getSize();
+    ++iter;
   }
   while(sizeLeft > 0 && iter != tiles.size()) {
     const ParamEntry *entry = tiles[iter];
@@ -792,12 +959,9 @@ uint4 MultiSlotAssign::assignAddress(Datatype *dt,const PrototypePieces &proto,i
     if (tmpStatus[entry->getGroup()] != 0)
       continue;		// Already consumed
     int4 trialSize = entry->getSize();
-    Address addr = entry->getAddrBySlot(tmpStatus[entry->getGroup()], trialSize,align);
+    Address addr = entry->getAddrBySlot(tmpStatus[entry->getGroup()], trialSize,align,resource->getManager());
     tmpStatus[entry->getGroup()] = -1;	// Consume the register
-    pieces.push_back(VarnodeData());
-    pieces.back().space = addr.getSpace();
-    pieces.back().offset = addr.getOffset();
-    pieces.back().size = trialSize;
+    pieces.emplace_back(addr,trialSize);
     sizeLeft -= trialSize;
     align = 1;		// Treat remaining partial pieces as having no alignment requirement
   }
@@ -805,13 +969,11 @@ uint4 MultiSlotAssign::assignAddress(Datatype *dt,const PrototypePieces &proto,i
     if (!consumeFromStack)
       return fail;
     int4 grp = stackEntry->getGroup();
-    Address addr = stackEntry->getAddrBySlot(tmpStatus[grp],sizeLeft,align);	// Consume all the space we need
+    // Consume all the space we need
+    Address addr = stackEntry->getAddrBySlot(tmpStatus[grp],sizeLeft,align,justifyRight,resource->getManager());
     if (addr.isInvalid())
       return fail;
-    pieces.push_back(VarnodeData());
-    pieces.back().space = addr.getSpace();
-    pieces.back().offset = addr.getOffset();
-    pieces.back().size = sizeLeft;
+    pieces.emplace_back(addr,sizeLeft);
   }
   else if (sizeLeft < 0) {			// Have odd data-type size
     if (resourceType == TYPECLASS_FLOAT && pieces.size() == 1) {
@@ -822,12 +984,8 @@ uint4 MultiSlotAssign::assignAddress(Datatype *dt,const PrototypePieces &proto,i
       tmp.offset = addr.getOffset();
       tmp.size = dt->getSize();
     }
-    else if (justifyRight) {
-      pieces.front().offset += -sizeLeft;	// Initial bytes of first entry are padding
-      pieces.front().size += sizeLeft;
-    }
     else {
-      pieces.back().size += sizeLeft;
+      justifyPieces(pieces, -sizeLeft, isBigEndian, consumeMostSig, justifyRight);
     }
   }
   status = tmpStatus;				// Commit resource usage for all the pieces
@@ -883,7 +1041,10 @@ bool MultiSlotAssign::fillinOutputMap(ParamActive *active) const
       }
     }
   }
-  return (count > 0);
+  if (count==0) return false;
+  if (consumeMostSig)
+    active->setJoinMostSigFirst();
+  return true;
 }
 
 void MultiSlotAssign::decode(Decoder &decoder)
@@ -895,8 +1056,12 @@ void MultiSlotAssign::decode(Decoder &decoder)
     if (attribId == 0) break;
     if (attribId == ATTRIB_REVERSEJUSTIFY) {
       if (decoder.readBool())
-	justifyRight = !justifyRight;
+	    justifyRight = !justifyRight;
     }
+    else if (attribId == ATTRIB_REVERSESIGNIF) {
+	  if (decoder.readBool()) 
+	    consumeMostSig = !consumeMostSig;
+	}
     else if (attribId == ATTRIB_STORAGE) {
       resourceType = string2typeclass(decoder.readString());
     }
@@ -906,17 +1071,38 @@ void MultiSlotAssign::decode(Decoder &decoder)
     else if (attribId == ATTRIB_STACKSPILL) {
       consumeFromStack = decoder.readBool();
     }
+    else if (attribId == ATTRIB_BACKFILL) {
+      allowBackfill = decoder.readBool();
+    }
   }
   decoder.closeElement(elemId);
   initializeEntries();			// Need new firstIter
 }
 
-MultiMemberAssign::MultiMemberAssign(type_class store,bool stack,bool mostSig,const ParamListStandard *res)
+/// \param pieces is the set of pieces
+/// \param pad is the number bytes of the padding element
+/// \return \b true if the padding request was met
+bool MultiMemberAssign::addPadding(vector<VarnodeData> &pieces,int4 pad) const
+
+{
+  if (pad == 0)
+    return true;
+  if (pad < 0)
+    return false;
+
+  pieces.emplace_back(constSpace,0,pad);
+  return true;
+}
+
+MultiMemberAssign::MultiMemberAssign(type_class store,bool recurse,bool stack,bool mostSig,const ParamListStandard *res)
   : AssignAction(res)
 {
+  constSpace = res->getManager()->getConstantSpace();
   resourceType = store;
+  isRecursive = recurse;
   consumeFromStack = stack;
   consumeMostSig = mostSig;
+  stackEntry = res->getStackEntry();
   fillinOutputActive = true;
 }
 
@@ -925,19 +1111,47 @@ uint4 MultiMemberAssign::assignAddress(Datatype *dt,const PrototypePieces &proto
 {
   vector<int4> tmpStatus = status;
   vector<VarnodeData> pieces;
-  PrimitiveExtractor primitives(dt,false,0,16);
+  PrimitiveExtractor primitives(dt,false,isRecursive,0,16);
   if (!primitives.isValid() || primitives.size() == 0 || primitives.containsUnknown()
       || !primitives.isAligned() || primitives.containsHoles())
     return fail;
   ParameterPieces param;
-  for(int4 i=0;i<primitives.size();++i) {
-    Datatype *curType = primitives.get(i).dt;
-    if (resource->assignAddressFallback(resourceType, curType, !consumeFromStack, tmpStatus,param) == fail)
+  if (isRecursive) {		// Recursive assignments
+    if (primitives.size() == 1) {
+      if (primitives.get(0).dt == dt)
+	return fail;		// Prevent infinite recursion
+    }
+    int4 size = 0;
+    int4 before = (stackEntry != (const ParamEntry *)0) ? tmpStatus[stackEntry->getGroup()] : -1;
+    for (int4 i = 0; i < primitives.size(); ++i) {
+      const PrimitiveExtractor::Primitive &primitive(primitives.get(i));
+      if (resource->assignAddress(primitive.dt, proto, pos, tlist, tmpStatus,param) == fail)
+	return fail;
+      if (!consumeFromStack && stackEntry != (const ParamEntry *)0) {
+	if (before != tmpStatus[stackEntry->getGroup()])
+	  return fail;
+      }
+      if (!addPadding(pieces, primitive.offset - size))
+	return fail;
+      size = primitive.offset + primitive.dt->getSize();
+      pieces.emplace_back(param.addr,primitive.dt->getSize());
+    }
+    if (!addPadding(pieces, dt->getSize() - size))
       return fail;
-    pieces.push_back(VarnodeData());
-    pieces.back().space = param.addr.getSpace();
-    pieces.back().offset = param.addr.getOffset();
-    pieces.back().size = curType->getSize();
+  }
+  else {		// Assignment from a specific resourceType
+    int4 size = 0;
+    for (int4 i = 0; i < primitives.size(); ++i) {
+      const PrimitiveExtractor::Primitive &primitive(primitives.get(i));
+      if (resource->assignAddressFallback(resourceType, primitive.dt, !consumeFromStack,tmpStatus,param) == fail)
+	return fail;
+      if (!addPadding(pieces, primitive.offset - size))
+	return fail;
+      size = primitive.offset + primitive.dt->getSize();
+      pieces.emplace_back(param.addr,primitive.dt->getSize());
+    }
+    if (!addPadding(pieces, dt->getSize() - size))
+      return fail;
   }
 
   status = tmpStatus;				// Commit resource usage for all the pieces
@@ -950,6 +1164,8 @@ uint4 MultiMemberAssign::assignAddress(Datatype *dt,const PrototypePieces &proto
 bool MultiMemberAssign::fillinOutputMap(ParamActive *active) const
 
 {
+  if (isRecursive)
+    return false;
   int4 count = 0;
   int4 curGroup = -1;
   for(int4 i=0;i<active->getNumTrials();++i) {
@@ -971,18 +1187,23 @@ bool MultiMemberAssign::fillinOutputMap(ParamActive *active) const
       return false;			// Entry must be justified
     count += 1;
   }
-  return (count > 0);
+  if (count==0) return false;
+  if (consumeMostSig)
+    active->setJoinMostSigFirst();
+  return true;
 }
 
 void MultiMemberAssign::decode(Decoder &decoder)
 
 {
+  isRecursive = true;
   uint4 elemId = decoder.openElement(ELEM_JOIN_PER_PRIMITIVE);
   for(;;) {
     uint4 attribId = decoder.getNextAttributeId();
     if (attribId == 0) break;
     if (attribId == ATTRIB_STORAGE) {
       resourceType = string2typeclass(decoder.readString());
+      isRecursive = false;
     }
   }
   decoder.closeElement(elemId);
@@ -994,11 +1215,15 @@ void MultiSlotDualAssign::initializeEntries(void)
 {
   resource->extractTiles(baseTiles,baseType);
   resource->extractTiles(altTiles,altType);
+  stackEntry = resource->getStackEntry();
+  
   if (baseTiles.size() == 0 || altTiles.size() == 0)
     throw LowlevelError("Could not find matching resources for action: join_dual_class");
   tileSize = baseTiles[0]->getSize();
   if (tileSize != altTiles[0]->getSize())
     throw LowlevelError("Storage class register sizes do not match for action: join_dual_class");
+  if (consumeFromStack && stackEntry == (const ParamEntry *)0)
+    throw LowlevelError("Cannot find matching stack resource for action: join_dual_class");
 }
 
 /// \brief Get the index of the first unused ParamEntry in the given list
@@ -1035,6 +1260,8 @@ int4 MultiSlotDualAssign::getTileClass(const PrimitiveExtractor &primitives,int4
   int4 res = 1;
   int4 count = 0;
   int4 endBoundary = off + tileSize;
+  if (index >= primitives.size()) return -1;
+  const PrimitiveExtractor::Primitive &firstPrimitive( primitives.get(index) );
   while(index < primitives.size()) {
     const PrimitiveExtractor::Primitive &element( primitives.get(index) );
     if (element.offset < off) return -1;
@@ -1047,6 +1274,12 @@ int4 MultiSlotDualAssign::getTileClass(const PrimitiveExtractor &primitives,int4
       res = 0;
   }
   if (count == 0) return -1;	// Must be at least one primitive in section
+  if (fillAlternate) { // Only use altType if the tile contains one primitive of exactly the tile size
+	if (count > 1)
+	  res = 0;
+    if (firstPrimitive.dt->getSize() != tileSize)
+      res = 0;
+  }
   return res;
 }
 
@@ -1055,41 +1288,49 @@ int4 MultiSlotDualAssign::getTileClass(const PrimitiveExtractor &primitives,int4
 MultiSlotDualAssign::MultiSlotDualAssign(const ParamListStandard *res)
   : AssignAction(res)
 {
+  isBigEndian = res->isBigEndian();
   fillinOutputActive = true;
   baseType = TYPECLASS_GENERAL;		// Tile from general purpose registers
   altType = TYPECLASS_FLOAT;		// Use specialized registers for floating-point components
+  consumeFromStack = false;
   consumeMostSig = false;
   justifyRight = false;
-  AddrSpace *spc = res->getSpacebase();
-  if (spc != (AddrSpace *)0 && spc->isBigEndian()) {
+  if (isBigEndian) {
     consumeMostSig = true;
     justifyRight = true;
   }
+  fillAlternate = false;
   tileSize = 0;
+  stackEntry = (const ParamEntry *)0;
 }
 
-MultiSlotDualAssign::MultiSlotDualAssign(type_class baseStore,type_class altStore,bool mostSig,bool justRight,
-					 const ParamListStandard *res)
+MultiSlotDualAssign::MultiSlotDualAssign(type_class baseStore,type_class altStore,bool stack,
+                     bool mostSig,bool justRight,bool fillAlt,const ParamListStandard *res)
   : AssignAction(res)
 {
+  isBigEndian = res->isBigEndian();
   fillinOutputActive = true;
   baseType = baseStore;
   altType = altStore;
+  consumeFromStack = stack;
   consumeMostSig = mostSig;
   justifyRight = justRight;
+  fillAlternate = fillAlt;
+  stackEntry = (const ParamEntry *)0;
   initializeEntries();
 }
 
 uint4 MultiSlotDualAssign::assignAddress(Datatype *dt,const PrototypePieces &proto,int4 pos,TypeFactory &tlist,
 					 vector<int4> &status,ParameterPieces &res) const
 {
-  PrimitiveExtractor primitives(dt,false,0,1024);
+  PrimitiveExtractor primitives(dt,false,false,0,1024);
   if (!primitives.isValid() || primitives.size() == 0 || primitives.containsHoles())
     return fail;
   int4 primitiveIndex = 0;
   vector<int4> tmpStatus = status;
   vector<VarnodeData> pieces;
   int4 typeSize = dt->getSize();
+  int4 align = dt->getAlignment();
   int4 sizeLeft = typeSize;
   int4 iterBase = 0;
   int4 iterAlt = 0;
@@ -1100,33 +1341,40 @@ uint4 MultiSlotDualAssign::assignAddress(Datatype *dt,const PrototypePieces &pro
       return fail;
     if (iterType == 0) {
       iterBase = getFirstUnused(iterBase, baseTiles, tmpStatus);
-      if (iterBase == baseTiles.size())
-	return fail;		// Out of general purpose registers
+      if (iterBase == baseTiles.size()) {
+	    if (!consumeFromStack)
+	      return fail;		// Out of general purpose registers
+        break;
+      }
       entry = baseTiles[iterBase];
     }
     else {
       iterAlt = getFirstUnused(iterAlt, altTiles, tmpStatus);
-      if (iterAlt == altTiles.size())
-	return fail;		// Out of alternate registers
+      if (iterAlt == altTiles.size()) {
+        if (!consumeFromStack)
+          return fail;		// Out of alternate registers
+        break;
+      }
       entry = altTiles[iterAlt];
     }
     int4 trialSize = entry->getSize();
-    Address addr = entry->getAddrBySlot(tmpStatus[entry->getGroup()], trialSize,1);
+    Address addr = entry->getAddrBySlot(tmpStatus[entry->getGroup()], trialSize,1,resource->getManager());
     tmpStatus[entry->getGroup()] = -1;	// Consume the register
-    pieces.push_back(VarnodeData());
-    pieces.back().space = addr.getSpace();
-    pieces.back().offset = addr.getOffset();
-    pieces.back().size = trialSize;
+    pieces.emplace_back(addr,trialSize);
     sizeLeft -= trialSize;
   }
+  if (sizeLeft > 0) {
+	if (!consumeFromStack)
+	  return fail;
+    int4 grp = stackEntry->getGroup();
+    // Consume all the space we need
+    Address addr = stackEntry->getAddrBySlot(tmpStatus[grp],sizeLeft,align,justifyRight,resource->getManager());
+    if (addr.isInvalid())
+      return fail;
+    pieces.emplace_back(addr,sizeLeft);
+  }
   if (sizeLeft < 0) {			// Have odd data-type size
-    if (justifyRight) {
-      pieces.front().offset += -sizeLeft;	// Initial bytes of first entry are padding
-      pieces.front().size += sizeLeft;
-    }
-    else {
-      pieces.back().size += sizeLeft;
-    }
+    justifyPieces(pieces, -sizeLeft, isBigEndian, consumeMostSig, justifyRight);
   }
   status = tmpStatus;				// Commit resource usage for all the pieces
   res.flags = 0;
@@ -1187,8 +1435,10 @@ bool MultiSlotDualAssign::fillinOutputMap(ParamActive *active) const
       }
     }
   }
-  return (count > 0);
-
+  if (count==0) return false;
+  if (consumeMostSig)
+    active->setJoinMostSigFirst();
+  return true;
 }
 
 void MultiSlotDualAssign::decode(Decoder &decoder)
@@ -1199,15 +1449,25 @@ void MultiSlotDualAssign::decode(Decoder &decoder)
     uint4 attribId = decoder.getNextAttributeId();
     if (attribId == 0) break;
     if (attribId == ATTRIB_REVERSEJUSTIFY) {
-      if (decoder.readBool())
-	justifyRight = !justifyRight;
+	  if (decoder.readBool())
+	    justifyRight = !justifyRight;
     }
+    else if (attribId == ATTRIB_REVERSESIGNIF) {
+	  if (decoder.readBool())
+	    consumeMostSig = !consumeMostSig;
+	}
     else if (attribId == ATTRIB_STORAGE || attribId == ATTRIB_A) {
       baseType = string2typeclass(decoder.readString());
     }
     else if (attribId == ATTRIB_B) {
       altType = string2typeclass(decoder.readString());
     }
+    else if (attribId == ATTRIB_STACKSPILL) {
+		consumeFromStack = decoder.readBool();
+	}
+    else if (attribId == ATTRIB_FILL_ALTERNATE) {
+		fillAlternate = decoder.readBool();
+	}
   }
   decoder.closeElement(elemId);
   initializeEntries();			// Need new firstIter
@@ -1337,6 +1597,61 @@ void ConsumeExtra::decode(Decoder &decoder)
 
 {
   uint4 elemId = decoder.openElement(ELEM_CONSUME_EXTRA);
+  for(;;) {
+    uint4 attribId = decoder.getNextAttributeId();
+    if (attribId == 0) break;
+    else if (attribId == ATTRIB_STORAGE) {
+		resourceType = string2typeclass(decoder.readString());
+	}
+	else if (attribId == ATTRIB_MATCHSIZE) {
+		matchSize = decoder.readBool();
+	}
+  }
+  decoder.closeElement(elemId);
+  initializeEntries();
+}
+
+
+/// Find the first ParamEntry matching the \b resourceType.
+void ConsumeRemaining::initializeEntries(void)
+
+{
+  resource->extractTiles(tiles,resourceType);
+  if (tiles.size() == 0)
+    throw LowlevelError("Could not find matching resources for action: consume_remaining");
+}
+
+ConsumeRemaining::ConsumeRemaining(const ParamListStandard *res)
+  : AssignAction(res)
+{
+  resourceType = TYPECLASS_GENERAL;
+}
+
+ConsumeRemaining::ConsumeRemaining(type_class store,const ParamListStandard *res)
+  : AssignAction(res)
+{
+  resourceType = store;
+  initializeEntries();
+}
+
+uint4 ConsumeRemaining::assignAddress(Datatype *dt,const PrototypePieces &proto,int4 pos,TypeFactory &tlist,
+				     vector<int4> &status,ParameterPieces &res) const
+{
+  int4 iter = 0;
+  while(iter != tiles.size()) {
+    const ParamEntry *entry = tiles[iter];
+    ++iter;
+    if (status[entry->getGroup()] != 0)
+      continue;		// Already consumed
+    status[entry->getGroup()] = -1;	// Consume the slot/register
+  }
+  return success;
+}
+
+void ConsumeRemaining::decode(Decoder &decoder)
+
+{
+  uint4 elemId = decoder.openElement(ELEM_CONSUME_REMAINING);
   resourceType = string2typeclass(decoder.readString(ATTRIB_STORAGE));
   decoder.closeElement(elemId);
   initializeEntries();
@@ -1351,16 +1666,19 @@ void ExtraStack::initializeEntry(void)
 }
 
 /// \param res is the new resource set to associate with \b this action
-/// \param val is a dummy value
-ExtraStack::ExtraStack(const ParamListStandard *res,int4 val)
-  : AssignAction(res)
-{
-  stackEntry = (const ParamEntry *)0;
-}
-
 ExtraStack::ExtraStack(const ParamListStandard *res)
   : AssignAction(res)
 {
+  afterBytes = -1;
+  afterStorage = TYPECLASS_GENERAL;
+  stackEntry = (const ParamEntry *)0;
+}
+
+ExtraStack::ExtraStack(type_class storage, int4 offset, const ParamListStandard *res)
+  : AssignAction(res)
+{
+  afterStorage = storage;
+  afterBytes = offset;
   stackEntry = (const ParamEntry *)0;
   initializeEntry();
 }
@@ -1371,9 +1689,29 @@ uint4 ExtraStack::assignAddress(Datatype *dt,const PrototypePieces &proto,int4 p
   if (res.addr.getSpace() == stackEntry->getSpace())
     return success;	// Parameter was already assigned to the stack
   int4 grp = stackEntry->getGroup();
+  // Check whether we have consumed enough storage to need to adjust the stack yet
+  if (afterBytes > 0) {
+    const list<ParamEntry>& entryList = resource->getEntry();
+    int4 bytesConsumed = 0;
+    list<ParamEntry>::const_iterator iter = entryList.begin();
+    list<ParamEntry>::const_iterator endIter = entryList.end();
+    while (iter != endIter) {
+	  const ParamEntry &entry(*iter);
+	  ++iter;
+	  if (entry.getGroup() == grp || entry.getType() != afterStorage) {
+		continue;
+	  }
+	  if (status[entry.getGroup()] != 0) {
+	    bytesConsumed += entry.getSize();
+	  }
+	}
+	if (bytesConsumed < afterBytes) {
+	  return success;
+	}
+  }
   // We assign the stack address (but ignore the actual address) updating the status for the stack,
   // which consumes the stack resources.
-  stackEntry->getAddrBySlot(status[grp],dt->getSize(),dt->getAlignment());
+  stackEntry->getAddrBySlot(status[grp],dt->getSize(),dt->getAlignment(),resource->getManager());
   return success;
 }
 
@@ -1381,6 +1719,14 @@ void ExtraStack::decode(Decoder &decoder)
 
 {
   uint4 elemId = decoder.openElement(ELEM_EXTRA_STACK);
+  for (;;) {
+    uint4 attribId = decoder.getNextAttributeId();
+    if (attribId == 0) break;
+    else if (attribId == ATTRIB_AFTER_BYTES)
+	  afterBytes = decoder.readUnsignedInteger();
+    else if (attribId == ATTRIB_AFTER_STORAGE)
+      afterStorage = string2typeclass(decoder.readString());
+  }
   decoder.closeElement(elemId);
   initializeEntry();
 }
@@ -1400,6 +1746,8 @@ ModelRule::ModelRule(const ModelRule &op2,const ParamListStandard *res)
     assign = op2.assign->clone(res);
   else
     assign = (AssignAction *)0;
+  for (int4 i=0;i<op2.preconditions.size();++i)
+    preconditions.push_back(op2.preconditions[i]->clone(res)); 
   for(int4 i=0;i<op2.sideeffects.size();++i)
     sideeffects.push_back(op2.sideeffects[i]->clone(res));
 }
@@ -1425,6 +1773,8 @@ ModelRule::~ModelRule(void)
     delete qualifier;
   if (assign != (AssignAction *)0)
     delete assign;
+  for(int4 i=0;i<preconditions.size();++i)
+    delete preconditions[i];
   for(int4 i=0;i<sideeffects.size();++i)
     delete sideeffects[i];
 }
@@ -1451,8 +1801,13 @@ uint4 ModelRule::assignAddress(Datatype *dt,const PrototypePieces &proto,int4 po
   if (qualifier != (QualifierFilter *)0 && !qualifier->filter(proto,pos)) {
     return AssignAction::fail;
   }
-  uint4 response = assign->assignAddress(dt,proto,pos,tlist,status,res);
+  vector<int4> tmpStatus = status;
+  for(int4 i =0;i<preconditions.size();++i) {
+	preconditions[i]->assignAddress(dt,proto,pos,tlist,tmpStatus,res);
+  }
+  uint4 response = assign->assignAddress(dt,proto,pos,tlist,tmpStatus,res);
   if (response != AssignAction::fail) {
+	status = tmpStatus;
     for(int4 i=0;i<sideeffects.size();++i) {
       sideeffects[i]->assignAddress(dt,proto,pos,tlist,status,res);
     }
@@ -1483,12 +1838,138 @@ void ModelRule::decode(Decoder &decoder,const ParamListStandard *res)
   else {
     qualifier = new AndFilter(qualifiers);
   }
+  for (;;) {
+    AssignAction *precond = AssignAction::decodePrecondition(decoder, res);
+    if (precond == (AssignAction *)0)
+      break;
+    preconditions.push_back(precond);
+  }
   assign = AssignAction::decodeAction(decoder, res);
   while(decoder.peekElement() != 0) {
     sideeffects.push_back(AssignAction::decodeSideeffect(decoder,res));
   }
 
   decoder.closeElement(elemId);
+}
+
+HiddenReturnAction::HiddenReturnAction(const ProtoModel *m)
+  : SharedAction(m)
+{
+  inputResource = (const ParamListStandard *) m->getInputResource();
+}
+
+void HiddenReturnAction::applyBefore(const PrototypePieces &proto,TypeFactory &tlist,vector<ParameterPieces> &params,
+				     vector<int4> &inputStatus,vector<int4> &outputStatus) const
+{
+  if (params.size() == 2) {	// Check for hidden parameters defined by the output list
+    ParameterPieces &last(params[params.size() - 1]);
+    if ((last.flags & ParameterPieces::hiddenretparm)!=0) {
+	// Need to pull from registers marked as hiddenret
+      inputResource->assignAddressFallback(TYPECLASS_HIDDENRET, last.type, false,inputStatus, last);
+    }
+    else {
+	// Assign as a regular first input pointer parameter
+      inputResource->assignAddress(last.type, proto, 0, tlist, inputStatus, last);
+    }
+    last.flags |= ParameterPieces::hiddenretparm ;
+  }
+}
+
+void HiddenReturnAction::applyAfter(const PrototypePieces &proto,TypeFactory &tlist,vector<ParameterPieces> &params,
+				    vector<int4> &inputStatus,vector<int4> &outputStatus) const
+{
+  if (model->hasThisPointer() && params.size() > 1) {
+    int4 thisIndex = 1;
+    if ((params[1].flags & ParameterPieces::hiddenretparm)!=0 && params.size() > 2) {
+      if (inputResource->isThisBeforeRetPointer()) {
+	// pointer has been bumped by auto-return-storage
+	params[1].swapMarkup(params[2]);	// must swap storage and position for slots 1 and 2
+      }
+      else {
+	thisIndex = 2;
+      }
+    }
+    params[thisIndex].flags |= ParameterPieces::isthis ;
+  }
+}
+
+SharedAction *HiddenReturnAction::clone(ProtoModel *newModel) const
+
+{
+  return new HiddenReturnAction(newModel);
+}
+
+ShareStackAction::ShareStackAction(const ProtoModel *m)
+  : SharedAction(m)
+{
+  const ParamList *inputResource = m->getInputResource();
+  const ParamList *outputResource = m->getOutputResource();
+  inputStackEntry = ((const ParamListStandard *) inputResource)->getStackEntry();
+  outputStackEntry = ((const ParamListStandard *) outputResource)->getStackEntry();
+  inputFirst = false;
+  extraAlign = 0;
+}
+
+void ShareStackAction::applyBefore(const PrototypePieces &proto,TypeFactory &tlist,vector<ParameterPieces> &params,
+				   vector<int4> &inputStatus,vector<int4> &outputStatus) const
+{
+  if (inputFirst)
+    return;
+  // Treat output consumed stack as input consumed stack
+  int4 slotnum = outputStatus[outputStackEntry->getGroup()];
+  if (extraAlign > inputStackEntry->getAlign()) {
+    int4 tmp = (slotnum * inputStackEntry->getAlign()) % extraAlign;
+    if (tmp != 0)
+      slotnum += (extraAlign - tmp) / inputStackEntry->getAlign();
+  }
+  inputStatus[inputStackEntry->getGroup()] = slotnum;
+}
+
+void ShareStackAction::applyAfter(const PrototypePieces &proto,TypeFactory &tlist,vector<ParameterPieces> &params,
+				  vector<int4> &inputStatus,vector<int4> &outputStatus) const
+{
+  if (!inputFirst)
+    return;
+  if (params.empty())
+    return;
+  ParameterPieces &outEntry(params[0]);
+  if (outEntry.addr.isInvalid() || outEntry.addr.getSpace() != outputStackEntry->getSpace())
+    return;
+
+  int4 slotnum = inputStatus[inputStackEntry->getGroup()];
+  if (extraAlign > inputStackEntry->getAlign()) {
+    int4 tmp = (slotnum * inputStackEntry->getAlign()) % extraAlign;
+    if (tmp != 0)
+      slotnum += (extraAlign - tmp) / inputStackEntry->getAlign();
+  }
+  outEntry.addr = inputStackEntry->getAddrBySlot(slotnum, outEntry.type->getSize(),outEntry.type->getAlignment(),
+						 model->getArch());
+}
+
+SharedAction *ShareStackAction::clone(ProtoModel *newModel) const
+
+{
+  return new ShareStackAction(newModel);
+}
+
+void ShareStackAction::decode(Decoder &decoder)
+
+{
+  uint4 mainid = decoder.openElement(ELEM_SHARESTACK);
+  inputFirst = false;
+  extraAlign = 0;
+  for(;;) {
+    uint4 attribId = decoder.getNextAttributeId();
+    if (attribId == 0) break;
+    else if (attribId == ATTRIB_FIRST) {
+      string pos = decoder.readString();
+      inputFirst = pos == "input";
+    }
+    else if (attribId == ATTRIB_ALIGN) {
+      extraAlign = decoder.readUnsignedInteger();
+    }
+  }
+  decoder.closeElement(mainid);
 }
 
 } // End namespace ghidra

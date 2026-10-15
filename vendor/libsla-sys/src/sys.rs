@@ -183,14 +183,16 @@ mod default {
         CPUI_NEW = 69,
         /// Insert a bit-range
         CPUI_INSERT = 70,
-        /// Extract a bit-range
-        CPUI_EXTRACT = 71,
+        /// Extract an unsigned bit-range
+        CPUI_ZPULL = 71,
         /// Count the 1-bits
         CPUI_POPCOUNT = 72,
         /// Count the leading 0-bits
         CPUI_LZCOUNT = 73,
+        /// Extract a signed bit-range
+        CPUI_SPULL = 74,
         /// Value indicating the end of the op-code values
-        CPUI_MAX = 74,
+        CPUI_MAX = 75,
     }
 
     extern "Rust" {
