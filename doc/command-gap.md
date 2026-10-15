@@ -1,10 +1,11 @@
 # Unmigrated radare2 commands: what is worth taking
 
-Draft, 2026-10-06, reviewed 2026-10-09, not yet on the roadmap. The numbers
-come from `scripts/command_gap.py` and reproduce at the review (`ar` 700, `ao`
-308, `pi` 231, 38 verb names); the ranking is section 3. This file records an
-analysis. An item enters `ROADMAP.md` only when its owner crate and its gate
-are named, and section 5 names the gates the first two ranks need.
+Draft 2026-10-06, reviewed 2026-10-09, folded into `ROADMAP.md` 2026-10-15: rank
+2 is item AO, ranks 3 and 5 and the parity tier are S1's, rank 1 is E's, rank 4
+P7's (conditional), and the rest is the roadmap's "Not taken". The roadmap owns
+the order; this file keeps the method and the measurements. The counts below
+are the 2026-10-09 run of `scripts/command_gap.py`; the 2026-10-15 rerun (`ar`
+711, `ao` 311, `pi` 236, 37 verb names) moved no family by more than 5%.
 
 ## 1. Method
 
@@ -39,7 +40,7 @@ A project rule already answers these, so they need no usefulness argument.
 |---|---|---|
 | `!`, `!rabin2` 224, `!rahash2` 128, `!rasm2` 98, `rm` 113, `cat`, `mkdir`, `k` 50, `m`, `o`, `om`, `b`, `ec`, `prj`, `?v` 138 | 1000+ | Non-negotiable 2: `r2s` opens a binary and spells the answer. A shell escape, a file system verb, an sdb key and a project file state nothing about a program. The `!r*` counts are radare2 testing its own command line binaries through r2 |
 | `aa`, `aaa`, `af`, `af+`, `afb+`, `afn` | — | Command Surface, "should it be automatic?" Functions arrive from `r2engine::program::Source` and discovery. A verb that triggers analysis, or defines a function by hand, adds a second owner for a fact discovery owns |
-| `d*` 194 (`dr` 19, `dk` 32, `di` 30, `dc` 9) | 194 | `doc/debugger.md` section 1: the debugger is a separate design that must not start before row D switches `pdd` to the staged pipeline. It binds to register names and a renderer that D replaces |
+| `d*` 194 (`dr` 19, `dk` 32, `di` 30, `dc` 9) | 194 | `doc/debugger.md` section 1: the debugger is a separate design, which waited for row D to switch `pdd` to the staged pipeline; D has merged (#122) |
 | `agf` 17, `agc`, `agx` | 17 | ROADMAP V5: `agf`/`agc`/`agx` share one renderer, already planned |
 | `afv` 195, `afl` 70, `afi` 59, `afb` 36 | 360 | Already in `VERBS`. P4 holds the rest: `afv` agrees with `pdd` |
 
