@@ -108,13 +108,13 @@ int32_t main(int32_t argc, char** argv)
     double swap_call(double, double);
 
     struct r2sleigh_bits_256 z0_5;
-    uint64_t tmp_lane_1010500_11_9_1;
+    uint64_t tmp_lane_1010514_0_0_1;
 
     /* r2dec proof: 1 construct is marked below; 15 source obligations: 10 rendered, 3 elided, 0 refused, 2 residual; 3 statements rendered; 1 callee prototype supplied by the source */
     {
         z0_5 = r2sleigh_bits_zero_extend_64_256((uint64_t)r2sleigh_float_to_bits_64(swap_call((double)(int32_t)argc, r2sleigh_float_from_bits_64((uint64_t)0x4000000000000000U))));
-        tmp_lane_1010500_11_9_1 = r2sleigh_bits_extract_256_64(z0_5, 0U);
-        return (int32_t)(r2sleigh_float_from_bits_64(tmp_lane_1010500_11_9_1) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_lane_1010500_11_9_1) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_lane_1010500_11_9_1) : r2sleigh_residual_i32(1));
+        tmp_lane_1010514_0_0_1 = r2sleigh_bits_extract_256_64(z0_5, 0U);
+        return (int32_t)(r2sleigh_float_from_bits_64(tmp_lane_1010514_0_0_1) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_lane_1010514_0_0_1) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_lane_1010514_0_0_1) : r2sleigh_residual_i32(1));
     }
 }
 
@@ -132,7 +132,7 @@ void __libc_csu_init(int32_t argc, char** argv, char** envp)
     uint64_t x22_2;
     uint64_t x23_2;
     uint64_t x8_4;
-    uint64_t tmp_80000_1;
+    uint64_t tmp_1010578_8_1;
 
     /* r2dec proof: 2 constructs are marked below; 45 source obligations: 21 rendered, 15 elided, 0 refused, 9 residual; 11 statements rendered */
     {
@@ -144,10 +144,10 @@ void __libc_csu_init(int32_t argc, char** argv, char** envp)
                 x8_4 = r2sleigh_load_u64((void*)x22_2);
                 r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1010564:13 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
                 r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x1010564:47 covering 1 op (render::values) */
-                tmp_80000_1 = (uint64_t)((uint64_t)x23_2 - (uint64_t)1U);
-                if ((uint8_t)((uint64_t)tmp_80000_1 != (uint64_t)0U)) {
+                tmp_1010578_8_1 = (uint64_t)((uint64_t)x23_2 - (uint64_t)1U);
+                if ((uint8_t)((uint64_t)tmp_1010578_8_1 != (uint64_t)0U)) {
                     x22_2 = (uint64_t)((uint64_t)x22_2 + (uint64_t)8U);
-                    x23_2 = tmp_80000_1;
+                    x23_2 = tmp_1010578_8_1;
                 } else {
                     break;
                 }
