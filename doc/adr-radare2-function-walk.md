@@ -70,4 +70,7 @@ upstream pull requests, one idea each.
 4. Edge-labelled path state with a join: the entry delta, the last compare and
    the live `lea` candidates become forward dataflow facts, where unequal
    labels become unknown. Result-changing, so it is measured separately; needs design.
-5. Derive the cap on `r_core_anal_fcn`'s callee recursion the same way (not yet taken).
+5. Derive the cap on `r_core_anal_fcn`'s callee recursion. Measured with no
+   payoff, not taken: `anal.depth` 128 or 4096 finds the same functions (`aa`:
+   vim 4706, ls-linux64 121; `af @ main` with `anal.calls`: vim 215, 0pack 282);
+   only 8 truncated anything (0pack 273).
