@@ -102,23 +102,40 @@ fn cmpxchg8b_and_16b_exchange_the_pair() {
     }
 }
 
-/// The locked forms lift alike, between the specification's `LOCK` and `UNLOCK`, with no refusal.
+/// The locked forms are one sequentially consistent compare-and-exchange of the cell, the
+/// specification's `LOCK` and `UNLOCK` gone, no plain or guarded store left beside it.
 #[test]
-fn a_locked_compare_and_exchange_lifts_with_its_store_guarded() {
+fn a_locked_compare_and_exchange_lifts_to_one_atomic_access() {
     let machine = machine();
-    for bytes in [
-        &[0xf0, 0x48, 0x0f, 0xb1, 0x0e][..],
-        &[0xf0, 0x48, 0x0f, 0xc7, 0x0e][..],
+    for (bytes, width) in [
+        (&[0xf0, 0x48, 0x0f, 0xb1, 0x0e][..], 8),
+        (&[0xf0, 0x0f, 0xb0, 0x0e][..], 1),
+        (&[0xf0, 0x48, 0x0f, 0xc7, 0x0e][..], 16),
+        (&[0xf0, 0x0f, 0xc7, 0x0e][..], 8),
     ] {
         let ops = &machine.lift(bytes);
+        let atomics: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                R2ILOp::Atomic(access) => Some(access),
+                _ => None,
+            })
+            .collect();
         assert!(
-            ops.iter()
-                .any(|op| matches!(op, R2ILOp::StoreGuarded { .. })),
-            "{ops:?}"
+            matches!(&atomics[..], [access] if access.dst.size == width
+                && access.ordering == r2il::MemoryOrdering::SeqCst
+                && matches!(access.update, r2il::AtomicUpdate::CompareExchange { .. })),
+            "{bytes:02x?}: {ops:?}"
         );
         assert!(
-            !ops.iter().any(|op| matches!(op, R2ILOp::Store { .. })),
-            "{ops:?}"
+            !ops.iter().any(|op| matches!(
+                op,
+                R2ILOp::Store { .. }
+                    | R2ILOp::StoreGuarded { .. }
+                    | R2ILOp::CallOther { .. }
+                    | R2ILOp::Unimplemented
+            )),
+            "{bytes:02x?}: {ops:?}"
         );
     }
 }

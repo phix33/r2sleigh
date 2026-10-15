@@ -3168,6 +3168,9 @@ define pcodeop LORelease;
 define pcodeop LoadAcquire;
 define pcodeop LoadAcquirePC;
 define pcodeop StoreRelease;
+# The Arm ARM's MemAtomic: the accesses between are one single-copy atomic read-modify-write (LSE, CAS, CASP).
+define pcodeop AtomicBegin;
+define pcodeop AtomicEnd;
 define pcodeop pacda;
 define pcodeop pacdb;
 define pcodeop pacdza;

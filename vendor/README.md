@@ -62,6 +62,14 @@ with their Q, D and S views. None carries a value between instructions: once
 a dead write to one is dropped, no instruction of 20,000 random words per
 language reads one on entry (`crates/r2sleigh-lift/tests/scratch_registers.rs`).
 
+Carried in this tree, not yet in the fork (sleigh-config pull request owed):
+every AArch64 LSE read-modify-write (`ld<op>`, `st<op>`, `swp` at each size) and
+every `cas` and `casp` brackets its load and store with `AtomicBegin()` and
+`AtomicEnd()`, the Arm ARM's `MemAtomic`: one single-copy atomic access, inside
+its release and acquire marks (`AARCH64base.sinc`, declared in
+`AARCH64instructions.sinc`). Without it the p-code of `ldadd` was `ldr; add;
+str`, and nothing told an atomic update from three plain accesses.
+
 Carried in this tree, its Ghidra half on 0verflowme/ghidra
 `r2sleigh-sleigh-context-12` (`ec9a9312`) and not yet in the forks' mains (fork
 pull requests owed to 0verflowme/libsla-sys and 0verflowme/libsla; audit W2):

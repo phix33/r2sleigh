@@ -80,6 +80,8 @@ struct LoadedSpecification {
     decode_state: Cell<u64>,
     /// The unique space's byte order (Ghidra's is the translator's), which places a truncated read.
     unique_big_endian: bool,
+    /// The register space's byte order, which places a truncated register read.
+    register_big_endian: bool,
 }
 
 /// Stamps every change to any specification's decode state, so no two changes share one.
@@ -1598,13 +1600,16 @@ impl LoadedSpecification {
         let mut extracted = crate::sleigh::extract_architecture(&sleigh, arch_name)?;
         crate::sleigh::apply_processor_spec(&mut extracted.arch, pspec);
         let arch = Arc::new(extracted.arch);
-        let unique_big_endian = arch
-            .spaces
-            .iter()
-            .find(|space| space.id == SpaceId::Unique)
-            .and_then(|space| space.endianness)
-            .unwrap_or(arch.memory_endianness)
-            == r2il::Endianness::Big;
+        let big_endian = |id: SpaceId| {
+            arch.spaces
+                .iter()
+                .find(|space| space.id == id)
+                .and_then(|space| space.endianness)
+                .unwrap_or(arch.memory_endianness)
+                == r2il::Endianness::Big
+        };
+        let (unique_big_endian, register_big_endian) =
+            (big_endian(SpaceId::Unique), big_endian(SpaceId::Register));
         let modelled_user_ops = user_operation::resolve_modelled_user_operations(&arch.user_ops);
         let authority = certifying.then(|| {
             GenuineLiftAuthority::new(
@@ -1629,6 +1634,7 @@ impl LoadedSpecification {
             // No stamp is zero, so a fresh specification continues nothing.
             decode_state: Cell::new(0),
             unique_big_endian,
+            register_big_endian,
         })
     }
 }
@@ -2454,9 +2460,11 @@ impl Disassembler {
     /// One instruction's P-code as r2il, with its local labels normalized.
     fn translated(&self, pcode: PcodeDisassembly, addr: u64) -> Result<R2ILBlock> {
         let mut block = self.translate_pcode(pcode, addr)?;
-        crate::internal_control::normalize_instruction_local_control(&mut block, &|userop| {
-            self.user_op_name(userop).map(str::to_owned)
-        });
+        crate::internal_control::normalize_instruction_local_control(
+            &mut block,
+            &|userop| self.user_op_name(userop).map(str::to_owned),
+            self.spec.register_big_endian,
+        );
         r2il::number_temporaries(&mut block.ops);
         Ok(block)
     }
