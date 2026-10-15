@@ -10,7 +10,7 @@ use crate::control::{SsaExecutionStopReason, SsaWorkControl};
 use crate::domtree::DomTree;
 use crate::function::{RegisterFamilyInfo, RegisterFamilySlot};
 use crate::naming::{RegisterNameMap, varnode_to_name};
-use crate::var::{CanonicalStorageId, SSAVar};
+use crate::var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar};
 
 /// Exact identity used by phi placement and SSA renaming.
 ///
@@ -35,9 +35,14 @@ impl RenameIdentity {
         }
     }
 
-    pub fn from_varnode(varnode: &r2il::Varnode, reg_names: Option<&RegisterNameMap>) -> Self {
+    /// `instruction` reads or writes the varnode; a temporary is that instruction's own.
+    pub fn from_varnode(
+        varnode: &r2il::Varnode,
+        reg_names: Option<&RegisterNameMap>,
+        instruction: u64,
+    ) -> Self {
         Self::new(
-            varnode_to_name(varnode, reg_names),
+            varnode_to_name(varnode, reg_names, instruction),
             CanonicalStorageId::from_varnode(varnode),
         )
     }
@@ -49,10 +54,11 @@ impl RenameIdentity {
         varnode: &r2il::Varnode,
         reg_names: Option<&RegisterNameMap>,
         families: Option<&RegisterFamilyInfo>,
+        instruction: u64,
     ) -> Self {
         match register_root_slot(varnode, families) {
             Some(root) => Self::for_root_slot(root, reg_names),
-            None => Self::from_varnode(varnode, reg_names),
+            None => Self::from_varnode(varnode, reg_names, instruction),
         }
     }
 
@@ -67,7 +73,7 @@ impl RenameIdentity {
             offset: root.offset,
             size: root.width,
         };
-        Self::from_varnode(&varnode, reg_names)
+        Self::from_varnode(&varnode, reg_names, NO_TEMPORARY)
     }
 
     pub fn synthetic(name: impl Into<String>, size: u32) -> Self {
@@ -77,6 +83,14 @@ impl RenameIdentity {
     pub fn as_var(&self, version: u32, disambiguator: u32) -> SSAVar {
         SSAVar::new(&self.name, version, self.size).with_rename_disambiguator(disambiguator)
     }
+}
+
+/// The instruction a varnode that cannot be a temporary is read at: none is asked.
+const NO_TEMPORARY: u64 = 0;
+
+/// A temporary belongs to one instruction, which lies in one block, so no merge carries one.
+fn is_temporary(identity: &RenameIdentity) -> bool {
+    identity.storage.space == CanonicalStorageSpace::Unique
 }
 
 pub type DefinitionSitesByIdentity = BTreeMap<RenameIdentity, BTreeSet<u64>>;
@@ -120,6 +134,9 @@ impl PhiPlacement {
 
         for (identity, def_blocks) in defs {
             control.poll()?;
+            if is_temporary(identity) {
+                continue;
+            }
             let mut def_list: Vec<u64> = def_blocks.iter().copied().collect();
             def_list.sort_unstable();
             let mut phi_blocks: Vec<u64> = domtree
@@ -201,17 +218,20 @@ pub fn collect_defs_from_cfg_with_names_storage_and_control<C: SsaWorkControl + 
         let Some(block) = cfg.get_block(addr) else {
             continue;
         };
-        for op in &block.ops {
+        for (index, op) in block.ops.iter().enumerate() {
             control.poll()?;
+            let instruction = block.op_instruction_addr(index).unwrap_or(block.addr);
             for varnode in op.inputs() {
                 if !matches!(varnode.space, r2il::SpaceId::Const) {
-                    let identity = RenameIdentity::for_varnode(varnode, reg_names, families);
+                    let identity =
+                        RenameIdentity::for_varnode(varnode, reg_names, families, instruction);
                     defs.entry(identity.clone()).or_default();
                     storage_by_identity.insert(identity.clone(), identity.storage);
                 }
             }
             if let Some(varnode) = op.output() {
-                let identity = RenameIdentity::for_varnode(varnode, reg_names, families);
+                let identity =
+                    RenameIdentity::for_varnode(varnode, reg_names, families, instruction);
                 defs.entry(identity.clone()).or_default().insert(block.addr);
                 storage_by_identity.insert(identity.clone(), identity.storage);
             }
@@ -233,7 +253,7 @@ pub(crate) fn clobber_identity(
         offset: storage.offset,
         size: storage.size,
     };
-    RenameIdentity::for_varnode(&varnode, reg_names, families)
+    RenameIdentity::for_varnode(&varnode, reg_names, families, NO_TEMPORARY)
 }
 
 /// The clobbers a call makes that this body can observe: those of a register it defines.
@@ -415,7 +435,11 @@ pub fn live_in_by_block(
             continue;
         };
         present.push(true);
-        let rows = block.ops.iter().map(|op| numbering.effect(op)).collect();
+        let rows = (block.ops.iter().enumerate())
+            .map(|(index, op)| {
+                numbering.effect(op, block.op_instruction_addr(index).unwrap_or(block.addr))
+            })
+            .collect();
         effects.push(rows);
     }
     // A call or a return reads or writes the whole of each register the
@@ -581,9 +605,13 @@ impl IdentityNumbers<'_> {
 
     /// The bits of the bytes `varnode` covers in the identity it is renamed
     /// as: a lane's own bytes of its root, or the whole of anything else.
-    fn bytes(&mut self, varnode: &r2il::Varnode) -> std::ops::Range<u32> {
-        let identity =
-            RenameIdentity::for_varnode(varnode, self.naming.reg_names, self.naming.families);
+    fn bytes(&mut self, varnode: &r2il::Varnode, instruction: u64) -> std::ops::Range<u32> {
+        let identity = RenameIdentity::for_varnode(
+            varnode,
+            self.naming.reg_names,
+            self.naming.families,
+            instruction,
+        );
         let root = identity.storage;
         let number = self.number_identity(identity);
         let whole = self.bases[number as usize].clone();
@@ -608,13 +636,20 @@ impl IdentityNumbers<'_> {
     }
 
     /// What one operation reads and defines, as renaming writes it.
-    fn effect(&mut self, op: &r2il::R2ILOp) -> LivenessOpEffect {
-        let kill = op.output().map(|varnode| self.bytes(varnode));
+    /// A temporary is never live where a block begins (`is_temporary`), so it has no bits.
+    fn effect(&mut self, op: &r2il::R2ILOp, instruction: u64) -> LivenessOpEffect {
+        let tracked = |varnode: &&r2il::Varnode| {
+            !matches!(varnode.space, r2il::SpaceId::Const | r2il::SpaceId::Unique)
+        };
+        let kill = op
+            .output()
+            .filter(tracked)
+            .map(|varnode| self.bytes(varnode, instruction));
         let reads = op
             .inputs()
             .into_iter()
-            .filter(|varnode| !matches!(varnode.space, r2il::SpaceId::Const))
-            .map(|varnode| self.bytes(varnode))
+            .filter(tracked)
+            .map(|varnode| self.bytes(varnode, instruction))
             .collect();
         LivenessOpEffect {
             boundary: match op {

@@ -37,12 +37,18 @@ pub fn frame_slot_name(entry_offset: i64) -> String {
     }
 }
 
-/// Convert a varnode to a variable name.
-///
-/// For registers:
-/// - If a name is found in the map, use the name directly (e.g., "rax")
-/// - If no name is found, use "reg:offset" fallback (e.g., "reg:10")
-pub fn varnode_to_name(vn: &Varnode, reg_names: Option<&RegisterNameMap>) -> String {
+/// A temporary's name: the instruction it belongs to and its offset there (ROADMAP D36).
+pub fn temporary_name(instruction: u64, offset: u64) -> String {
+    format!("tmp:{instruction:x}:{offset:x}")
+}
+
+/// A varnode's name, read or written by `instruction`, whose own a temporary is; a register is
+/// spelled by the map, or `reg:<offset>` where it has none.
+pub fn varnode_to_name(
+    vn: &Varnode,
+    reg_names: Option<&RegisterNameMap>,
+    instruction: u64,
+) -> String {
     match vn.space {
         SpaceId::Register => {
             if let Some(map) = reg_names
@@ -52,7 +58,7 @@ pub fn varnode_to_name(vn: &Varnode, reg_names: Option<&RegisterNameMap>) -> Str
             }
             format!("reg:{:x}", vn.offset)
         }
-        SpaceId::Unique => format!("tmp:{:x}", vn.offset),
+        SpaceId::Unique => temporary_name(instruction, vn.offset),
         SpaceId::Const => format!("const:{:x}", vn.offset),
         SpaceId::Ram => format!("ram:{:x}", vn.offset),
         SpaceId::Custom(id) if id == crate::slot_promotion::PROMOTED_SLOT_SPACE => {
@@ -74,7 +80,7 @@ mod tests {
             offset: 0x10,
             size: 8,
         };
-        assert_eq!(varnode_to_name(&vn, None), "reg:10");
+        assert_eq!(varnode_to_name(&vn, None, 0), "reg:10");
     }
 
     #[test]
@@ -88,7 +94,7 @@ mod tests {
             offset: 0x10,
             size: 8,
         };
-        assert_eq!(varnode_to_name(&vn, Some(&map)), "rax");
+        assert_eq!(varnode_to_name(&vn, Some(&map), 0), "rax");
     }
 
     #[test]
@@ -102,7 +108,7 @@ mod tests {
             offset: 0x10,
             size: 8,
         };
-        assert_eq!(varnode_to_name(&vn, Some(&map)), "reg:10");
+        assert_eq!(varnode_to_name(&vn, Some(&map), 0), "reg:10");
     }
 
     #[test]
@@ -113,20 +119,20 @@ mod tests {
             offset: 0x42,
             size: 4,
         };
-        assert_eq!(varnode_to_name(&const_vn, None), "const:42");
+        assert_eq!(varnode_to_name(&const_vn, None, 0), "const:42");
 
         let tmp_vn = Varnode {
             space: SpaceId::Unique,
             offset: 0x1000,
             size: 8,
         };
-        assert_eq!(varnode_to_name(&tmp_vn, None), "tmp:1000");
+        assert_eq!(varnode_to_name(&tmp_vn, None, 0x401334), "tmp:401334:1000");
 
         let ram_vn = Varnode {
             space: SpaceId::Ram,
             offset: 0x400000,
             size: 8,
         };
-        assert_eq!(varnode_to_name(&ram_vn, None), "ram:400000");
+        assert_eq!(varnode_to_name(&ram_vn, None, 0), "ram:400000");
     }
 }

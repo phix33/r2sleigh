@@ -231,7 +231,7 @@ impl SymbolTable {
         // A rendered identifier is spelled by `spell_var`, which never emits a
         // raw SSA name. One that arrives here still wearing its space prefix came
         // from somewhere that handed a machine name straight to the table, and
-        // that is how `tmp:25400` reaches the page as `tmp_25400`.
+        // that is how `tmp:401334:8` reaches the page as `tmp_401334_8`.
         if crate::debug::debug_merges() && name.contains(':') {
             eprintln!("RAWMINT name={name}");
         }

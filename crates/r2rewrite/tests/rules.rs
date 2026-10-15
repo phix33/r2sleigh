@@ -29,7 +29,7 @@ fn and_of_one_value_is_that_value() {
     let projection = projection(&artifact);
     let roots = canonicalize(&artifact, &projection).expect("canonical roots");
     let and = roots
-        .value(value_named(&artifact, "tmp:100_1"))
+        .value(value_named(&artifact, "tmp:1000:100_1"))
         .expect("and");
     assert!(matches!(
         roots.arena().term(and.canonical).kind,
@@ -132,7 +132,7 @@ fn identities_compose_through_a_single_use_chain() {
     let projection = projection(&artifact);
     let roots = canonicalize(&artifact, &projection).expect("canonical roots");
     let xor = roots
-        .value(value_named(&artifact, "tmp:400_1"))
+        .value(value_named(&artifact, "tmp:1000:400_1"))
         .expect("xor");
     let TermKind::Bitwise { left, right, .. } = roots.arena().term(xor.canonical).kind else {
         panic!("expected xor, got {:?}", roots.arena().term(xor.canonical));
@@ -179,7 +179,7 @@ fn a_difference_compared_with_zero_compares_its_operands() {
     let projection = projection(&artifact);
     let roots = canonicalize(&artifact, &projection).expect("canonical roots");
     let not = roots
-        .value(value_named(&artifact, "tmp:300_1"))
+        .value(value_named(&artifact, "tmp:1000:300_1"))
         .expect("the negation");
     let TermKind::Compare {
         op, left, right, ..
@@ -243,7 +243,7 @@ fn a_negated_ordering_flips_and_a_zero_extension_of_a_truncation_extracts() {
     let projection = projection(&artifact);
     let roots = canonicalize(&artifact, &projection).expect("canonical roots");
     let flipped = roots
-        .value(value_named(&artifact, "tmp:200_1"))
+        .value(value_named(&artifact, "tmp:1000:200_1"))
         .expect("negated ordering");
     let TermKind::Compare {
         op, interpretation, ..
@@ -257,7 +257,7 @@ fn a_negated_ordering_flips_and_a_zero_extension_of_a_truncation_extracts() {
     assert_eq!(op, r2ssa::MachineComparisonOp::LessThanOrEqual);
     assert_eq!(interpretation, r2ssa::MachineSignedness::Signed);
     let narrowed = roots
-        .value(value_named(&artifact, "tmp:400_1"))
+        .value(value_named(&artifact, "tmp:1000:400_1"))
         .expect("double truncation");
     let TermKind::Extract { input, lsb_bits } = roots.arena().term(narrowed.canonical).kind else {
         panic!(
@@ -327,12 +327,12 @@ fn a_signed_branch_on_flags_becomes_a_comparison_through_the_difference_by_name(
     // default policy would expand their single-reader definitions regardless
     // and would not exercise that contract.
     let inlinable = [
-        "tmp:200_1",
-        "tmp:300_1",
-        "tmp:400_1",
-        "tmp:500_1",
-        "tmp:600_1",
-        "tmp:700_1",
+        "tmp:1000:200_1",
+        "tmp:1000:300_1",
+        "tmp:1000:400_1",
+        "tmp:1000:500_1",
+        "tmp:1000:600_1",
+        "tmp:1000:700_1",
     ]
     .into_iter()
     .map(|name| value_named(&artifact, name))
@@ -345,11 +345,11 @@ fn a_signed_branch_on_flags_becomes_a_comparison_through_the_difference_by_name(
     )
     .expect("canonical roots under the production expansion policy");
     let difference = roots
-        .value(value_named(&artifact, "tmp:100_1"))
+        .value(value_named(&artifact, "tmp:1000:100_1"))
         .expect("difference");
     assert_eq!(difference.multiplicity, Multiplicity::Once);
     let branch = roots
-        .value(value_named(&artifact, "tmp:500_1"))
+        .value(value_named(&artifact, "tmp:1000:500_1"))
         .expect("the flag comparison");
     let TermKind::Compare {
         op,
@@ -376,7 +376,7 @@ fn a_signed_branch_on_flags_becomes_a_comparison_through_the_difference_by_name(
     let discharges = roots.discharges(&artifact, &projection, branch.value);
     assert!(discharges.is_empty(), "{discharges:?}");
     let zero_flag = roots
-        .value(value_named(&artifact, "tmp:300_1"))
+        .value(value_named(&artifact, "tmp:1000:300_1"))
         .expect("zero flag");
     assert!(matches!(
         roots.arena().term(zero_flag.canonical).kind,
@@ -415,7 +415,7 @@ fn an_address_sum_reaches_its_affine_normal_form() {
     let projection = projection(&artifact);
     let roots = canonicalize(&artifact, &projection).expect("canonical roots");
     let sum = roots
-        .value(value_named(&artifact, "tmp:300_1"))
+        .value(value_named(&artifact, "tmp:1000:300_1"))
         .expect("sum");
     let TermKind::Arithmetic {
         op: r2ssa::MachineArithmeticOp::Add,
@@ -481,10 +481,10 @@ fn an_extension_sandwiched_in_its_own_truncation_is_one_extension() {
     let projection = projection(&artifact);
     let roots = canonicalize(&artifact, &projection).expect("canonical roots");
     let once = roots
-        .value(value_named(&artifact, "tmp:200_1"))
+        .value(value_named(&artifact, "tmp:1000:200_1"))
         .expect("the first extension");
     let twice = roots
-        .value(value_named(&artifact, "tmp:400_1"))
+        .value(value_named(&artifact, "tmp:1000:400_1"))
         .expect("the second extension");
     assert_eq!(
         twice.canonical, once.canonical,

@@ -203,7 +203,7 @@ fn equal_conversions_are_equal_however_long_their_chains() {
     };
     let artifact = SsaArtifact::for_symbolic(&[block], None).expect("artifact");
     let last = |chain: u64| {
-        let name = format!("tmp:{:x}", start(chain) + 19 * 0x10 + 8);
+        let name = crate::naming::temporary_name(0x1000, start(chain) + 19 * 0x10 + 8);
         (artifact.graph().values.iter())
             .find(|value| value.var.name() == name)
             .map(|value| value.id)

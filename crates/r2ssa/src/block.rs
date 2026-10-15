@@ -109,6 +109,8 @@ pub struct SSAContext {
     versions: HashMap<&'static InternedName, u32>,
     /// Versions allocated by the current operation but not yet visible to reads.
     pending_versions: HashMap<&'static InternedName, u32>,
+    /// The instruction the operation being converted belongs to, whose temporaries it names.
+    instruction: u64,
 }
 
 impl SSAContext {
@@ -526,6 +528,7 @@ pub fn to_ssa(block: &R2ILBlock, spell: Spelling<'_>) -> SSABlock {
 
     for (op_index, op) in block.ops.iter().enumerate() {
         let instruction = block.instruction_of(op_index);
+        ctx.instruction = instruction.unwrap_or(block.addr);
         let ssa_op = convert_op(op, instruction, spell, &mut ctx);
         ctx.commit_deferred_versions();
         ssa_block.push(ssa_op);
@@ -542,13 +545,16 @@ pub type Spelling<'a> = &'a dyn Fn(&Varnode) -> Option<String>;
 /// For registers:
 /// - If a name is found, use the name directly (e.g., "rax", "cf")
 /// - If no name is found, use "reg:offset" fallback (e.g., "reg:10")
-fn varnode_to_name(vn: &Varnode, spell: Spelling<'_>) -> &'static InternedName {
+fn varnode_to_name(vn: &Varnode, spell: Spelling<'_>, instruction: u64) -> &'static InternedName {
     match vn.space {
         SpaceId::Register => match spell(vn) {
             Some(name) => intern_ascii_lowercase(&name),
             None => intern_fmt(format_args!("reg:{:x}", vn.offset)),
         },
-        SpaceId::Unique => intern_fmt(format_args!("tmp:{:x}", vn.offset)),
+        SpaceId::Unique => intern_fmt(format_args!(
+            "{}",
+            crate::naming::temporary_name(instruction, vn.offset)
+        )),
         SpaceId::Const => intern_fmt(format_args!("const:{:x}", vn.offset)),
         SpaceId::Ram => intern_fmt(format_args!("ram:{:x}", vn.offset)),
         SpaceId::Custom(id) if id == crate::slot_promotion::PROMOTED_SLOT_SPACE => intern_fmt(
@@ -560,7 +566,7 @@ fn varnode_to_name(vn: &Varnode, spell: Spelling<'_>) -> &'static InternedName {
 
 /// Convert a varnode to an SSA variable for reading (uses current version).
 fn read_var(vn: &Varnode, spell: Spelling<'_>, ctx: &SSAContext) -> SSAVar {
-    let name = varnode_to_name(vn, spell);
+    let name = varnode_to_name(vn, spell, ctx.instruction);
     let version = ctx.current_version(name);
     SSAVar::from_interned(name, version, vn.size)
 }
@@ -570,7 +576,7 @@ fn read_var(vn: &Varnode, spell: Spelling<'_>, ctx: &SSAContext) -> SSAVar {
 /// The new version remains invisible to reads until the current operation is
 /// fully converted.
 fn write_var(vn: &Varnode, spell: Spelling<'_>, ctx: &mut SSAContext) -> SSAVar {
-    let name = varnode_to_name(vn, spell);
+    let name = varnode_to_name(vn, spell, ctx.instruction);
     let version = ctx.defer_version(name);
     SSAVar::from_interned(name, version, vn.size)
 }

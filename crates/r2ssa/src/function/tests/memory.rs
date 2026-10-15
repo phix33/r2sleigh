@@ -467,7 +467,7 @@ fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
         .named_block(0x1780)
         .and_then(|block| {
             block.ops().iter().find_map(|op| match op {
-                SSAOp::Copy { dst, .. } if dst.name() == "tmp:1798" => Some(dst.clone()),
+                SSAOp::Copy { dst, .. } if dst.name() == "tmp:1780:1798" => Some(dst.clone()),
                 _ => None,
             })
         })
@@ -485,7 +485,7 @@ fn prepared_call_result_refuses_display_named_stack_store_reload_owner() {
         .named_block(0x1780)
         .and_then(|block| {
             block.ops().iter().find_map(|op| match op {
-                SSAOp::Subpiece { dst, .. } if dst.name() == "tmp:17a0" => Some(dst.clone()),
+                SSAOp::Subpiece { dst, .. } if dst.name() == "tmp:1780:17a0" => Some(dst.clone()),
                 _ => None,
             })
         })

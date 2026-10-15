@@ -66,6 +66,7 @@ fn caller_slots() -> BTreeMap<i64, CallerSlotSupply> {
         a: sum,
         b: make_unique(0x410, 8),
     });
+    let body = ops.len();
     load(&mut ops, 0, make_reg(RA, 8));
     ops.push(R2ILOp::IntAdd {
         dst: make_reg(SP, 8),
@@ -78,8 +79,14 @@ fn caller_slots() -> BTreeMap<i64, CallerSlotSupply> {
     let mut block = R2ILBlock::new(0x1000, 16);
     let count = ops.len();
     block.ops = ops;
+    // The body is one instruction and each load another, as the temporaries they pass require.
     for index in 0..count {
-        block.stamp_instruction(index, 0x1000 + index as u64);
+        let instruction = match index {
+            _ if index < body => 0x1000,
+            _ if index < body + 2 => 0x1004,
+            _ => 0x1008 + 4 * (index - body - 2) as u64,
+        };
+        block.stamp_instruction(index, instruction);
     }
     let interface = SourceFunctionInterface::new_exact(
         b"caller-slots".to_vec(),
