@@ -6538,3 +6538,23 @@ fn a_conditional_write_on_one_arm_merges_where_the_arms_join() {
         assert!(!text.contains(absent), "{absent}: {text}");
     }
 }
+
+/// `cmpxchg [rip+7], ecx; mov eax, [rip+1]; ret` over the four bytes at 0x100e: the compare may write
+/// them, so the load reads memory rather than the constant the container holds there (P5).
+#[test]
+fn a_load_of_bytes_a_conditional_store_writes_is_not_read_only() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: vec![
+            0x0f, 0xb1, 0x0d, 0x07, 0x00, 0x00, 0x00, // 1000 cmpxchg [rip+7], ecx
+            0x8b, 0x05, 0x01, 0x00, 0x00, 0x00, // 1007 mov eax, [rip+1]
+            0xc3, // 100d ret
+            0x44, 0x33, 0x22, 0x11, // 100e the bytes
+        ],
+        name: "exchange_then_load",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(!output.contains("0x11223344"), "{output}");
+}

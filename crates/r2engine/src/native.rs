@@ -2265,17 +2265,23 @@ fn literal_accesses(body: &crate::body::Body) -> (BTreeMap<u64, usize>, Vec<std:
     };
     let mut loads = BTreeMap::new();
     let mut stores = Vec::new();
-    for op in body.blocks.iter().flat_map(|block| &block.lifted.ops) {
-        match op {
-            r2il::R2ILOp::Load { dst, addr, .. } if literal(addr) => {
-                let size = usize::try_from(dst.size).unwrap_or(usize::MAX);
+    let accesses = (body.blocks.iter())
+        .flat_map(|block| &block.lifted.ops)
+        .flat_map(r2il::R2ILOp::memory_accesses);
+    for access in accesses {
+        let (addr, size) = (access.addr, access.size);
+        match access.kind {
+            r2il::eval::AccessKind::Read if literal(addr) && !access.repeated => {
+                let size = usize::try_from(size).unwrap_or(usize::MAX);
                 let widest = loads.entry(addr.offset).or_insert(size);
                 *widest = (*widest).max(size);
             }
-            r2il::R2ILOp::Store { addr, val, .. } if literal(addr) => {
-                stores.push(addr.offset..addr.offset.saturating_add(u64::from(val.size)));
-            }
-            _ => {}
+            r2il::eval::AccessKind::Write if literal(addr) => stores.push(match access.repeated {
+                // A repeated write's extent turns on a count and a direction, so it may reach any byte.
+                true => 0..u64::MAX,
+                false => addr.offset..addr.offset.saturating_add(u64::from(size)),
+            }),
+            r2il::eval::AccessKind::Read | r2il::eval::AccessKind::Write => {}
         }
     }
     (loads, stores)
