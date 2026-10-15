@@ -111,6 +111,7 @@ pub fn render(
     match &values {
         Some(values) => {
             c.params = values.params();
+            c.variadic = input.variadic();
             c.locals = values.locals();
             c.externs = values.externs();
             c.extern_objects = values.extern_objects();

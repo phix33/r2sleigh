@@ -172,6 +172,7 @@ pub(crate) fn prepare_function_for_emission(func: CFunction) -> EmissionReadyFun
             params: func.params,
             locals: func.locals,
             params_known: func.params_known,
+            variadic: func.variadic,
             externs: func.externs,
             typedefs: func.typedefs,
             aggregates: func.aggregates,
@@ -607,10 +608,12 @@ impl<'c> CodeGenerator<'c> {
         if func.params.is_empty() {
             // An empty list is only `void` when it was actually recovered.
             // Otherwise leave it unspecified rather than asserting the function
-            // takes no arguments.
-            if func.params_known {
+            // takes no arguments; a tail with no named parameter has no C spelling either.
+            if func.params_known && !func.variadic {
                 self.output.push_str("void");
             }
+        } else if func.variadic {
+            self.output.push_str(", ...");
         }
 
         self.output.push(')');
@@ -1756,6 +1759,7 @@ mod tests {
             locals: Vec::new(),
             body: Vec::new(),
             params_known: false,
+            variadic: false,
             symbols: std::rc::Rc::new(symbols),
         };
 
@@ -1802,6 +1806,7 @@ mod tests {
             locals: Vec::new(),
             body: Vec::new(),
             params_known: true,
+            variadic: false,
             symbols: std::rc::Rc::new(symbols),
         };
         let code = generate(&func);
@@ -1842,6 +1847,7 @@ mod tests {
                 CExpr::var(crate::symbol::declare(&symbols, "b")),
             )))],
             params_known: true,
+            variadic: false,
             symbols: std::rc::Rc::new(symbols),
         };
 
@@ -1871,6 +1877,7 @@ mod tests {
                 init: None,
             }],
             params_known: true,
+            variadic: false,
             symbols: std::rc::Rc::new(symbols),
         };
 
@@ -1907,6 +1914,7 @@ mod tests {
                 locals: Vec::new(),
                 body: Vec::new(),
                 params_known: true,
+                variadic: false,
                 symbols: std::rc::Rc::clone(&func_symbols(&symbols)),
             };
             generate(&func)
@@ -1967,6 +1975,7 @@ mod tests {
                 else_body: Some(Box::new(CStmt::Return(Some(CExpr::int(0))))),
             }],
             params_known: true,
+            variadic: false,
             symbols: std::rc::Rc::new(symbols),
         };
         let mut observed = plain.clone();
@@ -2241,6 +2250,7 @@ mod tests {
                 CStmt::Return(None),
             ],
             params_known: true,
+            variadic: false,
             symbols: std::rc::Rc::new(symbols),
         };
 
