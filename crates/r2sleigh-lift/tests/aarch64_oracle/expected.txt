@@ -23,4 +23,3 @@ fcvtzs_v4s: stop Undefined
 frintx_d: stop unmodelled CALLOTHER NEON_frintx
 frinti_d: stop unmodelled CALLOTHER NEON_frinti
 fmla_elem: wrong v0
-fcvtzu_fix_d_sat: wrong v4; wrong v7; wrong x4; wrong x7

@@ -16,7 +16,10 @@ Carried in this tree, not yet in the fork (sleigh-config #16 and #17): AArch64's
 `fcvt{a,m,n,p,z}u` into W and X and the scalar fixed-point `fcvtzu` into H, S
 and D saturate as FPToFixed states (NaN and below 0 give 0, at or above 2^N all
 ones), where #9's text wrapped (`fp_to_unsigned`, `fp_to_unsigned64`;
-`AARCH64neon.sinc`).
+`AARCH64neon.sinc`). The scalar fixed-point `fcvtzu` into H and D reads its
+fraction bits with `Imm_shr_imm16` and `Imm_shr_imm64`, as `fcvtzs` does, where
+Ghidra read `Imm_shr_imm32`: `fcvtzu d0, d1, #8` decoded as `#-0x38` and
+`fcvtzu h0, h1, #8` as `#0x28`.
 
 Licences: Apache-2.0 (each crate's `LICENSE`), with Ghidra's `NOTICE`,
 `DISCLAIMER.md` and `licenses/` kept beside its sources.

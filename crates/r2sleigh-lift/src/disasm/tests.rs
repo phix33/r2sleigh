@@ -155,6 +155,26 @@ fn aarch64_casp_compares_and_stores_its_first_register_at_the_address() {
     assert_eq!(stored, vec![x(2), x(3)], "{:?}", raw.ops);
 }
 
+/// Scalar fixed-point `fcvtzu` reads its fraction bits at its element size, as `fcvtzs` does.
+#[cfg(feature = "arm")]
+#[test]
+fn aarch64_fcvtzu_fixed_point_reads_fbits_at_its_element_size() {
+    let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::Aarch64Le)
+        .expect("trusted AArch64 specification");
+    // fcvtzu d0, d1, #8; fcvtzu h0, h1, #8; fcvtzu s0, s1, #8 (immh:immb 120, 24, 56).
+    let text = |word: u32| {
+        let bytes = padded_instruction(word.to_le_bytes());
+        disassembler
+            .disasm_native(&bytes, 0x1000)
+            .expect("decode")
+            .0
+    };
+    let single = text(0x7f38_fc20);
+    assert!(single.ends_with("#0x8"), "{single}");
+    assert_eq!(text(0x7f78_fc20), single.replace('s', "d"));
+    assert_eq!(text(0x7f18_fc20), single.replace('s', "h"));
+}
+
 #[cfg(feature = "arm")]
 #[test]
 fn aarch64_w_register_write_explicitly_zero_extends_its_declared_carrier() {
