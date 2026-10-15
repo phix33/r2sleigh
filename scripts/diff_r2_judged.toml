@@ -30,6 +30,14 @@ radare2 = "6.2.4"
 # ── Single binaries, ahead of the classes below that would otherwise take their rows ──
 
 [[judged]]
+command = "pd"
+binaries = ["arm-*.o", "aarch64-*.o"]
+r2 = '\b(blx?|b(eq|ne)?\.w|adrp x\d+,|ldr x\d+,) '
+r2s = '\b(blx?|b(eq|ne)?\.w|adrp x\d+,|ldr x\d+,) 0x[0-9a-f]+$'
+verdict = "unfilled"
+reason = "an ARM or AArch64 object's instruction field (R_ARM_THM_CALL, THM_JUMP19 and JUMP24, BE32 too; R_AARCH64_ADR_GOT_PAGE, LD_PREL_LO19) is stated typed but no encoder writes it, so r2s decodes the file's field: a branch to itself or by its addend (beq.w 0x810003e), an adrp to its own page; owner r2image (ROADMAP I: ARM and AArch64 instruction-field encoders). radare2 also lists the file's field, naming the relocation or the address (bl sym.f is the unrelocated self-target; adrp obj.cbuf names the page after the common symbol it lists at the base)"
+
+[[judged]]
 command = "is"
 binaries = ["TestRTTI-armv7-dSYM", "core.dwarf"]
 columns = ["vaddr"]
@@ -491,7 +499,7 @@ reason = "a common symbol (SHN_COMMON, x86-64's SHN_X86_64_LCOMMON) has no addre
 [[judged]]
 command = "pd"
 binaries = ["x86_64-abs-sym.o", "x86_64-common-sym.o", "x86_64-common-code.o", "arm-abs-thumb-blx.o"]
-r2 = '(\.[dq]word 0x[0-9a-f]+|ff +invalid)$'
+r2 = '(\.[dq]word 0x[0-9a-f]+| ff +invalid)$'
 verdict = "unfilled"
 reason = "a data section's relocated words: radare2 marks each relocation's word data and lists it .qword or .dword, the file's 0 (relocs unapplied), then its fill; r2s decodes them as instructions as the link leaves them (xor al, 0x12 is absval's 0x1234, stmdaeq r0, {r0, r8} is romfn's 0x08000101), and one starting inside a written word reads the file's bytes (stated::code encodes a write only whole); owner r2engine's listing (ROADMAP P11)"
 
@@ -716,14 +724,6 @@ r2 = 'mov[wt] r(ext|tf), 0x0$'
 r2s = 'mov[wt] r0, 0x0$'
 verdict = "r2s-right"
 reason = "the encoded register is r0 (movw r0, #:lower16:ext, :lower16:tf); radare2 substitutes the relocation's symbol into the register name (master too). Both leave the immediate the file's 0, which r2image's ARM encoders owe (ROADMAP I)"
-
-[[judged]]
-command = "pd"
-binaries = ["arm-*.o", "aarch64-*.o"]
-r2 = '\b(blx?|b(eq|ne)?\.w|adrp x\d+,|ldr x\d+,) '
-r2s = '\b(blx?|b(eq|ne)?\.w|adrp x\d+,|ldr x\d+,) 0x[0-9a-f]+$'
-verdict = "unfilled"
-reason = "an ARM or AArch64 object's instruction field (R_ARM_THM_CALL, THM_JUMP19 and JUMP24, BE32 too; R_AARCH64_ADR_GOT_PAGE, LD_PREL_LO19) is stated typed but no encoder writes it, so r2s decodes the file's field: a branch to itself or by its addend (beq.w 0x810003e), an adrp to its own page; owner r2image (ROADMAP I: ARM and AArch64 instruction-field encoders). radare2 also lists the file's field, naming the relocation or the address (bl sym.f is the unrelocated self-target; adrp obj.cbuf names the page after the common symbol it lists at the base)"
 
 [[judged]]
 command = "pd"
