@@ -62,7 +62,8 @@ upstream pull requests, one idea each.
    `R_ANAL_RET_DUP`/`R_ANAL_RET_NEW`. This changes results, so it is measured
    on its own.
 2. One read-ahead cache per walk instead of one per frame. Result-preserving;
-   measured in IO reads per function.
+   measured in IO reads per function. Open as radare2#26986: `aa` reads 109,762
+   to 36,583 on 0pack, 94,428 to 23,866 on vim, CPU unchanged on local files.
 3. Carry the predecessor in the frame, replacing `try_get_jmptbl_info`'s scan
    of every block; record each block's delay-slot tail so `bbget` stops
    re-decoding; hoist `function_has_ret_between` out of the per-case loop.
