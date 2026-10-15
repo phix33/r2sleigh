@@ -629,7 +629,7 @@ const fn gcd(a: u64, b: u64) -> u64 {
 /// Where a stub begins: the longest tail of its run that only feeds the transfer or does nothing.
 ///
 /// A stub's work before its transfer is computing where it goes. An instruction
-/// that stores, or writes what the transfer never reads, is not part of that:
+/// that writes memory, or writes what the transfer never reads, is not part of that:
 /// on x86 the zero pad after PLT0 decodes as `add byte [eax], al`. One that
 /// writes nothing stays, so a landing pad at the stub's head is its own.
 ///
@@ -663,7 +663,7 @@ fn stub_start(run: &r2il::R2ILBlock, starts: &[(u64, usize)], align: u64) -> u64
         .collect();
     for (index, (pc, ops)) in instructions.iter().enumerate().rev() {
         let transfer = index + 1 == instructions.len();
-        let stores = ops.iter().any(|op| matches!(op, R2ILOp::Store { .. }));
+        let stores = ops.iter().any(R2ILOp::is_memory_write);
         let stray = ops
             .iter()
             .filter_map(R2ILOp::output)
@@ -744,6 +744,30 @@ mod tests {
             )]),
         );
         db
+    }
+
+    /// A guarded store before the transfer writes memory and nothing the transfer reads, so it is not the stub's.
+    #[test]
+    fn a_stub_starts_after_any_instruction_that_writes_memory() {
+        let register = |offset| r2il::Varnode::register(offset, 4);
+        let mut run = fresh_run(0x3400);
+        run.push_from(
+            R2ILOp::StoreGuarded {
+                space: r2il::SpaceId::Ram,
+                addr: register(0),
+                val: register(4),
+                guard: register(8),
+                ordering: r2il::MemoryOrdering::Relaxed,
+            },
+            0x3400,
+        );
+        run.push_from(
+            R2ILOp::BranchInd {
+                target: register(12),
+            },
+            0x3404,
+        );
+        assert_eq!(stub_start(&run, &[(0x3400, 0), (0x3404, 1)], 1), 0x3404);
     }
 
     /// libz's `.plt.sec`: stubs whose slots bind to symbols libz defines name no import, and leave gaps.
