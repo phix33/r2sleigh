@@ -176,12 +176,58 @@ those calls' direct callees, its arity owners (none where one such call names
 no callee). Under `aa` (`Callers::Read`), `Resolved` waits on arity owners as
 on result owners: `Component` is Tarjan over both edges, bottom-up, and a
 function is resolved again where an owner outside its component states an
-exact arity. Members of one component read each other alone, so an argument a
-cycle hands on stays a floor; a fixpoint inside the component costs a
-preparation per member per round and waits on its measurement. Without `aa`, a
+exact arity. Without `aa`, a
 request demands results only, as above, and pays no closure (D23): measured on
 0pack `0x62ecf0`, demanding arity on a cold `pdd` took 20.0 to 36.5 G
 instructions, pumasim `0x23fdf0` 18.1 to 21.2 G.
+
+**A cycle's arities.** Inside a component, an owner is a member, and a
+member resolved alone leaves the slot a recursive call may be handed a floor
+(review.c's `fact`, `AtLeast(1)`, made `main`'s `fact(5)` a counted residual).
+Arity is the set of slots whose incoming value may be read, and any read
+happens at a finite recursion depth, so the least fixpoint over the members is
+exact; the floor was a needless greatest-fixpoint answer. `Resolved`, under
+`aa`, answers a member whose floor a member owns (an open member) by a
+worklist over the component (`least_fixpoint`):
+
+1. each open member is assumed `Exact` at the count it reads alone; every
+   other member an open one calls is stated as `Resolved` answers it, exact or
+   a floor;
+2. an open member is resolved against its outside owners, as above, and the
+   members it calls as assumed;
+3. where its read rises above its assumption (a count, then a floor, then no
+   interface), the assumption rises and every open member calling it is
+   resolved again. An assumption only rises, its count bounded by the slots
+   its body can read, so the work is O(k + (s + 2)·E) preparations for k open
+   members, s slots and E calls between them.
+
+A member's assumption states its interface alone, its result stripped
+(`SourceFunctionInterface::assumed_arity`), and nothing it preserves or
+reaches, so only arity moves: a member's result proof is the one it had. A
+floor with a non-member cause (an indirect call of unstated arity, an unseen
+transfer, a supervisor call, the argument area) survives the member's own
+read, and its callers through it stay floors. A read that falls below its
+assumption would mean recovery is not monotone in its callees' arities; the
+whole component then keeps the floors it had, under refusal evidence
+`arity-fixpoint` (none seen over every function of review.c and shapes.c at
+six builds, nor on the 0pack, pumasim and gzdoom functions below). The
+other open members' answers are deposited, as `Component` deposits its
+components. Measured on release `aa; pdd`, with one more walk per open member
+at its first resolution: 0pack `0x62ecf0` 61.89 to 62.44 G instructions,
+`0x58e3d0` 74.33 to 74.27 G, pumasim `0x23fdf0` 60.17 to 60.12 G, gzdoom
+`0x10070695c` 191.31 to 191.16 G, peak RSS within 4%; no budget is needed.
+
+A recursive root reads itself as its callers do: under `aa` its own entry is
+one of the callees it reads `Resolved`, so its recursive call takes the
+arity the fixpoint states rather than a count off the registers it wrote
+(gcc -O1's `fact` hoists `mov eax, 1` above its compare, and a call handed
+`al` is refused that count). It costs one `Resolved(entry)` per
+self-recursive root, which any caller's render pays anyway; without `aa` the
+root reads only its other callees, as before.
+
+What stays open: a cycle's result (shapes.c's `shape_mutual_even` now calls
+`shape_mutual_odd` with its two arguments, and returns a residual, since each
+member's result is the other's), the next fixpoint of this kind.
 
 ### Variadic tail (ROADMAP P7, W14)
 
