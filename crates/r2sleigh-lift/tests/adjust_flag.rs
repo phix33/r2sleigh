@@ -25,6 +25,18 @@ fn adjust(a: u128, b: u128, result: u128) -> u128 {
     ((a ^ b ^ result) >> 4) & 1
 }
 
+/// An instruction, its bytes, its form, the registers holding a and b, whether CF enters.
+type TwoOperand = (
+    &'static str,
+    &'static [u8],
+    Form,
+    &'static str,
+    &'static str,
+    bool,
+);
+/// An instruction, its bytes, EAX, ECX, CF in, AF out.
+type Worked = (&'static str, &'static [u8], u128, u128, u128, u128);
+
 #[derive(Clone, Copy)]
 enum Form {
     /// `a + b + carry` (ADD, ADC, INC, XADD).
@@ -36,8 +48,7 @@ enum Form {
 #[test]
 fn arithmetic_sets_af_to_the_carry_out_of_bit_3() {
     let machine = Machine::x86_64();
-    // (instruction, bytes, form, the register holding a, the one holding b, whether CF enters).
-    let forms: [(&str, &[u8], Form, &str, &str, bool); 6] = [
+    let forms: [TwoOperand; 6] = [
         (
             "add eax, ecx",
             &[0x01, 0xc8],
@@ -134,8 +145,7 @@ fn one_operand_and_memory_forms_set_af() {
 #[test]
 fn af_is_the_carry_or_borrow_out_of_bit_3_as_the_sdm_states_it() {
     let machine = Machine::x86_64();
-    // (instruction, bytes, EAX, ECX, CF in, AF out)
-    let cases: [(&str, &[u8], u128, u128, u128, u128); 8] = [
+    let cases: [Worked; 8] = [
         ("add eax, ecx", &[0x01, 0xc8], 0x0f, 0x01, 0, 1),
         ("add eax, ecx", &[0x01, 0xc8], 0x0e, 0x01, 0, 0),
         ("add eax, ecx", &[0x01, 0xc8], 0x08, 0x08, 0, 1),
