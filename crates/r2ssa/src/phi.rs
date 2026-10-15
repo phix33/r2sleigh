@@ -334,7 +334,7 @@ pub fn add_call_boundary_def_sites(
             continue;
         };
         for op in &block.ops {
-            if !matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. }) {
+            if !op.is_call() {
                 continue;
             }
             let callee = call_boundaries.callee_boundary(op);
@@ -618,7 +618,7 @@ impl IdentityNumbers<'_> {
             .collect();
         LivenessOpEffect {
             boundary: match op {
-                r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. } => LivenessBoundary::Call,
+                _ if op.is_call() => LivenessBoundary::Call,
                 r2il::R2ILOp::Return { .. } => LivenessBoundary::Return,
                 _ => LivenessBoundary::None,
             },

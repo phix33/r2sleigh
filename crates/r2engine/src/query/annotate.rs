@@ -464,7 +464,7 @@ fn straight_line_fate(
                 Some(fate) => return fate,
                 None => {}
             }
-            called |= matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. });
+            called |= op.is_call();
             if holders.is_empty() && derived.is_empty() {
                 return Fate::Result;
             }
@@ -517,7 +517,7 @@ fn op_fate(
     };
     let (held, built) = (reads(holders), reads(derived));
     match op {
-        R2ILOp::Call { .. } | R2ILOp::CallInd { .. } => {
+        _ if op.is_call() => {
             // A register the call may change no longer holds the number.
             holders.retain(|held| {
                 call_effect.is_none_or(|effect| {
@@ -579,86 +579,16 @@ fn touched_at(origins: &BlockOrigins, op: &R2ILOp) -> Vec<AnnotationKind> {
             .into_iter()
             .collect();
     }
-    accessed(op)
-        .into_iter()
-        .filter_map(|(addr, width, access)| Some(access(folded(addr)?, width)))
+    op.memory_accesses()
+        .filter(|access| access.space == SpaceId::Ram)
+        .filter_map(|access| {
+            let (address, width) = (folded(access.addr)?, access.size);
+            Some(match access.kind {
+                r2il::eval::AccessKind::Read => AnnotationKind::Reads { address, width },
+                r2il::eval::AccessKind::Write => AnnotationKind::Writes { address, width },
+            })
+        })
         .collect()
-}
-
-/// How an access is claimed at the address it folds to.
-type Access = fn(u64, u32) -> AnnotationKind;
-
-const fn reads(address: u64, width: u32) -> AnnotationKind {
-    AnnotationKind::Reads { address, width }
-}
-
-const fn writes(address: u64, width: u32) -> AnnotationKind {
-    AnnotationKind::Writes { address, width }
-}
-
-/// Each address one operation reads or writes memory through, with the bytes it accesses there.
-///
-/// A conditional or linked access names the address it would use as surely as
-/// a plain one does, and a repeated string operation names the first element
-/// at each address it reads or writes through.
-fn accessed(op: &R2ILOp) -> Vec<(&Varnode, u32, Access)> {
-    match op {
-        R2ILOp::Load {
-            dst,
-            space: SpaceId::Ram,
-            addr,
-        }
-        | R2ILOp::LoadLinked {
-            dst,
-            space: SpaceId::Ram,
-            addr,
-            ..
-        }
-        | R2ILOp::LoadGuarded {
-            dst,
-            space: SpaceId::Ram,
-            addr,
-            ..
-        } => vec![(addr, dst.size, reads)],
-        R2ILOp::Store {
-            space: SpaceId::Ram,
-            addr,
-            val,
-        }
-        | R2ILOp::StoreConditional {
-            space: SpaceId::Ram,
-            addr,
-            val,
-            ..
-        }
-        | R2ILOp::StoreGuarded {
-            space: SpaceId::Ram,
-            addr,
-            val,
-            ..
-        } => vec![(addr, val.size, writes)],
-        R2ILOp::AtomicCAS {
-            space: SpaceId::Ram,
-            addr,
-            expected,
-            ..
-        } => vec![(addr, expected.size, reads), (addr, expected.size, writes)],
-        R2ILOp::BlockTransfer(transfer) if transfer.space == SpaceId::Ram => {
-            let (kind, width) = (transfer.kind, transfer.element_size);
-            let (source, destination) = (&transfer.source, &transfer.destination);
-            [
-                kind.source_is_address()
-                    .then_some((source, width, reads as Access)),
-                kind.stop().map(|_| (destination, width, reads as Access)),
-                kind.writes_memory()
-                    .then_some((destination, width, writes as Access)),
-            ]
-            .into_iter()
-            .flatten()
-            .collect()
-        }
-        _ => Vec::new(),
-    }
 }
 
 /// The one number in the operands that spells this address, where there is one.

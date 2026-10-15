@@ -476,15 +476,12 @@ fn section_stubs(
         {
             return None;
         }
-        let leaves = lifted
-            .ops
-            .iter()
-            .any(|op| matches!(op, R2ILOp::Branch { .. } | R2ILOp::BranchInd { .. }));
         let indirect = lifted
             .ops
             .iter()
             .any(|op| matches!(op, R2ILOp::BranchInd { .. }));
         let direct = (lifted.ops.iter()).any(|op| matches!(op, R2ILOp::Branch { .. }));
+        let leaves = indirect || direct;
         let section_range = section.vaddr..end;
         entered.extend(lifted.ops.iter().filter_map(|op| match op {
             R2ILOp::Branch { target }

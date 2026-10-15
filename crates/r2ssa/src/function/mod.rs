@@ -3815,7 +3815,7 @@ fn decompile_call_boundary_config(
     let calls = blocks
         .iter()
         .flat_map(|block| &block.ops)
-        .any(|op| matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. }));
+        .any(R2ILOp::is_call);
     if calls && machine_context.call_effect().is_none() {
         r2il::refusal_evidence!(
             "call-effect",

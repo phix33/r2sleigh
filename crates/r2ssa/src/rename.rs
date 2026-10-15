@@ -728,14 +728,11 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                 let renamed_op = rename_op(op, op_addr, ctx, &mut defined_vars, reg_names);
                 let block_ops = result.blocks.get_mut(&block_addr).unwrap();
                 block_ops.append(&mut ctx.lanes.prefix);
-                let boundary_reads =
-                    if matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. })
-                        && call_boundaries.is_some()
-                    {
-                        append_call_boundary_reads(block_ops, ctx)
-                    } else {
-                        Vec::new()
-                    };
+                let boundary_reads = if op.is_call() && call_boundaries.is_some() {
+                    append_call_boundary_reads(block_ops, ctx)
+                } else {
+                    Vec::new()
+                };
                 record_renamed_op_storage(op, &renamed_op, result);
                 for (var, storage) in boundary_reads {
                     record_canonical_storage(
@@ -759,7 +756,7 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                 }
 
                 let mut written_lanes = Vec::new();
-                if matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. })
+                if op.is_call()
                     && let Some(boundary) = call_boundaries
                 {
                     let boundary_defs = append_call_boundary_defs(
@@ -785,7 +782,7 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                 // After the clobbers, not before them: the run of `CallDefine`
                 // directly following a call is how a result is found, and an
                 // operation in the middle of it ends that run early.
-                if matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. })
+                if op.is_call()
                     && let (Some(identity), Some(entering)) = (
                         stack_pointer_identity,
                         carrier_entering_instruction.as_ref(),

@@ -110,7 +110,7 @@ impl BlockOrigins {
 
     /// Apply one operation, so the state describes the point just after it.
     pub fn step(&mut self, op: &R2ILOp) {
-        if matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. }) {
+        if op.is_call() {
             // A callee may write any register; RAM is read by `of` directly and is never tracked.
             self.origins.clear();
             return;
@@ -132,30 +132,19 @@ impl BlockOrigins {
 
     /// Forget what a memory write may change: the bytes it names where its address folds, else its space.
     fn forget_memory_write(&mut self, op: &R2ILOp) {
-        let (space, addr, size) = match op {
-            R2ILOp::Store { space, addr, val }
-            | R2ILOp::StoreConditional {
-                space, addr, val, ..
+        for write in op.memory_accesses() {
+            if write.kind != r2il::eval::AccessKind::Write {
+                continue;
             }
-            | R2ILOp::StoreGuarded {
-                space, addr, val, ..
-            } => (*space, Some(addr), val.size),
-            R2ILOp::AtomicCAS {
-                space,
-                addr,
-                replacement,
-                ..
-            } => (*space, Some(addr), replacement.size),
-            // Its extent turns on a count and a direction, so it may write anywhere in its space; a scan or a compare writes none.
-            R2ILOp::BlockTransfer(transfer) if transfer.kind.writes_memory() => {
-                (transfer.space, None, 0)
+            let space = CanonicalStorageId::from_varnode(&Varnode::new(write.space, 0, 0)).space;
+            // A repeated write's extent turns on a count and a direction, so it may reach anywhere in its space.
+            let offset = (!write.repeated)
+                .then(|| self.of(write.addr)?.constant())
+                .flatten();
+            match offset {
+                Some(offset) => self.forget_bytes(space, offset, write.size.into()),
+                None => self.forget_bytes(space, 0, 1 << 64),
             }
-            _ => return,
-        };
-        let space = CanonicalStorageId::from_varnode(&Varnode::new(space, 0, 0)).space;
-        match addr.and_then(|addr| self.of(addr)?.constant()) {
-            Some(offset) => self.forget_bytes(space, offset, size.into()),
-            None => self.forget_bytes(space, 0, 1 << 64),
         }
     }
 
@@ -189,8 +178,8 @@ impl BlockOrigins {
 
     /// Apply one operation where the convention says what a call leaves standing; without one a call forgets everything.
     pub fn step_under(&mut self, op: &R2ILOp, call_effect: Option<&crate::SourceCallEffect>) {
-        match (op, call_effect) {
-            (R2ILOp::Call { .. } | R2ILOp::CallInd { .. }, Some(effect)) => {
+        match call_effect {
+            Some(effect) if op.is_call() => {
                 self.origins.retain(|storage, _| !effect.clobbers(*storage));
             }
             _ => self.step(op),

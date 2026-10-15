@@ -426,17 +426,13 @@ pub fn canonicalize_memory_operands(
 /// A plain load of an address this instruction already loaded or stored, nothing written to the address,
 /// value or memory between, reads the value held: one access Sleigh spells as several. O(n·k).
 pub fn forward_repeated_loads(ops: Vec<R2ILOp>) -> Vec<R2ILOp> {
-    let local_branch = |op: &R2ILOp| {
-        matches!(op, R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. }
-            if target.space == SpaceId::Const)
-    };
     let (mut loads, mut stores) = (0, 0);
     for op in &ops {
         loads += usize::from(matches!(op, R2ILOp::Load { .. }));
         stores += usize::from(matches!(op, R2ILOp::Store { .. }));
     }
     // Nothing to forward without a second load, or a load after a store.
-    if loads == 0 || (loads == 1 && stores == 0) || ops.iter().any(local_branch) {
+    if loads == 0 || (loads == 1 && stores == 0) || ops.iter().any(R2ILOp::is_local_branch) {
         return ops;
     }
     // Each (space, address, size) whose value a varnode still holds.

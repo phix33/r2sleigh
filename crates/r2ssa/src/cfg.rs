@@ -356,12 +356,9 @@ impl BasicBlock {
 }
 
 fn op_direct_control_target(op: &R2ILOp) -> Option<u64> {
-    match op {
-        R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. } => {
-            BasicBlock::extract_const_addr(target)
-        }
-        _ => None,
-    }
+    op.transfer()
+        .filter(|transfer| transfer.direct && !transfer.call)
+        .and_then(|transfer| BasicBlock::extract_const_addr(transfer.target))
 }
 
 fn op_terminates_basic_block(op: &R2ILOp) -> bool {
