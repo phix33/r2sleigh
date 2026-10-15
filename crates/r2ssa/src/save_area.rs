@@ -74,7 +74,7 @@ pub(crate) fn register_save_area(
             continue;
         }
         let mut saved = crate::dense::IdSet::new(graph.values.len());
-        let mut stores = BTreeSet::new();
+        let mut stores = crate::dense::IdSet::new(graph.insts.len());
         for (_, value, store) in (named..=last).flat_map(saved_at) {
             saved.insert(*value);
             stores.insert(*store);
@@ -112,7 +112,7 @@ fn entry_slot(graph: &SsaGraph, value: ValueId, arguments: &[CanonicalStorageId]
 fn read_only_by(
     graph: &SsaGraph,
     value: ValueId,
-    stores: &BTreeSet<InstId>,
+    stores: &crate::dense::IdSet<InstId>,
     observations: &crate::deadphi::ProvenProgramObservations,
 ) -> bool {
     let mut seen = crate::dense::IdSet::new(graph.values.len());
@@ -131,7 +131,7 @@ fn read_only_by(
                 }
                 (InstPayload::Op(SSAOp::CallUse { .. }), _) => {}
                 (_, Some(output)) if !observations.contains(output) => {}
-                _ if stores.contains(&site.inst) => {}
+                _ if stores.contains(site.inst) => {}
                 _ => return false,
             }
         }
