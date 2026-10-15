@@ -2362,6 +2362,10 @@ pub(crate) fn convention_slots(
                     r2abi::SaveAreaAnchor::End => r2source::SourceSaveAreaAnchor::End,
                 },
             ))
+            .with_variadic_count_register(
+                (target.convention.variadic_count_register)
+                    .and_then(|name| storage(target.arch, name).ok()),
+            )
             .with_entry_stack(target.convention.entry_stack.map(|stack| {
                 r2source::SourceEntryStack {
                     alignment: stack.alignment,

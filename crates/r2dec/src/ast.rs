@@ -1568,6 +1568,7 @@ impl CallRefusal {
                 B::SlotSkipped { .. } => "slot-skipped",
                 B::ResultPassedOn { .. } => "result-passed-on",
                 B::CountFromRegisters => "count-from-registers",
+                B::CountRegisterSet => "count-register-set",
                 B::ImportUnstated(r2ssa::UnstatedImport::Undeclared) => "import-undeclared",
                 B::ImportUnstated(r2ssa::UnstatedImport::Unplaced) => "import-unplaced",
             },
@@ -1636,6 +1637,9 @@ impl std::fmt::Display for CallRefusal {
                     );
                 }
                 B::CountFromRegisters => "no arity is stated, only the registers written before it",
+                B::CountRegisterSet => {
+                    "it is handed a vector count: variadic or unprototyped, its argument count unproven"
+                }
                 B::ImportUnstated(r2ssa::UnstatedImport::Undeclared) => {
                     "the import has no declaration to state its arguments"
                 }

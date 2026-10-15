@@ -3,11 +3,13 @@
 
 use crate::common;
 
-use common::{BASE, Literal};
+use common::{BASE, GLIBC, Literal};
 use r2engine::program::OpenProgram;
 
 /// `vf(unsigned n, ...) { va_start(ap, n); return take(ap, n); }` as clang builds it, `caller`
-/// calling `vf(1, 5)`; `six` and `arr` are six-parameter bodies their callers call with 1 to 6.
+/// calling `vf(1, 5)`; `six` and `arr` are six-parameter bodies their callers call with 1 to 6;
+/// `wrapper(a, b)` calls `vf(5, a, b, a ^ b, a + b, a | b)` and returns `b`; `outer` calls it with
+/// 3 and 4.
 const SYSV: &[u8] = &[
     0x48, 0x81, 0xec, 0xc8, 0x00, 0x00, 0x00, // 1000 sub rsp, 0xc8
     0x48, 0x89, 0x74, 0x24, 0x08, // 1007 mov [rsp + 0x8], rsi
@@ -102,6 +104,27 @@ const SYSV: &[u8] = &[
     0x41, 0xb9, 0x06, 0x00, 0x00, 0x00, // 118a mov r9d, 6
     0xe8, 0x8b, 0xff, 0xff, 0xff, // 1190 call 0x1120
     0xc3, // 1195 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1196 padding
+    0x53, // 11a0 push rbx
+    0x48, 0x89, 0xf3, // 11a1 mov rbx, rsi
+    0x49, 0x89, 0xf9, // 11a4 mov r9, rdi
+    0x49, 0x09, 0xf1, // 11a7 or r9, rsi
+    0x4c, 0x8d, 0x04, 0x37, // 11aa lea r8, [rdi + rsi]
+    0x48, 0x89, 0xf9, // 11ae mov rcx, rdi
+    0x48, 0x31, 0xf1, // 11b1 xor rcx, rsi
+    0x48, 0x89, 0xf2, // 11b4 mov rdx, rsi
+    0x48, 0x89, 0xfe, // 11b7 mov rsi, rdi
+    0xbf, 0x05, 0x00, 0x00, 0x00, // 11ba mov edi, 5
+    0x31, 0xc0, // 11bf xor eax, eax
+    0xe8, 0x3a, 0xfe, 0xff, 0xff, // 11c1 call 0x1000
+    0x48, 0x89, 0xd8, // 11c6 mov rax, rbx
+    0x5b, // 11c9 pop rbx
+    0xc3, // 11ca ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 11cb padding
+    0xbf, 0x03, 0x00, 0x00, 0x00, // 11d0 mov edi, 3
+    0xbe, 0x04, 0x00, 0x00, 0x00, // 11d5 mov esi, 4
+    0xe8, 0xc1, 0xff, 0xff, 0xff, // 11da call 0x11a0
+    0xc3, // 11df ret
 ];
 
 fn sysv() -> OpenProgram<Literal> {
@@ -117,6 +140,8 @@ fn sysv() -> OpenProgram<Literal> {
             ("arr", BASE + 0x120, 0x2d),
             ("sum5", BASE + 0x14d, 0x18),
             ("caller_arr", BASE + 0x170, 0x26),
+            ("wrapper", BASE + 0x1a0, 0x2b),
+            ("outer", BASE + 0x1d0, 0x10),
         ],
     ))
 }
@@ -147,6 +172,23 @@ fn a_register_save_area_is_a_variadic_tail_not_six_parameters() {
         !caller.contains("argument slots read with no parameter"),
         "{caller}"
     );
+    assert!(callee.contains("variadic tail registers"), "{callee}");
+}
+
+/// `wrapper` sets `al` for its call to `vf`, so even resolved before `vf` is read, the registers it
+/// writes there are no count: `outer`'s call agrees with `wrapper`'s own floor under `aa`.
+#[test]
+fn a_call_handed_a_vector_count_counts_no_argument_from_registers() {
+    let mut open = sysv();
+    open.analyse_program().expect("it surveys");
+    let outer = rendered(&mut open, BASE + 0x1d0);
+    assert!(
+        outer.contains("call to wrapper: its arity is only at least 0 (a floor)"),
+        "{outer}"
+    );
+    assert!(!outer.contains("wrapper(3"), "{outer}");
+    let wrapper = rendered(&mut open, BASE + 0x1a0);
+    assert!(!wrapper.contains("arg0"), "{wrapper}");
 }
 
 /// `six` spills all six in order and stores the spill's address: no named slot sits below the run.
@@ -215,4 +257,57 @@ fn an_aapcs64_save_area_is_a_variadic_tail() {
         "{caller}"
     );
     assert!(!caller.contains("vf(1"), "{caller}");
+}
+
+/// gcc's stack protector: `f` sets every argument register for `g(a + 1, 0, ...)`, stores the
+/// guard and clears it from `eax`; `g` returns its first argument plus one; `outer` calls `f(5)`.
+const SCRUBBED: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0x8d, 0x7f, 0x01, // 1004 lea edi, [rdi + 0x1]
+    0x31, 0xf6, // 1007 xor esi, esi
+    0x31, 0xd2, // 1009 xor edx, edx
+    0x31, 0xc9, // 100b xor ecx, ecx
+    0x45, 0x31, 0xc0, // 100d xor r8d, r8d
+    0x45, 0x31, 0xc9, // 1010 xor r9d, r9d
+    0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // 1013 mov rax, fs:[0x28]
+    0x48, 0x89, 0x44, 0x24, 0x08, // 101c mov [rsp + 0x8], rax
+    0x31, 0xc0, // 1021 xor eax, eax
+    0xe8, 0x38, 0x00, 0x00, 0x00, // 1023 call 0x1060
+    0x48, 0x8b, 0x54, 0x24, 0x08, // 1028 mov rdx, [rsp + 0x8]
+    0x64, 0x48, 0x2b, 0x14, 0x25, 0x28, 0x00, 0x00, 0x00, // 102d sub rdx, fs:[0x28]
+    0x75, 0x0a, // 1036 jne 0x1042
+    0xb8, 0x03, 0x00, 0x00, 0x00, // 1038 mov eax, 3
+    0x48, 0x83, 0xc4, 0x18, // 103d add rsp, 0x18
+    0xc3, // 1041 ret
+    0xe8, 0x09, 0x00, 0x00, 0x00, // 1042 call 0x1050
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1047 padding
+    0xeb, 0xfe, // 1050 jmp 0x1050
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1052 padding
+    0x8d, 0x47, 0x01, // 1060 lea eax, [rdi + 0x1]
+    0xc3, // 1063 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1064 padding
+    0xbf, 0x05, 0x00, 0x00, 0x00, // 1070 mov edi, 5
+    0xe8, 0x86, 0xff, 0xff, 0xff, // 1075 call 0x1000
+    0xc3, // 107a ret
+];
+
+/// The protector's `xor eax, eax` over its guard is no vector count: resolved before `g` is read,
+/// `f`'s call still counts `a + 1`, so `outer` calls `f(5)`.
+#[test]
+fn the_stack_protector_clearing_its_guard_sets_no_vector_count() {
+    let mut open = OpenProgram::of(
+        Literal::of_code(
+            SCRUBBED,
+            &[
+                ("f", BASE, 0x47),
+                ("halt", BASE + 0x50, 0x02),
+                ("g", BASE + 0x60, 0x04),
+                ("outer", BASE + 0x70, 0x0b),
+            ],
+        )
+        .running_on(GLIBC),
+    );
+    let outer = rendered(&mut open, BASE + 0x70);
+    assert!(outer.contains("f(5)"), "{outer}");
 }

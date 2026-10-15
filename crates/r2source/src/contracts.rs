@@ -3813,6 +3813,8 @@ pub struct SourceConventionSlots {
     variadic_tail_on_stack: bool,
     /// Which bound of the variadic register save area a `va_list` holds, where the convention has one.
     register_save_area: Option<SourceSaveAreaAnchor>,
+    /// Where a call hands a variadic or unprototyped callee its count of vector arguments: SysV's `al`.
+    variadic_count_register: Option<CanonicalStorageId>,
     /// The entry stack pointer's residue modulo an alignment, where the convention states one.
     entry_stack: Option<SourceEntryStack>,
 }
@@ -3978,6 +3980,17 @@ impl SourceConventionSlots {
         self
     }
 
+    /// Where a call hands a variadic or unprototyped callee its count of vector arguments.
+    pub const fn variadic_count_register(&self) -> Option<CanonicalStorageId> {
+        self.variadic_count_register
+    }
+
+    #[must_use]
+    pub fn with_variadic_count_register(mut self, register: Option<CanonicalStorageId>) -> Self {
+        self.variadic_count_register = register.filter(|storage| valid_register_storage(*storage));
+        self
+    }
+
     pub fn with_entry_stack(mut self, entry_stack: Option<SourceEntryStack>) -> Self {
         self.entry_stack = entry_stack.filter(|stack| stack.residue < stack.alignment);
         self
@@ -4023,6 +4036,7 @@ impl SourceConventionSlots {
             stack_arguments: None,
             variadic_tail_on_stack: false,
             register_save_area: None,
+            variadic_count_register: None,
             entry_stack: None,
         })
     }
