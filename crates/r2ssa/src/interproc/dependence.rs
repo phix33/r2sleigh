@@ -302,8 +302,8 @@ impl FormalDependence {
             | SSAOp::LoadLinked { dst, .. }
             | SSAOp::LoadGuarded { dst, .. } => self.reloaded_bits(prepared, *dst),
             SSAOp::CallDefine { .. } => last_call,
-            SSAOp::AtomicCAS(swap) => {
-                self.reloaded_bits(prepared, swap.dst)
+            SSAOp::Atomic(access) => {
+                self.reloaded_bits(prepared, access.dst)
                     | op.sources()
                         .into_iter()
                         .map(|source| self.bits_of(*source))
@@ -387,11 +387,11 @@ impl FrameTraffic {
                     | SSAOp::StoreConditional {
                         addr, val, space, ..
                     } => (addr, *space, None, Some(val)),
-                    SSAOp::AtomicCAS(swap) => (
-                        &swap.addr,
-                        swap.space,
-                        Some(&swap.dst),
-                        Some(&swap.replacement),
+                    SSAOp::Atomic(access) => (
+                        &access.addr,
+                        access.space,
+                        Some(&access.dst),
+                        Some(access.stored()),
                     ),
                     _ => continue,
                 };

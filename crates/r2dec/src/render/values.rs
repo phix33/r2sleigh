@@ -2668,7 +2668,8 @@ fn writes_value(op: &SSAOp<ValueId>) -> bool {
             | SSAOp::LoadGuarded { .. }
             | SSAOp::StoreConditional { .. }
             | SSAOp::StoreGuarded { .. }
-            | SSAOp::AtomicCAS(_)
+            | SSAOp::Atomic(_)
+            | SSAOp::IndivisibleAccess
             | SSAOp::BlockTransfer(_)
             | SSAOp::Breakpoint
             | SSAOp::Unimplemented

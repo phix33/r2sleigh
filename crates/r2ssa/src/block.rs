@@ -646,21 +646,16 @@ fn convert_op(
             val: read_var(val, spell, ctx),
             ordering: *ordering,
         },
-        AtomicCAS {
-            dst,
-            space,
-            addr,
-            expected,
-            replacement,
-            ordering,
-        } => SSAOp::AtomicCAS(Box::new(crate::op::AtomicCasOp {
-            dst: write_var(dst, spell, ctx),
-            space: *space,
-            addr: read_var(addr, spell, ctx),
-            expected: read_var(expected, spell, ctx),
-            replacement: read_var(replacement, spell, ctx),
-            ordering: *ordering,
-        })),
+        Atomic(access) => {
+            SSAOp::Atomic(Box::new(crate::op::AtomicOp::of(
+                access,
+                |v, written| match written {
+                    true => write_var(v, spell, ctx),
+                    false => read_var(v, spell, ctx),
+                },
+            )))
+        }
+        IndivisibleAccess => SSAOp::IndivisibleAccess,
         LoadGuarded {
             dst,
             space,

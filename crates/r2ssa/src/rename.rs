@@ -1336,27 +1336,16 @@ fn rename_op(
                 ordering: *ordering,
             }
         }
-        AtomicCAS {
-            dst,
-            addr,
-            expected,
-            replacement,
-            space,
-            ordering,
-        } => {
-            let addr_ssa = read_varnode(addr, ctx, reg_names);
-            let expected_ssa = read_varnode(expected, ctx, reg_names);
-            let replacement_ssa = read_varnode(replacement, ctx, reg_names);
-            let dst_ssa = write_varnode(dst, ctx, defined_vars, reg_names);
-            SSAOp::AtomicCAS(Box::new(crate::op::AtomicCasOp {
-                dst: dst_ssa,
-                space: *space,
-                addr: addr_ssa,
-                expected: expected_ssa,
-                replacement: replacement_ssa,
-                ordering: *ordering,
-            }))
+        Atomic(access) => {
+            SSAOp::Atomic(Box::new(crate::op::AtomicOp::of(
+                access,
+                |v, written| match written {
+                    true => write_varnode(v, ctx, defined_vars, reg_names),
+                    false => read_varnode(v, ctx, reg_names),
+                },
+            )))
         }
+        IndivisibleAccess => SSAOp::IndivisibleAccess,
         LoadGuarded {
             dst,
             addr,

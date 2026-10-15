@@ -104,15 +104,15 @@ pub(crate) fn collect_access_summaries(
                     uses.push(location.clone());
                     defs.push(location);
                 }
-                SSAOp::AtomicCAS(swap) => {
+                SSAOp::Atomic(access) => {
                     let location = memory_location_for_addr(
                         prep_facts,
                         addresses,
                         object_model,
                         graph,
-                        swap.addr,
-                        swap.space,
-                        swap.expected.size.max(swap.replacement.size),
+                        access.addr,
+                        access.space,
+                        access.dst.size,
                     );
                     uses.push(location.clone());
                     defs.push(location);

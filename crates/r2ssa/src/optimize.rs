@@ -1142,7 +1142,8 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
                     SSAOp::Load { .. }
                         | SSAOp::LoadLinked { .. }
                         | SSAOp::LoadGuarded { .. }
-                        | SSAOp::AtomicCAS { .. }
+                        | SSAOp::Atomic(_)
+                        | SSAOp::IndivisibleAccess
                         | SSAOp::CallOther { .. }
                         | SSAOp::CallDefine { .. }
                         | SSAOp::CallRestore { .. }

@@ -418,6 +418,7 @@ fn summary_atomic_effect_to_callee(effect: &r2ssa::SummaryAtomicEffect) -> Calle
             r2ssa::SummaryAtomicOp::LoadLinked => CalleeAtomicOp::LoadLinked,
             r2ssa::SummaryAtomicOp::StoreConditional => CalleeAtomicOp::StoreConditional,
             r2ssa::SummaryAtomicOp::CompareExchange => CalleeAtomicOp::CompareExchange,
+            r2ssa::SummaryAtomicOp::ReadModifyWrite => CalleeAtomicOp::ReadModifyWrite,
             r2ssa::SummaryAtomicOp::Fence => CalleeAtomicOp::Fence,
         },
         location: summary_location_to_callee(effect.location),

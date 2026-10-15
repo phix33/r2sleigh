@@ -52,9 +52,9 @@ pub use metadata::{
     ScalarKind, StorageClass,
 };
 pub use opcode::{
-    BlockStop, BlockTransfer, BlockTransferKind, ControlTransfer, MemoryAccess, R2ILBlock, R2ILOp,
-    SwitchCase, SwitchInfo, ValueUse, guarded_transfer, predicated_call, predicated_transfer,
-    return_addresses, returns_to,
+    AtomicAccess, AtomicFetchOp, AtomicUpdate, BlockStop, BlockTransfer, BlockTransferKind,
+    ControlTransfer, MemoryAccess, R2ILBlock, R2ILOp, SwitchCase, SwitchInfo, ValueUse,
+    guarded_transfer, predicated_call, predicated_transfer, return_addresses, returns_to,
 };
 pub use regname::select_register_name;
 pub use serialize::{

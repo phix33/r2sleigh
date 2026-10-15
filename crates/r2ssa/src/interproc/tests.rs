@@ -1441,14 +1441,16 @@ fn atomic_cas_marks_argument_read_and_write() {
     let blk = block(
         0x4200,
         vec![
-            R2ILOp::AtomicCAS {
+            R2ILOp::Atomic(Box::new(r2il::AtomicAccess {
                 dst: reg(0, 8),
                 space: SpaceId::Ram,
                 addr: reg(8, 8),
-                expected: c(1, 8),
-                replacement: c(2, 8),
+                update: r2il::AtomicUpdate::CompareExchange {
+                    expected: c(1, 8),
+                    replacement: c(2, 8),
+                },
                 ordering: MemoryOrdering::SeqCst,
-            },
+            })),
             R2ILOp::Return { target: reg(16, 8) },
         ],
     );

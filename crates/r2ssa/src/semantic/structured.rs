@@ -336,9 +336,16 @@ pub(crate) fn collect_structured_memory_access_facts(
                         );
                     }
                 }
-                SSAOp::AtomicCAS(swap) => {
-                    let (dst, addr, replacement, space) =
-                        (&swap.dst, &swap.addr, &swap.replacement, swap.space);
+                SSAOp::Atomic(access) => {
+                    let (dst, addr, space) = (&access.dst, &access.addr, access.space);
+                    // Only a swap always writes a value it names; a compare-and-exchange may write nothing.
+                    let written = match &access.update {
+                        crate::op::AtomicUpdateOp::Fetch {
+                            op: r2il::AtomicFetchOp::Swap,
+                            operand,
+                        } => graph.value_id_for_var(operand),
+                        _ => None,
+                    };
                     if let Some(address) = graph.value_id_for_var(addr) {
                         insert_raw_memory_subeffect(
                             EffectSink {
@@ -353,7 +360,7 @@ pub(crate) fn collect_structured_memory_access_facts(
                                 space,
                                 value: graph.value_id_for_var(dst),
                                 is_write: false,
-                                width: replacement.size,
+                                width: dst.size,
                             },
                         );
                         insert_raw_memory_subeffect(
@@ -367,9 +374,9 @@ pub(crate) fn collect_structured_memory_access_facts(
                             RawAccess {
                                 address,
                                 space,
-                                value: graph.value_id_for_var(replacement),
+                                value: written,
                                 is_write: true,
-                                width: replacement.size,
+                                width: dst.size,
                             },
                         );
                     }

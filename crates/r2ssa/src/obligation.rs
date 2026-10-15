@@ -744,7 +744,7 @@ impl SemanticObligationInventory {
                             | crate::SSAOp::StoreConditional { .. }
                             | crate::SSAOp::LoadGuarded { .. }
                             | crate::SSAOp::StoreGuarded { .. }
-                            | crate::SSAOp::AtomicCAS(_)
+                            | crate::SSAOp::Atomic(_)
                     )
                 )
             {
@@ -1751,8 +1751,9 @@ fn seed_direct_obligations(
             Component::MemoryOrdering((*ordering).into()),
             required,
         ),
-        // The monitor it clears is no value C holds, so it owes its atomic effect whole.
-        SSAOp::ClearExclusive => {
+        // The monitor it clears is no value C holds, so it owes its atomic effect whole; an
+        // untyped indivisible access owes its atomicity, which no plain access beside it states.
+        SSAOp::ClearExclusive | SSAOp::IndivisibleAccess => {
             seed_instruction(inst.id, Kind::Atomicity, Component::Whole, required);
         }
         SSAOp::LoadLinked { ordering, .. } | SSAOp::LoadGuarded { ordering, .. } => {
@@ -1797,12 +1798,12 @@ fn seed_direct_obligations(
                 );
             }
         }
-        SSAOp::AtomicCAS(swap) => {
+        SSAOp::Atomic(access) => {
             seed_instruction(inst.id, Kind::Atomicity, Component::Whole, required);
             seed_instruction(
                 inst.id,
                 Kind::MemoryOrdering,
-                Component::MemoryOrdering(swap.ordering.into()),
+                Component::MemoryOrdering(access.ordering.into()),
                 required,
             );
         }
@@ -3249,14 +3250,16 @@ mod tests {
     #[test]
     fn atomic_cas_has_read_write_and_ordering_obligations() {
         let mut block = R2ILBlock::new(0x5000, 4);
-        block.push(R2ILOp::AtomicCAS {
+        block.push(R2ILOp::Atomic(Box::new(r2il::AtomicAccess {
             dst: Varnode::unique(0x10, 8),
             space: SpaceId::Ram,
             addr: Varnode::register(0, 8),
-            expected: Varnode::constant(1, 8),
-            replacement: Varnode::constant(2, 8),
+            update: r2il::AtomicUpdate::CompareExchange {
+                expected: Varnode::constant(1, 8),
+                replacement: Varnode::constant(2, 8),
+            },
             ordering: MemoryOrdering::SeqCst,
-        });
+        })));
         block.push(R2ILOp::Return {
             target: Varnode::register(8, 8),
         });

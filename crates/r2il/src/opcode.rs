@@ -85,6 +85,68 @@ pub struct BlockTransfer {
     pub answer: Option<Varnode>,
 }
 
+/// What an indivisible read-modify-write computes from the value it read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum AtomicFetchOp {
+    Add,
+    /// `old - operand`.
+    Sub,
+    And,
+    Or,
+    Xor,
+    /// The operand itself, whatever was read.
+    Swap,
+    SignedMax,
+    SignedMin,
+    UnsignedMax,
+    UnsignedMin,
+}
+
+/// What an indivisible access writes back over the value it read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtomicUpdate {
+    /// `old op operand`, always written.
+    Fetch { op: AtomicFetchOp, operand: Varnode },
+    /// `replacement`, written only where the value read equals `expected`.
+    CompareExchange {
+        expected: Varnode,
+        replacement: Varnode,
+    },
+}
+
+/// One indivisible read-modify-write of `dst.size` bytes at `addr`; `dst` is the value read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtomicAccess {
+    pub dst: Varnode,
+    pub space: SpaceId,
+    pub addr: Varnode,
+    pub update: AtomicUpdate,
+    pub ordering: MemoryOrdering,
+}
+
+impl AtomicAccess {
+    /// The operands after the address: the fetch's operand, or the expected value and the replacement.
+    pub fn operands(&self) -> Vec<&Varnode> {
+        match &self.update {
+            AtomicUpdate::Fetch { operand, .. } => vec![operand],
+            AtomicUpdate::CompareExchange {
+                expected,
+                replacement,
+            } => vec![expected, replacement],
+        }
+    }
+
+    pub fn operands_mut(&mut self) -> Vec<&mut Varnode> {
+        match &mut self.update {
+            AtomicUpdate::Fetch { operand, .. } => vec![operand],
+            AtomicUpdate::CompareExchange {
+                expected,
+                replacement,
+            } => vec![expected, replacement],
+        }
+    }
+}
+
 /// The operand one operation sends control to, and how it sends it there.
 ///
 /// R2IL's statement of which operand of a branch or a call says where control
@@ -172,15 +234,12 @@ pub enum R2ILOp {
         ordering: MemoryOrdering,
     },
 
-    /// Atomic compare and exchange: dst = CAS(*addr, expected, replacement).
-    AtomicCAS {
-        dst: Varnode,
-        space: SpaceId,
-        addr: Varnode,
-        expected: Varnode,
-        replacement: Varnode,
-        ordering: MemoryOrdering,
-    },
+    /// One indivisible read-modify-write: a fetch operation or a compare-and-exchange.
+    Atomic(Box<AtomicAccess>),
+
+    /// The instruction's memory accesses are one indivisible access the lift has no typed
+    /// statement of; eval runs them as written, and nothing may render them as plain accesses.
+    IndivisibleAccess,
 
     /// Guarded load from memory: if guard then load.
     LoadGuarded {
@@ -691,9 +750,10 @@ macro_rules! memory_operation {
             | R2ILOp::BlockTransfer(_)
             | R2ILOp::Fence { .. }
             | R2ILOp::ClearExclusive
+            | R2ILOp::IndivisibleAccess
             | R2ILOp::LoadLinked { .. }
             | R2ILOp::StoreConditional { .. }
-            | R2ILOp::AtomicCAS { .. }
+            | R2ILOp::Atomic(_)
             | R2ILOp::LoadGuarded { .. }
             | R2ILOp::StoreGuarded { .. }
     };
@@ -732,7 +792,6 @@ macro_rules! output_of {
             | R2ILOp::Load { dst, .. }
             | R2ILOp::LoadLinked { dst, .. }
             | R2ILOp::LoadGuarded { dst, .. }
-            | R2ILOp::AtomicCAS { dst, .. }
             | R2ILOp::IntAdd { dst, .. }
             | R2ILOp::IntSub { dst, .. }
             | R2ILOp::IntMult { dst, .. }
@@ -800,10 +859,14 @@ macro_rules! output_of {
             R2ILOp::StoreConditional { result, .. } => result.$as(),
             R2ILOp::CallOther { output, .. } => output.$as(),
             R2ILOp::BlockTransfer(transfer) => transfer.answer.$as(),
+            R2ILOp::Atomic(access) => match access.$as() {
+                AtomicAccess { dst, .. } => Some(dst),
+            },
             R2ILOp::Store { .. }
             | R2ILOp::StoreGuarded { .. }
             | R2ILOp::Fence { .. }
             | R2ILOp::ClearExclusive
+            | R2ILOp::IndivisibleAccess
             | R2ILOp::Branch { .. }
             | R2ILOp::CBranch { .. }
             | R2ILOp::BranchInd { .. }
@@ -985,17 +1048,16 @@ impl R2ILOp {
             | R2ILOp::StoreGuarded {
                 space, addr, val, ..
             } => [Some(one(Write, space, addr, val.size)), None, None],
-            R2ILOp::AtomicCAS {
-                space,
-                addr,
-                expected,
-                replacement,
-                ..
-            } => [
-                Some(one(Read, space, addr, expected.size)),
-                Some(one(Write, space, addr, replacement.size)),
-                None,
-            ],
+            R2ILOp::Atomic(access) => {
+                let AtomicAccess {
+                    dst, space, addr, ..
+                } = access.as_ref();
+                [
+                    Some(one(Read, space, addr, dst.size)),
+                    Some(one(Write, space, addr, dst.size)),
+                    None,
+                ]
+            }
             R2ILOp::BlockTransfer(transfer) => {
                 let kind = transfer.kind;
                 let element = |kind, addr| MemoryAccess {
@@ -1015,6 +1077,7 @@ impl R2ILOp {
             }
             R2ILOp::Fence { .. }
             | R2ILOp::ClearExclusive
+            | R2ILOp::IndivisibleAccess
             | control_operation!()
             | state_operation!()
             | value_operation!() => [None, None, None],
@@ -1089,15 +1152,12 @@ impl R2ILOp {
                 &transfer.count,
                 &transfer.direction,
             ],
-            R2ILOp::Fence { .. } | R2ILOp::ClearExclusive => vec![],
+            R2ILOp::Fence { .. } | R2ILOp::ClearExclusive | R2ILOp::IndivisibleAccess => vec![],
             R2ILOp::LoadLinked { addr, .. } => vec![addr],
             R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
-            R2ILOp::AtomicCAS {
-                addr,
-                expected,
-                replacement,
-                ..
-            } => vec![addr, expected, replacement],
+            R2ILOp::Atomic(access) => std::iter::once(&access.addr)
+                .chain(access.operands())
+                .collect(),
             R2ILOp::LoadGuarded { addr, guard, .. } => vec![addr, guard],
             R2ILOp::StoreGuarded {
                 addr, val, guard, ..
@@ -1223,15 +1283,19 @@ impl R2ILOp {
                 } = transfer.as_mut();
                 vec![destination, source, count, direction]
             }
-            R2ILOp::Fence { .. } | R2ILOp::ClearExclusive => vec![],
+            R2ILOp::Fence { .. } | R2ILOp::ClearExclusive | R2ILOp::IndivisibleAccess => vec![],
             R2ILOp::LoadLinked { addr, .. } => vec![addr],
             R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
-            R2ILOp::AtomicCAS {
-                addr,
-                expected,
-                replacement,
-                ..
-            } => vec![addr, expected, replacement],
+            R2ILOp::Atomic(access) => {
+                let AtomicAccess { addr, update, .. } = access.as_mut();
+                match update {
+                    AtomicUpdate::Fetch { operand, .. } => vec![addr, operand],
+                    AtomicUpdate::CompareExchange {
+                        expected,
+                        replacement,
+                    } => vec![addr, expected, replacement],
+                }
+            }
             R2ILOp::LoadGuarded { addr, guard, .. } => vec![addr, guard],
             R2ILOp::StoreGuarded {
                 addr, val, guard, ..
@@ -1407,20 +1471,29 @@ impl std::fmt::Display for R2ILOp {
                     space, addr, val
                 )
             }
-            R2ILOp::AtomicCAS {
-                dst,
-                space,
-                addr,
-                expected,
-                replacement,
-                ordering,
-            } => {
-                write!(
-                    f,
-                    "{} = ATOMIC_CAS [{}]{}, {}, {} ({ordering:?})",
-                    dst, space, addr, expected, replacement
-                )
+            R2ILOp::Atomic(access) => {
+                let AtomicAccess {
+                    dst,
+                    space,
+                    addr,
+                    update,
+                    ordering,
+                } = access.as_ref();
+                match update {
+                    AtomicUpdate::Fetch { op, operand } => write!(
+                        f,
+                        "{dst} = ATOMIC_{op:?} [{space}]{addr}, {operand} ({ordering:?})"
+                    ),
+                    AtomicUpdate::CompareExchange {
+                        expected,
+                        replacement,
+                    } => write!(
+                        f,
+                        "{dst} = ATOMIC_CAS [{space}]{addr}, {expected}, {replacement} ({ordering:?})"
+                    ),
+                }
             }
+            R2ILOp::IndivisibleAccess => write!(f, "INDIVISIBLE_ACCESS"),
             R2ILOp::LoadGuarded {
                 dst,
                 space,

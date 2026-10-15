@@ -755,14 +755,29 @@ mod tests {
             ),
             (
                 "compare and swap",
-                R2ILOp::AtomicCAS {
+                R2ILOp::Atomic(Box::new(r2il::AtomicAccess {
                     dst: r0(),
                     space: SpaceId::Ram,
                     addr: r8(),
-                    expected: r0(),
-                    replacement: r8(),
+                    update: r2il::AtomicUpdate::CompareExchange {
+                        expected: r0(),
+                        replacement: r8(),
+                    },
                     ordering,
-                },
+                })),
+            ),
+            (
+                "atomic fetch",
+                R2ILOp::Atomic(Box::new(r2il::AtomicAccess {
+                    dst: r0(),
+                    space: SpaceId::Ram,
+                    addr: r8(),
+                    update: r2il::AtomicUpdate::Fetch {
+                        op: r2il::AtomicFetchOp::Add,
+                        operand: r8(),
+                    },
+                    ordering,
+                })),
             ),
         ]
     }

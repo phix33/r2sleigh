@@ -1658,8 +1658,8 @@ impl<'a> ObjectModelBuilder<'a> {
                 | SSAOp::StoreGuarded { addr, space, .. } => {
                     let _ = self.object_for_address_value(graph, addr, space);
                 }
-                SSAOp::AtomicCAS(ref swap) => {
-                    let _ = self.object_for_address_value(graph, swap.addr, swap.space);
+                SSAOp::Atomic(ref access) => {
+                    let _ = self.object_for_address_value(graph, access.addr, access.space);
                 }
                 _ => {}
             }

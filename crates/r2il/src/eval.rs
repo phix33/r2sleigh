@@ -5,7 +5,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::{BlockStop, BlockTransfer, BlockTransferKind, Endianness, R2ILOp, SpaceId, Varnode};
+use crate::{
+    AtomicAccess, AtomicFetchOp, AtomicUpdate, BlockStop, BlockTransfer, BlockTransferKind,
+    Endianness, R2ILOp, SpaceId, Varnode,
+};
 
 /// The bytes a value is carried in: a value of any width is exact while it fits them.
 const CARRIED: u32 = u128::BITS / 8;
@@ -668,7 +671,8 @@ fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> 
     match op {
         // Ordering constrains only what other observers see; one thread sees its own accesses in
         // program order (Arm ARM B2.3, internal visibility), so a fence changes no value it reads.
-        R2ILOp::Nop | R2ILOp::Fence { .. } => {}
+        R2ILOp::Nop | R2ILOp::Fence { .. } | R2ILOp::IndivisibleAccess => {}
+        R2ILOp::Atomic(access) if access.space == SpaceId::Ram => atomic(access, state)?,
         R2ILOp::Store {
             space: SpaceId::Ram,
             addr,
@@ -731,6 +735,59 @@ fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> 
         }
     }
     Ok(Flow::Next)
+}
+
+/// One indivisible access as one thread runs it: read, compute from what was read, write back,
+/// except where a compare-and-exchange finds another value; `dst` takes the value read.
+fn atomic<M: Mapped>(access: &AtomicAccess, state: &mut State<M>) -> Result<(), Stop> {
+    let bytes = access.dst.size;
+    let address = state.address(&access.addr)?;
+    let old = Word::new(state.load(address, bytes)?, bytes)?;
+    let written = match &access.update {
+        AtomicUpdate::Fetch { op, operand } => Some(fetched(*op, old, state.word(operand)?)?),
+        AtomicUpdate::CompareExchange {
+            expected,
+            replacement,
+        } => match state.word(expected)?.bits == old.bits {
+            true => Some(state.read(replacement)?),
+            false => None,
+        },
+    };
+    if let Some(value) = written {
+        state.store(address, bytes, value)?;
+    }
+    state.write(&access.dst, old.bits)
+}
+
+/// What a fetch operation writes back over `old`, at its width.
+fn fetched(op: AtomicFetchOp, old: Word, operand: Word) -> Result<u128, Stop> {
+    let (a, b) = (old.bits, operand.bits);
+    let signed = || -> Result<bool, Stop> { Ok(old.signed()? >= operand.signed()?) };
+    let value = match op {
+        AtomicFetchOp::Add => a.wrapping_add(b),
+        AtomicFetchOp::Sub => a.wrapping_sub(b),
+        AtomicFetchOp::And => a & b,
+        AtomicFetchOp::Or => a | b,
+        AtomicFetchOp::Xor => a ^ b,
+        AtomicFetchOp::Swap => b,
+        AtomicFetchOp::SignedMax => {
+            if signed()? {
+                a
+            } else {
+                b
+            }
+        }
+        AtomicFetchOp::SignedMin => {
+            if signed()? {
+                b
+            } else {
+                a
+            }
+        }
+        AtomicFetchOp::UnsignedMax => a.max(b),
+        AtomicFetchOp::UnsignedMin => a.min(b),
+    };
+    modulo(old.bytes, value & mask(old.bytes), None)
 }
 
 /// One thread's monitor (Arm ARM B2.9.2): a conditional store takes only after a linked load of
@@ -1120,6 +1177,63 @@ mod tests {
             }
             assert_eq!(state.register(ok.offset, 1), Some(took), "{ops:?}");
             assert_eq!(state.load(0x200, 4), Ok(stored), "{ops:?}");
+        }
+    }
+
+    /// Each atomic update reads the cell, writes what it states back (a compare-and-exchange only
+    /// where the cell held the expected value), and answers the value read, at the access's width.
+    #[test]
+    fn an_atomic_access_answers_the_old_value_and_writes_its_update() {
+        use crate::{AtomicAccess, AtomicFetchOp as Op, AtomicUpdate};
+        let (addr, operand, other, dst) = (
+            Varnode::register(0x20, 8),
+            Varnode::register(0x28, 2),
+            Varnode::register(0x30, 2),
+            Varnode::register(0x40, 2),
+        );
+        let fetch = |op| AtomicUpdate::Fetch {
+            op,
+            operand: operand.clone(),
+        };
+        // The cell holds 0x8001 (negative at 16 bits) and the operand 0x0203.
+        let cas = |expected: &Varnode| AtomicUpdate::CompareExchange {
+            expected: expected.clone(),
+            replacement: operand.clone(),
+        };
+        for (update, stored) in [
+            (fetch(Op::Add), 0x8204),
+            (fetch(Op::Sub), 0x7dfe),
+            (fetch(Op::And), 0x0001),
+            (fetch(Op::Or), 0x8203),
+            (fetch(Op::Xor), 0x8202),
+            (fetch(Op::Swap), 0x0203),
+            (fetch(Op::SignedMax), 0x0203),
+            (fetch(Op::SignedMin), 0x8001),
+            (fetch(Op::UnsignedMax), 0x8001),
+            (fetch(Op::UnsignedMin), 0x0203),
+            (cas(&other), 0x0203),
+            (cas(&operand), 0x8001),
+        ] {
+            let op = R2ILOp::Atomic(Box::new(AtomicAccess {
+                dst: dst.clone(),
+                space: SpaceId::Ram,
+                addr: addr.clone(),
+                update: update.clone(),
+                ordering: crate::MemoryOrdering::SeqCst,
+            }));
+            let cell = |at: u64| (0x200..0x210).contains(&at).then_some(0u8);
+            let mut state = State::new(Endianness::Little, cell, 64).expect("state");
+            state.set_register(addr.offset, 8, 0x200).expect("addr");
+            state
+                .set_register(operand.offset, 2, 0x0203)
+                .expect("operand");
+            state.set_register(other.offset, 2, 0x8001).expect("other");
+            state.store(0x200, 2, 0x8001).expect("cell");
+            state.store(0x202, 1, 0x77).expect("the byte after it");
+            assert_eq!(step(&op, &mut state), Flow::Next, "{update:?}");
+            assert_eq!(state.register(dst.offset, 2), Some(0x8001), "{update:?}");
+            assert_eq!(state.load(0x200, 2), Ok(stored), "{update:?}");
+            assert_eq!(state.load(0x202, 1), Ok(0x77), "{update:?}");
         }
     }
 
