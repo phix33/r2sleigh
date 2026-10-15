@@ -2602,7 +2602,12 @@
    "status": "residual-trap"
   },
   "tests/gold/review.c::gcc-O1::fact": {
-   "status": "equal"
+   "status": "residual-trap",
+   "cause": "gcc's `mov eax, 1` before the base case's branch reaches the recursive call, so W14's count-register rule reads `al` as a vector count: fact's arity is a floor while its own cycle is unresolved, and a floor lets the rule run. The call is a residual where it used to render.",
+   "owner": "P7",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "compared": "output"
   },
   "tests/gold/review.c::gcc-O1::fill": {
    "status": "equal"
