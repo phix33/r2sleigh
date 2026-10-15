@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use object::LittleEndian as LE;
 use object::pe;
-use object::read::pe::{ExportTarget, ImageNtHeaders, ImageOptionalHeader, PeFile};
+use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile};
 use object::{Object, ReadRef};
 use r2abi::statement::{Permissions, Segment};
 
@@ -403,8 +403,8 @@ fn relative(layout: &Layout, value: u64, addressed: bool) -> u64 {
 
 /// Each export at an address of this image; a forwarder names another image's and is no place here.
 ///
-/// The directory is read from its address alone where it states no size: the loader only reads the
-/// size to tell a forwarder.
+/// A forwarder's address lies inside the directory's stated extent, so a directory stating no size
+/// has none: it is read from its address alone, with every address a place.
 fn exports_of(
     layout: &Layout,
     data: &[u8],
@@ -416,28 +416,31 @@ fn exports_of(
     let Some(bytes) = layout.bytes(data, rva) else {
         return Vec::new();
     };
-    let bytes = match size {
-        0 => bytes,
-        size => &bytes[..bytes.len().min(size as usize)],
-    };
-    let Ok(table) = object::read::pe::ExportTable::parse(bytes, rva as u32) else {
-        return Vec::new();
-    };
-    let Ok(exports) = table.exports() else {
+    let sized = &bytes[..bytes.len().min(size as usize)];
+    let Ok(table) =
+        object::read::pe::ExportTable::parse(if size == 0 { bytes } else { sized }, rva as u32)
+    else {
         return Vec::new();
     };
     let library = layout.text(data, u64::from(table.directory().name.get(LE)));
-    exports
-        .iter()
-        .filter_map(|export| match export.target {
-            ExportTarget::Address(rva) => Some((export, rva)),
-            _ => None,
-        })
+    let addresses = table.address_iter().collect::<Vec<_>>();
+    let mut names = vec![None; addresses.len()];
+    for (pointer, index) in table.name_iter() {
+        if let (Ok(name), Some(slot)) = (
+            table.name_from_pointer(pointer),
+            names.get_mut(index.0 as usize),
+        ) {
+            *slot = Some(name);
+        }
+    }
+    let placed = addresses.into_iter().zip(names);
+    placed
+        .filter(|((_, _, address), _)| size == 0 || !table.is_forward(*address))
         .enumerate()
-        .map(|(index, (export, rva))| Exported {
-            vaddr: layout.at(u64::from(rva)),
-            name: export.name.map_or_else(
-                || format!("Ordinal_{}", export.ordinal.0).into(),
+        .map(|(index, ((_, ordinal, address), name))| Exported {
+            vaddr: layout.at(u64::from(address)),
+            name: name.map_or_else(
+                || format!("Ordinal_{}", ordinal.0).into(),
                 |name| String::from_utf8_lossy(name).into(),
             ),
             library: library.clone(),

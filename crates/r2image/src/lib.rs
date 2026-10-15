@@ -829,8 +829,8 @@ impl Image {
         symbols.extend(imports.iter().map(|import| Symbol {
             name: Arc::clone(&import.name),
             vaddr: import.slot,
-            // PE states no type; radare2 lists every import as a function.
-            kind: SymbolKind::Function,
+            // The import directory states no type: code or data, as the exporting image defines it.
+            kind: SymbolKind::Other,
             import: true,
             binding: Binding::Unstated,
             origin: SymbolOrigin {
@@ -843,10 +843,8 @@ impl Image {
         symbols.extend(exports.iter().map(|export| Symbol {
             name: Arc::clone(&export.name),
             vaddr: export.vaddr,
-            kind: match executable(export.vaddr) {
-                true => SymbolKind::Function,
-                false => SymbolKind::Data,
-            },
+            // The export directory states no type; discovery decides what begins a function.
+            kind: SymbolKind::Other,
             defined: true,
             binding: Binding::Global,
             origin: SymbolOrigin {
@@ -868,6 +866,8 @@ impl Image {
             if same {
                 kept.origin.table = kept.origin.table.or(later.origin.table);
                 kept.origin.dynamic = kept.origin.dynamic.or(later.origin.dynamic);
+                kept.origin.directory = kept.origin.directory.or(later.origin.directory);
+                kept.library = kept.library.take().or_else(|| later.library.take());
             }
             same
         });

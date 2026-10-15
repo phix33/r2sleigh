@@ -61,6 +61,8 @@ pub fn of(source: &impl Source) -> NameDb {
             Name {
                 text: symbol.name.clone(),
                 namespace: match symbol.kind {
+                    // A directory's entry is a symbol, whatever it names (radare2's `sym.`).
+                    _ if symbol.origin.directory.is_some() => Namespace::Symbol,
                     SymbolKind::Section => Namespace::Section,
                     SymbolKind::Function => Namespace::Symbol,
                     SymbolKind::Data => Namespace::Object,

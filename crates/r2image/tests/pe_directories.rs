@@ -41,8 +41,10 @@ fn each_import_is_its_slot_by_dll_and_the_loader_writes_it() {
     );
 }
 
+/// The directory states the export's address and name, not its type: whether it begins a function
+/// is discovery's to say.
 #[test]
-fn an_export_is_a_defined_function_of_this_image() {
+fn an_export_is_a_defined_symbol_of_this_image_with_no_stated_type() {
     let image = fixture();
     let export = image
         .symbols()
@@ -51,6 +53,6 @@ fn an_export_is_a_defined_function_of_this_image() {
         .expect("the export is stated");
     assert_eq!(export.vaddr, 0x1_4000_1000);
     assert!(export.defined && !export.import);
-    assert_eq!(export.kind, r2image::SymbolKind::Function);
+    assert_eq!(export.kind, r2image::SymbolKind::Other);
     assert_eq!(export.library.as_deref(), Some("fixture.dll"));
 }
