@@ -727,6 +727,85 @@ fn a_staged_call_passes_a_proven_string_as_a_literal() {
     assert!(text.contains("0x2010"), "{text}");
 }
 
+/// `strlen(0x2008)` on AArch64, the address formed from a page and an offset; `strlen` at 0x1018.
+const STRLEN_PAGED: &[u8] = &[
+    0xfd, 0x7b, 0xbf, 0xa9, // 0x1000 stp x29, x30, [sp, -16]!
+    0x00, 0x00, 0x00, 0xb0, // 0x1004 adrp x0, 0x2000
+    0x00, 0x20, 0x00, 0x91, // 0x1008 add x0, x0, 8
+    0x03, 0x00, 0x00, 0x94, // 0x100c bl 0x1018
+    0xfd, 0x7b, 0xc1, 0xa8, // 0x1010 ldp x29, x30, [sp], 16
+    0xc0, 0x03, 0x5f, 0xd6, // 0x1014 ret
+    0xc0, 0x03, 0x5f, 0xd6, // 0x1018 strlen: ret
+];
+/// "ok" at 0x2008, in static data.
+const PAGED_TEXT: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, b'o', b'k', 0, 0, 0, 0, 0, 0];
+
+/// `STRLEN_PAGED` as code and `PAGED_TEXT` as read-only static data at `TEXTS`.
+struct PagedText;
+
+impl r2engine::body::Program for PagedText {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let region = self.region(vaddr)?;
+        let bytes: &[u8] = match region.execute {
+            true => STRLEN_PAGED,
+            false => &PAGED_TEXT,
+        };
+        let rest = bytes.get(usize::try_from(vaddr - region.start).ok()?..)?;
+        Some(rest[..rest.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        let end = TEXTS + PAGED_TEXT.len() as u64;
+        code_region(STRLEN_PAGED.len(), vaddr).or_else(|| {
+            (TEXTS..end)
+                .contains(&vaddr)
+                .then_some(r2engine::body::Region {
+                    start: TEXTS,
+                    end,
+                    file_end: end,
+                    execute: false,
+                    write: false,
+                })
+        })
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        matches!(vaddr, BASE | 0x1018)
+    }
+}
+
+impl Program for PagedText {
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        (TEXTS..TEXTS + PAGED_TEXT.len() as u64).contains(&vaddr)
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.import_at(vaddr)
+            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == 0x1018).then(|| "strlen".to_owned())
+    }
+}
+
+/// Text an AArch64 body points at only once its page and offset fold is captured on a second
+/// preparation, the first sealed and never collected: the call still passes it as a literal.
+#[test]
+fn an_aarch64_page_and_offset_pass_the_text_they_fold_to() {
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let target = machine.target();
+    let response = decompile(&target, &PagedText, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("strlen(\"ok\")"), "{text}");
+    assert!(!text.contains("0x2008"), "{text}");
+}
+
 /// `half(0x2000)`, `half` a local body reading the 16-bit word at `[rdi + 2]`; at 0x2000 the
 /// words 9, 8, which also read as the text "\t".
 const HALF_AT_TEXT: &[u8] = &[

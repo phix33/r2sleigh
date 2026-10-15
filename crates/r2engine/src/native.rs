@@ -1402,8 +1402,9 @@ struct Native<'a> {
 }
 
 impl Native<'_> {
-    /// One body prepared, restated and prepared again against `callees`. With `caller_reads`, every
-    /// call decides an ambiguous result; only its own rendering asks (doc/adr-resolved-bodies.md).
+    /// One body sealed against `callees`, and prepared again where it restates its declared frame
+    /// or text it points at; with `caller_reads`, every call decides an ambiguous result. Its first
+    /// seal's facts are collected only where something reads them (doc/adr-resolved-bodies.md).
     fn resolve(
         &self,
         entry: u64,
@@ -1412,24 +1413,16 @@ impl Native<'_> {
         caller_reads: bool,
     ) -> Result<Resolution, NativeRefusal> {
         let (root, tables) = (&walk.root, &walk.tables[..]);
-        // What the binary's own debug information says this function takes is a
-        // declaration, exactly as an import's is, so it is placed in the
-        // convention's slots the same way and the body is prepared against it.
-        // Without this the engine reads every parameter as the width of the
-        // register it arrived in, whatever the source said.
+        // The binary's debug information declares the body as a library declares an import.
         let declared_prototype =
             Declared::body(self.target, entry).map(|declared| declared.prototype);
         let declared_root = self.declaration(entry);
-        let prepare_first = |reads| match (declared_root.interface.is_some(), tables.is_empty()) {
-            (false, true) => self.prepare_restated(
-                root,
-                callees,
-                Vec::new(),
-                Restatement::default(),
-                &[],
-                reads,
-            ),
-            _ => self.prepare_restated(
+        let seal_first = |reads| match (declared_root.interface.is_some(), tables.is_empty()) {
+            (false, true) => {
+                let restatement = Restatement::default();
+                self.seal(root, callees, Vec::new(), restatement, &[], reads)
+            }
+            _ => self.seal(
                 root,
                 callees,
                 Vec::new(),
@@ -1438,48 +1431,44 @@ impl Native<'_> {
                 reads,
             ),
         };
-        let mut first = prepare_first(None)?;
-        // A body writing both result registers is prepared once more with what the program's calls
+        let mut first = seal_first(None)?;
+        // A body writing both result registers is sealed once more with what the program's calls
         // read of them (doc/adr-resolved-bodies.md, "Caller reads").
-        let reads = (caller_reads && first.shared_artifact().machine_context().result_ambiguous())
+        let reads = (caller_reads && first.machine_context().result_ambiguous())
             .then(|| self.program.result_reads(entry))
             .flatten();
         if reads.is_some() {
-            first = prepare_first(reads)?;
+            drop(first);
+            first = seal_first(reads)?;
         }
-        // A second capture states what the first proved. Preparation recovers the
-        // interface off the instructions and proves which frame slots home which
-        // parameter; declaring those turns the spill into the parameter again,
-        // which is the whole difference between reading a frame and reading a
-        // program. Text the body points at is harvested the same way, because
-        // aarch64 forms an address from a page and an offset and the constant the
-        // literal lives at appears only once those are folded.
-        // The debug information may measure the frame from the frame pointer, and
-        // objects are identified by where they sit relative to the pointer the
-        // function was entered with. The distance between the two is what the
-        // prologue moved, which the first pass proved for every object it placed,
-        // so the declaration is restated into those coordinates rather than
-        // dropped for being in the other ones.
-        let declared_root = crate::declared::rebased(declared_root, &first, declared_prototype);
+        let context = first.machine_context();
+        let owners = Owners {
+            result: context.result_owners().clone(),
+            arity: context.arity_owners().clone(),
+        };
+        // aarch64 forms an address from a page and an offset: its text is captured once folded.
+        let folded = self.folded_literals(&first, root);
+        // Only a declared frame's restatement reads the first's facts, or the first is the answer.
+        let first = match declared_root.interface.is_some() || folded.is_empty() {
+            true => Some(self.collected(first)?),
+            false => None,
+        };
+        // The declared frame, measured from the pointer the function was entered with.
+        let declared_root = match &first {
+            Some(first) => crate::declared::rebased(declared_root, first, declared_prototype),
+            None => declared_root,
+        };
         let declared_slots = declared_root
             .interface
             .as_ref()
             .map(|interface| interface.stack_slots().to_vec())
             .unwrap_or_default();
-        let restated = self.restated(&first, &declared_slots);
-        let folded = self.folded_literals(&first, root);
-        // Only the first preparation recovers the interface; the restated one is handed it.
-        let shared = first.shared_artifact();
-        let context = shared.machine_context();
-        let owners = Owners {
-            result: context.result_owners().clone(),
-            arity: context.arity_owners().clone(),
-        };
-        let artifact = match restated.is_none() && folded.is_empty() {
-            true => first,
-            false => {
-                // A body that proved no frame slot restates nothing, and the
-                // declaration it was prepared against is still the declaration.
+        let restated = (first.as_ref()).and_then(|first| self.restated(first, &declared_slots));
+        let artifact = match first {
+            Some(first) if restated.is_none() && folded.is_empty() => first,
+            first => {
+                drop(first);
+                // A body that proved no frame slot restates nothing, and the declaration stands.
                 let restatement = Restatement {
                     interface: restated.or(declared_root.interface),
                     signature: declared_root.signature,
@@ -1719,22 +1708,14 @@ impl Native<'_> {
     /// an indirect call or jump uses is still looked up. Only code lying in a
     /// section the container states is data can be read as text that way,
     /// and ruling it out needs the def-use to say how each value is used.
-    fn folded_literals(
-        &self,
-        artifact: &TrustedSsaArtifact,
-        walked: &Walked,
-    ) -> Vec<(u64, String)> {
-        let prepared = artifact.shared_artifact();
+    fn folded_literals(&self, seal: &r2ssa::TrustedSeal, walked: &Walked) -> Vec<(u64, String)> {
         let already = self
             .literals(&walked.body)
             .into_iter()
             .map(|(address, _)| address)
             .collect::<BTreeSet<_>>();
         let mut found = BTreeMap::new();
-        for value in prepared.value_ids() {
-            let Some(address) = prepared.folded_value(value) else {
-                continue;
-            };
+        for address in seal.folded_values() {
             if address == 0 || already.contains(&address) {
                 continue;
             }
@@ -1807,6 +1788,27 @@ impl Native<'_> {
         tables: &[NativePointerTable],
         result_reads: Option<r2source::SourceResultReads>,
     ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
+        let seal = self.seal(
+            walked,
+            callees,
+            extra_literals,
+            restatement,
+            tables,
+            result_reads,
+        )?;
+        self.collected(seal)
+    }
+
+    /// One body captured, built and sealed, its facts not yet collected.
+    fn seal(
+        &self,
+        walked: &Walked,
+        callees: &Callees,
+        extra_literals: Vec<(u64, String)>,
+        restatement: Restatement,
+        tables: &[NativePointerTable],
+        result_reads: Option<r2source::SourceResultReads>,
+    ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
         let capture = Capture {
             extra_literals,
             restatement,
@@ -1814,15 +1816,25 @@ impl Native<'_> {
             result_reads,
         };
         let (lifted, evidence) = self.lifted(walked, callees, capture)?;
-        let artifact = TrustedSsaArtifact::prepare_with_callee_interfaces(
+        TrustedSsaArtifact::seal_with_callee_interfaces(
             lifted,
             Some(self.target.arch),
             &self.control,
             &evidence,
             &premises_reading(result_reads.is_some()),
         )
-        .map_err(NativeRefusal::of_preparation)?;
-        Ok(Arc::new(artifact))
+        .map_err(NativeRefusal::of_preparation)
+    }
+
+    /// A seal's facts collected into the artifact.
+    fn collected(
+        &self,
+        seal: r2ssa::TrustedSeal,
+    ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
+        let artifact = seal.collect(&self.control);
+        artifact
+            .map(Arc::new)
+            .map_err(NativeRefusal::of_preparation)
     }
 
     /// Where each dispatch of a body walked without its tables reads them, off its seal alone.
