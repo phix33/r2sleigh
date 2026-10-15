@@ -14,8 +14,8 @@ use crate::native::{NativeRefusal, Prepared};
 use crate::query::db::{Db, Query, Retention};
 use crate::query::references::Indexing;
 use crate::query::{
-    Answer, Answered, Completion, Coverage, Decoders, Line, Listing, Memory, Proved, References,
-    Stop, Unread, WalkedBody, Work,
+    Answer, Answered, Completion, Coverage, Decoders, Instruction, Line, Listing, Memory, Proved,
+    References, Stop, Unread, WalkedBody, Work,
 };
 use crate::{EngineDecompileResponse, SealedFunctionAnalysis};
 
@@ -411,6 +411,20 @@ impl<S: Source + 'static> OpenProgram<S> {
             r2il::refusal_evidence!("call-effect", "{:#x}: {reason}", request.start);
         }
         Ok(crate::query::listing(
+            &self.answered(None),
+            request,
+            Work::BlockLocal,
+        ))
+    }
+
+    /// A run of instructions, each lifted alone with the registers it reads and writes and its operations.
+    pub fn instructions(&mut self, request: Listing) -> Result<Answer<Vec<Instruction>>, String> {
+        self.start_request();
+        self.loaded()?;
+        if let Err(reason) = self.assembled() {
+            r2il::refusal_evidence!("call-effect", "{:#x}: {reason}", request.start);
+        }
+        Ok(crate::query::instructions(
             &self.answered(None),
             request,
             Work::BlockLocal,

@@ -381,6 +381,14 @@ pub fn lifted(
     Ok(out)
 }
 
+/// Operations as the low tier prints them: each register by its name, each user operation by its own.
+pub(crate) fn spelled_operations(arch: &r2il::ArchSpec, ops: &[r2il::R2ILOp]) -> Vec<String> {
+    let names = register_spellings(arch);
+    ops.iter()
+        .map(|op| spell_registers(&op.to_string(), &names))
+        .collect()
+}
+
 /// How this architecture's registers are spelled by `Varnode`'s own Display,
 /// and what to call each instead.
 ///

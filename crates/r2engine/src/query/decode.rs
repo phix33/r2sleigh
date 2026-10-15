@@ -7,7 +7,10 @@
 
 use r2sleigh_lift::Continuation;
 
-use super::records::{Answered, Line, Listing, Stop};
+use super::records::{
+    Answered, Instruction, Line, Listing, Register, Registers, Semantics, Stop, Unexpressed,
+    Unlifted,
+};
 use super::{Answer, Completion, Work};
 
 /// Sleigh fetches a whole window whatever the instruction needs.
@@ -17,6 +20,15 @@ const DECODE_WINDOW: usize = 16;
 ///
 /// A line keeps the decoder context the line before it left, as the walk does; a run's first line starts afresh.
 pub fn listing(answered: &Answered<'_>, request: Listing, work: Work) -> Answer<Vec<Line>> {
+    let run = annotated(answered, request, work);
+    Answer {
+        value: run.lines,
+        completion: run.completion,
+    }
+}
+
+/// A run read and annotated as a listing of it says.
+fn annotated(answered: &Answered<'_>, request: Listing, work: Work) -> Run {
     let mut run = Run::read(answered, request, work);
     let mut beyond = Lookahead {
         answered,
@@ -30,9 +42,58 @@ pub fn listing(answered: &Answered<'_>, request: Listing, work: Work) -> Answer<
         windows: &run.windows,
     };
     super::annotate::over_run(answered, work, &lifted, &mut beyond, &mut run.lines);
+    run
+}
+
+/// Decode and lift a run of instructions, each with what its operations read, write and are.
+///
+/// Each line is read and annotated as a listing at `work` reads it, so `ao` and `pd` say the same of one address.
+pub fn instructions(
+    answered: &Answered<'_>,
+    request: Listing,
+    work: Work,
+) -> Answer<Vec<Instruction>> {
+    let run = annotated(answered, request, work.max(Work::InstructionLocal));
+    let value = run
+        .lines
+        .into_iter()
+        .zip(run.lifts.into_iter().zip(run.windows))
+        .map(|(line, (lift, window))| {
+            let machine = answered.decoders.at(line.address);
+            let semantics = match (lift.zip(machine), &line.syntax, window) {
+                (Some((lift, machine)), ..) => Ok(stated(&lift, machine)),
+                (None, None, _) => Err(Unlifted::Undecoded),
+                (None, Some(_), None) => Err(Unlifted::UnstatedField),
+                (None, Some(_), Some(_)) => Err(Unlifted::NotLifted),
+            };
+            Instruction { line, semantics }
+        })
+        .collect();
     Answer {
-        value: run.lines,
+        value,
         completion: run.completion,
+    }
+}
+
+/// What one lifted instruction reads, writes and is, named by the lift.
+fn stated(lift: &r2il::R2ILBlock, machine: &crate::machine::Machine) -> Semantics {
+    let named = |ranges: Vec<r2il::Varnode>| {
+        r2il::join_tiles(ranges, |whole| machine.disasm.declares_register(whole))
+            .into_iter()
+            .map(|storage| Register {
+                name: machine.disasm.register_listed(&storage),
+                storage,
+            })
+            .collect()
+    };
+    Semantics {
+        registers: r2il::register_accesses(&lift.ops)
+            .map(|accesses| Registers {
+                reads: named(accesses.reads),
+                writes: named(accesses.writes),
+            })
+            .ok_or(Unexpressed::Unimplemented),
+        operations: crate::native::spelled_operations(&machine.arch, &lift.ops),
     }
 }
 
