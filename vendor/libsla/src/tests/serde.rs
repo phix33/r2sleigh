@@ -247,6 +247,14 @@ fn pcode_disassembly() {
     let value = PcodeDisassembly {
         instructions: vec![test_instruction(), test_instruction()],
         origin: VarnodeData::new(test_address(42_000), 42),
+        context_targets: vec![ContextTarget {
+            address: test_address(41_000),
+            word: 0,
+            mask: 1,
+            value: 0,
+            held: 1,
+            flow: true,
+        }],
     };
     test_round_trip(&value);
 }

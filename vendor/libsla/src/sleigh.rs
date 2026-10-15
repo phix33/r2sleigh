@@ -441,6 +441,36 @@ pub struct PcodeDisassembly {
 
     /// The origin of the instructions
     pub origin: VarnodeData,
+
+    /// The context the instruction sets at addresses other than its fall-through, which Sleigh
+    /// keeps out of its own context: `blx`'s instruction set at its target.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub context_targets: Vec<ContextTarget>,
+}
+
+/// A global context value an instruction commits at another address than its fall-through.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ContextTarget {
+    /// Where the value takes effect.
+    pub address: Address,
+    /// The index of the context word it sets.
+    pub word: u32,
+    /// The bits of that word it sets.
+    pub mask: u32,
+    /// The value of those bits, in place.
+    pub value: u32,
+    /// The value of those bits the decoder's context holds at the address.
+    pub held: u32,
+    /// Whether the value flows on from the address rather than holding at it alone.
+    pub flow: bool,
+}
+
+impl ContextTarget {
+    /// Whether the address decodes in another context than the one the decoder holds there.
+    pub fn differs(&self) -> bool {
+        self.held != self.value
+    }
 }
 
 /// Disassembly of an instruction into its native assembly
@@ -860,9 +890,24 @@ impl Sleigh for GhidraSleigh {
             sys_address.as_ref().unwrap(),
         );
 
+        let origin = handle_disassembly_response(response, loader, address)?;
+        let context_targets = self
+            .sleigh
+            .context_targets()
+            .iter()
+            .map(|target| ContextTarget {
+                address: target.address().into(),
+                word: u32::try_from(target.word()).unwrap_or_default(),
+                mask: target.mask(),
+                value: target.value(),
+                held: target.held(),
+                flow: target.flow(),
+            })
+            .collect();
         Ok(PcodeDisassembly {
-            origin: handle_disassembly_response(response, loader, address)?,
+            origin,
             instructions: output.instructions,
+            context_targets,
         })
     }
 
