@@ -71,7 +71,8 @@ NAME=0x00001070
 FILE=tests/fixtures/rv_O0g
 CMDS=aa; pdd @ 0x00001070
 EXPECT=<<EOF
-/* r2dec refused __cxa_finalize: r2sleigh: import stub at 0x1070; this symbol is the import `__cxa_finalize`, whose prototype nothing states. */
+/* r2sleigh: import stub at 0x1070; this symbol is the import `__cxa_finalize` and has no body of its own. */
+extern void __cxa_finalize(void*);
 
 EOF
 EXPECT_ERR=<<EOF
@@ -219,6 +220,7 @@ CMDS=aa; pdd @ 0x00001160
 EXPECT=<<EOF
 uint64_t __do_global_dtors_aux(void)
 {
+    void __cxa_finalize(void*);
     extern char __dso_handle[];
     extern char __TMC_END__[];
 
@@ -226,7 +228,7 @@ uint64_t __do_global_dtors_aux(void)
     uint64_t tmp_3ea80_1;
     uint64_t rdi_1;
 
-    /* r2dec proof: 4 constructs are marked below; 41 source obligations: 14 rendered, 17 elided, 0 refused, 10 residual; 8 statements rendered; 2 data object types refused */
+    /* r2dec proof: 3 constructs are marked below; 40 source obligations: 16 rendered, 17 elided, 0 refused, 7 residual; 9 statements rendered; 2 data object types refused; 1 callee prototype supplied by the source */
     {
         tmp_3e180_1 = r2sleigh_load_u8((void*)&__TMC_END__);
         if ((uint8_t)((uint8_t)tmp_3e180_1 != (uint8_t)0U)) {
@@ -236,12 +238,12 @@ uint64_t __do_global_dtors_aux(void)
             if ((uint8_t)((uint64_t)tmp_3ea80_1 == (uint64_t)0U)) {
             } else {
                 rdi_1 = r2sleigh_load_u64((void*)&__dso_handle);
-                r2sleigh_residual_void(2); /* r2dec gap: CallNotRendered at 0x117b:4 covering 1 op (render::values): call to __cxa_finalize: its arity is only at least 0 (a floor), and this call writes 1 */
+                __cxa_finalize((void*)rdi_1);
             }
             {
-                r2sleigh_residual_void(3); /* r2dec gap: CallNotRendered at 0x1187:17 covering 1 op (render::values): call to deregister_tm_clones: argument slot 0 may hand on what this function was passed */
+                r2sleigh_residual_void(2); /* r2dec gap: CallNotRendered at 0x1187:17 covering 1 op (render::values): call to deregister_tm_clones: argument slot 0 may hand on what this function was passed */
                 r2sleigh_store_u8((void*)&__TMC_END__, (uint8_t)1U);
-                return r2sleigh_residual_u64(4);
+                return r2sleigh_residual_u64(3);
             }
         }
     }

@@ -191,6 +191,8 @@ pub struct Prototypes {
 }
 
 const EMBEDDED: &str = include_str!("../data/types.sdb.txt");
+/// The C++ runtime's, portable too: a mangled key states its parameters (`data/README.md`).
+const EMBEDDED_CXX: &str = include_str!("../data/types-cxx.sdb.txt");
 const EMBEDDED_LINUX: &str = include_str!("../data/types-linux.sdb.txt");
 const EMBEDDED_ANDROID: &str = include_str!("../data/types-android.sdb.txt");
 const EMBEDDED_DARWIN: &str = include_str!("../data/types-darwin.sdb.txt");
@@ -221,7 +223,7 @@ pub enum Platform {
 }
 
 impl Prototypes {
-    /// The prototypes every C library declares alike.
+    /// The prototypes every C library declares alike, and the C++ runtime's.
     pub fn embedded() -> Self {
         Self::embedded_for(Platform::Unknown)
     }
@@ -234,7 +236,7 @@ impl Prototypes {
             Platform::Darwin => Some(EMBEDDED_DARWIN),
             Platform::Windows | Platform::Unknown => None,
         };
-        Self::parse_all([EMBEDDED].into_iter().chain(own), platform)
+        Self::parse_all([EMBEDDED, EMBEDDED_CXX].into_iter().chain(own), platform)
     }
 
     pub fn parse(text: &str) -> Self {
@@ -434,6 +436,56 @@ mod tests {
         assert_eq!(store.returns.as_written(), "void");
         let retain = prototypes.get("objc_retain").expect("objc_retain");
         assert_eq!(retain.returns.as_written(), "void *");
+    }
+
+    /// The C++ runtime's rows (`types-cxx.sdb.txt`): operator new takes the width its mangling
+    /// states, the ABI's throws never return, and a `z` in a mangling is the ellipsis.
+    #[test]
+    fn the_cxx_runtime_is_declared_as_its_mangling_and_the_abi_state() {
+        let prototypes = Prototypes::embedded();
+        let graph = prototypes.graph();
+        let model = DataModel::unix(64);
+        let size = |name: &str| {
+            let prototype = prototypes.get(name).expect(name);
+            let [size] = prototype.parameters.as_slice() else {
+                panic!("{name}: {:?}", prototype.parameters);
+            };
+            (
+                graph.size_bits(size.ty, &model),
+                prototype.returns.as_written().to_owned(),
+            )
+        };
+        assert_eq!(size("_Znwm"), (Some(64), "void *".to_owned()));
+        assert_eq!(size("_Znaj"), (Some(32), "void *".to_owned()));
+        let sized = prototypes.get("_ZdlPvm").expect("sized delete");
+        assert_eq!((sized.parameters.len(), sized.noreturn), (2, false));
+        let atexit = prototypes.get("__cxa_atexit").expect("__cxa_atexit");
+        assert_eq!(atexit.parameters.len(), 3);
+        assert!(atexit.parameters[0].is_function());
+        for name in [
+            "__cxa_throw",
+            "__cxa_rethrow",
+            "_Unwind_Resume",
+            "__cxa_pure_virtual",
+            "_ZSt9terminatev",
+            "_ZSt19__throw_logic_errorPKc",
+        ] {
+            assert!(prototypes.get(name).expect(name).noreturn, "{name}");
+        }
+        assert!(!prototypes.get("__cxa_begin_catch").expect("catch").noreturn);
+        let format = prototypes
+            .get("_ZSt24__throw_out_of_range_fmtPKcz")
+            .expect("the formatted throw");
+        assert_eq!((format.parameters.len(), format.variadic), (1, true));
+        // Every type the C++ table spells is one the reader states.
+        let cxx = Prototypes::parse(EMBEDDED_CXX);
+        assert!(cxx.len() > 70, "{}", cxx.len());
+        for prototype in cxx.by_name.values() {
+            for parameter in &prototype.parameters {
+                let ty = cxx.graph().get(parameter.ty);
+                assert!(!matches!(ty, Some(Type::Refused(_))), "{}", prototype.name);
+            }
+        }
     }
 
     #[test]
