@@ -15,13 +15,19 @@ pub struct RegisterAccesses {
 
 /// What `ops`, one instruction's operations in order, read on entry and write; `None` over an
 /// `Unimplemented` one. A local branch can skip a write, so past one nothing is killed or dropped.
-pub fn register_accesses(ops: &[R2ILOp]) -> Option<RegisterAccesses> {
+/// A `hidden` register is the specification's scratch: never a write, and dead where unread after.
+pub fn register_accesses(
+    ops: &[R2ILOp],
+    hidden: impl Fn(&Varnode) -> bool,
+) -> Option<RegisterAccesses> {
     if ops.iter().any(|op| matches!(op, R2ILOp::Unimplemented)) {
         return None;
     }
+    let scratch =
+        |vn: &Varnode| vn.space == SpaceId::Unique || (vn.space == SpaceId::Register && hidden(vn));
     let straight_line = !ops.iter().any(local_branch);
     let used = match straight_line {
-        true => effective(ops),
+        true => effective(ops, scratch),
         false => vec![true; ops.len()],
     };
     let mut accesses = RegisterAccesses::default();
@@ -37,7 +43,9 @@ pub fn register_accesses(ops: &[R2ILOp]) -> Option<RegisterAccesses> {
             }
         }
         if let Some(output) = op.output().filter(|vn| vn.space == SpaceId::Register) {
-            merge(&mut accesses.writes, output);
+            if !hidden(output) {
+                merge(&mut accesses.writes, output);
+            }
             if straight_line {
                 killed.push(range(output));
             }
@@ -46,31 +54,33 @@ pub fn register_accesses(ops: &[R2ILOp]) -> Option<RegisterAccesses> {
     Some(accesses)
 }
 
-/// Whether each operation reaches an effect: one backward pass, a value into a
-/// temporary dropped where nothing after it reads that temporary.
-fn effective(ops: &[R2ILOp]) -> Vec<bool> {
-    let mut needed: Vec<(u64, u64)> = Vec::new();
+/// Whether each operation reaches an effect: one backward pass, a value into
+/// `scratch` dropped where nothing after it reads that storage.
+fn effective(ops: &[R2ILOp], scratch: impl Fn(&Varnode) -> bool) -> Vec<bool> {
+    let mut needed: Vec<(SpaceId, u64, u64)> = Vec::new();
     let mut used = vec![true; ops.len()];
+    let read_later = |needed: &[(SpaceId, u64, u64)], vn: &Varnode| {
+        let (start, end) = range(vn);
+        needed
+            .iter()
+            .any(|&(space, from, to)| space == vn.space && from < end && start < to)
+    };
     for (index, op) in ops.iter().enumerate().rev() {
         let dead = op.is_speculatable_value()
-            && op.output().is_some_and(|out| {
-                out.space == SpaceId::Unique && !overlaps_any(&needed, range(out))
-            });
+            && op
+                .output()
+                .is_some_and(|out| scratch(out) && !read_later(&needed, out));
         if dead {
             used[index] = false;
             continue;
         }
-        let temporaries = op
-            .inputs()
-            .into_iter()
-            .filter(|vn| vn.space == SpaceId::Unique);
-        needed.extend(temporaries.map(range));
+        let scratches = op.inputs().into_iter().filter(|vn| scratch(vn));
+        needed.extend(scratches.map(|vn| {
+            let (from, to) = range(vn);
+            (vn.space, from, to)
+        }));
     }
     used
-}
-
-fn overlaps_any(ranges: &[(u64, u64)], (start, end): (u64, u64)) -> bool {
-    ranges.iter().any(|&(from, to)| from < end && start < to)
 }
 
 /// Disjoint `ranges` with each run of adjacent ones that exactly fills a `declared` register
@@ -189,7 +199,7 @@ mod tests {
                 src: reg(0x10, 4),
             },
         ];
-        let accesses = register_accesses(&ops).unwrap();
+        let accesses = register_accesses(&ops, |_| false).unwrap();
         assert_eq!(accesses.reads, vec![reg(0x38, 8)]);
         assert_eq!(accesses.writes, vec![reg(0x10, 8)]);
     }
@@ -202,7 +212,7 @@ mod tests {
             a: reg(0x30, 8),
             b: reg(0x38, 8),
         }];
-        let accesses = register_accesses(&ops).unwrap();
+        let accesses = register_accesses(&ops, |_| false).unwrap();
         assert_eq!(accesses.reads, vec![reg(0x30, 8), reg(0x38, 8)]);
         assert_eq!(accesses.writes, vec![reg(0x30, 8)]);
     }
@@ -224,7 +234,7 @@ mod tests {
                 src: reg(0x0, 2),
             },
         ];
-        let accesses = register_accesses(&ops).unwrap();
+        let accesses = register_accesses(&ops, |_| false).unwrap();
         assert_eq!(accesses.reads, vec![reg(0x0, 2)]);
         assert_eq!(
             accesses.writes,
@@ -248,9 +258,48 @@ mod tests {
                 src: reg(0x0, 8),
             },
         ];
-        let accesses = register_accesses(&ops).unwrap();
+        let accesses = register_accesses(&ops, |_| false).unwrap();
         assert_eq!(accesses.reads, vec![reg(0x206, 1), reg(0x0, 8)]);
         assert_eq!(accesses.writes, vec![reg(0x0, 8), reg(0x10, 8)]);
+    }
+
+    #[test]
+    fn a_hidden_register_is_scratch_never_a_write() {
+        // ARM `add r0, r1, r2` without S: Sleigh computes tmpCY (0x66) from CY (0x62), unused.
+        let hidden = |vn: &Varnode| vn.offset == 0x66;
+        let dead = [
+            R2ILOp::IntCarry {
+                dst: reg(0x66, 1),
+                a: reg(0x24, 4),
+                b: reg(0x28, 4),
+            },
+            R2ILOp::IntAdd {
+                dst: reg(0x20, 4),
+                a: reg(0x24, 4),
+                b: reg(0x28, 4),
+            },
+        ];
+        let accesses = register_accesses(&dead, hidden).unwrap();
+        assert_eq!(accesses.reads, vec![reg(0x24, 4), reg(0x28, 4)]);
+        assert_eq!(accesses.writes, vec![reg(0x20, 4)]);
+        // With S, the scratch is committed to CY: its inputs are read, it is not written.
+        let committed = [
+            R2ILOp::BoolXor {
+                dst: reg(0x66, 1),
+                a: reg(0x62, 1),
+                b: reg(0x63, 1),
+            },
+            R2ILOp::Copy {
+                dst: reg(0x62, 1),
+                src: reg(0x66, 1),
+            },
+        ];
+        let accesses = register_accesses(&committed, hidden).unwrap();
+        assert_eq!(accesses.reads, vec![reg(0x62, 1), reg(0x63, 1)]);
+        assert_eq!(accesses.writes, vec![reg(0x62, 1)]);
+        // Unmarked, the same scratch is a register the instruction writes.
+        let unmarked = register_accesses(&dead, |_| false).unwrap();
+        assert_eq!(unmarked.writes, vec![reg(0x66, 1), reg(0x20, 4)]);
     }
 
     #[test]
@@ -281,7 +330,7 @@ mod tests {
             b: reg(0x0, 8),
         }];
         assert_eq!(
-            register_accesses(&ops).unwrap(),
+            register_accesses(&ops, |_| false).unwrap(),
             RegisterAccesses::default()
         );
     }
@@ -295,7 +344,7 @@ mod tests {
                 src: reg(0x4, 4),
             },
         ];
-        assert_eq!(register_accesses(&ops), None);
+        assert_eq!(register_accesses(&ops, |_| false), None);
     }
 
     #[test]
@@ -305,7 +354,10 @@ mod tests {
             space: SpaceId::Ram,
             addr: reg(0x0, 8),
         }];
-        assert_eq!(register_accesses(&ops).unwrap().reads, vec![reg(0x0, 8)]);
+        assert_eq!(
+            register_accesses(&ops, |_| false).unwrap().reads,
+            vec![reg(0x0, 8)]
+        );
     }
 
     #[test]
@@ -321,6 +373,9 @@ mod tests {
                 src: reg(0x0, 4),
             },
         ];
-        assert_eq!(register_accesses(&ops).unwrap().reads, vec![reg(0x0, 4)]);
+        assert_eq!(
+            register_accesses(&ops, |_| false).unwrap().reads,
+            vec![reg(0x0, 4)]
+        );
     }
 }

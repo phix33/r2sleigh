@@ -86,7 +86,7 @@ fn stated(lift: &r2il::R2ILBlock, machine: &crate::machine::Machine) -> Semantic
             .collect()
     };
     Semantics {
-        registers: r2il::register_accesses(&lift.ops)
+        registers: r2il::register_accesses(&lift.ops, |vn| machine.disasm.hides_register(vn))
             .map(|accesses| Registers {
                 reads: named(accesses.reads),
                 writes: named(accesses.writes),
