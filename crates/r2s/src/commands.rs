@@ -262,6 +262,20 @@ pub(crate) const VERBS: &[Verb] = &[
         Some(decompile_json)
     ),
     verb!(
+        ["ao"],
+        Count,
+        Public,
+        "instructions as their lift states them: registers read and written, the IL",
+        Some(crate::opcodes::text)
+    ),
+    verb!(
+        ["aoj"],
+        Count,
+        Public,
+        "instructions as their lift states them, as JSON",
+        Some(crate::opcodes::json)
+    ),
+    verb!(
         ["aa"],
         None,
         Public,

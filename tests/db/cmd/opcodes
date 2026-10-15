@@ -1,0 +1,218 @@
+# `ao` and `aoj`: each instruction as its lift states it (ROADMAP AO). The registers
+# read are those whose value on entry the operations use, the registers written
+# those they write, joined where they overlap; `il` is what `pdil` prints.
+
+NAME=x86-64: a 32-bit write is the 64-bit register
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=ao 3 @ 0x401339
+EXPECT=<<EOF
+address: 0x401339
+opcode: add rsi, rdi
+disasm: add rsi, rdi
+mnemonic: add
+bytes: 4801fe
+size: 3
+reads: rsi rdi
+writes: cf of rsi sf zf pf
+il:
+    0: CF = CARRY(RSI, RDI)
+    1: OF = SCARRY(RSI, RDI)
+    2: RSI = RSI + RDI
+    3: SF = RSI s< 0x0:8
+    4: ZF = RSI == 0x0:8
+    5: uniq:0x58200[8] = RSI & 0xff:8
+    6: uniq:0x58300[1] = POPCOUNT(uniq:0x58200[8])
+    7: uniq:0x58400[1] = uniq:0x58300[1] & 0x1:1
+    8: PF = uniq:0x58400[1] == 0x0:1
+address: 0x40133c
+opcode: mov eax, 0x811c9dc5
+disasm: mov eax, 0x811c9dc5
+mnemonic: mov
+bytes: b8c59d1c81
+size: 5
+reads:
+writes: rax
+il:
+    0: RAX = COPY 0x811c9dc5:8
+address: 0x401341
+opcode: nop dword [rax]
+disasm: nop dword [rax]
+mnemonic: nop
+bytes: 0f1f8000000000
+size: 7
+reads:
+writes:
+il:
+EOF
+RUN
+
+NAME=x86-64: a register written before it is read is not read
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=aoj 2 @ 0x401348
+EXPECT=<<EOF
+[{"addr":4199240,"bytes":"0fb617","disasm":"movzx edx, byte [rdi]","il":["uniq:0x23a00[1] = LOAD [ram]RDI","EDX = ZEXT(uniq:0x23a00[1])","RDX = ZEXT(EDX)"],"mnemonic":"movzx","opcode":"movzx edx, byte [rdi]","reads":["rdi"],"size":3,"writes":["rdx"]},{"addr":4199243,"bytes":"4883c701","disasm":"add rdi, 0x1","il":["CF = CARRY(RDI, 0x1:8)","OF = SCARRY(RDI, 0x1:8)","RDI = RDI + 0x1:8","SF = RDI s< 0x0:8","ZF = RDI == 0x0:8","uniq:0x58200[8] = RDI & 0xff:8","uniq:0x58300[1] = POPCOUNT(uniq:0x58200[8])","uniq:0x58400[1] = uniq:0x58300[1] & 0x1:1","PF = uniq:0x58400[1] == 0x0:1"],"mnemonic":"add","opcode":"add rdi, 0x1","reads":["rdi"],"size":4,"writes":["cf","of","rdi","sf","zf","pf"]}]
+EOF
+RUN
+
+NAME=AArch64: writeback, a W source, a scalar FP write
+FILE=tests/fixtures/float_moves_zig_aarch64_O2g
+CMDS=ao 4 @ sym.main
+EXPECT=<<EOF
+address: 0x1010500
+opcode: stp x29, x30, [sp, -0x10]!
+disasm: stp x29, x30, [sp, -0x10]!
+mnemonic: stp
+bytes: fd7bbfa9
+size: 4
+reads: x29 x30 sp
+writes: sp
+il:
+    0: uniq:0x78f00[8] = COPY x29
+    1: uniq:0x79000[8] = COPY x30
+    2: sp = sp + 0xfffffffffffffff0:8
+    3: STORE [ram]sp = uniq:0x78f00[8]
+    4: uniq:0x79100[8] = sp + 0x8:8
+    5: STORE [ram]uniq:0x79100[8] = uniq:0x79000[8]
+address: 0x1010504
+opcode: mov x29, sp
+disasm: mov x29, sp
+mnemonic: mov
+bytes: fd030091
+size: 4
+reads: sp
+writes: x29
+il:
+    0: x29 = COPY sp
+address: 0x1010508
+opcode: scvtf d0, w0
+disasm: scvtf d0, w0
+mnemonic: scvtf
+bytes: 0000621e
+size: 4
+reads: w0
+writes: z0
+il:
+    0: d0 = INT2FLOAT(w0)
+    1: reg:0x5008[8] = COPY 0x0:8
+    2: reg:0x5010[8] = COPY 0x0:8
+    3: reg:0x5018[8] = COPY 0x0:8
+address: 0x101050c
+opcode: fmov d1, 0x4000000000000000
+disasm: fmov d1, 0x4000000000000000
+mnemonic: fmov
+bytes: 0110601e
+size: 4
+reads:
+writes: z1
+il:
+    0: d1 = COPY 0x4000000000000000:8
+    1: reg:0x5028[8] = COPY 0x0:8
+    2: reg:0x5030[8] = COPY 0x0:8
+    3: reg:0x5038[8] = COPY 0x0:8
+EOF
+RUN
+
+NAME=ARM BE8: code decoded little-endian, a load into pc
+FILE=tests/fixtures/arm_plt_lld_be8.so
+CMDS=<<EOF
+ao 1 @ sym.f
+aoj 1 @ 0x10218
+EOF
+EXPECT=<<EOF
+address: 0x101d4
+opcode: push {r4, lr}
+disasm: push {r4, lr}
+mnemonic: push
+bytes: 10402de9
+size: 4
+reads: sp lr r4
+writes: mult_addr sp
+il:
+    0: mult_addr = sp - 0x4:4
+    1: STORE [ram]mult_addr = lr
+    2: mult_addr = mult_addr - 0x4:4
+    3: STORE [ram]mult_addr = r4
+    4: mult_addr = mult_addr - 0x4:4
+    5: sp = mult_addr + 0x4:4
+[{"addr":66072,"bytes":"7cf0bce5","disasm":"ldr pc, [ip, 0x7c]!","il":["r12 = r12 + 0x7c:4","uniq:0x89200[4] = LOAD [ram]r12","uniq:0x0[4] = uniq:0x89200[4] & 0x1:4","ISAModeSwitch = uniq:0x0[4] != 0x0:4","TB = COPY ISAModeSwitch","pc = uniq:0x89200[4] & 0xfffffffe:4","BRANCHIND pc"],"mnemonic":"ldr","opcode":"ldr pc, [ip, 0x7c]!","reads":["ip"],"size":4,"writes":["ip","isamodeswitch","tb","pc"]}]
+EOF
+RUN
+
+NAME=BE32 Thumb object: a field the container does not state
+FILE=tests/fixtures/arm_thumb_movw_be.o
+CMDS=ao 2 @ 0x0800003e
+EXPECT=<<EOF
+address: 0x800003e
+opcode: bne.w 0x800003e
+disasm: bne.w 0x800003e
+mnemonic: bne.w
+bytes: f47faffe
+size: 4
+refused: it holds a field whose value the container does not state
+address: 0x8000042
+opcode: beq.w 0x8044042
+disasm: beq.w 0x8044042
+mnemonic: beq.w
+bytes: f003a7fe
+size: 4
+refused: it holds a field whose value the container does not state
+EOF
+RUN
+
+NAME=an operation the lift could not express states no registers
+FILE=tests/fixtures/arm_plt_lld_be8.so
+CMDS=<<EOF
+wx 1eff2f01 @ 0x101d4
+ao 1 @ 0x101d4
+EOF
+EXPECT=<<EOF
+4 bytes at 0x101d4
+address: 0x101d4
+opcode: bxeq lr
+disasm: bxeq lr
+mnemonic: bxeq
+bytes: 1eff2f01
+size: 4
+refused: an operation is unimplemented, so what it touches is not stated
+il:
+    0: uniq:0x4d00[1] = !ZR
+    1: UNIMPLEMENTED
+    2: UNIMPLEMENTED
+    3: UNIMPLEMENTED
+    4: UNIMPLEMENTED
+    5: UNIMPLEMENTED
+    6: UNIMPLEMENTED
+EOF
+RUN
+
+NAME=bytes that are not an instruction
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=<<EOF
+wx ffff @ 0x401330
+aoj 1 @ 0x401330
+EOF
+EXPECT=<<EOF
+2 bytes at 0x401330
+[{"addr":4199216,"bytes":"ff","disasm":"invalid","mnemonic":"invalid","opcode":"invalid","refused":"the bytes are not an instruction","size":1}]
+EOF
+RUN
+
+NAME=nothing mapped
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=ao 1 @ 0x10
+EXPECT_ERR=<<EOF
+r2s: nothing mapped at 0x10
+EOF
+EXPECT=<<EOF
+EOF
+RUN
+
+NAME=a count that is not a number
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=aoj many
+EXPECT_ERR=<<EOF
+r2s: bad count 'many'
+EOF
+EXPECT=<<EOF
+EOF
+RUN

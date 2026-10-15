@@ -9,6 +9,7 @@ mod function;
 mod grep;
 mod line;
 mod listing;
+mod opcodes;
 mod prompt;
 mod session;
 mod visual;
