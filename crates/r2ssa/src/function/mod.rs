@@ -504,6 +504,17 @@ impl TrustedSeal {
         self.sealed.graph()
     }
 
+    /// Where each dispatch reads its table: the values the artifact's facts would solve from it.
+    pub fn dispatch_table_reads(&self) -> Vec<crate::indirect::DispatchTableRead> {
+        let sealed = &self.sealed;
+        let (function, graph) = (sealed.function(), sealed.graph());
+        crate::indirect::prepared_dispatch_table_reads(
+            function,
+            graph,
+            sealed.decompile_prep_facts(),
+        )
+    }
+
     /// The value a storage holds immediately before one operation, as a call's arguments read it.
     pub fn value_reaching(
         &self,
@@ -2380,27 +2391,22 @@ impl TrustedSsaArtifact {
         )
     }
 
-    /// Where each dispatch reads its table, off the sealed function before any fact is collected:
-    /// the values are those the artifact's facts would solve from the same function.
-    pub fn dispatch_table_reads_with_callee_interfaces<C: SsaWorkControl + ?Sized>(
+    /// Build against the convention alone and seal, recovering nothing: for a reader of values
+    /// inside the body, such as a dispatch's table or a call's argument, which no interface decides.
+    pub fn seal_against_convention<C: SsaWorkControl + ?Sized>(
         lifted: TrustedLiftedFunction,
         arch: Option<&crate::Arch>,
         control: &C,
         evidence: &CalleeEvidence,
         premises: &BTreeSet<r2source::Premise>,
-    ) -> Result<Vec<crate::indirect::DispatchTableRead>, SsaPrepareError> {
-        // A table's bounds are its guards and the constants the seal states, which no interface
-        // decides: the convention's build is sealed, and nothing is recovered.
-        let recovery = Recovery::Convention;
-        let seal = Self::sealed(lifted, arch, control, (evidence, premises), recovery)?;
-        let sealed = &seal.sealed;
-        let reads = crate::indirect::prepared_dispatch_table_reads(
-            sealed.function(),
-            sealed.graph(),
-            sealed.decompile_prep_facts(),
-        );
-        control.poll()?;
-        Ok(reads)
+    ) -> Result<TrustedSeal, SsaPrepareError> {
+        Self::sealed(
+            lifted,
+            arch,
+            control,
+            (evidence, premises),
+            Recovery::Convention,
+        )
     }
 
     /// The trusted lift built under `recovery` and sealed, its facts not yet collected.

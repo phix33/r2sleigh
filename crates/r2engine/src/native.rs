@@ -745,16 +745,8 @@ pub(crate) fn handed(
         }
     };
     let walked = native.walked(body);
-    // What reaches a call's argument is read off the seal: no fact is collected for it.
-    let seal = native.seal(
-        &walked,
-        &Callees::default(),
-        Vec::new(),
-        Restatement::default(),
-        &[],
-        None,
-    );
-    match seal {
+    // What reaches a call's argument is the body's: read off the convention's seal, as a table.
+    match native.convention_seal(&walked, &Callees::default(), Restatement::default()) {
         Ok(seal) => native.handed_functions(&seal, &walked),
         Err(error) => {
             r2il::refusal_evidence!(
@@ -1828,6 +1820,18 @@ impl Native<'_> {
         callees: &Callees,
         restatement: Restatement,
     ) -> Result<Vec<r2ssa::indirect::DispatchTableRead>, NativeRefusal> {
+        let seal = self.convention_seal(walked, callees, restatement)?;
+        Ok(seal.dispatch_table_reads())
+    }
+
+    /// One body captured, built against the convention alone and sealed: what values inside it
+    /// read, which no interface decides.
+    fn convention_seal(
+        &self,
+        walked: &Walked,
+        callees: &Callees,
+        restatement: Restatement,
+    ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
         let capture = Capture {
             extra_literals: Vec::new(),
             restatement,
@@ -1835,7 +1839,7 @@ impl Native<'_> {
             result_reads: None,
         };
         let (lifted, evidence) = self.lifted(walked, callees, capture)?;
-        TrustedSsaArtifact::dispatch_table_reads_with_callee_interfaces(
+        TrustedSsaArtifact::seal_against_convention(
             lifted,
             Some(self.target.arch),
             &self.control,
