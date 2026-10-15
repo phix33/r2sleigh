@@ -92,6 +92,12 @@ Decisions
 | D31 | Every layer has an executable oracle: the container against radare2 and DWARF, the lift against the CPU, each IR rewrite against `r2il::eval` before and after it, the C against the machine. A layer without one is not admitted to render (2026-10-14) | standing (GT, VC) |
 | D32 | `pdd` renders an architecture only where an equivalence target grades it; elsewhere the listing, discovery and references work and `pdd` refuses with that reason (2026-10-14: ARM32 and RISC-V 64 refuse until LS and M give them targets) | standing (RF refuses; M, LS add targets) |
 | D33 | `libsla-sys`'s Ghidra, the compiler `sleigh-compiler` builds against its headers, and `sleigh-config`'s specifications sit on one Ghidra commit; the engine resyncs whenever the specifications do (2026-10-15: master `918acd744d`) | standing (VC) |
+| D34 | A lift pass over one instruction's ops edits through one plan whose applier keeps every instruction-relative label on its op, and `decode_sweep` runs each pass's input and output through `r2il::eval` from the same states ([verified layers](doc/adr-verified-layers.md)) | LS |
+| D35 | x86-64 has a CPU oracle recorded on contabo and replayed on every host, and CI fails a change to a vendored `.sinc` or `.pspec` that adds no oracle case or `r2il::eval` test (D28 enforced) | VC |
+| D36 | A temporary is named by where it is defined (its instruction and op index), not by its unique-space offset, so a resync that changes no semantics moves no census line | r2ssa (`naming.rs`) |
+| D37 | r2ssa states why an arity is a floor (an indirect call, an unresolved cycle member, a missing prototype); r2engine reads the cause, and a cycle's results are the same fixpoint as its arities | P7 |
+| D38 | The cost verdict counts retired user-space instructions (`perf_event_open`, CPU time under emulation); each record states its measure and the ratchet never compares across measures | GT |
+| D39 | A scheduled CI job reports how far the Ghidra base, `TESTBINS_REF` and the judged radare2 release are behind upstream and fails past a stated budget | GT, VC |
 
 The Sleigh crates (`libsla`, `libsla-sys`, `sleigh-config`) are vendored (`vendor/`).
 
@@ -214,13 +220,18 @@ each other, each on its own branch and stacked (AGENTS.md).
 5. **FS** and **RF**: one owner for starts and bodies (#255 done), every
    refusal a record (RF under way).
 6. **LS**'s rest: W20, W22, W23, M13 and W25 done (#254), M2 and its ordering
-   done, the Thumb context (W2, W3) done; W26 and a typed atomic RMW left. Then
+   done, the Thumb context (W2, W3) and big-endian ARM (W26, #282) done; a typed
+   atomic RMW left. Then
    **AO**, the first surface item, because it is a gate: each instruction's
    register reads and writes diffed against radare2 find lift and spec defects
    (done 2026-10-15: VC's AF, `lodsd` and scratch registers, the lift's shift
    flags and LS's conditional ARM transfers, recorded in its row).
+   Then the verified layers ([ADR](doc/adr-verified-layers.md)): D35's x86-64
+   oracle before further x86 spec fixes, D34's pass plan and its eval check,
+   D36's stable temporary names before the next resync.
 7. **P7**, with T's one declaration fact (W46, W47): invented arguments are an
    AGENTS blocker and the most common wrong C left.
+   Its next is D37: the floor's cause typed in r2ssa, then a cycle's results.
 8. **The cost path**: LX's AArch64 quadratic (P5, #252) and P21's liveness half (#258) done, its dense rename identities and domtrees left (LX);
    callee preparation is now the largest cost (gzdoom: `recover_interface`
    36% of `pdd`), so SM (P1) after P7's components, F2.1 and F2.2, LX4 with F2.4, F2.5, T's dense indexes, LX2, MM;
@@ -230,7 +241,8 @@ each other, each on its own branch and stacked (AGENTS.md).
 10. **Surface**: V7 after FS's containing-function query, S3, S1, S2, CL; then
    V3 to V6, E, A.
 
-Beside the path, when a step waits on CI: BD, L5 and L6, M's rest, LF, PF, H,
+Beside the path, when a step waits on CI: D38's instruction-count cost,
+D39's drift alarm, BD, L5 and L6, M's rest, LF, PF, H,
 G0, W, D's rest, hygiene. PE's rest is B's; P6's is SM's.
 
 Every item replaces what it owns and deletes the old path in its own branch

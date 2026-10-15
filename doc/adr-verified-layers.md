@@ -1,0 +1,105 @@
+# ADR: every layer verified, and the root causes behind 2026-10's defects
+
+Status: accepted (2026-10-15); D34 to D39 in [ROADMAP](../ROADMAP.md)
+
+## Context
+
+Most of the deep defects fixed in October 2026 share one cause. A layer the
+engine trusts had no independent check, so its errors reached the output and
+were found by chance.
+
+| Defect | Layer trusted | Found by |
+|---|---|---|
+| Ghidra's C++ engine 3,928 commits behind its specifications (#280) | vendored engine | a crash whose fix upstream already had |
+| `ParserContext` written past its fixed arrays (#278) | Sleigh parser | `pd 2000` on one binary |
+| a backward `blx`'s `globalset` leaking into the next decode (W2, #277) | Sleigh context | a listing compared by hand |
+| FCVT saturation and fraction bits; x86 AF; `lodsd`; unhidden scratch registers | specifications | the AArch64 CPU oracle, the AO register gate |
+| BE32 ARM decoded little-endian (W26, #282) | container byte order | the audit |
+| a label inside an instruction naming the op before its own (#280, #281) | the lift's own passes | review, twice |
+| 1,477 census lines renamed by a resync | temporary names | every spec change |
+| a recursive function's arity left a floor (#279) | r2ssa's arity evidence | equivalence |
+
+Every fix that held came with a gate: the CPU oracle, `diff_r2`, AO's register
+sets, `decode_sweep`. D31 already states the rule ("every layer has an
+executable oracle"). This ADR lists where the rule is not yet met, and the
+structural decisions that close each gap.
+
+## Layers and their verifiers
+
+| Layer | What it states | Verifier | Status |
+|---|---|---|---|
+| Container (`r2image`) | bytes, sections, symbols, relocations, byte orders | `diff_r2` against radare2, DWARF | present; field relocations open (I) |
+| Decoder (Sleigh, vendored) | instruction length and text | `diff_r2 pd`; `decode_sweep` (random words per language, no fault) | present |
+| Lift semantics (specs) | each instruction's effect | the CPU oracle: AArch64 present (Apple M5); **x86-64 missing** (D35); ARM32 refused (D32) | partial |
+| Lift passes (`translate.rs`, `internal_control`) | a rewrite of one instruction's ops | **none**: no eval before and after (D34) | missing |
+| Register effects | reads and writes per instruction | AO against radare2's `aeaj` | present (#284) |
+| r2ssa rewrites | value-preserving IR edits | `EditPlan` with stable ids ([stable identity](adr-stable-identity.md)), the semantic kernel | present |
+| Arity | how many arguments a callee takes | certification and equivalence; the floor's cause **not typed** (D37) | partial |
+| Rendered C | the function's behaviour | equivalence on x86-64 and aarch64 | present |
+| Cost | time to render | wall time, which **depends on host load** (D38) | nondeterministic |
+| Upstream pins | Ghidra, testbins, radare2 releases | **none**: the drift was found by hand (D39) | missing |
+
+## Decisions
+
+**D34. Lift passes edit through one instruction plan, and each is checked by
+`r2il::eval`.** Owner: `r2sleigh-lift`.
+- A pass over one instruction's ops states insertions before or after an op
+  and replacements. It never pushes into a fresh `Vec`.
+- One applier keeps every instruction-relative label on the op it named, as
+  r2ssa's `EditPlan` does for the IR. The per-pass `starts`/`at` vectors of
+  `whole_unique_reads` and `canonicalize_memory_operands` are deleted (D1).
+- Gate: `decode_sweep` runs each pass's input and output through `r2il::eval`
+  from the same seeded states and compares registers and memory. A pass that
+  moves a label or drops an effect fails it. This is D31's "each IR rewrite
+  against `r2il::eval` before and after" applied to the lift.
+
+**D35. x86-64 has a CPU oracle, and a spec change merges with oracle
+evidence.** Owner: VC.
+- The AArch64 harness's format (case, input state, the CPU's result, replayed
+  through the trusted lift on every host) is reused on x86-64. contabo runs x86-64
+  natively; the cases are recorded there and replayed everywhere.
+- Gate: CI fails a pull request that changes a `.sinc` or `.pspec` under
+  `vendor/sleigh-config` unless it also adds or changes an oracle case or an
+  `r2il::eval` test, as D28 requires.
+- Order: before further x86 spec fixes; the AF and `lodsd` fixes gain cases
+  when it lands.
+
+**D36. A temporary's name comes from where it is defined, not from its
+unique-space offset.** Owner: r2ssa (`naming.rs`); r2dec spells it.
+- The name derives from the stable op identity (the instruction and the op's
+  index within it), which a spec change leaves alone unless the instruction's
+  own semantics change.
+- Gate: a specification resync that changes no instruction's semantics moves
+  no census line.
+- Order: before the next specification resync.
+
+**D37. r2ssa states why an arity is a floor.** Owner: r2ssa (boundaries);
+r2engine reads it.
+- The cause is a typed fact: an indirect call, a call into an unresolved cycle
+  member, or a missing prototype.
+- The cycle fixpoint (#279) then needs no discovery round, and a cycle's
+  results become the same fixpoint over return values (`shape_mutual_even`).
+- Gate: an engine test per cause, and the `shape_mutual_even` record equal.
+
+**D38. The cost verdict counts retired instructions.** Owner: GT.
+- Native runs count user-space instructions with `perf_event_open`
+  (HW_INSTRUCTIONS, `exclude_kernel`) and stop past the budget. Emulated runs
+  fall back to CPU time (`ITIMER_VIRTUAL`).
+- Each record states its measure and budget, and the ratchet refuses to
+  compare across measures.
+- Gate: `slow` verdicts are identical on an idle and a loaded host.
+
+**D39. Upstream drift is a gate, not a discovery.** Owner: GT, with VC.
+- A scheduled CI job reports how far each pin is behind its upstream (the
+  Ghidra fork's base against Ghidra master, `TESTBINS_REF` against
+  radare2-testbins, the radare2 release in the judgments against the latest),
+  and fails past a stated budget.
+- The budget is a resync, not a waiver: D33 says the engine moves with the
+  specifications.
+
+## Order
+
+The six decisions slot into ROADMAP's order. D35 and D34 come after LS's
+typed atomic read-modify-write and before AO's spec follow-ups ship further x86
+fixes. D36 comes before the next resync. D37 is P7's next item. D38 and D39 are
+GT's, beside the path whenever a step waits on CI.
