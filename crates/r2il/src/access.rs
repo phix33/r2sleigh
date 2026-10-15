@@ -13,9 +13,8 @@ pub struct RegisterAccesses {
     pub writes: Vec<Varnode>,
 }
 
-/// What `ops`, one instruction's operations in order, read on entry and write; `None` over an
-/// `Unimplemented` one. A local branch can skip a write, so past one nothing is killed or dropped.
-/// A `hidden` register is the specification's scratch: never a write, and dead where unread after.
+/// What `ops`, one instruction's operations in order, read on entry and write (`None` if one is `Unimplemented`);
+/// past a local branch nothing is killed or dropped, and a `hidden` register is scratch, never a write.
 pub fn register_accesses(
     ops: &[R2ILOp],
     hidden: impl Fn(&Varnode) -> bool,

@@ -201,9 +201,8 @@ fn arm_it_condition(text: &str) -> String {
     }
 }
 
-/// ARM spellings Sleigh keeps from before the unified syntax, as other disassemblers print them:
-/// `cpy` is `mov`, a stack load or store of two or more registers is `pop` or `push` (the Arm
-/// ARM's preferred disassembly only past one register), `ldmia` is `ldm`.
+/// ARM spellings Sleigh keeps from before the unified syntax, as other disassemblers print them: `cpy` is
+/// `mov`, a stack load or store of two or more registers `pop` or `push` (Arm ARM), `ldmia` is `ldm`.
 fn arm_alias(text: &str) -> String {
     let several = |list: &str| list.contains(',') || list.contains('-');
     if let Some(rest) = text.strip_prefix("cpy ") {

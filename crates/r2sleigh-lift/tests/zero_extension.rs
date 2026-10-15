@@ -1,6 +1,5 @@
-//! In 64-bit mode a 32-bit register destination zero-extends into its 64-bit register (Intel SDM
-//! Vol. 1, 3.4.1.1), run through `r2il::eval` from registers whose upper halves are set; Ghidra's
-//! GP-7027 states it for these forms, ported in vendor/README.md.
+//! In 64-bit mode a 32-bit destination zero-extends into its 64-bit register (Intel SDM Vol. 1,
+//! 3.4.1.1; GP-7027, vendor/README.md), run through `r2il::eval` from registers with upper halves set.
 #![cfg(feature = "x86")]
 
 mod x86_machine;

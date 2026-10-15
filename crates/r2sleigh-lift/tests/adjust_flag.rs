@@ -85,22 +85,31 @@ fn arithmetic_sets_af_to_the_carry_out_of_bit_3() {
         ),
     ];
     for (text, bytes, form, left, right, carries) in forms {
-        for a in VALUES {
-            for b in VALUES {
-                for carry in [0, u128::from(carries)] {
-                    let entry = [(left, a), (right, b), ("CF", carry)];
-                    let state = &machine.run(bytes, &entry);
-                    let result = match form {
-                        Form::Add => a.wrapping_add(b).wrapping_add(carry),
-                        Form::Sub => a.wrapping_sub(b).wrapping_sub(carry),
-                    };
-                    let expected = adjust(a, b, result);
-                    let af = machine.read(state, "AF");
-                    assert_eq!(af, expected, "{text}: {a:#x}, {b:#x}, CF {carry}");
-                }
-            }
+        for (a, b, carry) in operands(carries) {
+            let entry = [(left, a), (right, b), ("CF", carry)];
+            let state = &machine.run(bytes, &entry);
+            let result = match form {
+                Form::Add => a.wrapping_add(b).wrapping_add(carry),
+                Form::Sub => a.wrapping_sub(b).wrapping_sub(carry),
+            };
+            let af = machine.read(state, "AF");
+            assert_eq!(
+                af,
+                adjust(a, b, result),
+                "{text}: {a:#x}, {b:#x}, CF {carry}"
+            );
         }
     }
+}
+
+/// Every pair of [`VALUES`], with CF clear and, where the instruction reads it, set.
+fn operands(carries: bool) -> Vec<(u128, u128, u128)> {
+    let carry_in: &[u128] = if carries { &[0, 1] } else { &[0] };
+    VALUES
+        .iter()
+        .flat_map(|&a| VALUES.iter().map(move |&b| (a, b)))
+        .flat_map(|(a, b)| carry_in.iter().map(move |&carry| (a, b, carry)))
+        .collect()
 }
 
 #[test]

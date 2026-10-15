@@ -1,6 +1,5 @@
 //! One x86-64 instruction lifted by the trusted specification and run through `r2il::eval`,
-//! with `[rsi]` pointing at a cell that holds [`HELD`].
-// Each test target that includes this module uses only part of it.
+//! with `[rsi]` pointing at a cell that holds [`HELD`]; each test target uses part of it.
 #![allow(dead_code)]
 
 use r2il::eval::{Flow, Mapped, State, step};

@@ -423,9 +423,8 @@ pub fn canonicalize_memory_operands(
     out
 }
 
-/// One machine access Sleigh spells as several (x86's `add [m], r` reads `[m]` for each flag): a
-/// plain load of an address this instruction already loaded or stored, with no write to the
-/// address, the value or memory between, reads the value held. Straight-line only. O(n·k).
+/// A plain load of an address this instruction already loaded or stored, nothing written to the address,
+/// value or memory between, reads the value held: one access Sleigh spells as several. O(n·k).
 pub fn forward_repeated_loads(ops: Vec<R2ILOp>) -> Vec<R2ILOp> {
     let local_branch = |op: &R2ILOp| {
         matches!(op, R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. }
@@ -446,26 +445,7 @@ pub fn forward_repeated_loads(ops: Vec<R2ILOp>) -> Vec<R2ILOp> {
     for op in ops {
         match op {
             R2ILOp::Load { dst, space, addr } => {
-                let known = held
-                    .iter()
-                    .find(|(at, address, value)| {
-                        *at == space && *address == addr && value.size == dst.size
-                    })
-                    .map(|(.., value)| value.clone());
-                match known {
-                    Some(value) if value == dst => {}
-                    Some(value) => {
-                        forget(&mut held, &dst);
-                        out.push(R2ILOp::Copy { dst, src: value });
-                    }
-                    None => {
-                        forget(&mut held, &dst);
-                        if !overlaps(&dst, &addr) {
-                            held.push((space, addr.clone(), dst.clone()));
-                        }
-                        out.push(R2ILOp::Load { dst, space, addr });
-                    }
-                }
+                out.extend(forward_load(&mut held, dst, space, addr))
             }
             R2ILOp::Store { space, addr, val } => {
                 // Another address may be the same bytes, so only this store's value stays known.
@@ -486,6 +466,30 @@ pub fn forward_repeated_loads(ops: Vec<R2ILOp>) -> Vec<R2ILOp> {
         }
     }
     out
+}
+
+/// One load where `held` may already know its value: the load, a copy of the value, or nothing.
+fn forward_load(
+    held: &mut Vec<(SpaceId, Varnode, Varnode)>,
+    dst: Varnode,
+    space: SpaceId,
+    addr: Varnode,
+) -> Option<R2ILOp> {
+    let known = held
+        .iter()
+        .find(|(at, address, value)| *at == space && *address == addr && value.size == dst.size)
+        .map(|(.., value)| value.clone());
+    if known.as_ref() == Some(&dst) {
+        return None;
+    }
+    forget(held, &dst);
+    if let Some(value) = known {
+        return Some(R2ILOp::Copy { dst, src: value });
+    }
+    if !overlaps(&dst, &addr) {
+        held.push((space, addr.clone(), dst.clone()));
+    }
+    Some(R2ILOp::Load { dst, space, addr })
 }
 
 fn overlaps(a: &Varnode, b: &Varnode) -> bool {
@@ -554,17 +558,17 @@ mod tests {
             R2ILOp::IntAdd {
                 dst: cell.clone(),
                 a: cell.clone(),
-                b: one.clone(),
+                b: one,
             },
             R2ILOp::Store {
                 space: SpaceId::Ram,
                 addr: address.clone(),
                 val: cell.clone(),
             },
-            load(cell.clone(), address.clone()),
+            load(cell.clone(), address),
             R2ILOp::IntSLess {
                 dst: flag(0x207),
-                a: cell.clone(),
+                a: cell,
                 b: Varnode::constant(0, 4),
             },
         ]);
@@ -593,7 +597,7 @@ mod tests {
             R2ILOp::Store {
                 space: SpaceId::Ram,
                 addr: other.clone(),
-                val: other.clone(),
+                val: other,
             },
         ] {
             let ops = forward_repeated_loads(vec![
@@ -609,7 +613,7 @@ mod tests {
         }
         let chased = vec![
             load(address.clone(), address.clone()),
-            load(address.clone(), address.clone()),
+            load(address.clone(), address),
         ];
         assert_eq!(forward_repeated_loads(chased.clone()), chased);
     }
