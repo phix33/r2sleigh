@@ -145,12 +145,17 @@ void ParserContext::addCommit(TripleSymbol *sym,int4 num,uintm mask,bool flow,Co
   set.flow = flow;
 }
 
-bool ParserContext::applyCommits(void)
+/// A commit aimed anywhere but the fall-through is collected in \e elsewhere, not written:
+/// painted from its target upward it would steer every later decode in the same run.
+/// \param elsewhere collects the commits aimed at another address
+/// \return \b true if any commit reached the context database
+bool ParserContext::applyCommits(vector<ContextTarget> &elsewhere)
 
 {
   if (contextcommit.empty()) return false;
   ParserWalker walker(this);
   walker.baseState();
+  bool committed = false;
 
   vector<ContextSet>::iterator iter;
 
@@ -177,6 +182,15 @@ bool ParserContext::applyCommits(void)
       uintb newoff = AddrSpace::addressToByte(commitaddr.getOffset(),addr.getSpace()->getWordSize());
       commitaddr = Address(addr.getSpace(),newoff);
     }
+    if (commitaddr != naddr) {
+      vector<uintm> held(contextsize);
+      contcache->getContext(commitaddr,held.data());
+      ContextTarget target = { commitaddr, (*iter).num, (*iter).mask, (*iter).value,
+			       held[(*iter).num] & (*iter).mask, (*iter).flow };
+      elsewhere.push_back(target);
+      continue;
+    }
+    committed = true;
 
 				// Commit context change
     if ((*iter).flow)		// The context flows
@@ -189,7 +203,7 @@ bool ParserContext::applyCommits(void)
 	contcache->setContext(commitaddr,nextaddr,(*iter).num,(*iter).mask,(*iter).value);
     }
   }
-  return true;
+  return committed;
 }
 
 void ParserWalker::setOutOfBandState(Constructor *ct,int4 index,ConstructState *tempstate,const ParserWalker &otherwalker)

@@ -167,6 +167,7 @@ class Sleigh : public SleighBase {
   mutable DisassemblyCache *discache;	///< Cache of recently parsed instructions
   mutable PcodeCacher pcode_cache;	///< Cache of p-code data just prior to emitting
   mutable bool contextcommitted;	///< A decode has committed context since the last reset
+  mutable vector<ContextTarget> contexttargets;	///< The last p-code decode's commits aimed past its fall-through
   void clearForDelete(void);		///< Delete the context and disassembly caches
 protected:
   ParserContext *obtainContext(const Address &addr,int4 state) const;
@@ -177,6 +178,7 @@ public:
   virtual ~Sleigh(void);				///< Destructor
   void reset(LoadImage *ld,ContextDatabase *c_db);	///< Reset the engine for a new program
   bool contextCommitted(void) const { return contextcommitted; }	///< Has a decode committed context since the last reset
+  const vector<ContextTarget> &contextTargets(void) const { return contexttargets; }	///< The last oneInstruction()'s commits kept out of the database
   void invalidateParseCache(void) const;	///< Forget every parse; the context database stays
   virtual void initialize(DocumentStorage &store);
   virtual void registerContext(const string &name,int4 sbit,int4 ebit);

@@ -64,6 +64,18 @@ struct ContextSet {		// Instructions for setting a global context value
   bool flow;			// Does the new context flow from its set point
 };
 
+/// \brief A global context value committed at an address other than the instruction's fall-through
+///
+/// It states how the target decodes (a \e blx's instruction set) and is kept out of the context database.
+struct ContextTarget {
+  Address addr;			///< Where the value takes effect
+  int4 num;			///< Number of context word affected
+  uintm mask;			///< Bits within word affected
+  uintm value;			///< New setting for bits
+  uintm held;			///< The bits the database holds at the address
+  bool flow;			///< Does the new context flow from its set point
+};
+
 class ParserWalker;		// Forward declaration
 class ParserWalkerChange;
 class Translate;
@@ -108,7 +120,7 @@ public:
   void setCalladdr(const Address &ad) { calladdr = ad; }
   void addCommit(TripleSymbol *sym,int4 num,uintm mask,bool flow,ConstructState *point);
   void clearCommits(void) { contextcommit.clear(); }
-  bool applyCommits(void);	///< Commit global context changes (\b true if there were any)
+  bool applyCommits(vector<ContextTarget> &elsewhere);	///< Commit fall-through context changes (\b true if there were any)
   const Address &getAddr(void) const { return addr; }
   const Address &getNaddr(void) const { return naddr; }
   const Address &getN2addr(void) const;

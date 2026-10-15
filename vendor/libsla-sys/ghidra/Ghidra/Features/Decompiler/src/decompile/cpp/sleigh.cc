@@ -557,6 +557,7 @@ void Sleigh::reset(LoadImage *ld,ContextDatabase *c_db)
   cache = new ContextCache(c_db);
   discache = (DisassemblyCache *)0;
   contextcommitted = false;
+  contexttargets.clear();
 }
 
 /// A parse whose state is \e uninitialized is parsed again from the bytes and context
@@ -769,8 +770,9 @@ int4 Sleigh::oneInstruction(PcodeEmit &emit,const Address &baseaddr) const
     }
   }
   
+  contexttargets.clear();
   ParserContext *pos = obtainContext(baseaddr,ParserContext::pcode);
-  if (pos->applyCommits())
+  if (pos->applyCommits(contexttargets))
     contextcommitted = true;
   fallOffset = pos->getLength();
   
@@ -779,7 +781,7 @@ int4 Sleigh::oneInstruction(PcodeEmit &emit,const Address &baseaddr) const
     do {
     // Do not pass pos->getNaddr() to obtainContext, as pos may have been previously cached and had naddr adjusted
       ParserContext *delaypos = obtainContext(pos->getAddr() + fallOffset,ParserContext::pcode);
-      if (delaypos->applyCommits())
+      if (delaypos->applyCommits(contexttargets))
 	contextcommitted = true;
       int4 len = delaypos->getLength();
       fallOffset += len;

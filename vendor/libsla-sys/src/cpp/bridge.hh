@@ -65,6 +65,20 @@ class RegisterVarnodeName {
         const std::string& getName() const;
 };
 
+/// One commit a p-code decode aimed at another address than its fall-through, which Sleigh kept out of its context.
+class ContextTargetProxy {
+    ContextTarget target;
+
+    public:
+        ContextTargetProxy(const ContextTarget &target);
+        const Address& getAddress() const;
+        int32_t getWord() const;
+        uint32_t getMask() const;
+        uint32_t getValue() const;
+        uint32_t getHeld() const;
+        bool getFlow() const;
+};
+
 class RawFormatDecode : public PackedDecode {
   static const int4 IN_BUFFER_SIZE;
   uint1 *inBuffer;
@@ -87,6 +101,7 @@ class SleighProxy : public Sleigh {
         unique_ptr<vector<RegisterVarnodeName>> getAllRegistersProxy() const;
         unique_ptr<vector<string>> getUserOpNamesProxy() const;
         int32_t getAlignmentProxy() const;
+        unique_ptr<vector<ContextTargetProxy>> getContextTargetsProxy() const;
         void clearCache(const DocumentStorage &processorSpec);
         void initializeFromSla(const std::string &sla);
         void initializeFromRawSla(const std::string &sla);
