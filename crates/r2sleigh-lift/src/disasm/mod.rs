@@ -96,6 +96,41 @@ pub struct Continuation {
     end: u64,
 }
 
+/// The context an instruction states for an address other than its fall-through, which no continued run takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetContext {
+    pub address: u64,
+    /// Whether the address decodes in another context than this decoder's there: `blx` switching instruction set.
+    pub foreign: bool,
+}
+
+/// Each address an instruction's P-code commits context at, other than its fall-through, in commit order.
+fn target_contexts(pcode: &PcodeDisassembly) -> Vec<TargetContext> {
+    let mut targets = Vec::<TargetContext>::new();
+    for commit in &pcode.context_targets {
+        let foreign = commit.differs();
+        match targets
+            .iter_mut()
+            .find(|one| one.address == commit.address.offset)
+        {
+            Some(one) => one.foreign |= foreign,
+            None => targets.push(TargetContext {
+                address: commit.address.offset,
+                foreign,
+            }),
+        }
+    }
+    targets
+}
+
+/// One instruction lifted in a run: its block, where it leaves the context, and the context it states elsewhere.
+#[derive(Debug)]
+pub struct Lifted {
+    pub block: R2ILBlock,
+    pub continuation: Continuation,
+    pub targets: Vec<TargetContext>,
+}
+
 /// A disassembler that uses libsla to lift instructions to r2il.
 pub struct Disassembler {
     /// The parsed specification, shared with every other holder of it.
@@ -118,6 +153,8 @@ pub struct Decoded {
     pub lifted: Result<R2ILBlock>,
     /// Present only where Sleigh built the P-code, which is what commits the context.
     pub continuation: Option<Continuation>,
+    /// The context the P-code states at other addresses than the fall-through; empty where it did not build.
+    pub targets: Vec<TargetContext>,
 }
 
 /// Embedded Sleigh profiles allowed to mint certifying lift authority.
@@ -2204,25 +2241,24 @@ impl Disassembler {
         self.lift_canonical(bytes, addr)
     }
 
-    /// Lift one instruction, keeping the context `after` left where it still holds.
-    ///
-    /// Some of that context is the meaning of what comes next: Thumb's `it`
-    /// sets the condition the following instructions run under, and a decoder
-    /// that starts afresh reads them as unconditional. A walk that lifts one
-    /// instruction at a time therefore saw a different program from the block
-    /// lift that reads the same bytes in a run -- unconditional where the
-    /// machine is predicated -- and the two disagreed about where control
-    /// goes.
+    /// Lift one instruction, keeping the context `after` left where it still holds: that context
+    /// is what the next instructions mean, as Thumb's `it` predicates them.
     pub fn lift_after(
         &self,
         bytes: &[u8],
         addr: u64,
         after: Option<Continuation>,
-    ) -> Result<(R2ILBlock, Continuation)> {
+    ) -> Result<Lifted> {
         self.resume(addr, after)?;
-        let lifted = self.lift_canonical(bytes, addr)?;
-        let end = addr + u64::from(lifted.size);
-        Ok((lifted, self.continuation(end)))
+        let pcode = self.pcode(bytes, addr)?;
+        let targets = target_contexts(&pcode);
+        let block = self.translated(pcode, addr)?;
+        let end = addr + u64::from(block.size);
+        Ok(Lifted {
+            block,
+            continuation: self.continuation(end),
+            targets,
+        })
     }
 
     /// Keep the context `after` left if it is this specification's last decode and ended at `addr`, else start afresh.
@@ -2434,12 +2470,14 @@ impl Disassembler {
         let pcode = self.pcode(bytes, addr);
         let end = addr + size as u64;
         let continuation = pcode.is_ok().then(|| self.continuation(end));
+        let targets = pcode.as_ref().map(target_contexts).unwrap_or_default();
         let lifted = pcode.and_then(|pcode| self.translated(pcode, addr));
         Ok(Decoded {
             syntax,
             flow: lifted.as_ref().ok().map(crate::flow::of),
             lifted,
             continuation,
+            targets,
         })
     }
 

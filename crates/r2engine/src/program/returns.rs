@@ -86,10 +86,6 @@ impl crate::body::Program for Knowing<'_> {
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         self.program.return_address_register()
     }
-
-    fn mode_register(&self) -> Option<r2il::Varnode> {
-        self.program.mode_register()
-    }
 }
 
 impl<'p, S: Source + 'static> Walking<'p, S> {
@@ -133,14 +129,14 @@ impl<'p, S: Source + 'static> Walking<'p, S> {
         crate::body::lift_body(entry, disasm, &knowing, &BTreeMap::new())
     }
 
-    fn step(trace: &mut Trace) -> Transfers {
+    /// What the walk reached since last asked; a target the lift states another context for is in the other set.
+    fn step(trace: &mut Trace, thumb: bool) -> Transfers {
         let reached = trace.reached();
-        // Sleigh's `ISAModeSwitch` holds the Thumb bit a call enters with.
         let entered_in = reached
             .calls
             .iter()
             .chain(&reached.tail_calls)
-            .filter_map(|target| Some((*target, *trace.entered_with().get(target)? != 0)))
+            .filter_map(|target| Some((*target, thumb != *trace.target_contexts().get(target)?)))
             .collect();
         Transfers {
             calls: reached.calls,
@@ -173,7 +169,7 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
         };
         let disasm = self.target(thumb).disasm;
         let mut trace = Trace::start(address, disasm, &knowing).map_err(NativeRefusal::Body)?;
-        let transfers = Self::step(&mut trace);
+        let transfers = Self::step(&mut trace, thumb);
         let walk = BodyWalk {
             entry: address,
             trace,
@@ -189,7 +185,7 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
         };
         let disasm = self.target(walk.thumb).disasm;
         walk.trace.open(callee, disasm, &knowing);
-        Self::step(&mut walk.trace)
+        Self::step(&mut walk.trace, walk.thumb)
     }
 
     fn handed(&self, walk: &BodyWalk, returns: &dyn Fn(u64) -> bool) -> Vec<(u64, bool)> {

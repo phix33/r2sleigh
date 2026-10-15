@@ -236,11 +236,6 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
         let assembled = self.db.inputs().assembled();
         assembled.and_then(|held| held.link.clone())
     }
-
-    fn mode_register(&self) -> Option<r2il::Varnode> {
-        let assembled = self.db.inputs().assembled();
-        assembled.and_then(|held| held.mode.clone())
-    }
 }
 
 impl<S: Source + 'static> crate::native::Program for View<'_, S> {

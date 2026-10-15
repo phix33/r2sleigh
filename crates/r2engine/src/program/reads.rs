@@ -278,8 +278,11 @@ fn padding<S: Source + 'static>(
                             })
                     }))
         };
-        match disasm.lift_after(&window, address, None) {
-            Ok((lifted, _))
+        match disasm
+            .lift_after(&window, address, None)
+            .map(|one| one.block)
+        {
+            Ok(lifted)
                 if lifted.size > 0
                     && inert(&lifted)
                     && !code.unstated(&(address..address + u64::from(lifted.size))) =>

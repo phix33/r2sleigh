@@ -125,7 +125,7 @@ fn decoded(
         ),
         false => machine.disasm.lift_after(&fetch, pc, after).map_or_else(
             |_| (None, None, None),
-            |(lift, context)| (None, Some(lift), Some(context)),
+            |one| (None, Some(one.block), Some(one.continuation)),
         ),
     };
     let size = match (&syntax, &lift) {
@@ -188,8 +188,8 @@ pub(super) fn lift_run(
                     let at = line.address.wrapping_add(offset);
                     machine.disasm.lift_after(window, at, context).ok()
                 });
-            context = lifted.as_ref().map(|(_, left)| *left);
-            lifted.map(|(lift, _)| lift)
+            context = lifted.as_ref().map(|one| one.continuation);
+            lifted.map(|one| one.block)
         })
         .collect()
 }

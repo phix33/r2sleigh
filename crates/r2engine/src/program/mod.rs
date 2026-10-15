@@ -47,8 +47,6 @@ struct Assembled {
     prototypes: r2abi::Prototypes,
     /// The register a call returns through, in the coordinates the lift spells.
     link: Option<r2il::Varnode>,
-    /// The register a call writes the instruction set of its target to.
-    mode: Option<r2il::Varnode>,
 }
 
 /// The decoders for a program's instruction sets and what a native request needs of them.
@@ -191,16 +189,6 @@ fn assemble(
                 size: register.size,
             })
     });
-    let mode = machine
-        .arch
-        .registers
-        .iter()
-        .find(|register| register.name == "ISAModeSwitch")
-        .map(|register| r2il::Varnode {
-            space: r2il::SpaceId::Register,
-            offset: register.offset,
-            size: register.size,
-        });
     // Which C library's own declarations apply is what the container
     // states of it, and nothing else: `_Exit` is each library's, and
     // `__fgets_chk` is two interfaces under one name. The program's own
@@ -212,7 +200,6 @@ fn assemble(
         compiler,
         prototypes,
         link,
-        mode,
     })
 }
 
@@ -522,10 +509,6 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         self.view().return_address_register()
-    }
-
-    fn mode_register(&self) -> Option<r2il::Varnode> {
-        self.view().mode_register()
     }
 }
 

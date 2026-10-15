@@ -40,7 +40,8 @@ pub use disasm::syntax::{NumberSpan, Span, Syntax};
 pub use disasm::{
     Continuation, Decoded, Disassembler, GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION,
     GenuineInstructionSpan, GenuineLiftAuthority, GenuineLiftedBlock, GenuineLiftedFunction,
-    GenuineLiftedFunctionAuthority, TrustedLiftedFunction, TrustedSleighProfile,
+    GenuineLiftedFunctionAuthority, Lifted, TargetContext, TrustedLiftedFunction,
+    TrustedSleighProfile,
 };
 pub use disasm::{
     EmbeddedMachine, embedded_arch_and_disassembler, embedded_machine, embedded_thumb_machine,
