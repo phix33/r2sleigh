@@ -202,15 +202,23 @@ fn arm_it_condition(text: &str) -> String {
 }
 
 /// ARM spellings Sleigh keeps from before the unified syntax, as other disassemblers print them:
-/// `cpy` is `mov`, a stack load or store of registers is `pop` or `push`, `ldmia` is `ldm`.
+/// `cpy` is `mov`, a stack load or store of two or more registers is `pop` or `push` (the Arm
+/// ARM's preferred disassembly only past one register), `ldmia` is `ldm`.
 fn arm_alias(text: &str) -> String {
+    let several = |list: &str| list.contains(',') || list.contains('-');
     if let Some(rest) = text.strip_prefix("cpy ") {
         return format!("mov {rest}");
     }
-    if let Some(list) = text.strip_prefix("stmdb sp!, ") {
+    if let Some(list) = text
+        .strip_prefix("stmdb sp!, ")
+        .filter(|list| several(list))
+    {
         return format!("push {list}");
     }
-    if let Some(list) = text.strip_prefix("ldmia sp!, ") {
+    if let Some(list) = text
+        .strip_prefix("ldmia sp!, ")
+        .filter(|list| several(list))
+    {
         return format!("pop {list}");
     }
     if let Some(rest) = text.strip_prefix("ldmia ") {
@@ -325,6 +333,9 @@ mod tests {
             "push {r8, sl, fp}"
         );
         assert_eq!(text("ldmia", "r13!,{r4,r15}", "ARM"), "pop {r4, pc}");
+        // One register is no PUSH or POP alias of LDM and STMDB (Arm ARM; binutils, radare2).
+        assert_eq!(text("ldmia", "r13!,{r15}", "ARM"), "ldm sp!, {pc}");
+        assert_eq!(text("stmdb", "r13!,{r14}", "ARM"), "stmdb sp!, {lr}");
         assert_eq!(text("ldmia", "r0!,{r1,r2}", "ARM"), "ldm r0!, {r1, r2}");
         assert_eq!(text("ldr", "r0,[r0,#0x0]", "ARM"), "ldr r0, [r0]");
         assert_eq!(text("ldr", "r0,[r0,#0x10]", "ARM"), "ldr r0, [r0, 0x10]");

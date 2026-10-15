@@ -1085,15 +1085,6 @@ reason = "a 32-bit Thumb-2 LDR whose offset a 16-bit one cannot hold: Sleigh wri
 command = "aoj"
 binaries = "*"
 fields = ["decode"]
-r2s = '^pop \{pc\}$'
-r2 = '^ldm sp!, \{pc\}$'
-verdict = "r2s-right"
-reason = "LDM SP!, {pc} is POP {pc}, the UAL preferred disassembly (Arm ARM); radare2 does not alias it"
-
-[[judged]]
-command = "aoj"
-binaries = "*"
-fields = ["decode"]
 r2s = '^ldmia\w\w sp!, '
 r2 = '^pop\w\w '
 verdict = "r2-right"
