@@ -123,6 +123,24 @@ jobs:
           cargo nextest run --workspace --all-features --no-fail-fast
           cargo test --workspace --all-features --doc --no-fail-fast
 
+  # ── A vendored specification change brings lift evidence (ROADMAP D35, D28) ──
+  #
+  # A pull request changing a `.sinc`, `.slaspec` or `.pspec` under vendor/sleigh-config
+  # fails unless it also changes an oracle case or an r2il::eval test of the lift.
+  spec-evidence:
+    name: Spec changes carry oracle evidence
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Every changed specification has a lift test beside it
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: python3 scripts/spec_evidence.py --base "$BASE"
+
   # ── The repository's own lints (tools/dylints/r2sleigh_lints) ──────
   #
   # A crate that has cleared a rule denies it at its root, so a new
@@ -233,6 +251,7 @@ jobs:
           python3 scripts/test_certify_render.py
           python3 scripts/test_census.py
           python3 scripts/test_diff_r2.py
+          python3 scripts/test_spec_evidence.py
           python3 -m unittest tests/test_no_plugin.py
           python3 -m unittest discover -s tests/decbench -p 'test_*.py'
       - name: A rendering may not read what nothing wrote
