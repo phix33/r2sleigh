@@ -369,7 +369,7 @@ reason = "a .plt.got stub (__cxa_finalize) that radare2 does not name as an impo
 command = "is"
 binaries = "ls-toybox"
 verdict = "r2s-right"
-reason = "its .plt's entries are 24 bytes apart and r2s reads each stub's slot (0x75928 reads strtod's 0x7b498); radare2 assumes 16 and drifts"
+reason = "r2s names each .plt stub by the slot it reads (0x75928 reads strtod's 0x7b498); radare2 6.2.4 parses the Android packed relocations before the PLT's, so an import whose address is also taken loses its PLT address (fixed by radare2#26982, c282ff9d42: flips when the pin moves past it)"
 
 [[judged]]
 command = "pd"
