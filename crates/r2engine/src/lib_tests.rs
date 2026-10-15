@@ -1746,11 +1746,10 @@ fn decompile_function_uses_engine_summary_preprobe_without_plugin_policy() {
     });
 
     assert!(response.output.text().contains("init_node"));
-    let route = response
-        .function_facts
-        .decompile_route()
-        .expect("decompile response should carry FunctionFacts route");
-    assert_ne!(route.kind, r2types::DecompileRouteKind::SummaryIslands);
+    assert!(
+        response.function_facts.decompile_route().is_some(),
+        "decompile response should carry FunctionFacts route"
+    );
 }
 
 #[test]
@@ -2126,11 +2125,10 @@ fn decompile_function_uses_canonical_display_identity_without_raw_payloads() {
         "canonical analysis name must remain the r2engine display identity: {}",
         response.output
     );
-    let route = response
-        .function_facts
-        .decompile_route()
-        .expect("decompile response should carry FunctionFacts route");
-    assert_ne!(route.kind, r2types::DecompileRouteKind::SummaryIslands);
+    assert!(
+        response.function_facts.decompile_route().is_some(),
+        "decompile response should carry FunctionFacts route"
+    );
 }
 
 #[test]
@@ -2241,13 +2239,13 @@ fn decompile_request_builder_owns_analysis_policy() {
 #[test]
 fn engine_plan_maps_routes_to_work_levels() {
     let route = test_decompile_route(
-        r2types::DecompileRouteKind::SummaryIslands,
-        Some("summary"),
+        r2types::DecompileRouteKind::FallbackComment,
+        Some("refused"),
         None,
     );
     assert_eq!(
         select_engine_plan(EngineRequestKind::Decompile, Some(&route), None),
-        EnginePlan::SemanticSummary
+        EnginePlan::RefuseWithEvidence
     );
     assert_eq!(
         select_engine_plan(EngineRequestKind::Decompile, None, None),
@@ -2265,30 +2263,6 @@ fn semantic_route_reason_preserves_exact_engine_route_reason() {
                 None,
             ),
             Some("structured proof".to_string()),
-        ),
-        (
-            test_decompile_route(
-                r2types::DecompileRouteKind::SummaryIslands,
-                Some("summary islands"),
-                None,
-            ),
-            Some("summary islands".to_string()),
-        ),
-        (
-            test_decompile_route(
-                r2types::DecompileRouteKind::LinearWorker,
-                Some("linear worker"),
-                None,
-            ),
-            Some("linear worker".to_string()),
-        ),
-        (
-            test_decompile_route(
-                r2types::DecompileRouteKind::VmSummary,
-                Some("vm summary"),
-                None,
-            ),
-            Some("vm summary".to_string()),
         ),
         (
             test_decompile_route(

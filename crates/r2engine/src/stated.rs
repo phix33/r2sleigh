@@ -31,6 +31,18 @@ impl StatedWord {
     }
 }
 
+/// The import a call through the word at `slot` reaches: the loader binds it there as a pointer
+/// word and seals it, so nothing rebinds it once the program runs (RELRO, a read-only Mach-O
+/// segment). A lazily bound slot names none. O(log W) in the loader's writes (audit W8).
+pub fn sealed_import(program: &dyn crate::body::Program, slot: u64) -> Option<&str> {
+    let write = r2abi::statement::write_at(program.loader_writes(), slot)?;
+    let r2abi::statement::WriteKind::Import { symbol, .. } = &write.kind else {
+        return None;
+    };
+    let word = write.place == slot && write.encoding == r2abi::statement::Encoding::Word;
+    (word && program.immutable(&(slot..write.end()))).then_some(symbol.as_str())
+}
+
 /// Whether the loader writes any byte of `range`: one search.
 pub fn written(program: &dyn Program, range: &Range<u64>) -> bool {
     r2abi::statement::writes_any(program.loader_writes(), range)
@@ -74,4 +86,129 @@ pub fn stated_word(
         // Nothing says which way a word reads here, so nothing is claimed.
         r2il::Endianness::Mixed | r2il::Endianness::Custom => return None,
     }))
+}
+
+/// The bytes of instructions as the program runs them: the file's, with each field the loader writes re-encoded where the container states its value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Code {
+    pub bytes: Vec<u8>,
+    /// Each written field whose value the container does not state, sorted.
+    unstated: Vec<Range<u64>>,
+}
+
+impl Code {
+    /// Whether the instruction at `range` holds a field the loader writes with no value stated: what it decodes there is not what runs.
+    pub fn unstated(&self, range: &Range<u64>) -> bool {
+        let first = self
+            .unstated
+            .partition_point(|field| field.end <= range.start);
+        self.unstated
+            .get(first)
+            .is_some_and(|field| field.start < range.end)
+    }
+}
+
+/// The `bytes` read at `at` once the loader is done (audit W5).
+///
+/// A word the loader writes with a stated address holds that address; a
+/// field holding its target less its place holds that difference; a word it
+/// writes with no value stated (a base relocation, a reserved table word) is
+/// the file's, which holds its link-time value. An import's word, a
+/// PC-relative field with no target, and an instruction immediate are
+/// unstated. `O(log W + k)` for the `k` writes over the window.
+pub fn code(
+    writes: &[crate::program::LoaderWrite],
+    at: u64,
+    mut bytes: Vec<u8>,
+    endian: r2il::Endianness,
+) -> Code {
+    use r2abi::statement::{Encoding, WriteKind};
+    let end = at.saturating_add(bytes.len() as u64);
+    let first = writes.partition_point(|write| write.end() <= at);
+    let mut unstated = Vec::new();
+    for write in writes[first..].iter().take_while(|write| write.place < end) {
+        let held = match (write.encoding, &write.kind) {
+            (Encoding::Word, WriteKind::Unknown) => continue,
+            (Encoding::Word, _) => write.target(),
+            (Encoding::FromPlace, _) => write
+                .target()
+                .map(|target| target.wrapping_sub(write.place))
+                .filter(|field| fits(*field, write.width)),
+            (Encoding::Typed, _) => None,
+        };
+        let encoded = held.and_then(|value| encode(value, write.width, endian));
+        let (Some(encoded), true) = (encoded, write.place >= at && write.end() <= end) else {
+            unstated.push(write.place..write.end());
+            continue;
+        };
+        let from = (write.place - at) as usize;
+        bytes[from..from + encoded.len()].copy_from_slice(&encoded);
+    }
+    Code { bytes, unstated }
+}
+
+/// Whether a signed difference fits a field of `width` bytes.
+fn fits(value: u64, width: u64) -> bool {
+    match width {
+        8 => true,
+        1..=7 => {
+            let bits = 8 * width as u32;
+            let signed = value as i64;
+            signed >= -(1i64 << (bits - 1)) && signed < (1i64 << (bits - 1))
+        }
+        _ => false,
+    }
+}
+
+/// `value`'s low `width` bytes in the program's byte order.
+fn encode(value: u64, width: u64, endian: r2il::Endianness) -> Option<Vec<u8>> {
+    let width = usize::try_from(width)
+        .ok()
+        .filter(|width| (1..=8).contains(width))?;
+    Some(match endian {
+        r2il::Endianness::Little => value.to_le_bytes()[..width].to_vec(),
+        r2il::Endianness::Big => value.to_be_bytes()[8 - width..].to_vec(),
+        r2il::Endianness::Mixed | r2il::Endianness::Custom => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use r2abi::statement::{Encoding, LoaderWrite, WriteKind};
+
+    fn write(place: u64, width: u64, kind: WriteKind, encoding: Encoding) -> LoaderWrite {
+        LoaderWrite {
+            place,
+            width,
+            kind,
+            encoding,
+        }
+    }
+
+    /// A base relocation's word holds its link-time value; an import's word and a field out of reach hold none.
+    #[test]
+    fn only_a_stated_value_is_encoded_and_a_word_with_none_keeps_the_files_link_time_value() {
+        let import = WriteKind::Import {
+            symbol: "f".into(),
+            library: None,
+        };
+        let writes = [
+            write(0x10, 4, WriteKind::Unknown, Encoding::Word),
+            write(0x14, 4, WriteKind::Absolute(0x1000), Encoding::FromPlace),
+            write(0x18, 4, import, Encoding::Word),
+            write(0x1c, 1, WriteKind::Absolute(0x1000), Encoding::FromPlace),
+        ];
+        let code = code(&writes, 0x10, vec![0xaa; 16], r2il::Endianness::Little);
+        assert_eq!(
+            &code.bytes[..8],
+            &[0xaa, 0xaa, 0xaa, 0xaa, 0xec, 0x0f, 0, 0]
+        );
+        assert!(!code.unstated(&(0x10..0x18)));
+        assert!(code.unstated(&(0x17..0x19)), "the import's word");
+        assert!(
+            code.unstated(&(0x1c..0x1d)),
+            "0x1000 - 0x1c does not fit a byte"
+        );
+    }
 }

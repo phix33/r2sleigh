@@ -162,6 +162,27 @@ stops at the transfer, and a later call to a stripped local function, which
 has no stated interface. Deciding them needs the caller's liveness past later
 calls and their callees' entry reads.
 
+### Arity (ROADMAP P7)
+
+A function's arity is `Exact(n)` or `AtLeast(n)` (`r2source::SourceArity`),
+stated apart from its result: a callee whose result is unproven keeps an exact
+arity, and a call to it hands on exactly its `n` arguments. Recovery states a
+floor where its reads cannot see every argument: a transfer the walk did not
+follow, a supervisor call, the argument area read past an incomplete register
+prefix, or an argument slot handed to a call of unproven arity.
+
+The last cause alone is one the callee's statement can lift: recovery names
+those calls' direct callees, its arity owners (none where one such call names
+no callee). Under `aa` (`Callers::Read`), `Resolved` waits on arity owners as
+on result owners: `Component` is Tarjan over both edges, bottom-up, and a
+function is resolved again where an owner outside its component states an
+exact arity. Members of one component read each other alone, so an argument a
+cycle hands on stays a floor; a fixpoint inside the component costs a
+preparation per member per round and waits on its measurement. Without `aa`, a
+request demands results only, as above, and pays no closure (D23): measured on
+0pack `0x62ecf0`, demanding arity on a cold `pdd` took 20.0 to 36.5 G
+instructions, pumasim `0x23fdf0` 18.1 to 21.2 G.
+
 ### Budget
 
 Resolution follows result demands only, so a request resolves what its
@@ -172,8 +193,8 @@ answer is a function of the program alone.
 ## Complexity
 
 Walks: one per function asked, held. Resolutions: one per callee asked,
-plus one per function whose result an owner then proves. Demand cycles:
-Tarjan, O(V + E) over result demands only, each component deposited once.
+plus one per function whose result an owner then proves. Components:
+Tarjan, O(V + E) over the owner edges the demand names, each component deposited once.
 
 ## Steps
 
@@ -182,5 +203,5 @@ Tarjan, O(V + E) over result demands only, each component deposited once.
 - P6c1: a callee runs the root's resolution, on its `Walked`, against its imports.
 - P6c2: `result_owners`, `Demand` and `Resolved`; an unproven callee states how many arguments it reads.
 - P6d, declined: `read_callees` is the one loop a root reads its callees through. The database
-  answers it with `Resolved`; a plain `Program` (tests/native.rs, the model integration test)
+  answers it with `Resolved`; a plain `Program` (tests/engine/native.rs, the model integration test)
   with each callee resolved alone, through the same `resolved_alone`.

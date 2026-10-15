@@ -1,0 +1,23 @@
+# A PE image's import and export directories: each import at its address table slot, by DLL,
+# and each export by name (tests/fixtures/pe_imports.py writes the fixture).
+
+NAME=imports and exports
+FILE=tests/fixtures/pe_imports_x64.dll
+CMDS=is
+EXPECT=<<EOF
+nth paddr      vaddr      bind   type   size lib name
+------------------------------------------------------------
+1   0x00000400 0x140001000 GLOBAL FUNC   0    fixture.dll start_here
+1   0x00000660 0x140002060 NONE   FUNC   0    KERNEL32.dll imp.ExitProcess
+2   0x00000668 0x140002068 NONE   FUNC   0    KERNEL32.dll imp.Ordinal_7
+EOF
+RUN
+
+NAME=a call through an import slot names the import
+FILE=tests/fixtures/pe_imports_x64.dll
+CMDS=pd 2 @ entry0
+EXPECT=<<EOF
+            0x140001000      ff155a100000   call qword [sym.imp.KERNEL32.dll_ExitProcess]
+            0x140001006      c3             ret
+EOF
+RUN

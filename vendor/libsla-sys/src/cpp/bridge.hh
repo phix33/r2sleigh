@@ -86,6 +86,7 @@ class SleighProxy : public Sleigh {
         std::unique_ptr<std::string> getRegisterNameProxy(AddrSpace *base, uintb off, int4 size) const;
         unique_ptr<vector<RegisterVarnodeName>> getAllRegistersProxy() const;
         unique_ptr<vector<string>> getUserOpNamesProxy() const;
+        int32_t getAlignmentProxy() const;
         void clearCache(const DocumentStorage &processorSpec);
         void initializeFromSla(const std::string &sla);
         void initializeFromRawSla(const std::string &sla);

@@ -118,6 +118,12 @@ declarations.
   shrinks to its own 16 bytes. The x86-64 baseline holds 38 canary traps;
   aarch64's guard is a global (`__stack_chk_guard`), which this rule does
   not read. A consumer refusing the premise is item A's.
+- P5 (audit P5, #252): a call that moved nothing reads the stack pointer off
+  the function's one reaching solve of its carrier (`ReachingStorage`): O(1)
+  per call once its block is scanned, O(ops + (B + E) log B) per function,
+  where a walk per call cost O(B · depth), cloning its path per block. A
+  `ret` ends its block and an x86 `call` is followed by its `CallRestore`, so
+  the solve crosses no transfer. gzdoom's AArch64 case fell from 34.9 to 3.3 s.
 
 ## Left
 

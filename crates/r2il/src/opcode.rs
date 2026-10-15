@@ -139,6 +139,9 @@ pub enum R2ILOp {
     /// Memory fence/barrier with ordering semantics.
     Fence { ordering: MemoryOrdering },
 
+    /// Clears the exclusive monitor a linked load set, so the next conditional store fails.
+    ClearExclusive,
+
     /// Linked load from memory: dst = LL(*[space]addr).
     LoadLinked {
         dst: Varnode,
@@ -736,16 +739,29 @@ impl R2ILOp {
     ///
     /// This is intentionally narrower than "has an output": reads, writes,
     /// allocation, CPU state queries, calls, and control flow may be observable
-    /// even when their result is later discarded.
+    /// even when their result is later discarded, and a division is undefined
+    /// where the test it was guarded by would have skipped it (audit W22).
     pub fn is_speculatable_value(&self) -> bool {
         self.output().is_some()
             && !self.is_control_flow()
             && !self.is_memory_read()
             && !self.is_memory_write()
+            && !self.is_integer_division()
             && !matches!(
                 self,
                 R2ILOp::CallOther { .. } | R2ILOp::CpuId { .. } | R2ILOp::New { .. }
             )
+    }
+
+    /// An integer quotient or remainder, undefined at a zero divisor.
+    pub fn is_integer_division(&self) -> bool {
+        matches!(
+            self,
+            R2ILOp::IntDiv { .. }
+                | R2ILOp::IntSDiv { .. }
+                | R2ILOp::IntRem { .. }
+                | R2ILOp::IntSRem { .. }
+        )
     }
 
     /// Returns the output varnode if this operation has one.
@@ -922,7 +938,7 @@ impl R2ILOp {
                 &transfer.count,
                 &transfer.direction,
             ],
-            R2ILOp::Fence { .. } => vec![],
+            R2ILOp::Fence { .. } | R2ILOp::ClearExclusive => vec![],
             R2ILOp::LoadLinked { addr, .. } => vec![addr],
             R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
             R2ILOp::AtomicCAS {
@@ -1056,7 +1072,7 @@ impl R2ILOp {
                 } = transfer.as_mut();
                 vec![destination, source, count, direction]
             }
-            R2ILOp::Fence { .. } => vec![],
+            R2ILOp::Fence { .. } | R2ILOp::ClearExclusive => vec![],
             R2ILOp::LoadLinked { addr, .. } => vec![addr],
             R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
             R2ILOp::AtomicCAS {
@@ -1211,6 +1227,7 @@ impl std::fmt::Display for R2ILOp {
                 write!(f, "STORE [{}]{} = {}", space, addr, val)
             }
             R2ILOp::Fence { ordering } => write!(f, "FENCE({ordering:?})"),
+            R2ILOp::ClearExclusive => write!(f, "CLEAR_EXCLUSIVE"),
             R2ILOp::LoadLinked {
                 dst,
                 space,
@@ -1651,6 +1668,42 @@ impl R2ILBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A division can be undefined where its guard would have skipped it, so it is never hoisted.
+    #[test]
+    fn integer_division_is_not_speculatable() {
+        let (dst, a, b) = (
+            Varnode::register(0, 8),
+            Varnode::register(8, 8),
+            Varnode::register(16, 8),
+        );
+        let divisions = [
+            R2ILOp::IntDiv {
+                dst: dst.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            },
+            R2ILOp::IntSDiv {
+                dst: dst.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            },
+            R2ILOp::IntRem {
+                dst: dst.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            },
+            R2ILOp::IntSRem {
+                dst: dst.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            },
+        ];
+        for op in divisions {
+            assert!(!op.is_speculatable_value(), "{op:?}");
+        }
+        assert!(R2ILOp::IntMult { dst, a, b }.is_speculatable_value());
+    }
 
     /// Every transfer the lift spells, and one data operation beside them.
     fn ops() -> Vec<R2ILOp> {

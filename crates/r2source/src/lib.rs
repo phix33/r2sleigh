@@ -804,6 +804,9 @@ pub enum AdvisoryCallTransfer {
     Call,
     TailJump,
     TailSlot,
+    /// A call through a slot the loader binds to an import and seals: the site's target address is
+    /// the slot, and the machine still has to show that the call reads it (audit W8).
+    CallSlot,
 }
 
 /// Who the callee is, from the symbol or relocation that named it: a function
@@ -956,7 +959,19 @@ pub enum SnapshotValidationError {
 
 impl std::fmt::Display for SnapshotValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid owned source snapshot: {self:?}")
+        let why = match self {
+            Self::InvalidMachineProfile => "the machine profile is not one the snapshot describes",
+            Self::InvalidPresentation => "the function's name or presentation is malformed",
+            Self::EmptyRevisionIdentity => "it names no source revision",
+            Self::InvalidFunctionImage => {
+                "the function's bytes are not a bounded body beginning at its entry"
+            }
+            Self::InvalidAdvisoryCall => "a call it lists lies outside the body or is listed twice",
+            Self::InvalidFunctionInterface => {
+                "the function interface disagrees with what was captured"
+            }
+        };
+        write!(f, "invalid source snapshot: {why}")
     }
 }
 

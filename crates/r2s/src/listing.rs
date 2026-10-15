@@ -170,17 +170,21 @@ pub(crate) fn painted(
             // an address. Naming every number the table happens to know
             // spelled `adrp x17, reloc.humanize_number` over a page base the
             // next instruction was about to move fifty bytes past.
-            let named = u64::try_from(number.value)
-                .ok()
-                .filter(|_| claim(line, *number).is_some())
-                .and_then(|value| names.of(value))
+            // The claim's address, not the spelling: Sleigh writes an address with its top bit set
+            // as a negative number, which radare2 writes, and the table names, unsigned.
+            let claimed = claimed_address(line, *number);
+            let name = claimed
+                .and_then(|address| names.of(address))
                 .map(|name| name.spelled());
-            let role = if named.is_some() {
+            let role = if name.is_some() {
                 Role::Name
             } else {
                 Role::Number
             };
-            (number.start, number.end, named, role)
+            let unsigned = claimed
+                .filter(|_| number.value < 0)
+                .map(|address| format!("{address:#x}"));
+            (number.start, number.end, name.or(unsigned), role)
         })
         .chain(
             syntax
@@ -197,7 +201,7 @@ pub(crate) fn painted(
         }
         // `lea` computes the address it brackets, so a name standing for it takes the brackets:
         // radare2 writes `lea r8, sym.fini` and `lea r8, [0x11e0]`.
-        let (start, end) = match named.is_some()
+        let (start, end) = match role == Role::Name
             && syntax.mnemonic == "lea"
             && syntax.body[..start].ends_with('[')
             && syntax.body[end..].starts_with(']')
@@ -229,8 +233,11 @@ pub(crate) fn disassemble_function(
     let addr = parse_number(session, argument)?;
     let listing = session.program.function_listing(addr)?;
     let answer = &listing.lines;
-    if answer.value.is_empty() {
-        return Err(format!("no blocks at {addr:#x}"));
+    // A walk refused at the entry lists nothing: the record is the answer (ROADMAP D29).
+    match (&listing.refused, answer.value.is_empty()) {
+        (Some(refused), true) => return Ok(unanalysed(refused).trim_end().to_owned()),
+        (None, true) => return Err(format!("no blocks at {addr:#x}")),
+        _ => {}
     }
     let mut out: String = answer
         .value
@@ -265,20 +272,14 @@ fn stopped(completion: Completion) -> String {
     }
 }
 
-/// How well supported the claim that this number is an address of the program is, where the engine makes one.
-///
-/// A number no reference claims is a coincidence: the table knows an address
-/// of that value and nothing proves this is one. A range proved for the value
-/// is not that proof, and naming by it put names in `pdf` that `ax` never listed.
-fn claim(
-    line: &r2engine::query::Line,
-    number: r2engine::NumberSpan,
-) -> Option<r2engine::discovery::Basis> {
+/// The address the engine claims a number stands for, where it uses the number as one: a number
+/// no reference claims is a coincidence, and naming it put names in `pdf` that `ax` never listed.
+fn claimed_address(line: &r2engine::query::Line, number: r2engine::NumberSpan) -> Option<u64> {
     line.annotations
         .iter()
         .filter(|annotation| annotation.operand == Some(number) && annotation.reference)
-        .map(|annotation| annotation.support)
-        .min()
+        .min_by_key(|annotation| annotation.support)
+        .and_then(|annotation| annotation.kind.address())
 }
 
 /// What this revision holds and what was proved at the line, as trailing notes each ending in its rung.
@@ -642,6 +643,24 @@ mod tests {
             spelled(&line("ldr", "r3, [sp, -0x4]"), &db()),
             "ldr r3, [sp, -0x4]"
         );
+    }
+
+    #[test]
+    fn a_claimed_address_spelled_negative_is_written_unsigned() {
+        // Sleigh writes an address with its top bit set as a negative number; the claim states the
+        // address, which radare2 writes unsigned and the table may name (audit: ibknoreloc64).
+        let mut line = unclaimed("call", "qword [-0xef18]");
+        let number = line.syntax.as_ref().expect("syntax").numbers[0];
+        line.annotations.push(r2engine::query::Annotation {
+            kind: r2engine::query::AnnotationKind::Reads {
+                address: 0xffff_ffff_ffff_10e8,
+                width: 8,
+            },
+            support: r2engine::discovery::Basis::Decoded,
+            operand: Some(number),
+            reference: true,
+        });
+        assert_eq!(spelled(&line, &db()), "call qword [0xffffffffffff10e8]");
     }
 
     #[test]

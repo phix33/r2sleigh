@@ -2,15 +2,14 @@
 
 use std::ops::Range;
 
-use object::read::pe::ImageNtHeaders;
 use object::{Object, ObjectSection};
 
-use r2abi::statement::{ImportStub, LoaderWrite, Relocation, WriteKind};
+use r2abi::statement::{Encoding, ImportStub, LoaderWrite, Relocation, WriteKind};
 
 mod elf;
 mod macho;
 
-pub(crate) use elf::hooks;
+pub(crate) use elf::{binding, hooks};
 
 /// What the loader applies to one image.
 pub(crate) struct Loaded {
@@ -19,6 +18,8 @@ pub(crate) struct Loaded {
     /// What the loader writes, sorted by place and disjoint.
     pub writes: Vec<LoaderWrite>,
     pub import_stubs: Vec<ImportStub>,
+    /// Where each record of a relocatable object resolves, by its place, sorted: what the call-frame reader relocates through.
+    pub targets: Vec<(u64, u64)>,
 }
 
 /// Every record the loader applies to the image, what it writes, and the stubs the format declares.
@@ -26,13 +27,35 @@ pub(crate) fn read(
     file: &object::File<'_>,
     data: &[u8],
     placed: &dyn Fn(&object::read::Section<'_, '_>) -> u64,
+    linkage: u64,
+    common: &dyn Fn(u32) -> Option<u64>,
     pointer: u64,
+    pe: Option<&crate::pe::Read>,
 ) -> Loaded {
+    let relocatable = file.kind() == object::ObjectKind::Relocatable;
     let (relocations, writes, ranges, import_stubs) = match file {
-        _ if file.kind() == object::ObjectKind::Relocatable => (
-            Vec::new(),
+        object::File::Elf32(_) | object::File::Elf64(_) if relocatable => {
+            let at = |index| {
+                file.section_by_index(index)
+                    .ok()
+                    .map(|section| placed(&section))
+            };
+            let placing = elf::Placing {
+                section: &at,
+                common,
+            };
+            let linked = elf::linked(file, &placing, linkage, pointer);
+            return Loaded {
+                relocations: linked.relocations,
+                writes: composed(linked.writes, Vec::new()),
+                import_stubs: linked.stubs,
+                targets: linked.targets,
+            };
+        }
+        _ if relocatable => (
             Vec::new(),
             linked(file, placed, pointer),
+            Vec::new(),
             Vec::new(),
         ),
         object::File::Elf32(_) | object::File::Elf64(_) => {
@@ -43,14 +66,21 @@ pub(crate) fn read(
             let read = macho::read(file, data);
             (read.relocations, read.writes, read.ranges, read.stubs)
         }
-        object::File::Pe32(pe) => (Vec::new(), Vec::new(), pe_writes(pe), Vec::new()),
-        object::File::Pe64(pe) => (Vec::new(), Vec::new(), pe_writes(pe), Vec::new()),
-        _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+        _ => match pe {
+            Some(pe) => (
+                Vec::new(),
+                pe_imports(pe, pointer),
+                pe.written.clone(),
+                Vec::new(),
+            ),
+            None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+        },
     };
     Loaded {
         relocations,
         writes: composed(writes, ranges),
         import_stubs,
+        targets: Vec::new(),
     }
 }
 
@@ -108,6 +138,9 @@ fn composed(mut writes: Vec<LoaderWrite>, ranges: Vec<Range<u64>>) -> Vec<Loader
             Some(last) if write.place < last.end() => {
                 last.width = last.end().max(write.end()) - last.place;
                 last.kind = WriteKind::Unknown;
+                if last.encoding != write.encoding {
+                    last.encoding = Encoding::Typed;
+                }
             }
             _ => stated.push(write),
         }
@@ -149,6 +182,7 @@ fn unknown(start: u64, end: u64) -> LoaderWrite {
         place: start,
         width: end - start,
         kind: WriteKind::Unknown,
+        encoding: Encoding::Word,
     }
 }
 
@@ -179,101 +213,40 @@ fn width(bits: u8, pointer: u64) -> u64 {
     }
 }
 
-/// An object file's own relocations, each at the place its section was put.
+/// A non-ELF object file's own relocations, each at the place its section was put, written as the type states and with no value read.
 fn linked(
     file: &object::File<'_>,
     placed: &dyn Fn(&object::read::Section<'_, '_>) -> u64,
     pointer: u64,
-) -> Vec<Range<u64>> {
+) -> Vec<LoaderWrite> {
     let at = |section: object::read::Section<'_, '_>| {
         let base = placed(&section);
         let relocations = section.relocations().collect::<Vec<_>>();
-        relocations.into_iter().map(move |(offset, relocation)| {
-            written(base.wrapping_add(offset), width(relocation.size(), pointer))
-        })
+        relocations
+            .into_iter()
+            .map(move |(offset, relocation)| LoaderWrite {
+                place: base.wrapping_add(offset),
+                width: width(relocation.size(), pointer),
+                kind: WriteKind::Unknown,
+                encoding: Encoding::Typed,
+            })
     };
     file.sections().flat_map(at).collect()
 }
 
-/// The base relocations, and each import address table the loader or the delay-load helper fills.
-fn pe_writes<'data, Pe, R>(file: &object::read::pe::PeFile<'data, Pe, R>) -> Vec<Range<u64>>
-where
-    Pe: ImageNtHeaders,
-    R: object::ReadRef<'data>,
-{
-    let base = file.relative_address_base();
-    let sections = file.section_table();
-    let directories = file.data_directories();
-    let mut ranges = Vec::new();
-    if let Ok(Some(blocks)) = directories.relocation_blocks(file.data(), &sections) {
-        let relocations = blocks.flatten().flatten();
-        let one = |relocation: object::read::pe::Relocation| {
-            let start = base.wrapping_add(u64::from(relocation.virtual_address));
-            written(start, based_width(relocation.typ))
-        };
-        ranges.extend(relocations.map(one));
-    }
-    let pointer = if file.is_64() { 8 } else { 4 };
-    if let Ok(Some(imports)) = file.import_table() {
-        let descriptors = imports.descriptors().into_iter().flatten().flatten();
-        let firsts = descriptors.map(|descriptor| descriptor.first_thunk.get(object::LittleEndian));
-        let thunks = |first| imports.thunks(first).ok();
-        ranges.extend(tables::<Pe>(firsts.collect(), &thunks, base, pointer));
-    }
-    if let Ok(Some(delayed)) = directories.delay_load_import_table(file.data(), &sections) {
-        let descriptors = delayed.descriptors().into_iter().flatten().flatten();
-        let firsts = descriptors.map(|descriptor| {
-            descriptor
-                .import_address_table_rva
-                .get(object::LittleEndian)
-        });
-        let thunks = |first| delayed.thunks(first).ok();
-        ranges.extend(tables::<Pe>(firsts.collect(), &thunks, base, pointer));
-    }
-    ranges
-}
-
-/// Each import address table, walked once: in address order, a table starting inside one already walked, in step with it, ends at that one's null.
-fn tables<'t, Pe: ImageNtHeaders>(
-    firsts: std::collections::BTreeSet<u32>,
-    thunks: &dyn Fn(u32) -> Option<object::read::pe::ImportThunkList<'t>>,
-    base: u64,
-    pointer: u64,
-) -> Vec<Range<u64>> {
-    // Where the last table walked in each alignment class ends.
-    let mut walked = [0u64; 8];
-    let mut ranges = Vec::new();
-    for first in firsts {
-        let (start, class) = (u64::from(first), usize::from(first as u8 % pointer as u8));
-        if start < walked[class] {
-            continue;
-        }
-        let bytes = thunks(first).map_or(0, thunk_count::<Pe>) * pointer;
-        walked[class] = start + bytes;
-        ranges.push(written(base.wrapping_add(start), bytes));
-    }
-    ranges
-}
-
-/// How many thunks an import address table holds before its null one.
-fn thunk_count<Pe: ImageNtHeaders>(mut thunks: object::read::pe::ImportThunkList<'_>) -> u64 {
-    let mut count = 0;
-    while let Ok(Some(_)) = thunks.next::<Pe>() {
-        count += 1;
-    }
-    count
-}
-
-/// How many bytes a PE base relocation of this type rewrites.
-fn based_width(typ: object::pe::BaseRelocationType) -> u64 {
-    use object::pe;
-    match typ {
-        pe::IMAGE_REL_BASED_ABSOLUTE => 0,
-        pe::IMAGE_REL_BASED_HIGH | pe::IMAGE_REL_BASED_LOW | pe::IMAGE_REL_BASED_HIGHADJ => 2,
-        pe::IMAGE_REL_BASED_HIGHLOW => 4,
-        // A pair of instructions, or a doubleword; unknown types are taken as wide as any.
-        _ => 8,
-    }
+/// Each import address table slot, which the loader (or the delay-load helper) fills with its import.
+fn pe_imports(pe: &crate::pe::Read, pointer: u64) -> Vec<LoaderWrite> {
+    (pe.imports.iter())
+        .map(|import| LoaderWrite {
+            place: import.slot,
+            width: pointer,
+            kind: WriteKind::Import {
+                symbol: import.name.to_string(),
+                library: Some(import.library.to_string()),
+            },
+            encoding: Encoding::Word,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -288,7 +261,12 @@ mod tests {
 
     #[test]
     fn a_later_record_at_one_place_stands_and_a_range_no_record_states_is_unknown() {
-        let write = |place, width, kind| LoaderWrite { place, width, kind };
+        let write = |place, width, kind| LoaderWrite {
+            place,
+            width,
+            kind,
+            encoding: Encoding::Word,
+        };
         let writes = vec![
             write(0x10, 8, WriteKind::Relative(0x100)),
             write(
@@ -296,6 +274,7 @@ mod tests {
                 8,
                 WriteKind::Import {
                     symbol: "f".to_owned(),
+                    library: None,
                 },
             ),
             write(0x10, 8, WriteKind::Relative(0x200)),

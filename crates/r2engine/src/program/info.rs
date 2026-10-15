@@ -31,6 +31,9 @@ pub struct FunctionInfo {
     /// Whether control never comes back from it, and what that takes for granted: nothing where
     /// the whole program proves it, a premise where a runtime model says it. `None` where it may.
     pub noreturn: Option<std::collections::BTreeSet<r2source::Premise>>,
+    /// Why there is no analysis, where there is none: the blocks are then the plain walk's, and
+    /// the calls, convention, parameters, locals and return are unknown, not empty (ROADMAP D29).
+    pub refused: Option<crate::native::NativeRefusal>,
 }
 
 /// One basic block.
@@ -100,6 +103,35 @@ impl FunctionInfo {
             returns: returns(artifact, sealed),
             locals: locals(artifact, sealed, &entities),
             noreturn,
+            refused: None,
+        }
+    }
+
+    /// A function whose analysis refused: the plain walk's blocks, as `afb` lists them, and why.
+    pub(crate) fn refused(
+        entry: u64,
+        walked: &[super::GraphBlock],
+        noreturn: Option<std::collections::BTreeSet<r2source::Premise>>,
+        refusal: crate::native::NativeRefusal,
+    ) -> Self {
+        let blocks = (walked.iter())
+            .map(|block| Block {
+                addr: block.address,
+                size: block.size,
+                instructions: block.lines.len(),
+                successors: block.edges.len(),
+            })
+            .collect();
+        Self {
+            entry,
+            blocks,
+            calls: Vec::new(),
+            convention: None,
+            arguments: Vec::new(),
+            locals: Vec::new(),
+            returns: None,
+            noreturn,
+            refused: Some(refusal),
         }
     }
 

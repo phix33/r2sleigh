@@ -936,7 +936,7 @@ const UNVISITED: usize = usize::MAX;
 /// The strongly connected components of a graph given as each node's
 /// successors, each after every component it reaches (Tarjan, iteratively),
 /// with its members in index order so a loop's header phi comes first.
-fn strongly_connected_components(successors: &[Vec<usize>]) -> Vec<Vec<usize>> {
+pub(crate) fn strongly_connected_components(successors: &[Vec<usize>]) -> Vec<Vec<usize>> {
     let count = successors.len();
     let mut tarjan = Tarjan {
         order: vec![UNVISITED; count],

@@ -9,11 +9,11 @@ Layers
 
 - **Unit tests**, inline beside a lowering, predicate, certificate or fold.
 - **Crate integration tests** in `crates/<crate>/tests/`, through the public
-  surface only (`crates/r2engine/tests/native.rs` is the model).
+  surface only (`crates/r2engine/tests/engine/native.rs` is the model).
 - **Golden files** in `tests/db/`, radare2's r2r format, run by
   `crates/r2s/tests/golden.rs`: a command's whole output on a fixed binary,
   so a pull request's diff shows what moved ([tests/db/README.md](../tests/db/README.md)).
-- **The claim oracle**, `crates/r2engine/tests/oracle.rs`, described below.
+- **The claim oracle**, `crates/r2engine/tests/engine/oracle.rs`, described below.
 - **End-to-end harnesses** that run a built `r2s` over real binaries.
 
 The claim oracle

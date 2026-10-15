@@ -99,7 +99,12 @@ fn derived<S: Source + 'static>(
     let Ok(target) = view.target(address) else {
         return (BTreeMap::new(), Cut::Whole);
     };
-    if let Some(name) = crate::native::Program::import_at(view, address) {
+    // A slot names its import only where the loader binds it and seals it, as pdd's CallSlot does.
+    let import = match callee {
+        Callee::At(_) => crate::native::Program::import_at(view, address),
+        Callee::ThroughSlot(_) => crate::stated::sealed_import(view, address).map(str::to_owned),
+    };
+    if let Some(name) = import {
         let declared = crate::native::declared_pointers(&target, &name);
         let declared = declared
             .into_iter()

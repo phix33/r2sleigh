@@ -9,6 +9,7 @@ from __future__ import annotations
 import pathlib
 import sys
 import tempfile
+import tomllib
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -81,6 +82,91 @@ class Judged(unittest.TestCase):
         found = diff_r2.differences("ie", "values", ours, "0x1000 0x18\n")
         self.assertEqual([item[1][1] for item in found], ["paddr", "vhaddr"])
 
+    def test_a_value_in_another_column_than_radare2s_is_a_disagreement(self):
+        header = "paddr      vaddr      phaddr     vhaddr     type\n"
+        theirs = header + "0x10 0x1000 0x18 0x100018 program\n"
+        swapped = header + "0x10 0x1000 0x100018 0x18 program\n"
+        found = diff_r2.differences("ie", "values", swapped, theirs)
+        self.assertEqual([(item[1][0], item[1][1]) for item in found], [(0x18, "vhaddr"), (0x100018, "phaddr")])
+        self.assertEqual(diff_r2.differences("ie", "values", theirs, theirs), [])
+
+    def test_a_column_radare2_does_not_name_is_compared_with_every_value(self):
+        ours = "paddr vaddr extra\n0x10 0x1000 0x18\n"
+        self.assertEqual(diff_r2.differences("ie", "values", ours, "paddr vaddr\n0x18 0x1000\n0x10 0x0\n"), [])
+
+    def test_values_only_radare2_reports_are_counted_by_column(self):
+        header = "nth paddr vaddr bind type size lib name\n"
+        theirs = header + "1 0x3b0 0x4011b0 NONE FUNC 0 imp.ExitProcess\n2 0x3b4 0x4011b4 NONE FUNC 0 imp.printf\n"
+        ours = header + "1 0x3b0 0x4011b0 NONE FUNC 0 imp.ExitProcess\n"
+        missed = diff_r2.radare2_only(diff_r2.normalise(ours), diff_r2.normalise(theirs))
+        self.assertEqual(missed, [("paddr", 0x3B4), ("vaddr", 0x4011B4)])
+        self.assertEqual(diff_r2.radare2_only(diff_r2.normalise(theirs), diff_r2.normalise(theirs)), [])
+
+    def test_the_ratchet_names_each_count_that_moved(self):
+        baseline = {"pe": {"is": 243, "refused": 10}, "elf": {"is": 4}}
+        measured = {"pe": {"is": 240, "refused": 10}, "elf": {"is": 5}, "mach0": {"is": 1}}
+        self.assertEqual(
+            diff_r2.ratchet(baseline, measured),
+            [("elf", "is", 4, 5), ("mach0", "is", None, 1), ("pe", "is", 243, 240)],
+        )
+
+    def test_a_fill_judgment_covers_only_radare2s_fill_past_what_r2s_shows(self):
+        fill = '[[judged]]\ncommand = "px"\nbinaries = "*"\nfill = "ff"\nverdict = "r2s-right"\nreason = "fill"\n'
+        table = diff_r2.load_judgments(None, tomllib.loads(fill))
+        line = "0x08000050  0300 0058 c003 5fd6 ffff ffff ffff ffff  ...X.._........."
+        prefix = "0x08000050  0300 0058 c003 5fd6                      ...X.._."
+        self.assertIsNotNone(diff_r2.judgment_for(table, "a", "px 64", ("lines", (line, prefix))))
+        filler = "0x08000060  ffff ffff ffff ffff ffff ffff ffff ffff  ................"
+        self.assertIsNotNone(diff_r2.judgment_for(table, "a", "px 64", ("lines", (filler, None))))
+        other = "0x08000050  0300 0058 c003 5fd7                      ...X.._."
+        self.assertIsNone(diff_r2.judgment_for(table, "a", "px 64", ("lines", (line, other))))
+        real = "0x08000050  0300 0058 c003 5fd6 0000 ffff ffff ffff  ...X.._........."
+        self.assertIsNone(diff_r2.judgment_for(table, "a", "px 64", ("lines", (real, prefix))))
+        self.assertIsNone(diff_r2.judgment_for(table, "a", "px 64", ("lines", (line, line.replace("0x0800", "0x0900")))))
+
+    def test_a_value_judgment_can_require_radare2s_row_holding_the_value(self):
+        table = diff_r2.load_judgments(None, tomllib.loads(
+            '[[judged]]\ncommand = "is"\nbinaries = "*"\ncolumns = ["vaddr"]\nr2 = \'^\\d+ 0x0+8 0x\'\n'
+            'r2s = \'^\\d+ -+ 0x0+8 \'\nverdict = "r2s-right"\nreason = "tls offset"\n'
+        ))
+        header = "nth paddr vaddr bind type size lib name\n"
+        theirs = header + "1 0x00000008 0x00400008 LOOS TLS 8 tid\n"
+        ours = header + "1 ---------- 0x00000008 10 NOTYPE 8 tid\n"
+        (found,) = diff_r2.differences("is", "values", ours, theirs)
+        self.assertIsNotNone(diff_r2.judgment_for(table, "a", "is", found))
+        moved = theirs.replace("0x00000008 0x00400008", "0x00000010 0x00400008")
+        (found,) = diff_r2.differences("is", "values", ours, moved)
+        self.assertIsNone(diff_r2.judgment_for(table, "a", "is", found))
+
+    def test_a_rounded_judgment_covers_only_radare2s_value_rounded_up_in_the_same_row(self):
+        table = diff_r2.load_judgments(None, tomllib.loads(
+            '[[judged]]\ncommand = "iS"\nbinaries = "*"\ncorpus = "pe"\ncolumns = ["vsize"]\nkey = "vaddr"\n'
+            'verdict = "r2s-right"\nreason = "aligned"\n'
+        ))
+        header = "nth paddr size vaddr vsize perm flags type name\n"
+        theirs = header + "0 0x400 0x1000 0x401000 0x1000 -r-x 0x60000020 ---- .text\n"
+        (found,) = diff_r2.differences("iS", "values", header + "1 0x400 0x1000 0x401000 0xe2d -r-x 0x60000020 .text\n", theirs)
+        self.assertIsNotNone(diff_r2.judgment_for(table, "a", "iS", found, "pe"))
+        self.assertIsNone(diff_r2.judgment_for(table, "a", "iS", found, "elf"))
+        elsewhere = header + "1 0x400 0x1000 0x402000 0xe2d -r-x 0x60000020 .text\n"
+        (found,) = [item for item in diff_r2.differences("iS", "values", elsewhere, theirs) if item[1][1] == "vsize"]
+        self.assertIsNone(diff_r2.judgment_for(table, "a", "iS", found, "pe"))
+        self.assertTrue(diff_r2.rounded(0x174, 0x200))
+        self.assertFalse(diff_r2.rounded(0x174, 0x300))
+        self.assertFalse(diff_r2.rounded(0x1000, 0x1000))
+
+    def test_a_listing_line_shows_its_bytes(self):
+        self.assertEqual(diff_r2.dumped("pd", "0x412c9      ff             invalid"), ("0x412c9", "ff"))
+        self.assertEqual(diff_r2.dumped("px", "0x10  6162 6364                                abcd"), ("0x10", "61626364"))
+
+    def test_radare2_loads_as_an_x86_64_host_then_takes_the_files_architecture(self):
+        argv = diff_r2.radare2_argv("/usr/bin/radare2", "s entry0;pd 8", "bin")
+        self.assertEqual(argv[argv.index("asm.arch=x86") - 1], "-e")
+        script = argv[argv.index("-c") + 1]
+        self.assertTrue(script.startswith("e asm.arch=`i~^arch[1]`;e asm.bits=`i~^bits[1]`;"))
+        self.assertTrue(script.endswith("s entry0;pd 8"))
+        self.assertEqual(argv[-1], "bin")
+
     def test_two_different_invalid_bytes_stay_different(self):
         def out(byte):
             script = "import sys; sys.stdout.buffer.write(bytes([{}]))".format(byte)
@@ -92,6 +178,16 @@ class Judged(unittest.TestCase):
         table = judgments()
         diff_r2.judgment_for(table, "arm1.bin", "pd 8", ("lines", ("push {r4}", "stmdb sp!, {r4}")))
         self.assertEqual([j["reason"] for j in table if j["matched"] == 0][-1], "nothing matches this")
+
+    def test_the_table_names_the_radare2_it_was_judged_against(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "judged.toml"
+            path.write_text('radare2 = "6.2.4"\n' + TABLE)
+            pinned, table = diff_r2.load_table(path)
+        self.assertEqual(pinned, "6.2.4")
+        self.assertEqual(len(table), 4)
+        self.assertEqual(diff_r2.release("radare2 6.2.4 +38388 abi:152 @ linux-x86-64\n"), "6.2.4")
+        self.assertIsNone(diff_r2.release(""))
 
     def test_an_unknown_verdict_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -87,10 +87,21 @@ fn every_counted_residual_has_its_site_on_rv_o0g() {
     assert_sited("tests/fixtures/rv_O0g");
 }
 
-/// RISC-V prologue adds (frame setup) and canary addresses were counted with no site.
+/// RISC-V 64 has no equivalence target, so it renders no C to site a residual in (ROADMAP D32): each
+/// function's `pdd` is the admission's record, and its listing still stands. The sited check returns
+/// here when M gives RISC-V a target.
 #[test]
-fn every_counted_residual_has_its_site_on_riscv() {
-    assert_sited("tests/fixtures/shapes_zig_riscv64_O0");
+fn riscv_renders_no_c_until_an_equivalence_target_grades_it() {
+    let riscv = binary("tests/fixtures/shapes_zig_riscv64_O0");
+    let refused = "no equivalence target grades riscv64 64-bit C, so none is rendered";
+    let out = shell(&riscv, "aa; pdd @ sym.shape_step; pdf @ sym.shape_step");
+    assert!(
+        out.contains(&format!("r2sleigh refused shape_step: {refused}")),
+        "{out}"
+    );
+    assert!(!out.contains("r2dec proof"), "{out}");
+    assert!(out.contains("ret"), "the listing is gone: {out}");
+    assert!(!out.contains("r2s:"), "{out}");
 }
 
 /// x86-64: control residuals, a return's and a trap's, and the gap a `_start` call leaves.

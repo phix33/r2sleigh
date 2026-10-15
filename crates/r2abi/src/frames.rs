@@ -17,6 +17,20 @@ pub struct UnwindFrame {
     /// register number and an offset from the stack pointer on entry. Empty
     /// when the CFA on entry is not stated from the stack pointer.
     pub saves: BTreeMap<u16, i64>,
+    /// How control enters the frame's first address, as its first row states it.
+    pub entry: FrameEntry,
+}
+
+/// The state the call-frame information states at a frame's first address.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FrameEntry {
+    /// The state a call leaves: the CFA the return address alone sets, no other register saved.
+    Called,
+    /// Any other state: a part of a function that its own code jumps to, as GCC's `.cold` is.
+    MidFunction,
+    /// Not stated: no call state is known for the architecture, or the first row did not read.
+    #[default]
+    Unstated,
 }
 
 /// Every frame the call-frame information states, by start address.

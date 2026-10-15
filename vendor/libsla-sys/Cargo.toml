@@ -36,3 +36,5 @@ cxx = "1.0"
 
 [build-dependencies]
 cxx-build = "1.0"
+# Unifies with cxx-build's cc, so the ~37 Ghidra sources compile on every job.
+cc = { version = "1", features = ["parallel"] }

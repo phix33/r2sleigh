@@ -1751,6 +1751,10 @@ fn seed_direct_obligations(
             Component::MemoryOrdering((*ordering).into()),
             required,
         ),
+        // The monitor it clears is no value C holds, so it owes its atomic effect whole.
+        SSAOp::ClearExclusive => {
+            seed_instruction(inst.id, Kind::Atomicity, Component::Whole, required);
+        }
         SSAOp::LoadLinked { ordering, .. } | SSAOp::LoadGuarded { ordering, .. } => {
             seed_instruction(
                 inst.id,
@@ -3217,7 +3221,8 @@ mod tests {
                 complete: true,
                 arguments_complete: true,
                 results_complete: true,
-                described: true,
+                arguments_proven: true,
+                refusal: None,
             },
         );
         let inventory = SemanticObligationInventory::collect(
@@ -3350,6 +3355,33 @@ mod tests {
                             == SemanticObligationComponent::MemoryOrdering(
                                 SemanticMemoryOrdering::Unknown,
                             )
+                })
+        );
+    }
+
+    /// A clear of the monitor owes its effect whole, so it is live and rendered as a gap rather
+    /// than proven dead.
+    #[test]
+    fn a_monitor_clear_owes_its_atomic_effect() {
+        let mut block = R2ILBlock::new(0x6000, 4);
+        block.push(R2ILOp::ClearExclusive);
+        block.push(R2ILOp::Return {
+            target: Varnode::register(8, 8),
+        });
+        let artifact = SsaArtifact::raw(&[block], None).expect("clear artifact");
+        let clear = artifact
+            .obligations()
+            .disposition_with_id(artifact.graph(), operation_at(&artifact, 0x6000, 0))
+            .expect("clear instruction");
+        assert_eq!(clear.state, SemanticInstructionState::LiveObligation);
+        assert!(
+            artifact
+                .obligations()
+                .owned(&clear)
+                .map(|obligation| &obligation.id)
+                .any(|id| {
+                    id.kind == SemanticObligationKind::Atomicity
+                        && id.component == SemanticObligationComponent::Whole
                 })
         );
     }

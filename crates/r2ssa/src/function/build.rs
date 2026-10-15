@@ -174,7 +174,7 @@ impl SSAFunction {
         let held = std::cell::Cell::new(r2il::allocation::live_bytes());
         let phase = |name: &str, size: usize| {
             let live = r2il::allocation::live_bytes();
-            let grew = live.saturating_sub(held.get());
+            let grew = r2il::allocation::Evidence(r2il::allocation::grown(held.get(), live));
             held.set(live);
             r2il::refusal_evidence!(
                 "collect-phase",

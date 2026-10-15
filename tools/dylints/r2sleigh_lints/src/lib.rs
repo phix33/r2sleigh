@@ -142,43 +142,14 @@ rustc_lint::declare_lint!(
 rustc_lint::declare_lint!(
     /// ### What it does
     ///
-    /// Warns when `r2dec` analysis code reconstructs imported-callee or
-    /// imported-like call-argument policy instead of consuming typed
-    /// `CalleeResolutionFacts` target resolution.
+    /// Warns when `r2dec` parses a call-target address through a local helper
+    /// or by stripping a `ram:` / `const:` prefix (AGENTS.md gotcha 7).
     ///
     /// ### Why is this bad?
     ///
-    /// Import/model classification depends on the same callsite, direct-address,
-    /// summary, callee-fact, and typed-signature evidence as callee identity.
-    /// Rebuilding it in analysis from raw names or partial identity lookups
-    /// creates a second owner and lets raw hints override typed facts.
-    ///
-    /// ### Example
-    ///
-    /// ```rust
-    /// r2types::callee_name_is_import_like(name);
-    /// facts.identity_for_callsite(site).is_some_and(|id| id.is_import_policy_authorized());
-    /// ```
-    ///
-    /// Use instead `CalleeResolutionFacts::resolve_target_identity(...)` or
-    /// `CalleeResolutionFacts::resolve_target_policy(...)`.
-    pub R2DEC_RAW_CALLEE_IMPORT_POLICY,
-    Warn,
-    "r2dec analysis should use typed callee resolution for import policy"
-);
-
-rustc_lint::declare_lint!(
-    /// ### What it does
-    ///
-    /// Warns when `r2dec` op-lowering code parses call-target addresses through
-    /// a local helper or direct `ram:` / `const:` prefix handling.
-    ///
-    /// ### Why is this bad?
-    ///
-    /// Call-target address interpretation is part of typed callee resolution and
-    /// the shared decompiler address parser. Recreating it in lowering creates a
-    /// second owner for call identity and lets rendering bypass
-    /// `CalleeResolutionFacts`.
+    /// Call-target address interpretation is part of typed callee resolution.
+    /// Recreating it in the renderer creates a second owner for call identity
+    /// and lets rendering bypass `CalleeResolutionFacts`.
     ///
     /// ### Example
     ///
@@ -188,19 +159,18 @@ rustc_lint::declare_lint!(
     /// name.strip_prefix("ram:");
     /// ```
     ///
-    /// Use instead `crate::address::parse_address_from_var_name()` or a
-    /// `CalleeResolutionFacts` lookup.
+    /// Use instead `CalleeResolutionFacts::identity_for_callsite`.
     pub R2DEC_RAW_CALL_TARGET_ADDRESS_PARSER,
     Warn,
-    "r2dec op-lowering should use typed callee resolution or the shared address parser"
+    "r2dec should resolve call targets through CalleeResolutionFacts, not parse names"
 );
 
 rustc_lint::declare_lint!(
     /// ### What it does
     ///
-    /// Warns when `r2dec` op-lowering code reconstructs call-target policy from
-    /// imported-name authorization, raw callsite identity lookups,
-    /// summary-helper lookups, or local modeled target helpers.
+    /// Warns when `r2dec` reconstructs a callee identity or its import/model
+    /// policy: from a name, a direct target, imported-name authorization,
+    /// helper lookups by name, or local modeled target helpers.
     ///
     /// ### Why is this bad?
     ///
@@ -211,18 +181,18 @@ rustc_lint::declare_lint!(
     /// ### Example
     ///
     /// ```rust
+    /// r2types::callee_name_is_import_like(name);
+    /// CalleeIdentity::from_direct_target(addr, &ctx);
     /// identity.is_import_policy_authorized();
-    /// facts.identity_for_callsite(callsite);
     /// self.summary_helper_view_for_name(alias);
-    /// self.is_modeled_callee_identity(identity);
     /// direct_target_context: Some(&ctx);
     /// ```
     ///
-    /// Use instead `CalleeResolutionFacts::resolve_target_policy()` through the
-    /// renderer's typed callee target resolver.
+    /// Use instead the identity `CalleeResolutionFacts` states for the callsite
+    /// and `CalleeResolutionFacts::resolve_target_policy()`.
     pub R2DEC_CALL_TARGET_POLICY_OWNERSHIP,
     Warn,
-    "r2dec op-lowering should consume typed callee target policy instead of recomputing it"
+    "r2dec should consume typed callee target policy instead of recomputing it"
 );
 
 rustc_lint::declare_lint!(
@@ -251,87 +221,6 @@ rustc_lint::declare_lint!(
     pub R2DEC_CALLEE_RESOLUTION_FALLBACK_OWNERSHIP,
     Warn,
     "r2dec must not synthesize CalleeResolutionFacts; r2engine owns callee resolution"
-);
-
-rustc_lint::declare_lint!(
-    /// ### What it does
-    ///
-    /// Warns when `r2dec` call-argument rendering policy authorizes a nested
-    /// call argument by asking whether its rendered callee is imported or
-    /// modeled.
-    ///
-    /// ### Why is this bad?
-    ///
-    /// A rendered callee name is not proof that a nested call argument is safe
-    /// to emit as executable C. Public call arguments may contain a call only
-    /// when a certified render proof authorizes that callsite and argument
-    /// value. Otherwise the renderer must emit an explicit unresolved argument
-    /// or residual/refusal.
-    ///
-    /// ### Example
-    ///
-    /// ```rust
-    /// if self.is_imported_call_target(func) {
-    ///     return false; // source-less nested call accepted
-    /// }
-    /// ```
-    ///
-    /// Use instead the certified public call-argument gate, such as
-    /// `proven_source_for_public_call_arg_call(...)`, and fail closed.
-    pub R2DEC_UNCERTIFIED_CALL_ARG_CALL_POLICY,
-    Warn,
-    "r2dec call arguments must not authorize nested calls from rendered callee policy"
-);
-
-rustc_lint::declare_lint!(
-    /// ### What it does
-    ///
-    /// Warns when `r2dec` call-argument render authorization treats
-    /// `CallArgBinding::source_var_name` as standalone proof.
-    ///
-    /// ### Why is this bad?
-    ///
-    /// A source variable name is a rendered hint, not evidence that the call
-    /// argument is safe to emit as executable C. Call arguments may render from
-    /// exact value/call provenance, or from a source name only after it resolves
-    /// through prepared semantic evidence.
-    ///
-    /// ### Example
-    ///
-    /// ```rust
-    /// binding.source_var_name.is_some()
-    /// ```
-    ///
-    /// Use instead a helper that ties the name back to prepared SSA/semantic
-    /// ownership before accepting it.
-    pub R2DEC_CALL_ARG_SOURCE_NAME_AUTHORITY,
-    Warn,
-    "r2dec call-argument rendering must not treat source_var_name as standalone authority"
-);
-
-rustc_lint::declare_lint!(
-    /// ### What it does
-    ///
-    /// Warns when `r2dec` call-argument render authorization treats
-    /// `CallArgBinding::source_call` as standalone proof.
-    ///
-    /// ### Why is this bad?
-    ///
-    /// A source call proves where a value came from; it does not prove that the
-    /// call argument is safe to emit as executable C. Argument rendering must
-    /// be backed by a certified value ID or prepared semantic authority.
-    ///
-    /// ### Example
-    ///
-    /// ```rust
-    /// binding.source_call.is_some()
-    /// ```
-    ///
-    /// Use instead the certified callsite argument contract carried through
-    /// `FunctionFacts`, or fail closed with a residual.
-    pub R2DEC_CALL_ARG_SOURCE_CALL_AUTHORITY,
-    Warn,
-    "r2dec call-argument rendering must not treat source_call as standalone authority"
 );
 
 rustc_lint::declare_lint!(
@@ -598,88 +487,6 @@ rustc_lint::declare_lint!(
     pub R2DEC_CERTIFIED_LOCAL_POST_CALL_SOURCE_FACT,
     Warn,
     "certified r2dec local post-call source recovery must not scan local SSA adjacency"
-);
-
-rustc_lint::declare_lint!(
-    /// ### What it does
-    ///
-    /// Warns when production `r2dec` analysis defines helpers that infer
-    /// authoritative call arguments locally.
-    ///
-    /// ### Why is this bad?
-    ///
-    /// Call arguments are executable C only after upstream SSA evidence has
-    /// been carried through `r2types::FunctionFacts`. A decompiler-local
-    /// `infer_call_authoritative_arg*` helper recreates callsite ownership
-    /// downstream and can render plausible arguments without the canonical
-    /// contract.
-    ///
-    /// ### Example
-    ///
-    /// ```rust
-    /// fn infer_call_authoritative_args(...) { ... }
-    /// ```
-    ///
-    /// Use instead `FunctionFacts` callsite argument facts populated by
-    /// `r2engine` from `r2ssa` certificates.
-    pub R2DEC_LOCAL_AUTHORITATIVE_CALL_ARG_INFERENCE,
-    Warn,
-    "r2dec must not infer authoritative call arguments outside FunctionFacts"
-);
-
-rustc_lint::declare_lint!(
-    /// ### What it does
-    ///
-    /// Warns when summary-only `r2dec` rendering paths emit executable-looking
-    /// C constructs such as `switch`, `case`, `break`, or `return`.
-    ///
-    /// ### Why is this bad?
-    ///
-    /// Summary evidence is not native CFG/control/dataflow proof. Summary
-    /// routes may render facts, comments, residuals, or refusals, but they must
-    /// not present executable C as if control flow had been reconstructed.
-    ///
-    /// ### Example
-    ///
-    /// ```rust
-    /// writeln!(out, "    switch ({selector}) {{");
-    /// ```
-    ///
-    /// Use instead comment/fact rendering such as:
-    ///
-    /// ```rust
-    /// writeln!(out, "    /* selector: {selector} */");
-    /// ```
-    pub R2DEC_SUMMARY_ROUTE_EXECUTABLE_C,
-    Warn,
-    "summary routes must render comments/facts, not executable C"
-);
-
-rustc_lint::declare_lint!(
-    /// ### What it does
-    ///
-    /// Warns when summary-only `r2dec` renderer files construct executable
-    /// `CStmt` nodes such as returns, branches, loops, switches, or expression
-    /// statements.
-    ///
-    /// ### Why is this bad?
-    ///
-    /// Summary routes may emit comments/facts/residuals only. Building
-    /// executable AST nodes in summary renderers creates a path where
-    /// summary-only evidence can become native-looking C without going through
-    /// the certified `FunctionFacts` render contract.
-    ///
-    /// ### Example
-    ///
-    /// ```rust
-    /// vec![CStmt::Return(Some(expr))]
-    /// ```
-    ///
-    /// Use `CStmt::comment(...)` or residualize. Executable output must be
-    /// produced by an exact typed-output seal, outside summary renderers.
-    pub R2DEC_SUMMARY_RENDER_EXECUTABLE_CSTMT,
-    Warn,
-    "summary/VM renderers must not construct executable CStmt bodies"
 );
 
 rustc_lint::declare_lint!(
@@ -1444,35 +1251,6 @@ rustc_lint::declare_lint!(
 rustc_lint::declare_lint!(
     /// ### What it does
     ///
-    /// Warns when certified `r2dec` op-lowering reads prepared
-    /// `CallsiteCertificate` data directly while synthesizing or recording
-    /// executable calls.
-    ///
-    /// ### Why is this bad?
-    ///
-    /// Callsite target and argument evidence is already projected through
-    /// `r2types::FunctionCallsiteFacts`. Reading prepared callsite
-    /// certificates in the renderer creates a second call-proof owner and lets
-    /// prepared SSA alone authorize executable calls without the `FunctionFacts`
-    /// spine.
-    ///
-    /// ### Example
-    ///
-    /// ```rust
-    /// self.prepared_call_site_for_op(block, op)
-    /// self.prepared.callsite_certificate_for_op(block, op)
-    /// fn certified_callsite_argument_values(cert: &r2types::CallsiteArgumentFacts)
-    /// ```
-    ///
-    /// Use `FunctionCallsiteFacts::arguments_for_site(...)`.
-    pub R2DEC_DIRECT_PREPARED_CALLSITE_CERTIFICATES,
-    Warn,
-    "certified r2dec call rendering must consume FunctionFacts callsite evidence"
-);
-
-rustc_lint::declare_lint!(
-    /// ### What it does
-    ///
     /// Warns when certified `r2dec` output validation reads raw prepared
     /// expression, memory, return, or stack-slot certificates instead of the
     /// canonical `FunctionFacts` render evidence.
@@ -1860,59 +1638,6 @@ rustc_lint::declare_lint!(
 rustc_lint::declare_lint!(
     /// ### What it does
     ///
-    /// Warns when production `r2dec` reads local stable stack/local-store
-    /// recovery directly on paths that can feed certified rendering.
-    ///
-    /// ### Why is this bad?
-    ///
-    /// `stable_stack_values` and `local_store_owner_expr_for_offset` are local
-    /// recovery conveniences, not certified `FunctionFacts` evidence. Certified
-    /// rendering must pass through a certified-aware accessor or an explicit
-    /// non-certified/prepared-only guard before consuming them.
-    ///
-    /// ### Example
-    ///
-    /// ```rust
-    /// self.use_info().stable_stack_values.get(&offset);
-    /// local_store_owner_expr_for_offset(view, prepared, block, idx, offset);
-    /// ```
-    ///
-    /// Use `stable_stack_value_for_offset(...)` or guard the prepared-only
-    /// fallback out of certified rendering first.
-    pub R2DEC_CERTIFIED_LOCAL_STACK_RECOVERY_BYPASS,
-    Warn,
-    "certified r2dec must not consume local stable stack/local-store recovery directly"
-);
-
-rustc_lint::declare_lint!(
-    /// ### What it does
-    ///
-    /// Warns when production `r2dec` analysis reads prepared SSA call-result
-    /// certificate maps directly.
-    ///
-    /// ### Why is this bad?
-    ///
-    /// Call-result ownership used by executable rendering must travel through
-    /// `r2types::FunctionFacts`. Reading `prepared.certificates().call_results`
-    /// in the renderer recreates a side channel and bypasses the engine-owned
-    /// evidence projection.
-    ///
-    /// ### Example
-    ///
-    /// ```rust
-    /// prepared.certificates().call_results.get(&value);
-    /// prepared.certificates().call_results_by_callsite.get(&site);
-    /// ```
-    ///
-    /// Use instead `FunctionCallResultFacts` from `FunctionFacts`.
-    pub R2DEC_DIRECT_PREPARED_CALL_RESULT_CERTIFICATES,
-    Warn,
-    "r2dec analysis must consume FunctionFacts call-result facts instead of prepared certificate maps"
-);
-
-rustc_lint::declare_lint!(
-    /// ### What it does
-    ///
     /// Warns when production `r2dec` reads prepared SSA predicate or switch
     /// maps directly, carries them through a side channel, or infers switch
     /// selectors from prepared SSA instead of the canonical control contract.
@@ -2234,8 +1959,8 @@ rustc_lint::declare_lint!(
 rustc_lint::declare_lint!(
     /// ### What it does
     ///
-    /// Warns when production `r2types` code outside `role_registry` calls the
-    /// raw role-name signature lookup APIs directly.
+    /// Warns when production `r2types` code calls the raw role-name signature
+    /// lookup APIs; the role registry that owned them is gone.
     ///
     /// ### Why is this bad?
     ///
@@ -2246,7 +1971,7 @@ rustc_lint::declare_lint!(
     /// ### Example
     ///
     /// ```rust
-    /// role_registry::signature_hint_for_name_candidates([name], 0);
+    /// signature_hint_for_name_candidates([name], 0);
     /// ```
     ///
     /// Use instead `signature_hint_for_role_identity(...)` after r2sym has
@@ -2408,13 +2133,9 @@ rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     STRING_PREFIX_SEMANTIC_CLASSIFICATION,
     R2_JSON_COMMAND_INTERNAL_SEAM,
     R2DEC_DIRECT_KNOWN_SIGNATURE_LOOKUP,
-    R2DEC_RAW_CALLEE_IMPORT_POLICY,
     R2DEC_RAW_CALL_TARGET_ADDRESS_PARSER,
     R2DEC_CALL_TARGET_POLICY_OWNERSHIP,
     R2DEC_CALLEE_RESOLUTION_FALLBACK_OWNERSHIP,
-    R2DEC_UNCERTIFIED_CALL_ARG_CALL_POLICY,
-    R2DEC_CALL_ARG_SOURCE_NAME_AUTHORITY,
-    R2DEC_CALL_ARG_SOURCE_CALL_AUTHORITY,
     R2DEC_CERTIFIED_RAW_CALL_ARG_FALLBACK,
     R2DEC_CERTIFIED_CALL_ARG_PREFIX_PROOF,
     R2DEC_DIRECT_ZERO_ARG_CALL_FALLBACK,
@@ -2425,9 +2146,6 @@ rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     R2DEC_CERTIFIED_RETURN_LOCAL_EXPR_FALLBACK,
     R2DEC_CERTIFIED_RETURN_CALL_RESULT_FACT,
     R2DEC_CERTIFIED_LOCAL_POST_CALL_SOURCE_FACT,
-    R2DEC_LOCAL_AUTHORITATIVE_CALL_ARG_INFERENCE,
-    R2DEC_SUMMARY_ROUTE_EXECUTABLE_C,
-    R2DEC_SUMMARY_RENDER_EXECUTABLE_CSTMT,
     R2DEC_ROUTE_POLICY_OWNERSHIP,
     R2DEC_MISSING_DECOMPILE_ROUTE_DEFAULT_STANDARD,
     R2DEC_BUILD_FUNCTION_REQUIRES_ROUTE_FACTS,
@@ -2455,7 +2173,6 @@ rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     R2DEC_CERTIFIED_PREPARED_SWITCH_SELECTOR_PROOF,
     R2DEC_SWITCH_SELECTOR_SINGLE_FACT_FALLBACK,
     R2DEC_PREPARED_DIRECT_TARGET_REPARSE,
-    R2DEC_DIRECT_PREPARED_CALLSITE_CERTIFICATES,
     R2DEC_DIRECT_PREPARED_RENDER_CERTIFICATES,
     R2DEC_CALL_RESULT_STACK_OWNER_FALLBACK,
     R2DEC_CALL_RESULT_SOURCE_EXPR_OWNER_FALLBACK,
@@ -2472,8 +2189,6 @@ rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     R2DEC_CERTIFIED_STACK_OWNER_PROOF_RECOMPOSITION,
     R2DEC_CERTIFIED_STACK_LOCAL_TYPE_OWNERSHIP,
     R2DEC_CERTIFIED_LOCAL_TYPE_HINTS,
-    R2DEC_CERTIFIED_LOCAL_STACK_RECOVERY_BYPASS,
-    R2DEC_DIRECT_PREPARED_CALL_RESULT_CERTIFICATES,
     R2DEC_DIRECT_PREPARED_CONTROL_FACTS,
     R2DEC_SOURCE_SHAPED_DECOMPILE_ORACLE,
     R2DEC_DEFAULT_TRUE_BRANCH_CONDITION,
@@ -2501,13 +2216,9 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         STRING_PREFIX_SEMANTIC_CLASSIFICATION,
         R2_JSON_COMMAND_INTERNAL_SEAM,
         R2DEC_DIRECT_KNOWN_SIGNATURE_LOOKUP,
-        R2DEC_RAW_CALLEE_IMPORT_POLICY,
         R2DEC_RAW_CALL_TARGET_ADDRESS_PARSER,
         R2DEC_CALL_TARGET_POLICY_OWNERSHIP,
         R2DEC_CALLEE_RESOLUTION_FALLBACK_OWNERSHIP,
-        R2DEC_UNCERTIFIED_CALL_ARG_CALL_POLICY,
-        R2DEC_CALL_ARG_SOURCE_NAME_AUTHORITY,
-        R2DEC_CALL_ARG_SOURCE_CALL_AUTHORITY,
         R2DEC_CERTIFIED_RAW_CALL_ARG_FALLBACK,
         R2DEC_CERTIFIED_CALL_ARG_PREFIX_PROOF,
         R2DEC_DIRECT_ZERO_ARG_CALL_FALLBACK,
@@ -2518,9 +2229,6 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         R2DEC_CERTIFIED_RETURN_LOCAL_EXPR_FALLBACK,
         R2DEC_CERTIFIED_RETURN_CALL_RESULT_FACT,
         R2DEC_CERTIFIED_LOCAL_POST_CALL_SOURCE_FACT,
-        R2DEC_LOCAL_AUTHORITATIVE_CALL_ARG_INFERENCE,
-        R2DEC_SUMMARY_ROUTE_EXECUTABLE_C,
-        R2DEC_SUMMARY_RENDER_EXECUTABLE_CSTMT,
         R2DEC_ROUTE_POLICY_OWNERSHIP,
         R2DEC_MISSING_DECOMPILE_ROUTE_DEFAULT_STANDARD,
         R2DEC_BUILD_FUNCTION_REQUIRES_ROUTE_FACTS,
@@ -2549,7 +2257,6 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         R2DEC_CERTIFIED_PREPARED_SWITCH_SELECTOR_PROOF,
         R2DEC_SWITCH_SELECTOR_SINGLE_FACT_FALLBACK,
         R2DEC_PREPARED_DIRECT_TARGET_REPARSE,
-        R2DEC_DIRECT_PREPARED_CALLSITE_CERTIFICATES,
         R2DEC_DIRECT_PREPARED_RENDER_CERTIFICATES,
         R2DEC_CALL_RESULT_STACK_OWNER_FALLBACK,
         R2DEC_CALL_RESULT_SOURCE_EXPR_OWNER_FALLBACK,
@@ -2566,8 +2273,6 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         R2DEC_CERTIFIED_STACK_OWNER_PROOF_RECOMPOSITION,
         R2DEC_CERTIFIED_STACK_LOCAL_TYPE_OWNERSHIP,
         R2DEC_CERTIFIED_LOCAL_TYPE_HINTS,
-        R2DEC_CERTIFIED_LOCAL_STACK_RECOVERY_BYPASS,
-        R2DEC_DIRECT_PREPARED_CALL_RESULT_CERTIFICATES,
         R2DEC_DIRECT_PREPARED_CONTROL_FACTS,
         R2DEC_SOURCE_SHAPED_DECOMPILE_ORACLE,
         R2DEC_DEFAULT_TRUE_BRANCH_CONDITION,
@@ -2730,18 +2435,6 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
                 R2DEC_LOCAL_SIGNATURE_ENRICHMENT,
                 item.span,
                 "r2dec must not enrich known signatures from names while constructing render context",
-            );
-        }
-
-        if is_r2dec_analysis_span(cx, item.span)
-            && !item_is_test_only(cx, item)
-            && r2dec_local_authoritative_call_arg_inference_item(cx, item)
-        {
-            span_lint(
-                cx,
-                R2DEC_LOCAL_AUTHORITATIVE_CALL_ARG_INFERENCE,
-                item.span,
-                "r2dec must consume FunctionFacts callsite arguments instead of inferring authoritative call args locally",
             );
         }
 
@@ -3006,18 +2699,6 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
             );
         }
 
-        if is_r2dec_op_lower_span(cx, item.span)
-            && !item_is_test_only(cx, item)
-            && r2dec_direct_prepared_callsite_certificates_item(cx, item)
-        {
-            span_lint(
-                cx,
-                R2DEC_DIRECT_PREPARED_CALLSITE_CERTIFICATES,
-                item.span,
-                "certified r2dec call rendering must read callsite proof from FunctionFacts, not prepared CallsiteCertificate",
-            );
-        }
-
         if is_r2dec_span(cx, item.span)
             && !item_is_test_only(cx, item)
             && r2dec_direct_prepared_render_certificates_item(cx, item)
@@ -3142,18 +2823,6 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
                 R2DEC_PREPARED_DIRECT_TARGET_REPARSE,
                 item.span,
                 "r2dec direct call target lookup must not reparse prepared SSA names or roots",
-            );
-        }
-
-        if is_r2dec_op_lower_span(cx, item.span)
-            && !impl_item_is_test_only(cx, item)
-            && r2dec_direct_prepared_callsite_certificates_impl_item(cx, item.span)
-        {
-            span_lint(
-                cx,
-                R2DEC_DIRECT_PREPARED_CALLSITE_CERTIFICATES,
-                item.span,
-                "certified r2dec call rendering must not authorize calls from prepared callsite certificates",
             );
         }
 
@@ -3597,95 +3266,30 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
             );
         }
 
-        if is_r2dec_analysis_path(cx, expr) && raw_callee_import_policy_expr(expr) {
-            span_lint(
-                cx,
-                R2DEC_RAW_CALLEE_IMPORT_POLICY,
-                expr.span,
-                "r2dec analysis must consume CalleeResolutionFacts target resolution/policy, not reconstruct callee import/model policy",
-            );
-        }
-
-        if is_r2dec_op_lower_path(cx, expr) && raw_call_target_address_parser_expr(expr) {
+        if is_r2dec_path(cx, expr) && raw_call_target_address_parser_expr(expr) {
             span_lint(
                 cx,
                 R2DEC_RAW_CALL_TARGET_ADDRESS_PARSER,
                 expr.span,
-                "r2dec op-lowering must use parse_address_from_var_name or CalleeResolutionFacts instead of local call-target address parsing",
+                "r2dec must resolve call targets through CalleeResolutionFacts, not parse addresses from `ram:`/`const:` names",
             );
         }
 
-        if is_r2dec_op_lower_path(cx, expr) && call_target_policy_ownership_expr(expr) {
+        if is_r2dec_path(cx, expr) && call_target_policy_ownership_expr(expr) {
             span_lint(
                 cx,
                 R2DEC_CALL_TARGET_POLICY_OWNERSHIP,
                 expr.span,
-                "r2dec op-lowering must consume the typed callee target policy contract instead of recomputing imported/modeled policy",
+                "r2dec must consume the typed callee target policy contract instead of recomputing imported/modeled policy",
             );
         }
 
-        if is_r2dec_lib_path(cx, expr) && callee_resolution_fallback_ownership_expr(expr) {
+        if is_r2dec_path(cx, expr) && callee_resolution_fallback_ownership_expr(expr) {
             span_lint(
                 cx,
                 R2DEC_CALLEE_RESOLUTION_FALLBACK_OWNERSHIP,
                 expr.span,
                 "r2dec must not synthesize CalleeResolutionFacts from raw call targets; pass the r2engine-owned resolution contract",
-            );
-        }
-
-        if is_r2dec_op_lower_path(cx, expr) && uncertified_call_arg_call_policy_expr(cx, expr) {
-            span_lint(
-                cx,
-                R2DEC_UNCERTIFIED_CALL_ARG_CALL_POLICY,
-                expr.span,
-                "r2dec call arguments must require certified nested-call proof instead of rendered imported/modeled callee policy",
-            );
-        }
-
-        if is_r2dec_op_lower_path(cx, expr) && call_arg_source_name_authority_expr(cx, expr) {
-            span_lint(
-                cx,
-                R2DEC_CALL_ARG_SOURCE_NAME_AUTHORITY,
-                expr.span,
-                "source_var_name is only a hint; call-argument rendering needs source_value_id or prepared semantic authority",
-            );
-        }
-
-        if is_r2dec_op_lower_path(cx, expr) && call_arg_source_call_authority_expr(cx, expr) {
-            span_lint(
-                cx,
-                R2DEC_CALL_ARG_SOURCE_CALL_AUTHORITY,
-                expr.span,
-                "source_call proves provenance only; call-argument rendering needs certified argument evidence",
-            );
-        }
-
-        if is_r2dec_summary_render_path(cx, expr) && summary_route_executable_c_expr(cx, expr) {
-            span_lint(
-                cx,
-                R2DEC_SUMMARY_ROUTE_EXECUTABLE_C,
-                expr.span,
-                "summary route rendering must stay comment/fact-only until native CFG/control/dataflow proof exists",
-            );
-        }
-
-        if is_r2dec_summary_or_structured_consumer_path(cx, expr)
-            && summary_render_executable_cstmt_expr(cx, expr)
-        {
-            span_lint(
-                cx,
-                R2DEC_SUMMARY_RENDER_EXECUTABLE_CSTMT,
-                expr.span,
-                "summary/VM renderers must not construct executable CStmt bodies without CertifiedC permission",
-            );
-        }
-
-        if is_r2dec_route_render_path(cx, expr) && summary_route_structured_worker_expr(expr) {
-            span_lint(
-                cx,
-                R2DEC_SUMMARY_ROUTE_EXECUTABLE_C,
-                expr.span,
-                "summary route rendering must not call semantic worker structuring without certified native render permission",
             );
         }
 
@@ -3745,7 +3349,7 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
             );
         }
 
-        if is_r2dec_op_lower_path(cx, expr)
+        if is_r2dec_path(cx, expr)
             && !is_inside_test_item(cx, expr)
             && r2dec_call_result_stack_owner_fallback_expr(cx, expr)
         {
@@ -3753,11 +3357,11 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
                 cx,
                 R2DEC_CALL_RESULT_STACK_OWNER_FALLBACK,
                 expr.span,
-                "r2dec must consume prepared call-result ownership instead of deriving stack-local owners in op-lowering",
+                "r2dec must consume prepared call-result ownership instead of deriving stack-local owners",
             );
         }
 
-        if is_r2dec_op_lower_path(cx, expr)
+        if is_r2dec_path(cx, expr)
             && !is_inside_test_item(cx, expr)
             && r2dec_call_result_source_expr_owner_fallback_expr(cx, expr)
         {
@@ -3766,18 +3370,6 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
                 R2DEC_CALL_RESULT_SOURCE_EXPR_OWNER_FALLBACK,
                 expr.span,
                 "r2dec must consume prepared call-result ownership instead of matching rendered call expressions",
-            );
-        }
-
-        if is_r2dec_analysis_path(cx, expr)
-            && !is_inside_test_item(cx, expr)
-            && r2dec_direct_prepared_call_result_certificates_expr(cx, expr)
-        {
-            span_lint(
-                cx,
-                R2DEC_DIRECT_PREPARED_CALL_RESULT_CERTIFICATES,
-                expr.span,
-                "r2dec analysis must read call-result proof from FunctionFacts, not prepared SSA certificate maps",
             );
         }
 
@@ -3844,33 +3436,7 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
             );
         }
 
-        if is_r2dec_op_lower_path(cx, expr)
-            && !is_inside_test_item(cx, expr)
-            && r2dec_direct_stable_stack_values_get_expr(cx, expr)
-        {
-            span_lint(
-                cx,
-                R2DEC_CERTIFIED_LOCAL_STACK_RECOVERY_BYPASS,
-                expr.span,
-                "r2dec op-lowering must read stable stack values through the certified-aware accessor",
-            );
-        }
-
-        if is_r2dec_analysis_path(cx, expr)
-            && !is_inside_test_item(cx, expr)
-            && r2dec_unguarded_local_store_owner_expr(cx, expr)
-        {
-            span_lint(
-                cx,
-                R2DEC_CERTIFIED_LOCAL_STACK_RECOVERY_BYPASS,
-                expr.span,
-                "r2dec prepared local-store recovery must be guarded out of certified rendering",
-            );
-        }
-
-        if is_r2types_non_role_registry_path(cx, expr)
-            && r2types_role_name_signature_hint_expr(expr)
-        {
+        if is_r2types_span(cx, expr.span) && r2types_role_name_signature_hint_expr(expr) {
             span_lint(
                 cx,
                 R2TYPES_ROLE_NAME_SIGNATURE_HINT_OWNERSHIP,
@@ -4124,22 +3690,6 @@ fn r2dec_local_header_arity_repair_item(cx: &LateContext<'_>, item: &Item<'_>) -
         })
 }
 
-fn r2dec_local_authoritative_call_arg_inference_item(
-    cx: &LateContext<'_>,
-    item: &Item<'_>,
-) -> bool {
-    if !matches!(item.kind, rustc_hir::ItemKind::Fn { .. }) {
-        return false;
-    }
-    cx.sess()
-        .source_map()
-        .span_to_snippet(item.span)
-        .is_ok_and(|snippet| {
-            snippet.contains("fn infer_call_authoritative_arg")
-                || snippet.contains("fn infer_stack_call_authoritative_args")
-        })
-}
-
 fn r2dec_route_policy_ownership_expr(expr: &Expr<'_>) -> bool {
     match expr.kind {
         ExprKind::Call(callee, _) => [
@@ -4273,20 +3823,6 @@ fn r2dec_prepared_call_view_direct_target_side_channel_item(
         })
 }
 
-fn r2dec_direct_prepared_callsite_certificates_item(cx: &LateContext<'_>, item: &Item<'_>) -> bool {
-    if !matches!(item.kind, rustc_hir::ItemKind::Fn { .. }) {
-        return false;
-    }
-    cx.sess()
-        .source_map()
-        .span_to_snippet(item.span)
-        .is_ok_and(|snippet| {
-            snippet.contains("fn certified_callsite_argument_values")
-                && (snippet.contains("r2ssa::CallsiteCertificate")
-                    || snippet.contains("r2types::CallsiteArgumentFacts"))
-        })
-}
-
 fn r2dec_certified_call_arg_prefix_proof_item(cx: &LateContext<'_>, item: &Item<'_>) -> bool {
     if !matches!(item.kind, rustc_hir::ItemKind::Fn { .. }) {
         return false;
@@ -4320,22 +3856,6 @@ fn r2dec_direct_prepared_render_certificates_item(cx: &LateContext<'_>, item: &I
                     || snippet.contains("certificates.memory_accesses")
                     || snippet.contains("certificates.returns")
                     || snippet.contains("certificates.callsites"))
-        })
-}
-
-fn r2dec_direct_prepared_callsite_certificates_impl_item(
-    cx: &LateContext<'_>,
-    span: rustc_span::Span,
-) -> bool {
-    cx.sess()
-        .source_map()
-        .span_to_snippet(span)
-        .is_ok_and(|snippet| {
-            (snippet.contains("fn certified_callsite_for_op")
-                && snippet.contains("callsite_certificate_for_op"))
-                || (snippet.contains("fn certified_synthesized_call_expr_for_source_call")
-                    && (snippet.contains("prepared_call_site_for_op")
-                        || snippet.contains("resolved_call_target(call_site)")))
         })
 }
 
@@ -4989,28 +4509,6 @@ fn r2dec_uncertified_field_placeholder_name(name: &str) -> bool {
     )
 }
 
-fn r2dec_direct_prepared_call_result_certificates_expr(
-    cx: &LateContext<'_>,
-    expr: &Expr<'_>,
-) -> bool {
-    match expr.kind {
-        ExprKind::Field(_, field) => {
-            matches!(
-                field.name.as_str(),
-                "call_results" | "call_results_by_callsite"
-            ) && cx
-                .sess()
-                .source_map()
-                .span_to_snippet(expr.span)
-                .is_ok_and(|snippet| snippet.contains("certificates()."))
-        }
-        ExprKind::MethodCall(method, _, _, _) => {
-            method.ident.as_str() == "call_result_certificates_for_callsite"
-        }
-        _ => false,
-    }
-}
-
 fn r2dec_direct_prepared_control_facts_expr(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     match expr.kind {
         ExprKind::Field(_, field) => {
@@ -5592,52 +5090,6 @@ fn snippet_recomposes_stack_owner_proof(snippet: &str) -> bool {
     .any(|needle| snippet.contains(needle))
 }
 
-fn r2dec_direct_stable_stack_values_get_expr(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    let ExprKind::MethodCall(method, receiver, _, _) = expr.kind else {
-        return false;
-    };
-    method.ident.as_str() == "get"
-        && expr_references_stable_stack_values(receiver)
-        && !enclosing_item_name(cx, expr)
-            .as_deref()
-            .is_some_and(|name| name == "stable_stack_value_for_offset")
-}
-
-fn r2dec_unguarded_local_store_owner_expr(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    let ExprKind::Call(callee, _) = expr.kind else {
-        return false;
-    };
-    if !expr_path_last_segment_is(callee, "local_store_owner_expr_for_offset") {
-        return false;
-    }
-    !enclosing_item_snippet_contains(cx, expr, "certified_rendering_required")
-        && !enclosing_item_snippet_contains(cx, expr, "requires_certified_rendering()")
-        && !enclosing_item_snippet_contains(cx, expr, "prepared-only")
-        && !enclosing_item_snippet_contains(cx, expr, "prepared only")
-}
-
-fn expr_references_stable_stack_values(expr: &Expr<'_>) -> bool {
-    match expr.kind {
-        ExprKind::Field(base, ident) => {
-            ident.name.as_str() == "stable_stack_values"
-                || expr_references_stable_stack_values(base)
-        }
-        ExprKind::MethodCall(_, receiver, args, _) => {
-            expr_references_stable_stack_values(receiver)
-                || args.iter().any(expr_references_stable_stack_values)
-        }
-        ExprKind::Call(callee, args) => {
-            expr_references_stable_stack_values(callee)
-                || args.iter().any(expr_references_stable_stack_values)
-        }
-        ExprKind::AddrOf(_, _, inner)
-        | ExprKind::Unary(_, inner)
-        | ExprKind::Cast(inner, _)
-        | ExprKind::DropTemps(inner) => expr_references_stable_stack_values(inner),
-        _ => false,
-    }
-}
-
 fn r2types_role_name_signature_hint_expr(expr: &Expr<'_>) -> bool {
     matches!(
         expr.kind,
@@ -5770,23 +5222,6 @@ fn expr_references_callee_facts(expr: &Expr<'_>) -> bool {
     }
 }
 
-fn raw_callee_import_policy_expr(expr: &Expr<'_>) -> bool {
-    match expr.kind {
-        ExprKind::Call(callee, _) => {
-            expr_path_last_segment_is(callee, "callee_name_is_import_like")
-                || expr_path_last_segment_is(callee, "from_direct_target")
-        }
-        ExprKind::MethodCall(method, _, _, _) => matches!(
-            method.ident.as_str(),
-            "identity_for_callsite"
-                | "identity_for_direct_addr"
-                | "is_import_policy_authorized"
-                | "target_policy_for_callsite_or_identity"
-        ),
-        _ => false,
-    }
-}
-
 fn raw_call_target_address_parser_expr(expr: &Expr<'_>) -> bool {
     match expr.kind {
         ExprKind::Call(callee, _) => expr_path_last_segment_is(callee, "extract_call_address"),
@@ -5796,7 +5231,8 @@ fn raw_call_target_address_parser_expr(expr: &Expr<'_>) -> bool {
             true
         }
         ExprKind::MethodCall(method, _, [arg], _) => {
-            method.ident.as_str() == "strip_prefix" && call_target_address_prefix_literal(arg)
+            matches!(method.ident.as_str(), "strip_prefix" | "trim_start_matches")
+                && call_target_address_prefix_literal(arg)
         }
         _ => false,
     }
@@ -5812,9 +5248,13 @@ fn call_target_address_prefix_literal(expr: &Expr<'_>) -> bool {
     matches!(symbol.as_str(), "ram:" | "const:")
 }
 
+/// Reading `CalleeResolutionFacts::identity_for_callsite`/`identity_for_direct_addr` is the
+/// contract (AGENTS.md gotcha 7); building an identity or a policy beside it is not.
 fn call_target_policy_ownership_expr(expr: &Expr<'_>) -> bool {
     match expr.kind {
         ExprKind::Call(callee, _) => [
+            "callee_name_is_import_like",
+            "from_direct_target",
             "is_modeled_callee_identity",
             "modeled_callee_addr_for_identity",
         ]
@@ -5829,7 +5269,6 @@ fn call_target_policy_ownership_expr(expr: &Expr<'_>) -> bool {
         ExprKind::MethodCall(method, _, _, _) => matches!(
             method.ident.as_str(),
             "is_import_policy_authorized"
-                | "identity_for_callsite"
                 | "summary_helper_view_for_name"
                 | "helper_view_for_name"
                 | "is_modeled_callee_identity"
@@ -5850,10 +5289,6 @@ fn expr_is_some_call(expr: &Expr<'_>) -> bool {
     )
 }
 
-fn expr_is_none_path(expr: &Expr<'_>) -> bool {
-    matches!(expr.kind, ExprKind::Path(ref qpath) if qpath_last_segment_is(qpath, "None"))
-}
-
 fn callee_resolution_fallback_ownership_expr(expr: &Expr<'_>) -> bool {
     matches!(
         expr.kind,
@@ -5866,143 +5301,6 @@ fn callee_resolution_fallback_ownership_expr(expr: &Expr<'_>) -> bool {
             .iter()
             .any(|name| expr_path_last_segment_is(callee, name))
     )
-}
-
-fn uncertified_call_arg_call_policy_expr(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    if !enclosing_item_name(cx, expr)
-        .as_deref()
-        .is_some_and(is_call_arg_render_boundary_name)
-    {
-        return false;
-    }
-
-    match expr.kind {
-        ExprKind::MethodCall(method, _, args, _) => match method.ident.as_str() {
-            "is_imported_call_target" | "is_modeled_call_target" => true,
-            "imported_or_modeled_call_target_for_optional_site" => {
-                args.is_empty() || args.iter().any(expr_is_none_path)
-            }
-            _ => false,
-        },
-        ExprKind::Call(callee, _) => ["is_imported_call_target", "is_modeled_call_target"]
-            .iter()
-            .any(|name| expr_path_last_segment_is(callee, name)),
-        _ => false,
-    }
-}
-
-fn is_call_arg_render_boundary_name(name: &str) -> bool {
-    matches!(
-        name,
-        "call_arg_requires_result_rebuild"
-            | "choose_preferred_imported_call_arg_expr"
-            | "render_imported_call_arg"
-            | "render_authoritative_source_call_arg"
-            | "normalize_imported_call_arg_expr"
-            | "finalize_authoritative_imported_call_arg_expr"
-            | "normalize_call_arg_expr_with_import_policy"
-    )
-}
-
-fn call_arg_source_name_authority_expr(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    if !enclosing_item_name(cx, expr)
-        .as_deref()
-        .is_some_and(is_call_arg_authority_boundary_name)
-    {
-        return false;
-    }
-
-    let ExprKind::MethodCall(method, receiver, _, _) = expr.kind else {
-        return false;
-    };
-    if !matches!(method.ident.as_str(), "is_some" | "is_none" | "is_some_and") {
-        return false;
-    }
-    if method.ident.as_str() == "is_some_and"
-        && cx
-            .sess()
-            .source_map()
-            .span_to_snippet(expr.span)
-            .is_ok_and(|snippet| {
-                snippet.contains("source_var_name_has_prepared_call_arg_authority")
-            })
-    {
-        return false;
-    }
-    expr_references_call_arg_source_var_name(receiver)
-}
-
-fn call_arg_source_call_authority_expr(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    if !enclosing_item_name(cx, expr)
-        .as_deref()
-        .is_some_and(is_call_arg_authority_boundary_name)
-    {
-        return false;
-    }
-
-    let ExprKind::MethodCall(method, receiver, _, _) = expr.kind else {
-        return false;
-    };
-    if !matches!(method.ident.as_str(), "is_some" | "is_none" | "is_some_and") {
-        return false;
-    }
-    expr_references_call_arg_source_call(receiver)
-}
-
-fn is_call_arg_authority_boundary_name(name: &str) -> bool {
-    matches!(
-        name,
-        "certified_call_args_for_site"
-            | "certified_call_args_for_site_with_direct_target"
-            | "call_arg_binding_has_render_authority"
-    )
-}
-
-fn expr_references_call_arg_source_var_name(expr: &Expr<'_>) -> bool {
-    match expr.kind {
-        ExprKind::Field(base, ident) => {
-            ident.name.as_str() == "source_var_name"
-                || expr_references_call_arg_source_var_name(base)
-        }
-        ExprKind::MethodCall(_, receiver, args, _) => {
-            expr_references_call_arg_source_var_name(receiver)
-                || args.iter().any(expr_references_call_arg_source_var_name)
-        }
-        ExprKind::Call(callee, args) => {
-            expr_references_call_arg_source_var_name(callee)
-                || args.iter().any(expr_references_call_arg_source_var_name)
-        }
-        ExprKind::Block(block, _) => block
-            .expr
-            .is_some_and(expr_references_call_arg_source_var_name),
-        ExprKind::AddrOf(_, _, inner)
-        | ExprKind::Unary(_, inner)
-        | ExprKind::Cast(inner, _)
-        | ExprKind::DropTemps(inner) => expr_references_call_arg_source_var_name(inner),
-        _ => false,
-    }
-}
-
-fn expr_references_call_arg_source_call(expr: &Expr<'_>) -> bool {
-    match expr.kind {
-        ExprKind::Field(base, ident) => {
-            ident.name.as_str() == "source_call" || expr_references_call_arg_source_call(base)
-        }
-        ExprKind::MethodCall(_, receiver, args, _) => {
-            expr_references_call_arg_source_call(receiver)
-                || args.iter().any(expr_references_call_arg_source_call)
-        }
-        ExprKind::Call(callee, args) => {
-            expr_references_call_arg_source_call(callee)
-                || args.iter().any(expr_references_call_arg_source_call)
-        }
-        ExprKind::Block(block, _) => block.expr.is_some_and(expr_references_call_arg_source_call),
-        ExprKind::AddrOf(_, _, inner)
-        | ExprKind::Unary(_, inner)
-        | ExprKind::Cast(inner, _)
-        | ExprKind::DropTemps(inner) => expr_references_call_arg_source_call(inner),
-        _ => false,
-    }
 }
 
 fn enclosing_item_name(cx: &LateContext<'_>, expr: &Expr<'_>) -> Option<String> {
@@ -6072,116 +5370,6 @@ fn enclosing_item_snippet_contains(cx: &LateContext<'_>, expr: &Expr<'_>, needle
     false
 }
 
-fn summary_route_executable_c_expr(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    if matches!(expr.kind, ExprKind::Field(_, _))
-        && enclosing_item_snippet_contains(cx, expr, "render_semantic_worker_linearization")
-        && cx
-            .sess()
-            .source_map()
-            .span_to_snippet(expr.span)
-            .is_ok_and(|snippet| {
-                snippet.contains("plan.signature.signature") || snippet.contains("decl.decl")
-            })
-    {
-        return true;
-    }
-
-    if cx
-        .sess()
-        .source_map()
-        .span_to_snippet(expr.span)
-        .is_ok_and(|snippet| {
-            snippet.lines().count() <= 2
-                && ["switch (", "case 0x", "default:", "break;"]
-                    .iter()
-                    .any(|needle| snippet.contains(needle))
-        })
-    {
-        return true;
-    }
-
-    match expr.kind {
-        ExprKind::MethodCall(method, _, _, _)
-            if method.ident.as_str() == "render_authorized_signature"
-                && enclosing_item_snippet_contains(cx, expr, "CFunction") =>
-        {
-            true
-        }
-        ExprKind::Lit(lit) => {
-            let LitKind::Str(symbol, _) = lit.node else {
-                return false;
-            };
-            let text = symbol.as_str();
-            let trimmed = text.trim();
-            if trimmed.contains("switch (") {
-                return true;
-            }
-            ["case ", "default:", "break;", "return "]
-                .iter()
-                .any(|prefix| trimmed.starts_with(prefix))
-        }
-        ExprKind::Call(callee, _) => {
-            if cx
-                .sess()
-                .source_map()
-                .span_to_snippet(expr.span)
-                .is_ok_and(|snippet| snippet.contains("CStmt::"))
-            {
-                return false;
-            }
-            ["Return", "Expr", "merge_params_with_external_signature"]
-                .iter()
-                .any(|name| expr_path_last_segment_is(callee, name))
-        }
-        ExprKind::Field(_, ident) => {
-            ident.name.as_str() == "register_params"
-                && enclosing_item_snippet_contains(cx, expr, "CFunction")
-        }
-        _ => false,
-    }
-}
-
-fn summary_render_executable_cstmt_expr(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    if is_inside_test_item(cx, expr) {
-        return false;
-    }
-    if !matches!(expr.kind, ExprKind::Call(_, _) | ExprKind::Struct(_, _, _)) {
-        return false;
-    }
-    cx.sess()
-        .source_map()
-        .span_to_snippet(expr.span)
-        .is_ok_and(|snippet| {
-            let snippet = snippet.trim_start();
-            [
-                "CStmt::Return",
-                "CStmt::Expr",
-                "CStmt::If",
-                "CStmt::While",
-                "CStmt::DoWhile",
-                "CStmt::For",
-                "CStmt::Switch",
-                "CStmt::if_stmt",
-                "CStmt::while_loop",
-            ]
-            .iter()
-            .any(|needle| snippet.starts_with(needle))
-        })
-}
-
-fn summary_route_structured_worker_expr(expr: &Expr<'_>) -> bool {
-    match expr.kind {
-        ExprKind::MethodCall(method, _, _, _) => {
-            method.ident.as_str() == "structure_semantic_worker_islands"
-        }
-        ExprKind::Call(callee, _) => {
-            expr_path_last_segment_is(callee, "semantic_worker_structured_body")
-                || expr_path_last_segment_is(callee, "structure_semantic_worker_islands")
-        }
-        _ => false,
-    }
-}
-
 fn expr_path_last_segment_is(expr: &Expr<'_>, name: &str) -> bool {
     match expr.kind {
         ExprKind::Path(ref qpath) => qpath_last_segment_is(qpath, name),
@@ -6233,8 +5421,8 @@ fn is_display_name_rendering_span(cx: &LateContext<'_>, span: rustc_span::Span) 
     let filename = format!("{filename:?}");
     filename.contains("crates/r2source/src/display_names.rs")
         || filename.contains("crates/r2dec/src/")
-        || filename.contains("crates/r2ssa/src/function.rs")
-        || filename.contains("crates/r2types/src/function_facts.rs")
+        || filename.contains("crates/r2ssa/src/function/")
+        || filename.contains("crates/r2types/src/function_facts/")
 }
 
 /// Whether a struct expression builds the `Observed` variant of `CStmt` or
@@ -6365,59 +5553,9 @@ fn is_r2dec_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
     format!("{filename:?}").contains("crates/r2dec/src/")
 }
 
-fn is_r2dec_analysis_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
-    let filename = cx.sess().source_map().span_to_filename(span);
-    format!("{filename:?}").contains("crates/r2dec/src/analysis/")
-}
-
-fn is_r2dec_op_lower_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
-    let filename = cx.sess().source_map().span_to_filename(span);
-    format!("{filename:?}").contains("crates/r2dec/src/fold/op_lower/")
-}
-
-fn is_r2dec_analysis_path(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    let filename = cx.sess().source_map().span_to_filename(expr.span);
-    format!("{filename:?}").contains("crates/r2dec/src/analysis/")
-}
-
-fn is_r2dec_op_lower_path(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    let filename = cx.sess().source_map().span_to_filename(expr.span);
-    format!("{filename:?}").contains("crates/r2dec/src/fold/op_lower/")
-}
-
-fn is_r2dec_lib_path(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    let filename = cx.sess().source_map().span_to_filename(expr.span);
-    format!("{filename:?}").contains("crates/r2dec/src/lib.rs")
-}
-
 fn is_r2dec_lib_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
     let filename = cx.sess().source_map().span_to_filename(span);
     format!("{filename:?}").contains("crates/r2dec/src/lib.rs")
-}
-
-fn is_r2dec_summary_render_path(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    let filename = cx.sess().source_map().span_to_filename(expr.span);
-    let filename = format!("{filename:?}");
-    filename.contains("crates/r2dec/src/consumer_summary.rs")
-        || filename.contains("crates/r2dec/src/consumer_linear.rs")
-        || filename.contains("crates/r2dec/src/consumer_vm.rs")
-}
-
-fn is_r2dec_summary_or_structured_consumer_path(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    let filename = cx.sess().source_map().span_to_filename(expr.span);
-    let filename = format!("{filename:?}");
-    filename.contains("crates/r2dec/src/consumer_summary.rs")
-        || filename.contains("crates/r2dec/src/consumer_linear.rs")
-        || filename.contains("crates/r2dec/src/consumer_vm.rs")
-        || filename.contains("crates/r2dec/src/consumer_structured.rs")
-        || filename.contains("crates/r2dec/src/summary_render_executable_cstmt.rs")
-}
-
-fn is_r2dec_route_render_path(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    let filename = cx.sess().source_map().span_to_filename(expr.span);
-    let filename = format!("{filename:?}");
-    filename.contains("crates/r2dec/src/consumer_structured.rs")
-        || filename.contains("crates/r2dec/src/lib.rs")
 }
 
 fn is_r2engine_path(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
@@ -6490,13 +5628,6 @@ fn rendering_decision_method_names(cx: &LateContext<'_>, item: &Item<'_>) -> Vec
 fn is_r2types_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
     let filename = cx.sess().source_map().span_to_filename(span);
     format!("{filename:?}").contains("crates/r2types/src/")
-}
-
-fn is_r2types_non_role_registry_path(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    let filename = cx.sess().source_map().span_to_filename(expr.span);
-    let filename = format!("{filename:?}");
-    filename.contains("crates/r2types/src/")
-        && !filename.contains("crates/r2types/src/role_registry.rs")
 }
 
 fn is_canonical_ssa_var_classifier(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {

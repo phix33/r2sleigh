@@ -8,9 +8,9 @@
 //! which operations are modelled on their own, one `CallOther` at a time: each
 //! row is an exact name the specification declares, never a prefix or a
 //! pattern, so a name this lift does not know is simply absent and its
-//! `CallOther` keeps refusing. The AArch64 exclusive-access pair is not here:
-//! it means something only together with the load or store beside it, and
-//! `internal_control` recognises it as that idiom.
+//! `CallOther` keeps refusing. The ARM and AArch64 exclusive-access markers are
+//! not here: each means something only together with the load or store beside
+//! it, and `internal_control` recognises it as that idiom.
 
 use std::collections::HashMap;
 
@@ -36,6 +36,11 @@ pub(crate) enum ModelledUserOperation {
     Trap,
     /// ARM `bx` switching instruction set, which the p-code has already done.
     SetIsaMode,
+    /// ARM and AArch64 `clrex`: the exclusive monitor a linked load set is cleared.
+    ClearExclusive,
+    /// AArch64 `LoadAcquire`, `LoadAcquirePC` and `StoreRelease`: the instruction's access is
+    /// ordered, stated as a fence after the load or before the store (`vendor/README.md`).
+    Ordering(r2il::MemoryOrdering),
     /// x86 `PMOVSX*` / `PMOVZX*`.
     PackedExtension(PackedExtension),
     /// x86 `PSHUFLW`, `PSHUFHW` and `PSHUFW`.
@@ -362,7 +367,7 @@ const WORD_SHUFFLES: [(&str, ShuffledQuadword, EncodingForm); 11] = [
 
 /// The operations outside the packed-extension family, by the exact name the
 /// specification declares.
-const NAMED: [(&str, ModelledUserOperation); 12] = [
+const NAMED: [(&str, ModelledUserOperation); 17] = [
     ("NEON_ext", ModelledUserOperation::NeonExt),
     ("NEON_ushl", ModelledUserOperation::NeonUshl),
     ("NEON_rev64", ModelledUserOperation::NeonRev64),
@@ -383,7 +388,23 @@ const NAMED: [(&str, ModelledUserOperation); 12] = [
     ("a64_TBL", ModelledUserOperation::A64Tbl),
     ("SoftwareBreakpoint", ModelledUserOperation::Trap),
     ("UndefinedInstructionException", ModelledUserOperation::Trap),
+    // x86 `ud0`, `ud1` and `ud2`.
+    ("invalidInstructionException", ModelledUserOperation::Trap),
     ("setISAMode", ModelledUserOperation::SetIsaMode),
+    ("ClearExclusiveLocal", ModelledUserOperation::ClearExclusive),
+    (
+        "LoadAcquire",
+        ModelledUserOperation::Ordering(r2il::MemoryOrdering::Acquire),
+    ),
+    // RCpc: C11's acquire is what compilers emit `ldapr` for, so Acquire states no more than it.
+    (
+        "LoadAcquirePC",
+        ModelledUserOperation::Ordering(r2il::MemoryOrdering::Acquire),
+    ),
+    (
+        "StoreRelease",
+        ModelledUserOperation::Ordering(r2il::MemoryOrdering::Release),
+    ),
 ];
 
 /// Every modelled operation with the exact name it is declared under.

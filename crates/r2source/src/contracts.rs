@@ -287,6 +287,27 @@ impl SourceAbiParameterSpec {
     }
 }
 
+/// How many arguments a function takes, as its body proves it (ROADMAP P7): exactly its
+/// parameters, or at least them where a slot past them may be read or handed on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum SourceArity {
+    Exact(usize),
+    AtLeast(usize),
+}
+
+impl SourceArity {
+    /// The arguments a call is known to pass, whichever the arity is.
+    pub const fn floor(self) -> usize {
+        match self {
+            Self::Exact(count) | Self::AtLeast(count) => count,
+        }
+    }
+
+    pub const fn is_exact(self) -> bool {
+        matches!(self, Self::Exact(_))
+    }
+}
+
 /// Explicit source return contract. Absence of an interface remains unknown;
 /// `Void` is therefore materially different from no return information.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -838,8 +859,8 @@ pub struct SourceFunctionInterface {
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
     body_proven_return_address: bool,
-    /// Whether the body reads an argument slot past its parameters, so its arity is unproven.
-    reads_past_parameters: bool,
+    /// Whether the parameters are a floor: a slot past them may be read or handed on.
+    arity_floor: bool,
     /// Where the result is unproven, the registers it may be in: each call takes the one its
     /// caller reads.
     result_carriers: Option<SourceResultCarriers>,
@@ -878,7 +899,25 @@ pub enum SourceFunctionInterfaceError {
 
 impl std::fmt::Display for SourceFunctionInterfaceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid source function interface: {self:?}")
+        let why = match self {
+            Self::InvalidFormatParameterIndex => {
+                "its format parameter is not one of its parameters"
+            }
+            Self::EmptyRevisionIdentity => "it names no source revision",
+            Self::EmptyCallingConvention => "it names no calling convention",
+            Self::InvalidParameterOrder => "its parameters are out of order",
+            Self::InvalidRegisterStorage => "a register it names is not a register storage",
+            Self::InvalidReturnAddressStorage => "its return address storage is malformed",
+            Self::InvalidStackPointerStorage => "its stack pointer storage is malformed",
+            Self::InvalidFramePointerStorage => "its frame pointer storage is malformed",
+            Self::InvalidReturnMechanism => "its return mechanism is malformed",
+            Self::OverlappingRegisterStorages => "two of its registers overlap",
+            Self::InvalidStackSlot => "a stack slot it names is malformed",
+            Self::InvalidStackSlotRole => "a stack slot's role is malformed",
+            Self::OverlappingStackSlots => "two of its stack slots overlap",
+            Self::InvalidLogicalTypes { reason } => reason,
+        };
+        write!(f, "invalid source function interface: {why}")
     }
 }
 
@@ -1301,7 +1340,7 @@ impl SourceFunctionInterface {
             format_parameter: None,
             variadic: false,
             body_proven_return_address: false,
-            reads_past_parameters: false,
+            arity_floor: false,
             result_carriers: None,
             types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
         })
@@ -1353,7 +1392,7 @@ impl SourceFunctionInterface {
             format_parameter: self.format_parameter.clone(),
             variadic: self.variadic,
             body_proven_return_address: self.body_proven_return_address,
-            reads_past_parameters: self.reads_past_parameters,
+            arity_floor: self.arity_floor,
             result_carriers: self.result_carriers,
             types: self.types.clone(),
             ..rebuilt
@@ -1502,17 +1541,19 @@ impl SourceFunctionInterface {
         Ok(self)
     }
 
-    /// Record that the body reads an argument slot past its parameters.
+    /// Record that the parameters are a floor: a slot past them may be read or handed on.
     #[must_use]
-    pub const fn with_reads_past_parameters(mut self) -> Self {
-        self.reads_past_parameters = true;
+    pub const fn with_arity_floor(mut self) -> Self {
+        self.arity_floor = true;
         self
     }
 
-    /// Whether the body reads an argument slot past its parameters: no caller may take its
-    /// parameter count as the call's arity.
-    pub const fn reads_past_parameters(&self) -> bool {
-        self.reads_past_parameters
+    /// How many arguments a call hands this function: its parameters exactly, or at least them.
+    pub fn arity(&self) -> SourceArity {
+        match self.arity_floor {
+            true => SourceArity::AtLeast(self.parameters.len()),
+            false => SourceArity::Exact(self.parameters.len()),
+        }
     }
 
     /// Record the registers the unproven result may be in.
@@ -2162,7 +2203,18 @@ pub enum SourceCallSiteInterfaceError {
 
 impl std::fmt::Display for SourceCallSiteInterfaceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid source callsite interface: {self:?}")
+        let why = match self {
+            Self::EmptyRevisionIdentity => "it names no source revision",
+            Self::InvalidTargetStorage => "its target storage is malformed",
+            Self::EmptyCallingConvention => "it names no calling convention",
+            Self::InvalidArgumentOrder => "its arguments are out of order",
+            Self::InvalidRegisterStorage => "a register it names is not a register storage",
+            Self::OverlappingRegisterStorages => "two of its registers overlap",
+            Self::InvalidFormatParameterIndex => "its format argument is not one of its arguments",
+            Self::NoreturnWithResult => "a call that never returns states a result",
+            Self::IncompatibleCalleeInterface => "the callee's own interface disagrees with it",
+        };
+        write!(f, "invalid source callsite interface: {why}")
     }
 }
 

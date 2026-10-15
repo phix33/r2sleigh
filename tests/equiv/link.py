@@ -53,7 +53,9 @@ from target import X86_64, Target
 VARIANTS: dict[str, list[str]] = {
     "O0": ["-O0", "-ftrivial-auto-var-init=zero"],
     "pattern": ["-O0", "-ftrivial-auto-var-init=pattern"],
-    "O2": ["-O2", "-ftrivial-auto-var-init=zero"],
+    # No sibling call: the guard tells a rendering's own call from a program function's tail
+    # jump back into the graded entry by the return address a call leaves.
+    "O2": ["-O2", "-ftrivial-auto-var-init=zero", "-fno-optimize-sibling-calls"],
     "ubsan": ["-O0", "-ftrivial-auto-var-init=zero", "-fsanitize=undefined",
               "-fno-sanitize-recover=all"],
 }

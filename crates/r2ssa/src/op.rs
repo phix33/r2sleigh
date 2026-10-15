@@ -35,6 +35,9 @@ pub enum SSAOp<V = SSAVar> {
     /// Memory fence/barrier.
     Fence { ordering: MemoryOrdering },
 
+    /// Clears the exclusive monitor (`r2il::R2ILOp::ClearExclusive`).
+    ClearExclusive,
+
     /// Load-linked from memory.
     LoadLinked {
         dst: V,
@@ -560,6 +563,7 @@ impl<V> SSAOp<V> {
             Fence { ordering } => Fence {
                 ordering: *ordering,
             },
+            ClearExclusive => ClearExclusive,
             LoadLinked {
                 dst,
                 space,
@@ -1108,6 +1112,7 @@ impl<V> SSAOp<V> {
 
             Store { .. }
             | Fence { .. }
+            | ClearExclusive
             | StoreGuarded { .. }
             | CallUse { .. }
             | Branch { .. }
@@ -1284,7 +1289,13 @@ impl<V> SSAOp<V> {
 
             CallRestore { src, .. } | CallUse { src } => f(src),
 
-            Fence { .. } | Nop | Unimplemented | Breakpoint | CpuId { .. } | CallDefine { .. } => {}
+            Fence { .. }
+            | ClearExclusive
+            | Nop
+            | Unimplemented
+            | Breakpoint
+            | CpuId { .. }
+            | CallDefine { .. } => {}
         }
     }
 
@@ -1396,6 +1407,7 @@ impl<V> SSAOp<V> {
         if matches!(
             self,
             SSAOp::Fence { .. }
+                | SSAOp::ClearExclusive
                 | SSAOp::LoadLinked { .. }
                 | SSAOp::LoadGuarded { .. }
                 | SSAOp::BlockTransfer(_)
@@ -1454,6 +1466,7 @@ impl<V: std::fmt::Display> std::fmt::Display for SSAOp<V> {
                 )
             }
             SSAOp::Fence { ordering } => write!(f, "FENCE({:?})", ordering),
+            SSAOp::ClearExclusive => write!(f, "CLEAR_EXCLUSIVE"),
             SSAOp::LoadLinked {
                 dst,
                 space,

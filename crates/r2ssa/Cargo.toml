@@ -14,7 +14,7 @@ petgraph = "0.8"
 
 [features]
 default = []
-sleigh-config = ["dep:sleigh-config"]
+sleigh-config = ["dep:sleigh-config", "r2sleigh-lift/x86"]
 
 [dev-dependencies]
 proptest = "1.12"
@@ -24,7 +24,6 @@ serde_json.workspace = true
 [dependencies.sleigh-config]
 workspace = true
 optional = true
-features = ["x86"]
 
 [lints]
 workspace = true

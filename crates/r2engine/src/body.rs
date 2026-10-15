@@ -52,6 +52,23 @@ pub trait Program {
         false
     }
 
+    /// What the loader writes before the program runs, sorted by place and
+    /// disjoint, with the value the container states for each: the file's
+    /// bytes there are not what the program reads or runs. Nothing, where
+    /// nothing is loaded. Read through [`crate::stated`], never directly.
+    fn loader_writes(&self) -> &[crate::program::LoaderWrite] {
+        &[]
+    }
+
+    /// Whether nothing can write any byte of `range` once the program runs:
+    /// a segment mapped without write permission, or one the loader seals
+    /// after it is done. Where the program says nothing of sealing, only the
+    /// region's own permission answers.
+    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
+        self.region(range.start)
+            .is_some_and(|region| !region.write && range.end <= region.end)
+    }
+
     /// Whether another function begins here.
     ///
     /// This is what bounds a body. The walk can see that control transfers; it
@@ -188,7 +205,16 @@ pub enum UnresolvedReason {
     Undecodable,
     /// The instruction needs more bytes than the image maps at that address.
     Truncated,
+    /// The loader writes a field of the instruction with a value the container does not state
+    /// (audit W5): what its bytes decode to is not what runs.
+    Relocated,
+    /// The body reached [`BODY_INSTRUCTIONS`] before it closed (D18): no analysis reads it whole.
+    Budget,
 }
+
+/// How many instructions one body may hold: 8x the largest function the corpora hold (pumasim's
+/// Gui constructor, 8,250), so only hostile code (a chain of overlapping jumps) reaches it.
+pub const BODY_INSTRUCTIONS: usize = 1 << 16;
 
 /// Why a body could not be lifted at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +227,10 @@ pub enum BodyError {
     EntryUnbacked(u64),
     /// The entry address does not decode, so there is no first instruction.
     EntryUndecodable(u64),
+    /// The loader writes a field of the first instruction with a value the container does not state.
+    EntryRelocated(u64),
+    /// The body at this entry holds more instructions than [`BODY_INSTRUCTIONS`].
+    Oversized(u64),
 }
 
 impl std::fmt::Display for BodyError {
@@ -216,6 +246,14 @@ impl std::fmt::Display for BodyError {
                 "the file holds no bytes at {addr:#x}: the loader fills zeros there"
             ),
             Self::EntryUndecodable(addr) => write!(f, "no instruction decodes at {addr:#x}"),
+            Self::EntryRelocated(addr) => write!(
+                f,
+                "the instruction at {addr:#x} holds a field the loader writes with no value the container states"
+            ),
+            Self::Oversized(addr) => write!(
+                f,
+                "the body at {addr:#x} holds more than {BODY_INSTRUCTIONS} instructions, the budget no function reaches"
+            ),
         }
     }
 }
@@ -398,6 +436,8 @@ struct Walk {
     calls: BTreeSet<u64>,
     loads: BTreeSet<u64>,
     tail_calls: BTreeSet<u64>,
+    /// Each call through a slot the loader binds to an import and seals, by instruction: the slot.
+    slot_calls: BTreeMap<u64, u64>,
     falls_into: BTreeSet<u64>,
     entered_with: BTreeMap<u64, u64>,
     unresolved: Vec<Unresolved>,
@@ -435,6 +475,7 @@ impl Walk {
             calls: BTreeSet::new(),
             loads: BTreeSet::new(),
             tail_calls: BTreeSet::new(),
+            slot_calls: BTreeMap::new(),
             falls_into: BTreeSet::new(),
             entered_with: BTreeMap::new(),
             unresolved: Vec::new(),
@@ -449,6 +490,7 @@ impl Walk {
                 Some(UnresolvedReason::Unmapped) => BodyError::EntryUnmapped(entry),
                 Some(UnresolvedReason::NotExecutable) => BodyError::EntryNotExecutable(entry),
                 Some(UnresolvedReason::Unbacked) => BodyError::EntryUnbacked(entry),
+                Some(UnresolvedReason::Relocated) => BodyError::EntryRelocated(entry),
                 _ => BodyError::EntryUndecodable(entry),
             });
         };
@@ -476,6 +518,10 @@ impl Walk {
         while let Some(addr) = pending.pop() {
             if self.decoded.contains_key(&addr) {
                 continue;
+            }
+            if self.decoded.len() >= BODY_INSTRUCTIONS {
+                self.stop(addr, UnresolvedReason::Budget);
+                break;
             }
             if let Some(instruction) = self.decode(addr, disasm, program) {
                 let enters = enters_supervisor(&instruction.lifted.ops, disasm.arch_spec());
@@ -512,9 +558,12 @@ impl Walk {
         }
         window.truncate(held);
         let available = window.len();
+        // What runs is what the loader leaves, so a field it writes decodes as the value it writes.
+        let endian = disasm.arch_spec().memory_endianness;
+        let code = crate::stated::code(program.loader_writes(), addr, window, endian);
         // Sleigh fetches a whole window whatever the instruction needs, so a
         // short one is padded and the decoded size checked against what is real.
-        let mut fetch = window;
+        let mut fetch = code.bytes.clone();
         fetch.resize(WINDOW, 0);
 
         // The decoder's context continues where this follows the last decode, exactly as a block lift of the same bytes would.
@@ -526,6 +575,9 @@ impl Walk {
         }
         if lifted.size as usize > available {
             return self.stop(addr, UnresolvedReason::Truncated);
+        }
+        if code.unstated(&(addr..addr + u64::from(lifted.size))) {
+            return self.stop(addr, UnresolvedReason::Relocated);
         }
 
         // Whether a call comes back is the callee's fact, decided where it is recorded.
@@ -678,7 +730,17 @@ impl Walk {
             // back -- unless it calls through a slot whose pointer the
             // program states, and what it states there never returns.
             BlockTerminator::IndirectCall { fallthrough } => {
-                let through = called_slot(&instruction.lifted.ops);
+                let ops = &instruction.lifted.ops;
+                let at = ops
+                    .iter()
+                    .rposition(|op| matches!(op, r2il::R2ILOp::CallInd { .. }));
+                let through = at.and_then(|at| r2ssa::loaded_target_slot(&instruction.lifted, at));
+                let through = through.map(|slot| slot.offset);
+                if let Some(slot) = through
+                    && crate::stated::sealed_import(program, slot).is_some()
+                {
+                    self.slot_calls.insert(addr, slot);
+                }
                 if through.is_none_or(|slot| program.returns_through(slot)) {
                     self.continues(fallthrough, &mut successors, program)
                 }
@@ -800,6 +862,7 @@ impl Walk {
             link,
             dispatched: &self.dispatched,
             tail_calls: &self.tail_calls,
+            slot_calls: &self.slot_calls,
         };
         for (addr, instruction) in self.lifted.unwrap_or_default() {
             let broken = parts
@@ -840,33 +903,6 @@ impl Walk {
     }
 }
 
-/// The constant address an indirect call reads its target from, where the
-/// call's target is exactly a load of one: `call [slot]`.
-fn called_slot(ops: &[r2il::R2ILOp]) -> Option<u64> {
-    let target = ops.iter().rev().find_map(|op| match op {
-        r2il::R2ILOp::CallInd { target } => Some(target),
-        _ => None,
-    })?;
-    // The last write of the target before the call is what it calls.
-    let at = ops
-        .iter()
-        .position(|op| matches!(op, r2il::R2ILOp::CallInd { .. }))?;
-    ops[..at].iter().rev().find_map(|op| {
-        let written = op.output()?;
-        if written != target {
-            return None;
-        }
-        Some(match op {
-            r2il::R2ILOp::Load { space, addr, .. }
-                if *space == r2il::SpaceId::Ram && addr.space == r2il::SpaceId::Const =>
-            {
-                Some(addr.offset)
-            }
-            _ => None,
-        })
-    })?
-}
-
 /// Every address a load reads that the operations state as a constant.
 fn constant_loads(ops: &[r2il::R2ILOp]) -> impl Iterator<Item = u64> + '_ {
     ops.iter().filter_map(|op| match op {
@@ -879,11 +915,30 @@ fn constant_loads(ops: &[r2il::R2ILOp]) -> impl Iterator<Item = u64> + '_ {
     })
 }
 
+/// The call through a sealed import slot an instruction makes, which the walk recorded.
+fn slot_call(
+    instruction: &Instruction,
+    base: usize,
+    slot_calls: &BTreeMap<u64, u64>,
+) -> Option<Transfer> {
+    let slot = *slot_calls.get(&instruction.lifted.addr)?;
+    let ops = &instruction.lifted.ops;
+    let at = ops
+        .iter()
+        .rposition(|op| matches!(op, r2il::R2ILOp::CallInd { .. }))?;
+    Some(Transfer {
+        op: base + at,
+        target: slot,
+        kind: r2source::AdvisoryCallTransfer::CallSlot,
+    })
+}
+
 /// What ending a block reads of the walk.
 struct Ending<'a> {
     link: Option<&'a r2il::Varnode>,
     dispatched: &'a BTreeMap<u64, Vec<u64>>,
     tail_calls: &'a BTreeSet<u64>,
+    slot_calls: &'a BTreeMap<u64, u64>,
 }
 
 /// The transfer to another function an instruction ends in, at `base`, its first operation's
@@ -968,6 +1023,7 @@ fn finish(parts: &mut Vec<Instruction>, ending: &Ending<'_>, closed: bool) -> Bo
     let mut base = 0;
     for part in parts.iter() {
         transfers.extend(transfer_of(part, base, ending.tail_calls));
+        transfers.extend(slot_call(part, base, ending.slot_calls));
         base += part.lifted.ops.len();
     }
     let lifted = R2ILBlock::join(start, size, parts.drain(..).map(|part| part.lifted));

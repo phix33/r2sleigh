@@ -66,7 +66,8 @@ fn a_relative_word_holds_its_addend_however_high_the_image_is_linked() {
     assert_eq!(
         at(&pie, 0x1_3fd8),
         Some(r2image::WriteKind::Import {
-            symbol: "__libc_start_main".to_owned()
+            symbol: "__libc_start_main".to_owned(),
+            library: None,
         })
     );
 }
@@ -110,7 +111,8 @@ fn a_chained_rebase_states_its_target_and_a_bind_its_import() {
     assert_eq!(
         at(&limits, 0x1_0000_4000),
         Some(r2image::WriteKind::Import {
-            symbol: "memcpy".to_owned()
+            symbol: "memcpy".to_owned(),
+            library: None,
         })
     );
     assert_eq!(

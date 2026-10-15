@@ -65,10 +65,8 @@ fn main() {
 
     let mut reader = line::Reader::default();
     if cli.visual {
-        if let Err(error) = r2s_tui::run(&mut visual::Visual {
-            session: &mut session,
-        }) {
-            eprintln!("r2s: visual mode: {error}");
+        if let Err(message) = visual::open(&mut session) {
+            eprintln!("r2s: {message}");
             std::process::exit(1);
         }
         std::process::exit(0);
@@ -82,14 +80,14 @@ fn main() {
 
     if !cli.quiet {
         let arch = session.image().arch();
-        println!(
-            "r2s: {} {:?} {} {}-bit, entry {:#x}",
+        emit(format_args!(
+            "r2s: {} {} {} {}-bit, entry {:#x}\n",
             cli.file,
-            session.image().format(),
+            commands::format_name(session.image().format(), arch.bits),
             arch.name,
             arch.bits,
             session.addr
-        );
+        ));
     }
 
     let stdin = std::io::stdin();
@@ -108,8 +106,8 @@ fn main() {
     let mut line = String::new();
     loop {
         if !cli.quiet {
-            print!("[{:#010x}]> ", session.addr);
-            let _ = std::io::stdout().flush();
+            emit(format_args!("[{:#010x}]> ", session.addr));
+            said(std::io::stdout().flush());
         }
         line.clear();
         match stdin.lock().read_line(&mut line) {
@@ -165,7 +163,7 @@ impl Run {
         for (at, statement) in statements.into_iter().enumerate() {
             let message = match statement.and_then(|statement| commands::run(session, &statement)) {
                 Ok(output) => {
-                    print!("{output}");
+                    emit(format_args!("{output}"));
                     continue;
                 }
                 Err(message) => message,
@@ -183,5 +181,26 @@ impl Run {
             }
         }
         true
+    }
+}
+
+/// The status a shell reports for a process SIGPIPE ended: radare2's and coreutils' when the reader
+/// goes. Rust ignores SIGPIPE, so the write fails instead and this ends the process the same way.
+const READER_GONE: i32 = 128 + 13;
+
+/// Write to standard output.
+fn emit(text: std::fmt::Arguments<'_>) {
+    said(std::io::stdout().lock().write_fmt(text));
+}
+
+/// A write or flush of standard output; once its reader has gone nothing more can be said, so the
+/// process ends.
+fn said(written: std::io::Result<()>) {
+    if let Err(error) = written {
+        if error.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(READER_GONE);
+        }
+        eprintln!("r2s: {error}");
+        std::process::exit(1);
     }
 }

@@ -621,7 +621,7 @@ pub struct VariadicCallsiteArgumentCountEvidence {
 }
 
 /// Why a variadic callsite could not prove and project its own argument list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum VariadicCallsiteArgumentCountRefusal {
     MissingFormatParameter,
     FormatArgumentUnavailable,
@@ -650,6 +650,48 @@ impl VariadicCallsiteArgumentCountRefusal {
             Self::FloatingVariadicArgument => "floating_variadic_argument",
         }
     }
+}
+
+/// The first fact a call boundary could not prove: why the call is incomplete or its arguments are
+/// not the callee's (audit M3). Slots and counts are argument positions, from zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CallBoundaryRefusal {
+    /// No machine context or convention describes the call.
+    NoConvention,
+    /// The callee's declared interface is incomplete.
+    InterfaceIncomplete,
+    /// The convention passes arguments in a stack area whose place the walk cannot see.
+    ArgumentAreaUnseen,
+    /// The callee's declaration names argument `index`, and no value reaches it.
+    DeclaredArgumentUnreached { index: u32 },
+    /// The callee's body states exactly `count` arguments, and one reaches no value.
+    StatedArgumentUnreached { count: u32 },
+    /// The callee is variadic, and this call's argument count is unproven.
+    VariadicCount(VariadicCallsiteArgumentCountRefusal),
+    /// The callee declares a result, and no value it leaves reaches the caller.
+    ResultUnreached,
+    /// The callee takes at least `floor` arguments, and this call writes `written`, past it.
+    Floor { floor: u32, written: u32 },
+    /// Slot `slot` holds what this function was handed, which the call may pass on.
+    MayHandOn { slot: u32 },
+    /// Slot `slot` is unwritten, yet this function writes a later one.
+    SlotSkipped { slot: u32 },
+    /// Slot `slot` holds an earlier call's result, and this function writes a later one.
+    ResultPassedOn { slot: u32 },
+    /// No callee states an arity: the count is only the registers written before the call.
+    CountFromRegisters,
+    /// The callee is an import, which has no body here, and no placed declaration states its
+    /// arguments; its stub's arity is the loader's, never the import's (ROADMAP P7).
+    ImportUnstated(UnstatedImport),
+}
+
+/// Why an import states no interface: the engine reads one only off its declaration (ROADMAP P7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UnstatedImport {
+    /// No table declares it.
+    Undeclared,
+    /// Its declaration names an argument this convention does not place.
+    Unplaced,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -685,8 +727,12 @@ pub struct SourceCallBoundaryFact {
     /// away a proven result because an argument beside it was unproven.
     pub arguments_complete: bool,
     pub results_complete: bool,
-    /// Whether a prototype or the callee's own interface describes the call, rather than its arity being read off the registers written before it.
-    pub described: bool,
+    /// The one "arguments proven" verdict (audit D3): the callee states how many arguments it
+    /// takes (a prototype, its exact interface or statement, or a floor no written slot passes)
+    /// and each reaches the call. An arity read off the registers written before it is none.
+    pub arguments_proven: bool,
+    /// Why `complete` or `arguments_proven` is false; `None` exactly where both hold.
+    pub refusal: Option<CallBoundaryRefusal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1695,17 +1741,20 @@ impl<'a> ObjectModelBuilder<'a> {
                 // from; otherwise the address is its operand's object,
                 // displaced.
                 if interior.is_none() && !self.evidenced_roots.contains(&root) {
+                    // The nearest span below the root on its base first: spans are ordered by
+                    // (base, offset), so only those starting below it on that base are read.
+                    let floor = StackAddressRoot {
+                        base: root.base,
+                        offset: i64::MIN,
+                    };
                     let containing = self
                         .evidenced_spans
-                        .iter()
-                        .filter(|(base, end)| {
-                            base.base == root.base
-                                && base.offset < root.offset
-                                && root.offset < **end
-                                && self.evidenced_roots.contains(base)
+                        .range(floor..root)
+                        .rev()
+                        .find(|(base, end)| {
+                            root.offset < **end && self.evidenced_roots.contains(*base)
                         })
-                        .map(|(base, _)| *base)
-                        .max_by_key(|base| base.offset);
+                        .map(|(base, _)| *base);
                     if let Some(container) = containing {
                         let object = self.ensure_stack_object(container);
                         self.interior_offsets
@@ -1867,18 +1916,27 @@ impl<'a> ObjectModelBuilder<'a> {
                     .lower_bound(index)
                     .and_then(|lower| i64::try_from(lower).ok())?;
                 let reached = position.offset.checked_add(first)?;
+                let (floor, at) = (
+                    StackAddressRoot {
+                        base: position.base,
+                        offset: i64::MIN,
+                    },
+                    StackAddressRoot {
+                        base: position.base,
+                        offset: reached,
+                    },
+                );
                 let container = self
                     .evidenced_roots
-                    .iter()
-                    .filter(|root| root.base == position.base && root.offset <= reached)
-                    .filter(|root| {
+                    .range(floor..=at)
+                    .rev()
+                    .find(|root| {
                         root.offset == reached
                             || self
                                 .evidenced_spans
                                 .get(root)
                                 .is_some_and(|end| reached < *end)
                     })
-                    .max_by_key(|root| root.offset)
                     .copied()?;
                 Some((container, position.offset - container.offset))
             });
@@ -2160,8 +2218,8 @@ pub(crate) struct ReachingAbiPolicy {
 pub(crate) struct ReachingAbi<'a> {
     pub(crate) function: &'a SSAFunction,
     /// The register geometry, which says when the storage wanted is the low
-    /// lane of a root a call defines; `None` answers only exact storage.
-    pub(crate) machine_context: Option<&'a crate::SourceMachineContext>,
+    /// lane of a root a call defines.
+    pub(crate) machine_context: &'a crate::SourceMachineContext,
     pub(crate) prep: Option<&'a crate::DecompilePrepFacts>,
     pub(crate) graph: &'a SsaGraph,
     pub(crate) storage: CanonicalStorageId,

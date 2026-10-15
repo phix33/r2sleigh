@@ -71,6 +71,67 @@ pub struct RenderedLink {
     pub size: Option<u64>,
 }
 
+/// What a rendered call calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CallKind {
+    /// A function the program defines, by name.
+    Function,
+    /// A function the program imports, by name.
+    Import,
+    /// The function being rendered.
+    Itself,
+    /// Whatever a computed pointer holds.
+    Pointer,
+}
+
+/// One call the rendering spells, as a linker reads it: who, and with how many arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedCall {
+    pub kind: CallKind,
+    pub callee: Option<String>,
+    /// Where the callee resolves in the program, where a declaration states it.
+    pub addr: Option<u64>,
+    pub arguments: usize,
+    /// Whether the declaration the call is checked against takes a variadic tail.
+    pub variadic: bool,
+}
+
+/// Every call to a function the rendering spells, in the order the tree holds them; a machine
+/// operation and a residual are no call.
+pub(crate) fn calls(func: &CFunction) -> Vec<RenderedCall> {
+    let mut found = Vec::new();
+    func.visit_body_exprs(&mut |expr| {
+        let CExpr::Call {
+            func: callee, args, ..
+        } = expr
+        else {
+            return;
+        };
+        let call =
+            |kind, callee: Option<&str>, declared: Option<&crate::ast::CExternDecl>| RenderedCall {
+                kind,
+                callee: callee.map(str::to_owned),
+                addr: declared.and_then(|declaration| declaration.address),
+                arguments: args.len(),
+                variadic: declared.is_some_and(|declaration| declaration.variadic),
+            };
+        match callee.unobserved() {
+            CExpr::External { name, kind } => {
+                let declared = func.externs.iter().find(|decl| decl.name == *name);
+                let kind = match kind {
+                    _ if *name == func.name => CallKind::Itself,
+                    ExternalKind::Import => CallKind::Import,
+                    ExternalKind::Function => CallKind::Function,
+                    _ => return,
+                };
+                found.push(call(kind, Some(name), declared));
+            }
+            _ => found.push(call(CallKind::Pointer, None, None)),
+        }
+    });
+    found
+}
+
 /// Every name the function declares: its parameters in order, then each
 /// declaration in the body in the order the text writes it.
 pub(crate) fn variables(func: &CFunction) -> Vec<RenderedVariable> {

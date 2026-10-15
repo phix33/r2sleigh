@@ -120,6 +120,7 @@ fn checked(binary: &Path, addr: u64, cc: Option<&str>) -> Value {
         check_residual(&label, residual, &text);
     }
     check_names(&label, &answer, code);
+    check_calls(&label, &answer, code);
     check_definition(&label, &answer, code);
     if let Some(cc) = cc {
         compile(cc, code, &label);
@@ -219,6 +220,31 @@ fn check_residual(label: &str, residual: &Value, text: &[&str]) {
             "{label}: {call} is a {kind} gap"
         );
     }
+    // A call gap names its callee and its reason's tag, as its comment does; no other residual does.
+    let callee = residual["callee"].as_str();
+    let reason = residual["reason"].as_str();
+    if residual["gap"] == "CallNotRendered" {
+        let callee = callee.expect("a call gap's callee");
+        let spelled = if callee == "indirect" {
+            "an indirect target"
+        } else {
+            callee
+        };
+        assert!(
+            line.contains(&format!(": call to {spelled}: ")),
+            "{label}: {call} calls {callee}"
+        );
+        assert!(
+            reason.is_some_and(|tag| !tag.is_empty()),
+            "{label}: {call} has no reason"
+        );
+    } else {
+        assert_eq!(
+            (callee, reason),
+            (None, None),
+            "{label}: {call} is no call gap"
+        );
+    }
 }
 
 /// Every link and every variable is a name the code spells.
@@ -236,6 +262,29 @@ fn check_names(label: &str, answer: &Value, code: &str) {
             code.contains(name),
             "{label}: variable {name} is not in the code"
         );
+    }
+}
+
+/// Every call names a callee the unit links, at the address the link resolves, or is a pointer
+/// call, which names none; and the code spells each one.
+fn check_calls(label: &str, answer: &Value, code: &str) {
+    let links = answer["links"].as_array().expect("links");
+    for call in answer["calls"].as_array().expect("calls") {
+        let kind = call["kind"].as_str().expect("a kind");
+        let callee = call["callee"].as_str();
+        match kind {
+            "pointer" => assert!(callee.is_none(), "{label}: {call}"),
+            "self" => assert_eq!(callee, answer["definition"].as_str(), "{label}: {call}"),
+            "function" | "import" => {
+                let ident = callee.expect("a named callee");
+                let linked = links.iter().find(|link| link["ident"] == ident);
+                let linked = linked.unwrap_or_else(|| panic!("{label}: {ident} is not linked"));
+                assert_eq!(linked["kind"], kind, "{label}: {call}");
+                assert_eq!(linked["addr"], call["addr"], "{label}: {call}");
+                assert!(code.contains(&format!("{ident}(")), "{label}: {call}");
+            }
+            other => panic!("{label}: a call of kind {other}"),
+        }
     }
 }
 
@@ -406,9 +455,10 @@ fn unassigned_reads_at_o2(definition: &str, answer: &Value) -> Option<String> {
         )
     } else {
         (
-            // The stack-protector check is compiler-inserted, so the canary's reads are gone.
-            vec!["never-assigned"],
-            named.contains("1 never assigned, read as residuals (xmm0_4)")
+            // The stack-protector check is compiler-inserted, so the canary's reads are gone; the
+            // result of `dispatch`, a call past its floor (audit W7), is never assigned too.
+            vec!["never-assigned", "never-assigned"],
+            named.contains("2 never assigned, read as residuals (rax_19, xmm0_4)")
                 && !code.contains("FS_OFFSET"),
         )
     };

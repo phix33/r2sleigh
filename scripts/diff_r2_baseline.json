@@ -1,0 +1,23 @@
+{
+  "elf": {
+    "iS": 249,
+    "ie": 53,
+    "is": 9991,
+    "refused": 81,
+    "skipped": 0
+  },
+  "mach0": {
+    "iS": 692,
+    "ie": 49,
+    "is": 102042,
+    "refused": 10,
+    "skipped": 0
+  },
+  "pe": {
+    "iS": 385,
+    "ie": 309,
+    "is": 26139,
+    "refused": 37,
+    "skipped": 0
+  }
+}

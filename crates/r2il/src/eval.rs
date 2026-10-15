@@ -92,6 +92,8 @@ pub struct State<M> {
     written: BTreeMap<u64, u8>,
     mapped: M,
     accesses: Vec<Access>,
+    /// The address and width the last linked load marked, until a conditional store or a clear.
+    monitor: Option<(u64, u32)>,
     /// Operations and block elements the run may still execute.
     budget: u64,
 }
@@ -113,6 +115,7 @@ impl<M: Mapped> State<M> {
             written: BTreeMap::new(),
             mapped,
             accesses: Vec::new(),
+            monitor: None,
             budget,
         })
     }
@@ -663,7 +666,9 @@ fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> 
         return Ok(flow);
     }
     match op {
-        R2ILOp::Nop => {}
+        // Ordering constrains only what other observers see; one thread sees its own accesses in
+        // program order (Arm ARM B2.3, internal visibility), so a fence changes no value it reads.
+        R2ILOp::Nop | R2ILOp::Fence { .. } => {}
         R2ILOp::Store {
             space: SpaceId::Ram,
             addr,
@@ -682,9 +687,39 @@ fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> 
             let value = state.load(address, dst.size)?;
             state.write(dst, value)?;
         }
+        // A guarded access happens where its guard holds and is no access at all where it fails;
+        // one thread orders nothing, so the ordering it states changes no value.
+        R2ILOp::StoreGuarded {
+            space: SpaceId::Ram,
+            addr,
+            val,
+            guard,
+            ..
+        } => {
+            if state.word(guard)?.boolean()? == 1 {
+                let address = state.address(addr)?;
+                let value = state.read(val)?;
+                state.store(address, val.size, value)?;
+            }
+        }
+        R2ILOp::LoadGuarded {
+            dst,
+            space: SpaceId::Ram,
+            addr,
+            guard,
+            ..
+        } => {
+            if state.word(guard)?.boolean()? == 1 {
+                let address = state.address(addr)?;
+                let value = state.load(address, dst.size)?;
+                state.write(dst, value)?;
+            }
+        }
         R2ILOp::BlockTransfer(transfer) if transfer.space == SpaceId::Ram => {
             block(transfer, state)?;
         }
+        _ if exclusive(op, state)? => {}
+        _ if floating(op, state)? => {}
         _ => {
             let (operation, dst, operands) = Operation::of(op).ok_or(Stop::Unmodelled)?;
             let operands = operands
@@ -696,6 +731,201 @@ fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> 
         }
     }
     Ok(Flow::Next)
+}
+
+/// One thread's monitor (Arm ARM B2.9.2): a conditional store takes only after a linked load of
+/// its address and width, and clears the mark whether or not it took; false for any other op.
+fn exclusive<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<bool, Stop> {
+    match op {
+        R2ILOp::LoadLinked {
+            dst,
+            space: SpaceId::Ram,
+            addr,
+            ..
+        } => {
+            let address = state.address(addr)?;
+            let value = state.load(address, dst.size)?;
+            state.write(dst, value)?;
+            state.monitor = Some((address, dst.size));
+        }
+        R2ILOp::StoreConditional {
+            result,
+            space: SpaceId::Ram,
+            addr,
+            val,
+            ..
+        } => {
+            let address = state.address(addr)?;
+            let value = state.read(val)?;
+            let took = state.monitor.take() == Some((address, val.size));
+            if took {
+                state.store(address, val.size, value)?;
+            }
+            if let Some(result) = result {
+                state.write(result, u128::from(took))?;
+            }
+        }
+        R2ILOp::ClearExclusive => state.monitor = None,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// An IEEE binary32 or binary64 value; p-code's other float widths are not modelled.
+#[derive(Clone, Copy)]
+enum Float {
+    Single(f32),
+    Double(f64),
+}
+
+/// The quiet NaN every arithmetic NaN result is: p-code leaves the payload open, and a
+/// host's own payload would make the run depend on the host.
+const SINGLE_NAN: u32 = 0x7fc0_0000;
+const DOUBLE_NAN: u64 = 0x7ff8_0000_0000_0000;
+
+impl Float {
+    fn of(bits: u128, bytes: u32) -> Result<Self, Stop> {
+        match bytes {
+            4 => Ok(Self::Single(f32::from_bits(bits as u32))),
+            8 => Ok(Self::Double(f64::from_bits(bits as u64))),
+            _ => Err(Stop::Unmodelled),
+        }
+    }
+
+    fn wide(self) -> f64 {
+        match self {
+            Self::Single(x) => f64::from(x),
+            Self::Double(x) => x,
+        }
+    }
+
+    /// The bits of an arithmetic result, its NaN the canonical one.
+    fn bits(self) -> u128 {
+        match self {
+            Self::Single(x) if x.is_nan() => u128::from(SINGLE_NAN),
+            Self::Double(x) if x.is_nan() => u128::from(DOUBLE_NAN),
+            Self::Single(x) => u128::from(x.to_bits()),
+            Self::Double(x) => u128::from(x.to_bits()),
+        }
+    }
+
+    /// `x` rounded once at this value's format.
+    fn at(self, x: f64) -> Self {
+        match self {
+            Self::Single(_) => Self::Single(x as f32),
+            Self::Double(_) => Self::Double(x),
+        }
+    }
+
+    fn binary(
+        self,
+        other: Self,
+        single: fn(f32, f32) -> f32,
+        double: fn(f64, f64) -> f64,
+    ) -> Result<Self, Stop> {
+        match (self, other) {
+            (Self::Single(a), Self::Single(b)) => Ok(Self::Single(single(a, b))),
+            (Self::Double(a), Self::Double(b)) => Ok(Self::Double(double(a, b))),
+            _ => Err(Stop::Unmodelled),
+        }
+    }
+
+    fn unary(self, single: fn(f32) -> f32, double: fn(f64) -> f64) -> Self {
+        match self {
+            Self::Single(x) => Self::Single(single(x)),
+            Self::Double(x) => Self::Double(double(x)),
+        }
+    }
+}
+
+/// The sign bit of a float `bytes` wide.
+fn sign(bytes: u32) -> Result<u128, Stop> {
+    match width(bytes)? {
+        bytes if bytes <= CARRIED => Ok(1u128 << (8 * bytes - 1)),
+        _ => Err(Stop::Unmodelled),
+    }
+}
+
+/// Executes a float operation in round-to-nearest-even, returning whether `op` is one; what p-code
+/// leaves undefined (a `FLOAT_ROUND` tie, an integer the value does not fit) has no value.
+fn floating<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<bool, Stop> {
+    let mut float = |varnode: &Varnode| -> Result<Float, Stop> {
+        Float::of(state.read(varnode)?, varnode.size)
+    };
+    let (dst, value) = match op {
+        R2ILOp::FloatAdd { dst, a, b } => (
+            dst,
+            float(a)?
+                .binary(float(b)?, |a, b| a + b, |a, b| a + b)?
+                .bits(),
+        ),
+        R2ILOp::FloatSub { dst, a, b } => (
+            dst,
+            float(a)?
+                .binary(float(b)?, |a, b| a - b, |a, b| a - b)?
+                .bits(),
+        ),
+        R2ILOp::FloatMult { dst, a, b } => (
+            dst,
+            float(a)?
+                .binary(float(b)?, |a, b| a * b, |a, b| a * b)?
+                .bits(),
+        ),
+        R2ILOp::FloatDiv { dst, a, b } => (
+            dst,
+            float(a)?
+                .binary(float(b)?, |a, b| a / b, |a, b| a / b)?
+                .bits(),
+        ),
+        // Sign operations are not arithmetic: a NaN keeps its payload.
+        R2ILOp::FloatNeg { dst, src } => (dst, state.read(src)? ^ sign(src.size)?),
+        R2ILOp::FloatAbs { dst, src } => (dst, state.read(src)? & !sign(src.size)?),
+        R2ILOp::FloatSqrt { dst, src } => (dst, float(src)?.unary(f32::sqrt, f64::sqrt).bits()),
+        R2ILOp::FloatCeil { dst, src } => (dst, float(src)?.unary(f32::ceil, f64::ceil).bits()),
+        R2ILOp::FloatFloor { dst, src } => (dst, float(src)?.unary(f32::floor, f64::floor).bits()),
+        R2ILOp::FloatRound { dst, src } => {
+            let x = float(src)?;
+            if (x.wide() - x.wide().trunc()).abs() == 0.5 {
+                return Err(Stop::Undefined);
+            }
+            (dst, x.unary(f32::round, f64::round).bits())
+        }
+        R2ILOp::FloatNaN { dst, src } => (dst, u128::from(float(src)?.wide().is_nan())),
+        R2ILOp::FloatEqual { dst, a, b } => (dst, u128::from(float(a)?.wide() == float(b)?.wide())),
+        R2ILOp::FloatNotEqual { dst, a, b } => {
+            (dst, u128::from(float(a)?.wide() != float(b)?.wide()))
+        }
+        R2ILOp::FloatLess { dst, a, b } => (dst, u128::from(float(a)?.wide() < float(b)?.wide())),
+        R2ILOp::FloatLessEqual { dst, a, b } => {
+            (dst, u128::from(float(a)?.wide() <= float(b)?.wide()))
+        }
+        R2ILOp::FloatFloat { dst, src } => {
+            (dst, Float::of(0, dst.size)?.at(float(src)?.wide()).bits())
+        }
+        R2ILOp::Int2Float { dst, src } => {
+            let integer = Word::new(state.read(src)?, src.size)?.signed()?;
+            let value = match dst.size {
+                4 => Float::Single(integer as f32),
+                8 => Float::Double(integer as f64),
+                _ => return Err(Stop::Unmodelled),
+            };
+            (dst, value.bits())
+        }
+        R2ILOp::Trunc { dst, src } | R2ILOp::Float2Int { dst, src } => {
+            if !(1..=8).contains(&dst.size) {
+                return Err(Stop::Unmodelled);
+            }
+            let x = float(src)?.wide().trunc();
+            let bound = 2f64.powi(8 * dst.size as i32 - 1);
+            if x.is_nan() || x < -bound || x >= bound {
+                return Err(Stop::Undefined);
+            }
+            (dst, (x as i64) as u128 & mask(dst.size))
+        }
+        _ => return Ok(false),
+    };
+    state.write(dst, value)?;
+    Ok(true)
 }
 
 /// Where a transfer goes, or `None` for an operation that is not one.
@@ -793,6 +1023,150 @@ fn block<M: Mapped>(transfer: &BlockTransfer, state: &mut State<M>) -> Result<()
 
 #[cfg(test)]
 mod tests {
+
+    /// A guarded store writes and a guarded load reads only where the guard holds; a guard that is
+    /// no boolean is undefined.
+    #[test]
+    fn a_guarded_access_happens_exactly_where_its_guard_holds() {
+        let (guard, addr, val) = (
+            Varnode::register(0x10, 1),
+            Varnode::register(0x20, 8),
+            Varnode::register(0x28, 4),
+        );
+        let ops = [
+            R2ILOp::StoreGuarded {
+                space: SpaceId::Ram,
+                addr: addr.clone(),
+                val: val.clone(),
+                guard: guard.clone(),
+                ordering: crate::MemoryOrdering::Relaxed,
+            },
+            R2ILOp::LoadGuarded {
+                dst: val.clone(),
+                space: SpaceId::Ram,
+                addr: Varnode::constant(0x100, 8),
+                guard: guard.clone(),
+                ordering: crate::MemoryOrdering::Relaxed,
+            },
+        ];
+        for (held, stored, loaded) in [(1, 0xdead_beef, 0x0303_0303), (0, 0x0101_0101, 0xdead_beef)]
+        {
+            let mut state = State::new(Endianness::Little, |_| Some(1u8), 64).expect("state");
+            state.set_register(guard.offset, 1, held).expect("guard");
+            state.set_register(addr.offset, 8, 0x200).expect("addr");
+            state.set_register(val.offset, 4, 0xdead_beef).expect("val");
+            state.store(0x100, 4, 0x0303_0303).expect("stored");
+            for op in &ops {
+                assert_eq!(step(op, &mut state), Flow::Next, "{op:?}");
+            }
+            assert_eq!(state.load(0x200, 4), Ok(stored), "guard {held}");
+            assert_eq!(state.register(val.offset, 4), Some(loaded), "guard {held}");
+        }
+        let mut state = State::new(Endianness::Little, |_| Some(1u8), 64).expect("state");
+        state.set_register(guard.offset, 1, 2).expect("guard");
+        assert_eq!(step(&ops[0], &mut state), Flow::Stop(Stop::Undefined));
+    }
+
+    /// A conditional store takes, answering 1, only after a linked load of its address and width
+    /// with no clear between; it clears the mark either way, so a second one fails and writes nothing.
+    #[test]
+    fn a_conditional_store_takes_only_after_a_linked_load_of_its_address() {
+        let (addr, val, ok) = (
+            Varnode::register(0x20, 8),
+            Varnode::register(0x28, 4),
+            Varnode::register(0x30, 1),
+        );
+        let linked = |at: u64| R2ILOp::LoadLinked {
+            dst: Varnode::register(0x40, 4),
+            space: SpaceId::Ram,
+            addr: Varnode::constant(at, 8),
+            ordering: crate::MemoryOrdering::Unknown,
+        };
+        let conditional = R2ILOp::StoreConditional {
+            result: Some(ok.clone()),
+            space: SpaceId::Ram,
+            addr: addr.clone(),
+            val: val.clone(),
+            ordering: crate::MemoryOrdering::Unknown,
+        };
+        let wide_linked = R2ILOp::LoadLinked {
+            dst: Varnode::register(0x40, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x200, 8),
+            ordering: crate::MemoryOrdering::Unknown,
+        };
+        let (written, untouched) = (0xdead_beef, 0x0101_0101);
+        for (ops, took, stored) in [
+            (vec![linked(0x200), conditional.clone()], 1, written),
+            (
+                vec![linked(0x200), conditional.clone(), conditional.clone()],
+                0,
+                written,
+            ),
+            (vec![conditional.clone()], 0, untouched),
+            (
+                vec![linked(0x200), R2ILOp::ClearExclusive, conditional.clone()],
+                0,
+                untouched,
+            ),
+            (vec![linked(0x208), conditional.clone()], 0, untouched),
+            (vec![wide_linked, conditional], 0, untouched),
+        ] {
+            let mut state = State::new(Endianness::Little, |_| Some(1u8), 64).expect("state");
+            state.set_register(addr.offset, 8, 0x200).expect("addr");
+            state.set_register(val.offset, 4, 0xdead_beef).expect("val");
+            for op in &ops {
+                assert_eq!(step(op, &mut state), Flow::Next, "{op:?}");
+            }
+            assert_eq!(state.register(ok.offset, 1), Some(took), "{ops:?}");
+            assert_eq!(state.load(0x200, 4), Ok(stored), "{ops:?}");
+        }
+    }
+
+    /// A fence of any ordering runs and leaves registers, memory and the monitor as they were.
+    #[test]
+    fn a_fence_changes_nothing_one_thread_sees() {
+        let (addr, val, ok) = (
+            Varnode::register(0x20, 8),
+            Varnode::register(0x28, 4),
+            Varnode::register(0x30, 1),
+        );
+        for ordering in [
+            crate::MemoryOrdering::Relaxed,
+            crate::MemoryOrdering::Acquire,
+            crate::MemoryOrdering::Release,
+            crate::MemoryOrdering::AcqRel,
+            crate::MemoryOrdering::SeqCst,
+            crate::MemoryOrdering::Unknown,
+        ] {
+            let ops = [
+                R2ILOp::LoadLinked {
+                    dst: Varnode::register(0x40, 4),
+                    space: SpaceId::Ram,
+                    addr: addr.clone(),
+                    ordering: crate::MemoryOrdering::Relaxed,
+                },
+                R2ILOp::Fence { ordering },
+                R2ILOp::StoreConditional {
+                    result: Some(ok.clone()),
+                    space: SpaceId::Ram,
+                    addr: addr.clone(),
+                    val: val.clone(),
+                    ordering: crate::MemoryOrdering::Relaxed,
+                },
+            ];
+            let mut state = State::new(Endianness::Little, |_| Some(1u8), 64).expect("state");
+            state.set_register(addr.offset, 8, 0x200).expect("addr");
+            state.set_register(val.offset, 4, 0xdead_beef).expect("val");
+            state.store(0x200, 4, 0x0101_0101).expect("memory");
+            for op in &ops {
+                assert_eq!(step(op, &mut state), Flow::Next, "{op:?}");
+            }
+            assert_eq!(state.register(0x40, 4), Some(0x0101_0101), "{ordering:?}");
+            assert_eq!(state.register(ok.offset, 1), Some(1), "{ordering:?}");
+            assert_eq!(state.load(0x200, 4), Ok(0xdead_beef), "{ordering:?}");
+        }
+    }
 
     /// A lane at bit 128 of a 256-bit register lies outside the carried word: unmodelled, not a panic.
     #[test]
@@ -1020,15 +1394,105 @@ mod tests {
         assert_eq!(step(&scan, &mut machine), stopped);
     }
 
-    #[test]
-    fn only_the_integer_core_runs_and_a_transfer_says_where() {
+    /// Runs one float operation from `inputs` (offset, size, bits) and reads its result at offset 32.
+    fn float_run(op: &R2ILOp, inputs: &[(u64, u32, u128)]) -> Result<u128, Stop> {
         let mut machine = state();
-        let float = R2ILOp::FloatAdd {
-            dst: register(0, 8),
-            a: register(0, 8),
-            b: register(0, 8),
+        for (offset, size, value) in inputs {
+            machine
+                .set_register(*offset, *size, *value)
+                .expect("an input");
+        }
+        match step(op, &mut machine) {
+            Flow::Next => Ok(machine
+                .register(32, op.output().map_or(8, |dst| dst.size))
+                .expect("a result")),
+            Flow::Stop(stop) => Err(stop),
+            flow => panic!("{flow:?}"),
+        }
+    }
+
+    fn double(x: f64) -> u128 {
+        u128::from(x.to_bits())
+    }
+
+    #[test]
+    fn floats_round_to_nearest_even_with_one_nan_and_keep_a_sign_operations_payload() {
+        let (a, b, out) = (register(0, 8), register(8, 8), register(32, 8));
+        let divide = R2ILOp::FloatDiv {
+            dst: out.clone(),
+            a: a.clone(),
+            b: b.clone(),
         };
-        assert_eq!(step(&float, &mut machine), Flow::Stop(Stop::Unmodelled));
+        let thirds = [(0, 8, double(1.0)), (8, 8, double(3.0))];
+        assert_eq!(float_run(&divide, &thirds), Ok(double(1.0 / 3.0)));
+        // 0/0 is the canonical NaN whatever the host would produce.
+        let zeros = [(0, 8, 0), (8, 8, 0)];
+        assert_eq!(float_run(&divide, &zeros), Ok(u128::from(DOUBLE_NAN)));
+        let signalling = 0x7ff4_0000_0000_0001u128;
+        let negate = R2ILOp::FloatNeg {
+            dst: out,
+            src: a.clone(),
+        };
+        assert_eq!(
+            float_run(&negate, &[(0, 8, signalling)]),
+            Ok(signalling | 1 << 63)
+        );
+        let less = R2ILOp::FloatLess {
+            dst: register(32, 1),
+            a,
+            b,
+        };
+        assert_eq!(
+            float_run(&less, &[(0, 8, signalling), (8, 8, double(1.0))]),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn a_conversion_rounds_once_and_a_tie_or_an_overflow_has_no_value() {
+        let (a, out) = (register(0, 8), register(32, 8));
+        let round = R2ILOp::FloatRound {
+            dst: out.clone(),
+            src: a.clone(),
+        };
+        assert_eq!(
+            float_run(&round, &[(0, 8, double(2.5))]),
+            Err(Stop::Undefined)
+        );
+        assert_eq!(float_run(&round, &[(0, 8, double(2.75))]), Ok(double(3.0)));
+        let truncate = R2ILOp::Trunc {
+            dst: register(32, 4),
+            src: a.clone(),
+        };
+        assert_eq!(
+            float_run(&truncate, &[(0, 8, double(-2.9))]),
+            Ok(0xffff_fffe)
+        );
+        let past = [(0, 8, double(2147483648.0))];
+        assert_eq!(float_run(&truncate, &past), Err(Stop::Undefined));
+        let widen = R2ILOp::Int2Float {
+            dst: out,
+            src: register(0, 4),
+        };
+        assert_eq!(float_run(&widen, &[(0, 4, 0xffff_ffff)]), Ok(double(-1.0)));
+        let narrow = R2ILOp::FloatFloat {
+            dst: register(32, 4),
+            src: a,
+        };
+        let third = u128::from((1f32 / 3.0).to_bits());
+        assert_eq!(float_run(&narrow, &[(0, 8, double(1.0 / 3.0))]), Ok(third));
+    }
+
+    #[test]
+    fn an_unmodelled_width_stops_and_a_transfer_says_where() {
+        let mut machine = state();
+        machine.set_register(0, 2, 0x3c00).expect("a half");
+        let half = R2ILOp::FloatAdd {
+            dst: register(0, 2),
+            a: register(0, 2),
+            b: register(0, 2),
+        };
+        assert_eq!(step(&half, &mut machine), Flow::Stop(Stop::Unmodelled));
         let unwritten = Stop::Unwritten {
             space: SpaceId::Register,
             offset: 8,

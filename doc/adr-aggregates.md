@@ -137,7 +137,7 @@ little-endian target.
 
 ## Validation
 
-- Behavior test in `r2engine/tests/native.rs` style: a byte-literal x86-64
+- Behavior test in `r2engine/tests/engine/native.rs` style: a byte-literal x86-64
   function reading `+0` u8, `+2` u16, `+4` u32 and `+8` u64 through `rdi`
   renders `struct fcn_<entry>_arg0* arg0` and the definition text.
 - Negative tests: an indexed access refuses; an uncertified access refuses;

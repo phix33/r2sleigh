@@ -1281,6 +1281,7 @@ fn rename_op(
         Fence { ordering } => SSAOp::Fence {
             ordering: *ordering,
         },
+        ClearExclusive => SSAOp::ClearExclusive,
         LoadLinked {
             dst,
             addr,

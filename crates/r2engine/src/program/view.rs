@@ -6,6 +6,7 @@ use std::rc::Rc;
 use super::LoaderWrite;
 use crate::machine::Machine;
 
+use super::starts::{Stated, StatedStarts};
 use super::{Imports, NameDb, Names, ProgramInputs, Source, naming};
 use crate::native::NativeTarget;
 use crate::query::db::Db;
@@ -29,6 +30,8 @@ pub(crate) struct View<'a, S: Source + 'static> {
     pub(super) db: &'a Db<ProgramInputs<S>>,
     names: Rc<NameDb>,
     imports: Rc<naming::Linkage>,
+    /// Where the container states a function begins, which bounds every body walk.
+    starts: Rc<StatedStarts>,
     /// Whether each function discovery found is Thumb; empty for discovery itself, which decides it.
     modes: Rc<BTreeMap<u64, bool>>,
 }
@@ -39,42 +42,36 @@ impl<S: Source + 'static> Clone for View<'_, S> {
             db: self.db,
             names: Rc::clone(&self.names),
             imports: Rc::clone(&self.imports),
+            starts: Rc::clone(&self.starts),
             modes: Rc::clone(&self.modes),
         }
     }
 }
 
 impl<'a, S: Source + 'static> View<'a, S> {
-    /// The view a query reads through; the names, the stubs and, where asked, the modes are asked once.
+    /// The view a query reads through; the names, the stubs, the stated starts and, where asked, the modes are asked once.
     pub(super) fn new(db: &'a Db<ProgramInputs<S>>, with_modes: bool) -> Self {
         let imports = db.get::<Imports>(&()).expect("the imports ask for nothing");
         let names = db
             .get::<Names>(&())
             .expect("the names ask only for the imports");
+        let starts = (db.get::<Stated>(&())).expect("the stated starts ask only for the imports");
         let modes = match with_modes {
             true => modes(db),
             false => Rc::default(),
         };
-        Self::with(db, names, imports, modes)
-    }
-
-    /// The view over tables the caller already holds for this revision.
-    pub(super) const fn with(
-        db: &'a Db<ProgramInputs<S>>,
-        names: Rc<NameDb>,
-        imports: Rc<naming::Linkage>,
-        modes: Rc<BTreeMap<u64, bool>>,
-    ) -> Self {
         Self {
             db,
             names,
             imports,
+            starts,
             modes,
         }
     }
 
-    pub(super) fn imports(&self) -> &BTreeMap<u64, naming::Stub> {
-        &self.imports.stubs
+    /// Where the container states a function begins.
+    pub(super) fn stated_starts(&self) -> &StatedStarts {
+        &self.starts
     }
 
     /// The program's linkage code: its stubs and the sections that hold only linkage code.
@@ -84,6 +81,11 @@ impl<'a, S: Source + 'static> View<'a, S> {
 
     pub(super) fn source(&self) -> &'a S {
         &self.db.inputs().source
+    }
+
+    /// Why the program's decoders did not load, where they did not.
+    pub(super) fn unloaded(&self) -> Option<crate::native::Unassembled> {
+        self.db.inputs().machines().err()
     }
 
     /// The decoder for one instruction set.
@@ -116,23 +118,23 @@ impl<'a, S: Source + 'static> View<'a, S> {
         &self,
         machine: &'a Machine,
         entry: u64,
-    ) -> Result<NativeTarget<'a>, String> {
-        self.target_under(machine, self.db.inputs().assembled_at(entry)?)
+    ) -> Result<NativeTarget<'a>, crate::native::Unassembled> {
+        Ok(self.target_under(machine, self.db.inputs().assembled_at(entry)?))
     }
 
     /// A decoder under the program's default convention, for a walk that reads no boundary.
     pub(super) fn decoder_of(&self, machine: &'a Machine) -> Result<NativeTarget<'a>, String> {
         let assembled = self.db.inputs().assembled();
-        self.target_under(machine, assembled.ok_or("the program was not assembled")?)
+        Ok(self.target_under(machine, assembled.ok_or("the program was not assembled")?))
     }
 
     fn target_under(
         &self,
         machine: &'a Machine,
         assembled: &'a super::Assembled,
-    ) -> Result<NativeTarget<'a>, String> {
+    ) -> NativeTarget<'a> {
         let inputs = self.db.inputs();
-        Ok(NativeTarget {
+        NativeTarget {
             arch: machine.tables(),
             disasm: &machine.disasm,
             cpu: machine.cpu,
@@ -142,15 +144,13 @@ impl<'a, S: Source + 'static> View<'a, S> {
             dwarf: &machine.dwarf,
             prototypes: &assembled.prototypes,
             declarations: &inputs.source.container().declarations,
-        })
+        }
     }
 
     pub(super) fn target(&self, addr: u64) -> Result<NativeTarget<'a>, String> {
-        self.target_of(
-            self.machine_at(addr)
-                .ok_or("no Sleigh specification for this architecture")?,
-            addr,
-        )
+        let machine = self.machine_at(addr);
+        let machine = machine.ok_or("no Sleigh specification for this architecture")?;
+        self.target_of(machine, addr).map_err(|why| why.to_string())
     }
 
     /// Whether control comes back from a call to `callee`: false only where the program proves it
@@ -180,6 +180,14 @@ impl<S: Source + 'static> crate::query::Decoders for View<'_, S> {
 }
 
 impl<S: Source + 'static> crate::body::Program for View<'_, S> {
+    fn loader_writes(&self) -> &[LoaderWrite] {
+        &self.source().container().loader_writes
+    }
+
+    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
+        self.source().container().immutable(range)
+    }
+
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let read = self.source().read(vaddr, max)?;
         // Only what is mapped: no write can land in the unmapped rest.
@@ -206,14 +214,7 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
     }
 
     fn is_entry(&self, vaddr: u64) -> bool {
-        // A stub is a function of the program's as much as a body is.
-        self.imports.stubs.contains_key(&vaddr)
-            || self
-                .db
-                .inputs()
-                .defined
-                .get(&vaddr)
-                .is_some_and(|function| *function)
+        self.starts.holds(vaddr)
     }
 
     fn returns(&self, callee: u64) -> bool {
@@ -248,13 +249,21 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         self.db.inputs().control.clone()
     }
 
+    /// A callee resolved against its result's owners; under `aa`, against its arity's too.
     fn read_callee(
         &self,
         address: u64,
+        callers: super::Callers,
         _read: &mut dyn FnMut() -> crate::native::CalleeRead,
     ) -> std::sync::Arc<crate::native::CalleeRead> {
         let thumb = self.thumb_at(address);
-        let read = self.db.get::<super::resolved::Resolved>(&(address, thumb));
+        let demand = match callers {
+            super::Callers::Read => super::resolved::Demand::Arity,
+            super::Callers::Unread => super::resolved::Demand::Result,
+        };
+        let read = self
+            .db
+            .get::<super::resolved::Resolved>(&((address, thumb), demand));
         let read = read.expect("a callee's read asks for no other root");
         std::sync::Arc::clone(&read.0)
     }
@@ -271,19 +280,12 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         self.db.inputs().static_data.holds(vaddr)
     }
 
-    fn loader_writes(&self) -> &[LoaderWrite] {
-        &self.source().container().loader_writes
-    }
-
-    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
-        self.source().container().immutable(range)
-    }
-
     fn holds_code(&self, vaddr: u64) -> bool {
-        match &self.db.inputs().code {
-            Some(code) => code.holds(vaddr),
-            None => crate::body::Program::region(self, vaddr).is_some_and(|region| region.execute),
-        }
+        self.db.inputs().holds_code(vaddr)
+    }
+
+    fn places_function(&self, vaddr: u64) -> bool {
+        self.db.inputs().places_function(vaddr)
     }
 
     fn result_reads(&self, entry: u64) -> Option<r2source::SourceResultReads> {

@@ -489,11 +489,10 @@ fn pointer_use(
     let call = op.transfer().filter(|transfer| transfer.call)?;
     let callee = if call.direct {
         Callee::At(encoded_target(call.target)?)
+    } else if let Some(slot) = r2ssa::loaded_target_slot(block, at) {
+        Callee::ThroughSlot(slot.offset)
     } else {
-        match BlockOrigins::upto(block, at).of(call.target)? {
-            ValueOrigin::Constant { value, .. } => Callee::At(value),
-            ValueOrigin::LoadedSlot(slot) => Callee::ThroughSlot(slot.offset),
-        }
+        Callee::At(BlockOrigins::upto(block, at).of(call.target)?.constant()?)
     };
     let held = |storage: &CanonicalStorageId| {
         holders
@@ -664,17 +663,86 @@ fn accessed(op: &R2ILOp) -> Vec<(&Varnode, u32, Access)> {
 
 /// The one number in the operands that spells this address, where there is one.
 fn sole_operand(syntax: &Syntax, address: u64) -> Option<NumberSpan> {
-    let mut spelling = syntax
-        .numbers
-        .iter()
-        .filter(|number| number.value == i128::from(address));
+    let mut spelling = syntax.numbers.iter().filter(|number| {
+        let exact = i128::from(address) == number.value;
+        exact || (spells_address(number.value, address) && !beside_a_register(syntax, number))
+    });
     let found = spelling.next()?;
     spelling.next().is_none().then_some(*found)
+}
+
+/// Whether a number shares its bracketed operand with a register: a displacement, which a wrapped
+/// spelling never names, since the register's value is added to it.
+fn beside_a_register(syntax: &Syntax, number: &NumberSpan) -> bool {
+    let body = syntax.body.as_bytes();
+    let before = &body[..number.start.min(body.len())];
+    let Some(open) = before.iter().rposition(|byte| *byte == b'[') else {
+        return false;
+    };
+    if before[open..].contains(&b']') {
+        return false;
+    }
+    let after = body.get(number.end..).unwrap_or_default();
+    let close = after.iter().position(|byte| *byte == b']');
+    let close = close.map_or(body.len(), |at| number.end + at);
+    (syntax.registers.iter()).any(|register| register.start > open && register.end <= close)
+}
+
+/// Whether a spelled number is this address: as written, or a negative spelling of it wrapped at
+/// 64 or 32 bits, as Sleigh prints a computed address whose top bit is set.
+fn spells_address(value: i128, address: u64) -> bool {
+    let address = i128::from(address);
+    value == address
+        || (value < 0
+            && (value.rem_euclid(1 << 64) == address
+                || (address < 1 << 32 && value.rem_euclid(1 << 32) == address)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_displacement_beside_a_register_is_never_a_wrapped_address() {
+        use r2sleigh_lift::Span;
+        let syntax = |body: &str, number: (usize, usize, i128), registers: Vec<Span>| Syntax {
+            mnemonic: "mov".into(),
+            body: body.into(),
+            size: 3,
+            numbers: vec![NumberSpan {
+                start: number.0,
+                end: number.1,
+                value: number.2,
+            }],
+            registers,
+        };
+        let eax = |start| Span {
+            start,
+            end: start + 3,
+        };
+        let displaced = syntax(
+            "ecx, dword [eax - 0x10]",
+            (16, 22, -0x10),
+            vec![eax(0), eax(12)],
+        );
+        assert_eq!(sole_operand(&displaced, 0xffff_fff0), None);
+        let absolute = syntax("ecx, dword [-0x10]", (12, 17, -0x10), vec![eax(0)]);
+        assert!(sole_operand(&absolute, 0xffff_fff0).is_some());
+        let named = syntax(
+            "ecx, dword [eax + 0x4010]",
+            (16, 24, 0x4010),
+            vec![eax(0), eax(12)],
+        );
+        assert!(sole_operand(&named, 0x4010).is_some());
+    }
+
+    #[test]
+    fn a_negative_spelling_is_the_address_it_wraps_to() {
+        assert!(spells_address(-0xef18, 0xffff_ffff_ffff_10e8));
+        assert!(spells_address(-0x10, 0xffff_fff0));
+        assert!(spells_address(0x4010, 0x4010));
+        assert!(!spells_address(-0x10, 0x10));
+    }
 
     #[test]
     fn storages_overlap_by_a_shared_byte_in_one_space_only() {

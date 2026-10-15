@@ -1,5 +1,5 @@
 {
- "note": "AArch64 (run_equiv.py --target aarch64, under qemu-user). Blessed from the first full run, on an x86-64 Ubuntu 24.04 host with its aarch64-linux-gnu-gcc 13.3 and clang 18.1 (--target=aarch64-linux-gnu), after reading the records; a cause in brackets names the owner. No CI job runs this target yet, so the CI bless D5 asks for is still owed. Re-blessed after 63e6300e (run at 5b1a9206 on contabo, 553 equal): classify clang-O1/O2 and gcc-O2 equal, from ub, once the lookup table is read at its address rather than through a string literal; no other record moved. Re-blessed at P4's exit (9da018ab, all shards at f8ca4cc5): 600 equal; each record that moved names its owner, and calls of unproven arity refuse (decided 2026-10-07). Re-blessed at the result-carrier stack (#85 to #87, gated at c9361ccc on gcc 13.3.0 / clang 18.1.3): 606 equal. A body writing both result registers is unproven unless the code reading it says which, each call deciding for itself; a float result is the lane its readers take; a parameter handed on untouched, or read only for a call of unproven arity, leaves the arity a floor its callers fill. Gained: avg at gcc-O0, gcc-O1 and clang-O1 (its double, returned as d0's lane), the mains of hashes gcc-O2, shapes clang-O1, clang-O2, gcc-O1 and gcc-O2, review gcc-O0 and gcc-O1, and code_pointer_table clang-O2. Lost to an honest residual: crc32_init and fill (void, unread), shape_function_pointer and table_dispatch at gcc-O0 (an indirect call of unproven arity, where legacy passed an argument nothing proved), and code_pointer_table clang-O0 main (its callee's result unproven). Re-blessed at lift-addv (#93): `addv b0` zeroes the vector above byte 0 (the vendored Ghidra AArch64 spec fix), so bit_count at gcc-O1 and gcc-O2 moves differs to equal, 606 to 608; CI run 37936776903 held every other record. Re-blessed at the D switch (#122): pdd renders through the staged decompiler, every move judged; equal rises x86-64 635 to 659 and aarch64 606 to 631, with no differs, ub, uninit or compile error on either. Re-blessed at #126: a callee with an unproven result states its parameters to every call, so shape_call_chain gcc-O1/O2 and shape_struct_pointer at four levels are equal (631 to 637). Re-blessed at #127: a constant byte shift demands only the bytes it moves, so combined clang-O1/O2 are equal (637 to 639). Re-blessed at #201 from its CI run (38331907688): value_count_bits is equal at gcc -O0/-O1/-O2, LZCOUNT being spelled; clang's cells wait on NEON_uaddlv. Re-blessed at #228 from its CI run (38488342021): 27 cells are equal, from the pair result (shape_multiword_return, shape_struct_pointer, shape_struct_value), the closed world's void result (inverted_void, crc32_init, fill, shape_stash, indirect_store, mixed_touch, shape_struct_array, #224) and the monotone stack-roots meet (#213). gcc-O2 shape_byte_indexed_buffer now first traps on a vector lane store: #213 removed its frame-record residuals. Re-blessed at #235 from its CI run (38511197484): gcc-O1 mixed_touch leaves equal, since the closed world now needs the second result register overwritten by every call (#224's review), and one call is followed by another call.",
+ "note": "AArch64 (run_equiv.py --target aarch64, under qemu-user). Blessed from the first full run, on an x86-64 Ubuntu 24.04 host with its aarch64-linux-gnu-gcc 13.3 and clang 18.1 (--target=aarch64-linux-gnu), after reading the records; a cause in brackets names the owner. No CI job runs this target yet, so the CI bless D5 asks for is still owed. Re-blessed after 63e6300e (run at 5b1a9206 on contabo, 553 equal): classify clang-O1/O2 and gcc-O2 equal, from ub, once the lookup table is read at its address rather than through a string literal; no other record moved. Re-blessed at P4's exit (9da018ab, all shards at f8ca4cc5): 600 equal; each record that moved names its owner, and calls of unproven arity refuse (decided 2026-10-07). Re-blessed at the result-carrier stack (#85 to #87, gated at c9361ccc on gcc 13.3.0 / clang 18.1.3): 606 equal. A body writing both result registers is unproven unless the code reading it says which, each call deciding for itself; a float result is the lane its readers take; a parameter handed on untouched, or read only for a call of unproven arity, leaves the arity a floor its callers fill. Gained: avg at gcc-O0, gcc-O1 and clang-O1 (its double, returned as d0's lane), the mains of hashes gcc-O2, shapes clang-O1, clang-O2, gcc-O1 and gcc-O2, review gcc-O0 and gcc-O1, and code_pointer_table clang-O2. Lost to an honest residual: crc32_init and fill (void, unread), shape_function_pointer and table_dispatch at gcc-O0 (an indirect call of unproven arity, where legacy passed an argument nothing proved), and code_pointer_table clang-O0 main (its callee's result unproven). Re-blessed at lift-addv (#93): `addv b0` zeroes the vector above byte 0 (the vendored Ghidra AArch64 spec fix), so bit_count at gcc-O1 and gcc-O2 moves differs to equal, 606 to 608; CI run 37936776903 held every other record. Re-blessed at the D switch (#122): pdd renders through the staged decompiler, every move judged; equal rises x86-64 635 to 659 and aarch64 606 to 631, with no differs, ub, uninit or compile error on either. Re-blessed at #126: a callee with an unproven result states its parameters to every call, so shape_call_chain gcc-O1/O2 and shape_struct_pointer at four levels are equal (631 to 637). Re-blessed at #127: a constant byte shift demands only the bytes it moves, so combined clang-O1/O2 are equal (637 to 639). Re-blessed at #201 from its CI run (38331907688): value_count_bits is equal at gcc -O0/-O1/-O2, LZCOUNT being spelled; clang's cells wait on NEON_uaddlv. Re-blessed at #228 from its CI run (38488342021): 27 cells are equal, from the pair result (shape_multiword_return, shape_struct_pointer, shape_struct_value), the closed world's void result (inverted_void, crc32_init, fill, shape_stash, indirect_store, mixed_touch, shape_struct_array, #224) and the monotone stack-roots meet (#213). gcc-O2 shape_byte_indexed_buffer now first traps on a vector lane store: #213 removed its frame-record residuals. Re-blessed at #235 from its CI run (38511197484): gcc-O1 mixed_touch leaves equal, since the closed world now needs the second result register overwritten by every call (#224's review), and one call is followed by another call. Re-blessed at GT T1/T20 (schema 2): a residual trap is graded on the state it reached, so every residual-trap record now compares its output before the trap (and its memory, for a returned residual in the outermost activation; `compared`), and its reason names the trapping site's pddj cause; no record moved status. Every non-equal record names its ROADMAP.md owner and its site; causes that no longer described their record were rewritten from its rendering (sext, which carried gate_three's setcc cause, and the records whose trap had moved to another site), and the placeholders replaced. Re-blessed at #272 (52003906, gated on contabo): P7 (#264) makes a call to a callee whose arity is a floor a counted residual, and M3 (#269) names call gaps by their refusal. x86-64 equal 678 to 666, aarch64 685 to 676, no differs, ub or uninit; every move is judged in one of five causes: an indirect call of unstated arity, a caller of such a function, a recursive callee whose component reads itself alone, a variadic callee whose register save area reads as parameters (W14), and printf's stack tail now named.",
  "records": {
   "tests/corpus/branchy.c::aarch64-clang-O0::addr_chain": {
    "status": "equal"
@@ -12,7 +12,10 @@
   },
   "tests/corpus/branchy.c::aarch64-clang-O0::and_chain_effect": {
    "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::aarch64-clang-O0::bool_relay": {
@@ -116,7 +119,10 @@
   },
   "tests/corpus/branchy.c::aarch64-clang-O1::and_chain_effect": {
    "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::aarch64-clang-O1::bool_relay": {
@@ -217,7 +223,10 @@
   },
   "tests/corpus/branchy.c::aarch64-clang-O2::and_chain_effect": {
    "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::aarch64-clang-O2::bool_relay": {
@@ -420,7 +429,10 @@
   },
   "tests/corpus/branchy.c::aarch64-gcc-O1::and_chain_effect": {
    "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::aarch64-gcc-O1::bool_relay": {
@@ -521,7 +533,10 @@
   },
   "tests/corpus/branchy.c::aarch64-gcc-O2::and_chain_effect": {
    "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/branchy.c::aarch64-gcc-O2::bool_relay": {
@@ -721,7 +736,10 @@
   },
   "tests/corpus/hashes.c::aarch64-clang-O2::crc32_init": {
    "cause": "[#122] The source returns void and the body leaves both result registers written, so the result is unproven (#85) and the return is a residual; legacy's C returned an uninitialised value (ub). Owner: P7, the result proof over the call graph that makes it void.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/hashes.c::aarch64-clang-O2::crc32_table": {
@@ -870,7 +888,10 @@
   },
   "tests/corpus/hashes.c::aarch64-gcc-O2::crc32_init": {
    "cause": "The source returns void; the vectorized body leaves both x0 and the q0/Z0 vector register written on its way out, so the result carrier is unproven (r2ssa recover_interface, #85), and no call reads either register to decide it (#86): the rendered return is a residual that traps where it would be read. Owner: P7, the result proof over the call graph that makes it void.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/hashes.c::aarch64-gcc-O2::crc32_table": {
@@ -914,20 +935,32 @@
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::indirect_store": {
    "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::main": {
-   "status": "equal"
+   "cause": "[P7, W14] shape_variadic and shape_variadic_local hand their unwritten argument registers on to a variadic callee whose va_start prologue saves every argument register, which recovery reads as parameters: the arity resolves to every register slot and main's call passes the slots it never wrote as never-assigned residuals. Closing fact: a register save area stated as a variadic tail (W14).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::mixed_fold": {
    "cause": "[gate-limitation] An aggregate passed by value: AAPCS64 passes the 16-byte `struct mixed` in two consecutive x registers; spec.py marks every by-value aggregate unsupported.",
+   "owner": "GT",
    "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::mixed_from": {
    "cause": "[gate-limitation] An aggregate return: `struct mixed` (16 bytes) comes back in x0:x1; spec.py marks every aggregate return unsupported.",
+   "owner": "GT",
    "reason": "an aggregate return (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::mixed_touch": {
@@ -955,7 +988,12 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::shape_function_pointer": {
-   "status": "equal"
+   "cause": "[P7, #264] The function's own indirect call (through its table of function pointers, or a pointer it was passed) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Closing fact: the common prototype of the call's target set (P7's indirect-call arity, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::shape_multiword_return": {
    "status": "equal"
@@ -973,8 +1011,11 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::shape_recurse_mutual": {
-   "cause": "[r2dec render gap] A counted residual inside the body is reached on the graded vectors (helper r2sleigh_residual_u64); not yet triaged per function in the first AArch64 bless.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "The first parameter is recovered as uint8_t, but clang -O0 spills x0 whole (`stur x0, [x29, #-8]`) and reloads it for `and x0, x8, #0xf` and `#0x7`, so the rendering rebuilds x0 from the entry value above the byte: an argument slot read with no parameter (unadmitted-argument), whose residual traps on every call although only the low four bits are ever demanded. It replaces a cause that left the record unexamined.",
+   "compared": "output",
+   "owner": "B",
+   "reason": "r2sleigh_residual_u64 unadmitted-argument",
+   "site": "crates/r2ssa/src/demand.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::shape_signed_divmod": {
@@ -1006,12 +1047,16 @@
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::vfold": {
    "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
    "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::wide_make": {
    "cause": "[gate-limitation] An aggregate return: `struct wide` (two uint64_t) comes back in x0:x1; the thunk keeps x1, but spec.py marks every aggregate return unsupported.",
+   "owner": "GT",
    "reason": "an aggregate return (struct wide)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::indirect_load": {
@@ -1019,15 +1064,25 @@
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::indirect_store": {
    "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::main": {
-   "status": "equal"
+   "cause": "[P7, #264] The callee (table_dispatch or shape_function_pointer) hands an argument slot to an indirect call of unstated arity, so its arity stays a floor even under aa, and this call, writing past the floor, is a counted residual (a tail jump's TailTransferNotRendered; never-assigned where the unrendered call's result is read). Closing fact: the indirect call's target-set prototype, which makes the callee's arity exact (P7).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::mixed_fold": {
    "cause": "[gate-limitation] An aggregate passed by value: AAPCS64 passes the 16-byte `struct mixed` in two consecutive x registers; spec.py marks every by-value aggregate unsupported.",
+   "owner": "GT",
    "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::mixed_touch": {
@@ -1049,16 +1104,22 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::shape_byte_indexed_buffer": {
-   "cause": "[#122] The vectorised byte loop loads its constants from a constant pool and stores 128-bit lanes, terms and stores staged does not spell yet (TermNotSpelled, StoreNotSpelled), so the loop is residual where legacy refused it or, at x86 clang-O2 and AArch64 clang-O2 and gcc-O1, matched. Owner: staged spelling of constant-pool vector loads.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "The stack pointer is rendered from its entry value, `sp_1 = SP_0 - 80` (held from entry), because the frame model does not place every frame address the byte loop computes from `add x10, sp, #0x10` (ROADMAP P4 names this function); the residual traps in the first statement, before the loop's unspelled stores (StoreNotSpelled). Before, this record carried the vectorised loop's constant-pool cause.",
+   "compared": "output",
+   "owner": "P4",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/function/stack_roots.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::shape_call_chain": {
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::shape_function_pointer": {
-   "cause": "[P7] A call nothing declares stops its argument count at a slot that holds this function's own parameter, or a call's result, while a later slot is written: the count is unproven and the call refuses where it rendered without its arguments (P4 exit, 2026-10-07; decision: refuse an unproven arity).",
-   "reason": "r2sleigh_residual_void",
+   "cause": "[P7, #264] The function's own indirect call (through its table of function pointers, or a pointer it was passed) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Closing fact: the common prototype of the call's target set (P7's indirect-call arity, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::shape_multiword_return": {
@@ -1108,12 +1169,16 @@
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::vfold": {
    "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
    "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::wide_make": {
    "cause": "[gate-limitation] An aggregate return: `struct wide` (two uint64_t) comes back in x0:x1; the thunk keeps x1, but spec.py marks every aggregate return unsupported.",
+   "owner": "GT",
    "reason": "an aggregate return (struct wide)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::indirect_load": {
@@ -1123,11 +1188,18 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::main": {
-   "status": "equal"
+   "cause": "[P7, #264] The callee (table_dispatch or shape_function_pointer) hands an argument slot to an indirect call of unstated arity, so its arity stays a floor even under aa, and this call, writing past the floor, is a counted residual (a tail jump's TailTransferNotRendered; never-assigned where the unrendered call's result is read). Closing fact: the indirect call's target-set prototype, which makes the callee's arity exact (P7).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::mixed_fold": {
    "cause": "[gate-limitation] An aggregate passed by value: AAPCS64 passes the 16-byte `struct mixed` in two consecutive x registers; spec.py marks every by-value aggregate unsupported.",
+   "owner": "GT",
    "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::mixed_touch": {
@@ -1150,15 +1222,21 @@
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::shape_byte_indexed_buffer": {
    "cause": "[#122] The vectorised byte loop loads its constants from a constant pool and stores 128-bit lanes, terms and stores staged does not spell yet (TermNotSpelled, StoreNotSpelled), so the loop is residual where legacy refused it or, at x86 clang-O2 and AArch64 clang-O2 and gcc-O1, matched. Owner: staged spelling of constant-pool vector loads.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "output",
+   "owner": "D",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2dec/src/render/terms.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::shape_call_chain": {
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::shape_function_pointer": {
-   "cause": "[#122] The call through the function table has unproven arity (r2ssa: the call site may hand on an argument slot the body does not write), so staged writes it as a residual call; decision 2026-10-07: refuse an unproven arity. Legacy refused the function, or at clang-O0 guessed the arity and matched. Owner: an indirect call's arity from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_void",
+   "cause": "[P7, #264] The function's own indirect call (through its table of function pointers, or a pointer it was passed) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Closing fact: the common prototype of the call's target set (P7's indirect-call arity, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::shape_multiword_return": {
@@ -1208,12 +1286,16 @@
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::vfold": {
    "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
    "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::wide_make": {
    "cause": "[gate-limitation] An aggregate return: `struct wide` (two uint64_t) comes back in x0:x1; the thunk keeps x1, but spec.py marks every aggregate return unsupported.",
+   "owner": "GT",
    "reason": "an aggregate return (struct wide)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::indirect_load": {
@@ -1223,16 +1305,25 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::main": {
-   "status": "equal"
+   "cause": "[P7, W14] shape_variadic and shape_variadic_local hand their unwritten argument registers on to a variadic callee whose va_start prologue saves every argument register, which recovery reads as parameters: the arity resolves to every register slot and main's call passes the slots it never wrote as never-assigned residuals. Closing fact: a register save area stated as a variadic tail (W14).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::mixed_fold": {
    "cause": "[gate-limitation] An aggregate passed by value: AAPCS64 passes the 16-byte `struct mixed` in two consecutive x registers; spec.py marks every by-value aggregate unsupported.",
+   "owner": "GT",
    "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::mixed_from": {
    "cause": "[gate-limitation] An aggregate return: `struct mixed` (16 bytes) comes back in x0:x1; spec.py marks every aggregate return unsupported.",
+   "owner": "GT",
    "reason": "an aggregate return (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::mixed_touch": {
@@ -1260,8 +1351,11 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::shape_function_pointer": {
-   "cause": "[P7] gcc -O0 copies the function table's initializer through x3 (`mov x3, x0; ldp x0, x1, [x3]`), and that write reaches the indirect call: from the body alone the call may read x3, so its arity is unproven and the call refuses (#87; decision 2026-10-07: refuse an unproven arity). Before, legacy passed the call's own target register as a third argument nothing proved. Owner: the arity of an indirect call from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_void",
+   "cause": "[P7, #264] The function's own indirect call (through its table of function pointers, or a pointer it was passed) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Closing fact: the common prototype of the call's target set (P7's indirect-call arity, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::shape_multiword_return": {
@@ -1307,18 +1401,25 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::shape_variadic_local": {
-   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "The local variadic callee vfold(unsigned, ...) is recovered with eight fixed parameters (x0..x7, as `uint64_t fcn(uint32_t, uint64_t x 7)`), so the call passes x3..x7, which the caller never assigns: those arguments are residuals (never-assigned). Owner: the variadic callee's arity as AtLeast(n) from its body. Before, this record carried the frame record's cause, which now describes gcc-O2.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::vfold": {
    "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
    "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::wide_make": {
    "cause": "[gate-limitation] An aggregate return: `struct wide` (two uint64_t) comes back in x0:x1; the thunk keeps x1, but spec.py marks every aggregate return unsupported.",
+   "owner": "GT",
    "reason": "an aggregate return (struct wide)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::indirect_load": {
@@ -1328,16 +1429,26 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::main": {
-   "status": "equal"
+   "cause": "[P7, #264] The callee (table_dispatch or shape_function_pointer) hands an argument slot to an indirect call of unstated arity, so its arity stays a floor even under aa, and this call, writing past the floor, is a counted residual (a tail jump's TailTransferNotRendered; never-assigned where the unrendered call's result is read). Closing fact: the indirect call's target-set prototype, which makes the callee's arity exact (P7).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::mixed_fold": {
    "cause": "[gate-limitation] An aggregate passed by value: AAPCS64 passes the 16-byte `struct mixed` in two consecutive x registers; spec.py marks every by-value aggregate unsupported.",
+   "owner": "GT",
    "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::mixed_touch": {
    "cause": "[P7 closed world, #224 review] The body uses x1 as scratch, so x1 counts as a possible second result, and the closed world needs every call to overwrite it before reading. main's first call (0x400c80) is followed by `add x0, sp, #8` and a second `bl mixed_touch`, where the scan stops with x1 untouched, so no call proves the result void and the return is a counted residual. Deciding it needs the caller's liveness past the next call and that callee's entry reads (ROADMAP P7, the crc32_init/fill item).",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::op_add": {
@@ -1357,28 +1468,40 @@
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_byte_indexed_buffer": {
    "cause": "[#122] The vectorised byte loop loads its constants from a constant pool and stores 128-bit lanes, terms and stores staged does not spell yet (TermNotSpelled, StoreNotSpelled), so the loop is residual where legacy refused it or, at x86 clang-O2 and AArch64 clang-O2 and gcc-O1, matched. Owner: staged spelling of constant-pool vector loads.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "D",
+   "reason": "r2sleigh_residual_void gap:TermNotSpelled",
+   "site": "crates/r2dec/src/render/terms.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_call_chain": {
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_function_pointer": {
-   "cause": "[P7] A call nothing declares stops its argument count at a slot that holds this function's own parameter, or a call's result, while a later slot is written: the count is unproven and the call refuses where it rendered without its arguments (P4 exit, 2026-10-07; decision: refuse an unproven arity).",
-   "reason": "r2sleigh_residual_void",
+   "cause": "[P7, #264] The function's own indirect call (through its table of function pointers, or a pointer it was passed) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Closing fact: the common prototype of the call's target set (P7's indirect-call arity, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_multiword_return": {
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_mutual_even": {
-   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "[P7, #264] The callee is recursive (fact calls itself; shape_mutual_odd and shape_mutual_even call each other), and members of one call-graph component read each other resolved alone, so the slot the recursive call may receive keeps the arity a floor and this call, writing past it, is a counted residual. Closing fact: a least fixpoint over the component's arities (P7's fixpoint inside a cycle).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2engine/src/program/resolved.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_mutual_odd": {
    "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_pointer_to_pointer": {
@@ -1415,18 +1538,25 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_variadic_local": {
-   "cause": "[r2ssa preserved saves, AArch64] The frame record `stp x29, x30, [sp, #-N]!` stores the caller's frame pointer; the engine does not take it as a preserved-register save, so the stored entry value is rendered as a counted residual that every call reaches (proof line: held from entry, read as residuals (X29_0)). x86-64's `push rbp` is kept as a preserved save since R4.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "The local variadic callee vfold(unsigned, ...) is recovered with eight fixed parameters (x0..x7, as `uint64_t fcn(uint32_t, uint64_t x 7)`), so the call passes x3..x7, which the caller never assigns: those arguments are residuals (never-assigned). Owner: the variadic callee's arity as AtLeast(n) from its body. Before, this record carried the frame record's cause, which now describes gcc-O2.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::vfold": {
    "cause": "[#122] `vfold` is a variadic definition: the harness cannot call it without the count of its trailing arguments, so it is unsupported where legacy refused it.",
+   "owner": "GT",
    "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::wide_make": {
    "cause": "[gate-limitation] An aggregate return: `struct wide` (two uint64_t) comes back in x0:x1; the thunk keeps x1, but spec.py marks every aggregate return unsupported.",
+   "owner": "GT",
    "reason": "an aggregate return (struct wide)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::indirect_load": {
@@ -1436,16 +1566,26 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::main": {
-   "status": "equal"
+   "cause": "[P7, W14] shape_variadic and shape_variadic_local hand their unwritten argument registers on to a variadic callee whose va_start prologue saves every argument register, which recovery reads as parameters: the arity resolves to every register slot and main's call passes the slots it never wrote as never-assigned residuals. Closing fact: a register save area stated as a variadic tail (W14).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::mixed_fold": {
    "cause": "[gate-limitation] An aggregate passed by value: AAPCS64 passes the 16-byte `struct mixed` in two consecutive x registers; spec.py marks every by-value aggregate unsupported.",
+   "owner": "GT",
    "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::mixed_touch": {
    "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::op_add": {
@@ -1465,15 +1605,21 @@
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::shape_byte_indexed_buffer": {
    "cause": "[#122] The vectorised byte loop loads its constants from a constant pool and stores 128-bit lanes, terms and stores staged does not spell yet (StoreNotSpelled), so the loop is residual. Until #213 the frame record `stp x29, x30` was read as entry-value residuals (SP_0, X29_0, X30_0), which trapped first as r2sleigh_residual_u64; the monotone stack-roots meet takes it as a preserved save. Owner: staged spelling of constant-pool vector loads.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "D",
+   "reason": "r2sleigh_residual_void gap:StoreNotSpelled",
+   "site": "crates/r2dec/src/render/terms.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::shape_call_chain": {
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::shape_function_pointer": {
-   "cause": "[P7] The indirect call through the function table has unproven arity, so it is a residual statement (#87; decision 2026-10-07: refuse an unproven arity), reached before the result residual it used to stop at. Owner: the arity of an indirect call from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_void",
+   "cause": "[P7, #264] The function's own indirect call (through its table of function pointers, or a pointer it was passed) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Closing fact: the common prototype of the call's target set (P7's indirect-call arity, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::shape_multiword_return": {
@@ -1519,18 +1665,25 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::shape_variadic_local": {
-   "cause": "[#122] The va_list calls carry arguments r2ssa states incomplete (ArgumentsIncomplete), so they are residual calls where legacy refused the function. Owner: va_list arguments as one stated object.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "The frame record's store of the caller's frame pointer (x29) is rendered as a store of x29's entry value, held from entry, into frame + 0, and nothing reads it back; that residual traps first, before the call to vfold whose x2..x7 arguments (unadmitted-argument) are residuals too. x86-64's `push rbp` is kept as a preserved save since R4. Before, this record carried the va_list calls' cause, a later site.",
+   "compared": "output",
+   "owner": "P4",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/function/dead_frame_stores.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::vfold": {
    "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
    "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::wide_make": {
    "cause": "[gate-limitation] An aggregate return: `struct wide` (two uint64_t) comes back in x0:x1; the thunk keeps x1, but spec.py marks every aggregate return unsupported.",
+   "owner": "GT",
    "reason": "an aggregate return (struct wide)",
+   "site": "tests/equiv/spec.py",
    "status": "unsupported"
   },
   "tests/corpus/values.c::aarch64-clang-O0::main": {
@@ -1787,12 +1940,18 @@
   },
   "tests/gold/code_pointer_table.c::aarch64-clang-O0::main": {
    "cause": "[P7] main passes table_dispatch its two arguments and returns what it returns. clang -O0's table_dispatch copies its table through q0 (`ldr q0; str q0`), so it leaves both x0 and q0 written (#85), and no call reads either (#86): main hands x0 on by returning it, which reads nothing until main's own result is stated. Its result is unproven, and main's return is a residual. Owner: r2abi, __libc_start_main's main stated as int (*)(int, char**, char**), spelled `func` today; with main's result stated, its return reads x0.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::aarch64-clang-O0::table_dispatch": {
-   "cause": "[#122] The call through the function table has unproven arity (r2ssa: the call site may hand on an argument slot the body does not write), so staged writes it as a residual call; decision 2026-10-07: refuse an unproven arity. Legacy refused the function, or at clang-O0 guessed the arity and matched. Owner: an indirect call's arity from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "[P7, #264] The function's own indirect call (through its table of function pointers, or a pointer it was passed) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Closing fact: the common prototype of the call's target set (P7's indirect-call arity, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::aarch64-clang-O0::table_op_add": {
@@ -1805,13 +1964,19 @@
    "status": "equal"
   },
   "tests/gold/code_pointer_table.c::aarch64-clang-O1::main": {
-   "cause": "[P7] main now passes table_dispatch its two arguments (#87: a callee whose parameters reach a call of unproven arity states them as a floor its callers fill), and returns what table_dispatch returns; that is the result of a call through the table whose arity is unproven, so the callee states none and main's return is a residual. Owner: the arity of an indirect call from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "[P7, #264] The callee (table_dispatch or shape_function_pointer) hands an argument slot to an indirect call of unstated arity, so its arity stays a floor even under aa, and this call, writing past the floor, is a counted residual (a tail jump's TailTransferNotRendered; never-assigned where the unrendered call's result is read). Closing fact: the indirect call's target-set prototype, which makes the callee's arity exact (P7).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::aarch64-clang-O1::table_dispatch": {
-   "cause": "[P7] A call nothing declares stops its argument count at a slot that holds this function's own parameter, or a call's result, while a later slot is written: the count is unproven and the call refuses where it rendered without its arguments (P4 exit, 2026-10-07; decision: refuse an unproven arity).",
-   "reason": "r2sleigh_residual_void",
+   "cause": "[P7, #264] The function's own indirect call (through its table of function pointers, or a pointer it was passed) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Closing fact: the common prototype of the call's target set (P7's indirect-call arity, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::aarch64-clang-O1::table_op_add": {
@@ -1842,8 +2007,11 @@
    "status": "equal"
   },
   "tests/gold/code_pointer_table.c::aarch64-gcc-O0::table_dispatch": {
-   "cause": "[#122] The call through the function table has unproven arity (r2ssa: the call site may hand on an argument slot the body does not write), so staged writes it as a residual call; decision 2026-10-07: refuse an unproven arity. Legacy refused the function, or at clang-O0 guessed the arity and matched. Owner: an indirect call's arity from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_void",
+   "cause": "[P7, #264] The function's own indirect call (through its table of function pointers, or a pointer it was passed) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Closing fact: the common prototype of the call's target set (P7's indirect-call arity, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::aarch64-gcc-O0::table_op_add": {
@@ -1856,13 +2024,19 @@
    "status": "equal"
   },
   "tests/gold/code_pointer_table.c::aarch64-gcc-O1::main": {
-   "cause": "[P7] main now passes table_dispatch its two arguments (#87: a callee whose parameters reach a call of unproven arity states them as a floor its callers fill), and returns what table_dispatch returns; that is the result of a call through the table whose arity is unproven, so the callee states none and main's return is a residual. Owner: the arity of an indirect call from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "[P7, #264] The callee (table_dispatch or shape_function_pointer) hands an argument slot to an indirect call of unstated arity, so its arity stays a floor even under aa, and this call, writing past the floor, is a counted residual (a tail jump's TailTransferNotRendered; never-assigned where the unrendered call's result is read). Closing fact: the indirect call's target-set prototype, which makes the callee's arity exact (P7).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::aarch64-gcc-O1::table_dispatch": {
-   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "table_dispatch's interface admits no parameter: its parameters reach only the calls through the table, whose arity is unproven (#87), so they are a floor its callers fill. Its read of x1 (b, kept in x19 for the loop) is then an argument slot read with no parameter (unadmitted-argument), a residual in the first statement. Owner: an indirect call's arity from the common prototype of the table's entries. Before, this record carried the unproven return's cause, a later site.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unadmitted-argument",
+   "site": "crates/r2ssa/src/semantic/call_sites.rs",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::aarch64-gcc-O1::table_op_add": {
@@ -1876,12 +2050,18 @@
   },
   "tests/gold/code_pointer_table.c::aarch64-gcc-O2::main": {
    "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::aarch64-gcc-O2::table_dispatch": {
-   "cause": "[P7] The indirect call through the function table has unproven arity, so it is a residual statement (#87; decision 2026-10-07: refuse an unproven arity), reached before the result residual it used to stop at. Owner: the arity of an indirect call from the common prototype of the table's entries.",
-   "reason": "r2sleigh_residual_void",
+   "cause": "[P7, #264] The function's own indirect call (through its table of function pointers, or a pointer it was passed) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Closing fact: the common prototype of the call's target set (P7's indirect-call arity, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::aarch64-gcc-O2::table_op_add": {
@@ -2005,16 +2185,22 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::aarch64-clang-O1::state_machine": {
-   "cause": "[#122] The function reads a register it arrived with that its recovered interface admits as no parameter (state_machine's RAX on the empty-string path, table_walk's RCX), and the read is a residual (#90) where legacy refused the function. Owner: r2ssa's parameter recovery, which ends at the first unread slot.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "The function reads a register it arrived with that no argument slot delivers (state_machine's x16, table_walk's x8), and the read is a residual held from entry (#90) in the statement before its loop. The x86-64 records name RAX and RCX for the same shape; before, this record named those x86-64 registers.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/gold/manual_limits.c::aarch64-clang-O1::struct_nested_array": {
    "status": "equal"
   },
   "tests/gold/manual_limits.c::aarch64-clang-O1::table_walk": {
-   "cause": "[#122] The function reads a register it arrived with that its recovered interface admits as no parameter (state_machine's RAX on the empty-string path, table_walk's RCX), and the read is a residual (#90) where legacy refused the function. Owner: r2ssa's parameter recovery, which ends at the first unread slot.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "The function reads a register it arrived with that no argument slot delivers (state_machine's x16, table_walk's x8), and the read is a residual held from entry (#90) in the statement before its loop. The x86-64 records name RAX and RCX for the same shape; before, this record named those x86-64 registers.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/gold/manual_limits.c::aarch64-clang-O2::fnv_fold": {
@@ -2129,8 +2315,11 @@
    "status": "equal"
   },
   "tests/gold/review.c::aarch64-clang-O0::dispatch": {
-   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "[P7, #264] The function's own indirect call (through its table of function pointers, or a pointer it was passed) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Closing fact: the common prototype of the call's target set (P7's indirect-call arity, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-clang-O0::fact": {
@@ -2138,7 +2327,10 @@
   },
   "tests/gold/review.c::aarch64-clang-O0::fill": {
    "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-clang-O0::find": {
@@ -2149,7 +2341,10 @@
   },
   "tests/gold/review.c::aarch64-clang-O0::main": {
    "cause": "[#122] Legacy's C for `main` did not compile; staged's compiles and traps at a residual where a term or store is not spelled yet (TermNotSpelled, StoreNotSpelled) or a call's arity is unproven.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "D",
+   "reason": "r2sleigh_residual_void gap:TermNotSpelled",
+   "site": "crates/r2dec/src/render/terms.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-clang-O0::mul_div": {
@@ -2181,7 +2376,10 @@
   },
   "tests/gold/review.c::aarch64-clang-O1::dispatch": {
    "cause": "[#122] `dispatch` tail-jumps through its function-pointer parameter, an indirect branch with no resolved target, which staged writes as a residual transfer (UnresolvedIndirectBranch) where legacy refused the function. Owner: a tail jump through a parameter as a call through it, from the parameter's declared type.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnresolvedIndirectBranch",
+   "site": "crates/r2ssa/src/indirect.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-clang-O1::fact": {
@@ -2198,7 +2396,10 @@
   },
   "tests/gold/review.c::aarch64-clang-O1::main": {
    "cause": "[#122] Legacy's C for `main` did not compile; staged's compiles and traps at a residual where a term or store is not spelled yet (TermNotSpelled, StoreNotSpelled) or a call's arity is unproven.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "D",
+   "reason": "r2sleigh_residual_void gap:StoreNotSpelled",
+   "site": "crates/r2dec/src/render/terms.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-clang-O1::mul_div": {
@@ -2230,17 +2431,25 @@
   },
   "tests/gold/review.c::aarch64-clang-O2::dispatch": {
    "cause": "[#122] `dispatch` tail-jumps through its function-pointer parameter, an indirect branch with no resolved target, which staged writes as a residual transfer (UnresolvedIndirectBranch) where legacy refused the function. Owner: a tail jump through a parameter as a call through it, from the parameter's declared type.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnresolvedIndirectBranch",
+   "site": "crates/r2ssa/src/indirect.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-clang-O2::fact": {
    "cause": "[gate-limitation, as on x86-64] The -O0 build of the rendering overruns its budget (four times the original's) at n near 2^31. Clang vectorised the loop into four NEON lanes, which the rendering spells lane by lane through the 256-bit carrier helpers; the original and the -O2 build return. The original needs about 3.3 s of its 5 s there under qemu (1 s natively), so how many such vectors are graded depends on the host's load; the status does not. The x86-64 record of this function is slow for the same reason.",
+   "owner": "GT",
    "reason": "O0",
+   "site": "tests/equiv/gate.py",
    "status": "slow"
   },
   "tests/gold/review.c::aarch64-clang-O2::fill": {
    "cause": "[#122] The source returns void and the body leaves both result registers written, so the result is unproven (#85) and the return is a residual; legacy's C returned an uninitialised value (ub). Owner: P7, the result proof over the call graph that makes it void.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-clang-O2::find": {
@@ -2251,7 +2460,10 @@
   },
   "tests/gold/review.c::aarch64-clang-O2::main": {
    "cause": "[#122] Legacy's C for `main` did not compile; staged's compiles and traps at a residual where a term or store is not spelled yet (TermNotSpelled, StoreNotSpelled) or a call's arity is unproven.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "D",
+   "reason": "r2sleigh_residual_void gap:StoreNotSpelled",
+   "site": "crates/r2dec/src/render/terms.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-clang-O2::mul_div": {
@@ -2282,8 +2494,11 @@
    "status": "equal"
   },
   "tests/gold/review.c::aarch64-gcc-O0::dispatch": {
-   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "[P7, #264] The function's own indirect call (through its table of function pointers, or a pointer it was passed) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Closing fact: the common prototype of the call's target set (P7's indirect-call arity, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-gcc-O0::fact": {
@@ -2299,7 +2514,12 @@
    "status": "equal"
   },
   "tests/gold/review.c::aarch64-gcc-O0::main": {
-   "status": "equal"
+   "cause": "[P7, #264] The callee is recursive (fact calls itself; shape_mutual_odd and shape_mutual_even call each other), and members of one call-graph component read each other resolved alone, so the slot the recursive call may receive keeps the arity a floor and this call, writing past it, is a counted residual. Closing fact: a least fixpoint over the component's arities (P7's fixpoint inside a cycle).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2engine/src/program/resolved.rs",
+   "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-gcc-O0::mul_div": {
    "status": "equal"
@@ -2329,8 +2549,11 @@
    "status": "equal"
   },
   "tests/gold/review.c::aarch64-gcc-O1::dispatch": {
-   "cause": "[P7 calls] The value in x0 at the return comes from a call (through a table, a function pointer or a mutual recursion) whose result the engine does not prove on AArch64, so the rendered return is a counted residual.",
-   "reason": "r2sleigh_residual_u64",
+   "cause": "[P7, #264] The function's own indirect call (through its table of function pointers, or a pointer it was passed) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Closing fact: the common prototype of the call's target set (P7's indirect-call arity, SM).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-gcc-O1::fact": {
@@ -2346,7 +2569,12 @@
    "status": "equal"
   },
   "tests/gold/review.c::aarch64-gcc-O1::main": {
-   "status": "equal"
+   "cause": "[P7, #264] The callee is recursive (fact calls itself; shape_mutual_odd and shape_mutual_even call each other), and members of one call-graph component read each other resolved alone, so the slot the recursive call may receive keeps the arity a floor and this call, writing past it, is a counted residual. Closing fact: a least fixpoint over the component's arities (P7's fixpoint inside a cycle).",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2engine/src/program/resolved.rs",
+   "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-gcc-O1::mul_div": {
    "status": "equal"
@@ -2377,7 +2605,10 @@
   },
   "tests/gold/review.c::aarch64-gcc-O2::dispatch": {
    "cause": "[#122] `dispatch` tail-jumps through its function-pointer parameter, an indirect branch with no resolved target, which staged writes as a residual transfer (UnresolvedIndirectBranch) where legacy refused the function. Owner: a tail jump through a parameter as a call through it, from the parameter's declared type.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnresolvedIndirectBranch",
+   "site": "crates/r2ssa/src/indirect.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-gcc-O2::fact": {
@@ -2385,7 +2616,10 @@
   },
   "tests/gold/review.c::aarch64-gcc-O2::fill": {
    "cause": "The source returns void; the vectorized body leaves both x0 and the q0/Z0 vector register written on its way out, so the result carrier is unproven (r2ssa recover_interface, #85), and no call reads either register to decide it (#86): the rendered return is a residual that traps where it would be read. Owner: P7, the result proof over the call graph that makes it void.",
-   "reason": "r2sleigh_residual_u64",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-gcc-O2::find": {
@@ -2396,7 +2630,10 @@
   },
   "tests/gold/review.c::aarch64-gcc-O2::main": {
    "cause": "[#122] Legacy's C for `main` did not compile; staged's compiles and traps at a residual where a term or store is not spelled yet (TermNotSpelled, StoreNotSpelled) or a call's arity is unproven.",
-   "reason": "r2sleigh_residual_void",
+   "compared": "output",
+   "owner": "D",
+   "reason": "r2sleigh_residual_void gap:TermNotSpelled",
+   "site": "crates/r2dec/src/render/terms.rs",
    "status": "residual-trap"
   },
   "tests/gold/review.c::aarch64-gcc-O2::mul_div": {
@@ -2412,7 +2649,7 @@
    "status": "equal"
   }
  },
- "schema": 1,
+ "schema": 2,
  "toolchain": {
   "clang": "Ubuntu clang version 18.1.3 (1ubuntu1)",
   "gcc": "aarch64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"

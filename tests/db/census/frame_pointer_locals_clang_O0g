@@ -27,17 +27,17 @@ EXPECT=<<EOF
 uint64_t _init(void)
 {
     uint64_t rax_1;
-    uint64_t rax_2;
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 22 source obligations: 12 rendered, 10 elided, 0 refused; 6 statements rendered */
+    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 5 statements rendered; 1 never assigned, read as residuals (RAX_2) */
     {
         rax_1 = r2sleigh_load_u64((void*)(uint64_t)0x3fd0U);
         if ((uint8_t)((uint64_t)rax_1 == (uint64_t)0U)) {
             rax_3 = rax_1;
         } else {
-            rax_2 = ((uint64_t(*)(void))(uint64_t)rax_1)();
-            rax_3 = rax_2;
+            r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1014:4 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
+            r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x1014:10 covering 1 op (render::values) */
+            rax_3 = r2sleigh_residual_u64(3);
         }
         {
             return (uint64_t)rax_3;
@@ -54,7 +54,8 @@ NAME=0x00001030
 FILE=tests/fixtures/frame_pointer_locals_clang_O0g
 CMDS=aa; pdd @ 0x00001030
 EXPECT=<<EOF
-/* r2dec refused __cxa_finalize: r2sleigh: import stub at 0x1030; this symbol is the import `__cxa_finalize`, whose prototype nothing states. */
+/* r2sleigh: import stub at 0x1030; this symbol is the import `__cxa_finalize` and has no body of its own. */
+extern void __cxa_finalize(void*);
 
 EOF
 EXPECT_ERR=<<EOF
@@ -68,15 +69,13 @@ EXPECT=<<EOF
 void _start(void)
 {
     uint64_t tmp_55400_2;
-    uint64_t tmp_3cb80_1;
 
-    /* r2dec proof: 5 constructs are marked below; 28 source obligations: 2 rendered, 4 elided, 0 refused, 22 residual; 2 statements rendered; 1 held from entry, read as residuals (stack_p0) */
+    /* r2dec proof: 5 constructs are marked below; 28 source obligations: 0 rendered, 6 elided, 0 refused, 22 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0) */
     {
         tmp_55400_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x1040:29 covering 1 op (render::values) */
         r2sleigh_residual_void(3); /* r2dec gap: StoreNotSpelled at 0x1040:32 covering 1 op (render::values) */
-        tmp_3cb80_1 = r2sleigh_load_u64((void*)(uint64_t)0x3fc0U);
-        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x1040:68 covering 1 op (render::values) */
+        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x1040:68 covering 1 op (render::values): call to __libc_start_main: the import's declaration has an argument this convention does not place */
         r2sleigh_residual_void(5); /* r2dec gap: TailTransferNotRendered at 0x1040 (render::control) */
     }
 }
@@ -156,8 +155,7 @@ CMDS=aa; pdd @ 0x000010e0
 EXPECT=<<EOF
 uint64_t __do_global_dtors_aux(void)
 {
-    void __cxa_finalize(uint64_t);
-    uint64_t deregister_tm_clones(void);
+    void __cxa_finalize(void*);
     extern char __dso_handle[];
     extern char __TMC_END__[];
 
@@ -165,7 +163,7 @@ uint64_t __do_global_dtors_aux(void)
     uint64_t tmp_3ea80_1;
     uint64_t rdi_1;
 
-    /* r2dec proof: 2 constructs are marked below; 39 source obligations: 19 rendered, 16 elided, 0 refused, 4 residual; 10 statements rendered; 2 data object types refused */
+    /* r2dec proof: 3 constructs are marked below; 40 source obligations: 16 rendered, 17 elided, 0 refused, 7 residual; 9 statements rendered; 2 data object types refused; 1 callee prototype supplied by the source */
     {
         tmp_3e180_1 = r2sleigh_load_u8((void*)&__TMC_END__);
         if ((uint8_t)((uint8_t)tmp_3e180_1 != (uint8_t)0U)) {
@@ -175,12 +173,12 @@ uint64_t __do_global_dtors_aux(void)
             if ((uint8_t)((uint64_t)tmp_3ea80_1 == (uint64_t)0U)) {
             } else {
                 rdi_1 = r2sleigh_load_u64((void*)&__dso_handle);
-                __cxa_finalize(rdi_1);
+                __cxa_finalize((void*)rdi_1);
             }
             {
-                deregister_tm_clones();
+                r2sleigh_residual_void(2); /* r2dec gap: CallNotRendered at 0x1107:17 covering 1 op (render::values): call to deregister_tm_clones: argument slot 0 may hand on what this function was passed */
                 r2sleigh_store_u8((void*)&__TMC_END__, (uint8_t)1U);
-                return r2sleigh_residual_u64(2);
+                return r2sleigh_residual_u64(3);
             }
         }
     }

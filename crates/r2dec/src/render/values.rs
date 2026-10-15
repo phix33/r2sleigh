@@ -17,7 +17,10 @@ mod transfer;
 use super::RenderInput;
 use super::calls::{self, CallPlan};
 use super::terms::{self, Spell};
-use crate::ast::{CExpr, CExternDecl, CLocal, CParam, CStmt, CType, GapKind, GapMarker};
+use crate::ast::{
+    CExpr, CExternDecl, CLocal, CParam, CStmt, CType, CallGap, CallRefusal, GapCallee, GapKind,
+    GapMarker,
+};
 use crate::prelude::{Helper, ResidualType};
 use crate::symbol::{SymbolId, SymbolRole, SymbolTable};
 
@@ -54,6 +57,8 @@ pub(super) struct Values<'a> {
     restored: RefCell<Vec<bool>>,
     /// The instructions whose rendered text evaluates a residual: their obligations are residual.
     residual: RefCell<Vec<bool>>,
+    /// By instruction index: a gap stands for its atomic effect beside the value the text assigns.
+    effect: RefCell<Vec<bool>>,
     /// The values read as residuals because C has no value for them, which the proof line names.
     unassigned: RefCell<Vec<super::proof::UnassignedRead>>,
     /// What the text being spelled reads and absorbs, kept only once a statement or test holding it is.
@@ -63,6 +68,8 @@ pub(super) struct Values<'a> {
     elisions: crate::certified::Elisions,
     /// The calls the facts describe, by instruction.
     calls: r2ssa::dense::IdMap<InstId, CallPlan>,
+    /// The calls they do not, with the callee and the first fact each lacks.
+    unplanned: r2ssa::dense::IdMap<InstId, CallGap>,
     /// The values a described call's statement assigns.
     results: r2ssa::dense::IdSet<ValueId>,
     /// One declaration per callee, which every call to it here must agree with.
@@ -122,11 +129,11 @@ impl Own {
 }
 
 /// `value`, or the refusal evidence that the staged call at `inst` lacks `what`.
-fn needed<T>(value: Option<T>, inst: InstId, what: &str) -> Option<T> {
-    if value.is_none() {
-        r2il::refusal_evidence!("staged-call", "{inst:?}: {what}");
-    }
-    value
+fn needed<T>(value: Option<T>, inst: InstId, why: CallRefusal) -> Result<T, CallRefusal> {
+    value.ok_or_else(|| {
+        r2il::refusal_evidence!("staged-call", "{inst:?}: {why:?}");
+        why
+    })
 }
 
 /// Whether an instruction between a producer and its reader is one a moved read or trap may not cross.
@@ -316,7 +323,7 @@ impl Demand<'_> {
             let owes = match &inst.payload {
                 InstPayload::Phi { .. } => false,
                 InstPayload::Op(op) => {
-                    writes_value(op)
+                    (writes_value(op) || reads_beside_effect(op))
                         && inventory
                             .obligations_for_inst(inst.id)
                             .any(|o| o.id.kind != SemanticObligationKind::LiveValueProducer)
@@ -495,16 +502,19 @@ fn canonical_roots(
     r2rewrite::canonicalize_with(artifact, projection, &policy, &|_| None).ok()
 }
 
-/// Each call's plan, by its instruction, and the values those calls assign their results to.
+/// Each call's plan, or the gap it leaves, by its instruction, and the values planned calls assign
+/// their results to.
 fn plan_calls(
     input: &RenderInput<'_>,
     tags: &super::tags::Tags,
 ) -> (
     r2ssa::dense::IdMap<InstId, CallPlan>,
+    r2ssa::dense::IdMap<InstId, CallGap>,
     r2ssa::dense::IdSet<ValueId>,
 ) {
     let (artifact, graph, inventory) = (input.artifact(), input.graph(), input.obligations());
     let mut planned = r2ssa::dense::IdMap::new(graph.insts.len());
+    let mut unplanned = r2ssa::dense::IdMap::new(graph.insts.len());
     let mut results = r2ssa::dense::IdSet::new(graph.values.len());
     for inst in &graph.insts {
         let call = matches!(
@@ -516,11 +526,26 @@ fn plan_calls(
                     | SSAOp::BranchInd { .. }
             )
         );
-        let Some(mut plan) = call
+        let mut plan = match call
             .then(|| calls::plan(artifact, input.callee_resolution(), inventory, inst.id))
             .flatten()
-        else {
-            continue;
+        {
+            Some(Ok(plan)) => plan,
+            Some(Err(gap)) => {
+                unplanned.insert(inst.id, gap);
+                continue;
+            }
+            None if matches!(
+                inst.payload,
+                InstPayload::Op(SSAOp::Call { .. } | SSAOp::CallInd { .. })
+            ) =>
+            {
+                let callee = calls::gap_callee(artifact, input.callee_resolution(), inst.id);
+                let reason = CallRefusal::NoCallSite;
+                unplanned.insert(inst.id, CallGap { callee, reason });
+                continue;
+            }
+            None => continue,
         };
         if matches!(plan.callee, calls::Callee::Named { .. }) {
             let signature = input.declared_callee_signature(inst.id);
@@ -544,7 +569,7 @@ fn plan_calls(
         }
         planned.insert(inst.id, plan);
     }
-    (planned, results)
+    (planned, unplanned, results)
 }
 
 /// The instructions a term computes in place of reading their values.
@@ -747,7 +772,7 @@ impl<'a> Values<'a> {
         let projection = MachineProjection::from_artifact(artifact).ok()?;
         let readers = Readers::new(graph, inventory);
         let roots = canonical_roots(artifact, &projection, &readers)?;
-        let (planned, results) = plan_calls(input, tags);
+        let (planned, unplanned, results) = plan_calls(input, tags);
         let elisions = crate::certified::Elisions::of(artifact);
         let mut dispatch = r2ssa::dense::IdSet::new(graph.insts.len());
         for switch in artifact.certificates().switches.values() {
@@ -784,11 +809,13 @@ impl<'a> Values<'a> {
             rendered: RefCell::new(vec![false; graph.insts.len()]),
             restored: RefCell::new(vec![false; graph.insts.len()]),
             residual: RefCell::new(vec![false; graph.insts.len()]),
+            effect: RefCell::new(vec![false; graph.insts.len()]),
             unassigned: RefCell::new(Vec::new()),
             pending: RefCell::new(Attempt::default()),
             dispatch,
             elisions,
             calls: planned,
+            unplanned,
             results,
             externs: RefCell::new(BTreeMap::new()),
             strings: input.string_literals(),
@@ -1234,6 +1261,7 @@ impl<'a> Values<'a> {
             };
             self.attempt();
             let state = self.inventory.state_of(inst.id);
+            let at = self.graph.instruction_for_inst(inst.id).unwrap_or(addr);
             let stmt = match state {
                 _ if certified_elision(
                     self.artifact,
@@ -1244,16 +1272,22 @@ impl<'a> Values<'a> {
                 {
                     Ok(Vec::new())
                 }
+                Some(SemanticInstructionState::LiveObligation) if reads_beside_effect(op) => {
+                    self.effect_gap(&mut out, (addr, at), inst.id);
+                    self.value(inst.id, inst.output)
+                }
                 Some(SemanticInstructionState::LiveObligation) => {
                     self.statement(inst.id, op, inst.output)
                 }
                 Some(SemanticInstructionState::UnsupportedUnknown) => Err(match op {
                     SSAOp::CallOther { userop, .. } => Gap::UserOperation(*userop),
+                    // A call r2ssa's boundary leaves unproven is a call gap, by that refusal.
+                    SSAOp::Call { .. } | SSAOp::CallInd { .. } => (self.unplanned.get(inst.id))
+                        .map_or(Gap::Unsupported, |gap| Gap::Call(gap.reason)),
                     _ => Gap::Unsupported,
                 }),
                 _ => Ok(Vec::new()),
             };
-            let at = self.graph.instruction_for_inst(inst.id).unwrap_or(addr);
             match stmt {
                 Ok(stmts) => {
                     for stmt in stmts {
@@ -1272,8 +1306,25 @@ impl<'a> Values<'a> {
         if let Some(slot) = self.residual.borrow_mut().get_mut(inst.0 as usize) {
             *slot = true;
         }
+        self.marker(out, (addr, at), inst, self.gap_kind(inst, gap));
+    }
+
+    /// The gap for an atomic effect C has no statement of, beside the value its text still assigns.
+    fn effect_gap(&self, out: &mut Vec<(u64, CStmt)>, (addr, at): (u64, u64), inst: InstId) {
+        if let Some(slot) = self.effect.borrow_mut().get_mut(inst.0 as usize) {
+            *slot = true;
+        }
+        self.marker(out, (addr, at), inst, GapKind::EffectNotRendered);
+    }
+
+    fn marker(
+        &self,
+        out: &mut Vec<(u64, CStmt)>,
+        (addr, at): (u64, u64),
+        inst: InstId,
+        kind: GapKind,
+    ) {
         let op_idx = self.graph.op_ordinal(inst).unwrap_or(0);
-        let kind = self.gap_kind(gap);
         if let Some((_, CStmt::Gap(marker))) = out.last_mut()
             && marker.op_idx + marker.ops == op_idx
             && marker.kind == kind
@@ -1293,10 +1344,11 @@ impl<'a> Values<'a> {
         ));
     }
 
-    /// The marker's kind: a user operation by the name the specification gives it, which is what
-    /// the instruction does; with no name, only that the inventory could not account for it.
-    fn gap_kind(&self, gap: Gap) -> GapKind {
+    /// The marker's kind: a call by its callee and reason; a user operation by the name the
+    /// specification gives it, else only that the inventory could not account for it.
+    fn gap_kind(&self, inst: InstId, gap: Gap) -> GapKind {
         match gap {
+            Gap::Call(reason) => GapKind::CallNotRendered(self.call_gap(inst, reason)),
             Gap::UserOperation(userop) => self
                 .artifact
                 .user_operations()
@@ -1304,7 +1356,12 @@ impl<'a> Values<'a> {
                 .map_or(GapKind::UnsupportedInstruction, |name| {
                     GapKind::UserOperation(name.clone())
                 }),
-            gap => gap.kind(),
+            Gap::Unsupported => GapKind::UnsupportedInstruction,
+            Gap::Effect => GapKind::EffectNotRendered,
+            Gap::Store => GapKind::StoreNotSpelled,
+            Gap::Term => GapKind::TermNotSpelled,
+            Gap::Type => GapKind::ValueHasNoCType,
+            Gap::Unknown => GapKind::ValueNotComputed,
         }
     }
 
@@ -1326,7 +1383,7 @@ impl<'a> Values<'a> {
                 .store(inst, *addr, *val)
                 .map(|stmt| vec![stmt])
                 .ok_or(Gap::Store),
-            SSAOp::Call { .. } | SSAOp::CallInd { .. } => self.call(inst).ok_or(Gap::Call),
+            SSAOp::Call { .. } | SSAOp::CallInd { .. } => self.call(inst).map_err(Gap::Call),
             SSAOp::BlockTransfer(transfer) => self
                 .block_transfer(inst, transfer)
                 .map(|stmt| vec![stmt])
@@ -1344,30 +1401,33 @@ impl<'a> Values<'a> {
             SSAOp::CallDefine { .. } if output.is_some_and(|o| self.is_named(o)) => {
                 Err(Gap::Unknown)
             }
-            _ if writes_value(op) => {
-                let Some(output) = output else {
-                    return Ok(Vec::new());
-                };
-                if !self.bound[inst.0 as usize] {
-                    return Ok(Vec::new());
-                }
-                let (name, _) = self.names[output.0 as usize].ok_or(Gap::Type)?;
-                let canonical = self.roots.value(output).ok_or(Gap::Term)?;
-                if reads_itself(
-                    &self.projection,
-                    self.roots.arena(),
-                    canonical.canonical,
-                    output,
-                ) {
-                    return Err(Gap::Unknown);
-                }
-                let value = self.spell(canonical.canonical).ok_or(Gap::Term)?;
-                self.mark_discharged(output);
-                Ok(vec![self.binding(output, name, canonical.canonical, value)])
-            }
+            _ if writes_value(op) => self.value(inst, output),
             _ if self.inventory.obligations_for_inst(inst).next().is_none() => Ok(Vec::new()),
             _ => Err(Gap::Effect),
         }
+    }
+
+    /// The binding of `inst`'s output to its term's spelling, where a statement owes it one.
+    fn value(&self, inst: InstId, output: Option<ValueId>) -> Result<Vec<CStmt>, Gap> {
+        let Some(output) = output else {
+            return Ok(Vec::new());
+        };
+        if !self.bound[inst.0 as usize] {
+            return Ok(Vec::new());
+        }
+        let (name, _) = self.names[output.0 as usize].ok_or(Gap::Type)?;
+        let canonical = self.roots.value(output).ok_or(Gap::Term)?;
+        if reads_itself(
+            &self.projection,
+            self.roots.arena(),
+            canonical.canonical,
+            output,
+        ) {
+            return Err(Gap::Unknown);
+        }
+        let value = self.spell(canonical.canonical).ok_or(Gap::Term)?;
+        self.mark_discharged(output);
+        Ok(vec![self.binding(output, name, canonical.canonical, value)])
     }
 
     /// `value` written at the store's cell: its canonical access where import built one, else its
@@ -1417,10 +1477,15 @@ impl<'a> Values<'a> {
 
     /// A described call: its callee by name, each argument at the class its signature passes it
     /// in, its result assigned.
-    fn call(&self, inst: InstId) -> Option<Vec<CStmt>> {
-        let plan = self.calls.get(inst)?;
+    fn call(&self, inst: InstId) -> Result<Vec<CStmt>, CallRefusal> {
+        let Some(plan) = self.calls.get(inst) else {
+            return Err(
+                (self.unplanned.get(inst)).map_or(CallRefusal::NoCallSite, |gap| gap.reason)
+            );
+        };
         if self.calls_itself(plan) {
-            return self.recursive_call(inst, plan).map(|stmt| vec![stmt]);
+            let call = self.recursive_call(inst, plan).map(|stmt| vec![stmt]);
+            return needed(call, inst, CallRefusal::SelfCallNotSpelled);
         }
         let call = self.call_expr(
             inst,
@@ -1430,8 +1495,21 @@ impl<'a> Values<'a> {
         needed(
             self.assign_call(inst, plan, call),
             inst,
-            "result assignment",
+            CallRefusal::ResultNotSpelled,
         )
+    }
+
+    /// The gap a call the text states no statement for leaves: its callee and `reason`.
+    fn call_gap(&self, inst: InstId, reason: CallRefusal) -> CallGap {
+        let callee = match (self.calls.get(inst), self.unplanned.get(inst)) {
+            (Some(plan), _) => match &plan.callee {
+                calls::Callee::Named { name, .. } => GapCallee::Named(name.clone()),
+                calls::Callee::Through(_) => GapCallee::Indirect,
+            },
+            (None, Some(gap)) => gap.callee.clone(),
+            (None, None) => GapCallee::Indirect,
+        };
+        CallGap { callee, reason }
     }
 
     /// The text `value` points at where `reader` passes it as a constant address in `class`, and
@@ -1484,25 +1562,47 @@ impl<'a> Values<'a> {
         }
     }
 
-    /// The call's expression, returning `ret`: a named callee is declared once, and one reached
-    /// through its target value is cast to the function type it is called at.
-    fn call_expr(&self, inst: InstId, plan: &CallPlan, ret: Option<&MachineType>) -> Option<CExpr> {
+    /// Each argument the call at `inst` passes, at its class: the expression and its C type.
+    fn passed(
+        &self,
+        inst: InstId,
+        plan: &CallPlan,
+    ) -> Result<(Vec<CExpr>, Vec<CType>), CallRefusal> {
         let mut arguments = Vec::with_capacity(plan.arguments.len());
         let mut types = Vec::with_capacity(plan.arguments.len());
-        let mut texts = Vec::with_capacity(plan.arguments.len());
         for ((argument, class), stacked) in plan.arguments.iter().zip(&plan.stacked) {
-            texts.push(self.passed_text(*argument, class, inst));
-            let held = needed(self.value_type(*argument), inst, "argument type")?;
+            let held = needed(self.value_type(*argument), inst, CallRefusal::ArgumentType)?;
             // A float the caller stored as bits would travel in a float register once C declares it.
             if *stacked && matches!(held, MachineType::Float { .. }) {
-                return needed(None, inst, "float on the stack");
+                return needed(None, inst, CallRefusal::FloatOnStack);
             }
-            let operand = needed(self.operand(*argument, inst), inst, "argument operand")?;
-            arguments.push(needed(fit(operand, &held, class), inst, "argument class")?);
-            types.push(terms::c_type(class)?);
+            let operand = self.operand(*argument, inst);
+            let operand = needed(operand, inst, CallRefusal::ArgumentOperand)?;
+            let fitted = fit(operand, &held, class);
+            arguments.push(needed(fitted, inst, CallRefusal::ArgumentFit)?);
+            types.push(needed(
+                terms::c_type(class),
+                inst,
+                CallRefusal::ArgumentType,
+            )?);
         }
+        Ok((arguments, types))
+    }
+
+    /// The call's expression, returning `ret`: a named callee is declared once, and one reached
+    /// through its target value is cast to the function type it is called at.
+    fn call_expr(
+        &self,
+        inst: InstId,
+        plan: &CallPlan,
+        ret: Option<&MachineType>,
+    ) -> Result<CExpr, CallRefusal> {
+        let (mut arguments, mut types) = self.passed(inst, plan)?;
+        let texts = (plan.arguments.iter())
+            .map(|(argument, class)| self.passed_text(*argument, class, inst))
+            .collect();
         let mut ret_type = match ret {
-            Some(class) => terms::c_type(class)?,
+            Some(class) => needed(terms::c_type(class), inst, CallRefusal::ResultNotSpelled)?,
             None => CType::Void,
         };
         // A declared prototype passes and returns at the types the source states.
@@ -1530,8 +1630,10 @@ impl<'a> Values<'a> {
                     ret: Box::new(ret_type),
                     params: types.into_boxed_slice(),
                 };
-                let address = terms::fit_integer(self.operand(*target, inst)?, self.ptr_bits)?;
-                return Some(CExpr::call_at(
+                let address = (self.operand(*target, inst))
+                    .and_then(|target| terms::fit_integer(target, self.ptr_bits));
+                let address = needed(address, inst, CallRefusal::TargetNotSpelled)?;
+                return Ok(CExpr::call_at(
                     inst,
                     CExpr::cast(pointer, address),
                     arguments,
@@ -1540,7 +1642,7 @@ impl<'a> Values<'a> {
         };
         // A parameter or local of the callee's name would shadow the function it calls.
         if (self.symbols.try_borrow()).map_or(true, |symbols| symbols.by_name(name).is_some()) {
-            return needed(None, inst, "callee name a declared variable holds");
+            return needed(None, inst, CallRefusal::CalleeShadowed);
         }
         types.truncate(plan.fixed);
         let declaration = CExternDecl {
@@ -1557,7 +1659,7 @@ impl<'a> Values<'a> {
                 slot.insert(declaration);
             }
             std::collections::btree_map::Entry::Occupied(slot) if *slot.get() != declaration => {
-                return needed(None, inst, "declaration another call disagrees with");
+                return needed(None, inst, CallRefusal::DeclarationDisagrees);
             }
             std::collections::btree_map::Entry::Occupied(_) => {}
         }
@@ -1565,7 +1667,23 @@ impl<'a> Values<'a> {
             name: name.clone(),
             kind,
         };
-        Some(CExpr::call_at(inst, callee, arguments))
+        Ok(CExpr::call_at(inst, callee, arguments))
+    }
+
+    /// The call a tail transfer at `addr` stands for: the refusal of its plan, or no call site.
+    pub(super) fn tail_gap(
+        &self,
+        addr: u64,
+        resolution: Option<&r2types::CalleeResolutionFacts>,
+    ) -> Option<CallGap> {
+        let (inst, op) = self.terminator(addr)?;
+        if let Some(gap) = self.unplanned.get(inst) {
+            return Some(gap.clone());
+        }
+        matches!(op, SSAOp::Branch { .. } | SSAOp::BranchInd { .. }).then(|| CallGap {
+            callee: calls::gap_callee(self.artifact, resolution, inst),
+            reason: CallRefusal::NoCallSite,
+        })
     }
 
     /// A tail transfer as C: the call and a bare `return` where the function returns nothing, else
@@ -1590,7 +1708,8 @@ impl<'a> Values<'a> {
             .return_kind();
         let stmts = match (returns, tail) {
             (r2source::SourceFunctionReturn::Void, _) => {
-                let call = self.call_expr(inst, plan, tail.as_ref().map(|(_, class)| class))?;
+                let call =
+                    (self.call_expr(inst, plan, tail.as_ref().map(|(_, class)| class))).ok()?;
                 vec![CStmt::Expr(call), CStmt::Return(None)]
             }
             (r2source::SourceFunctionReturn::Register { storage }, Some((carried, class)))
@@ -1605,7 +1724,7 @@ impl<'a> Values<'a> {
                         _ => return None,
                     },
                 };
-                let call = self.call_expr(inst, plan, Some(class))?;
+                let call = self.call_expr(inst, plan, Some(class)).ok()?;
                 // The function's caller reads the bytes r2ssa says its declared result occupies.
                 let demanded = (self.artifact.machine_context().function_interface())
                     .and_then(r2ssa::returned_bytes)
@@ -2187,6 +2306,7 @@ impl<'a> Values<'a> {
     pub(super) fn close(&self, ledger: &mut crate::ledger::ObligationLedger) {
         use crate::ledger::{ElisionReason, Outcome};
         let (rendered, restored) = (self.rendered.borrow(), self.restored.borrow());
+        let effect = self.effect.borrow();
         let covered = self.covered_by_residuals();
         let certificates = self.artifact.certificates();
         let frame_setup = &certificates.stack_geometry.frame_setup;
@@ -2204,6 +2324,11 @@ impl<'a> Values<'a> {
                 }
                 (_, Some(reason)) => Outcome::Elided(reason),
                 _ if index.is_some_and(|i| covered[i]) => Outcome::Gapped,
+                (SemanticObligationKind::Atomicity | SemanticObligationKind::MemoryOrdering, _)
+                    if index.is_some_and(|i| effect[i]) =>
+                {
+                    Outcome::Gapped
+                }
                 _ if index.is_some_and(|i| rendered[i]) => {
                     match self.artifact.obligation_extent_assumption(obligation.id) {
                         Some(_) => Outcome::Assumed,
@@ -2404,8 +2529,8 @@ enum Gap {
     /// A user operation the specification names and no model gives an effect: r2ssa accounts for
     /// it as an unknown effect, which no C statement states.
     UserOperation(u32),
-    /// A call, until its callsite facts are rendered.
-    Call,
+    /// A call the facts do not describe, or whose C the text cannot spell, and why.
+    Call(CallRefusal),
     /// An effect with no C statement here: a fence, an atomic, a block transfer, a user operation.
     Effect,
     Store,
@@ -2415,20 +2540,6 @@ enum Gap {
     Type,
     /// A value no producer computes, such as what a call leaves in a register.
     Unknown,
-}
-
-impl Gap {
-    const fn kind(self) -> GapKind {
-        match self {
-            Self::Unsupported | Self::UserOperation(_) => GapKind::UnsupportedInstruction,
-            Self::Call => GapKind::CallNotRendered,
-            Self::Effect => GapKind::EffectNotRendered,
-            Self::Store => GapKind::StoreNotSpelled,
-            Self::Term => GapKind::TermNotSpelled,
-            Self::Type => GapKind::ValueHasNoCType,
-            Self::Unknown => GapKind::ValueNotComputed,
-        }
-    }
 }
 
 /// An integer held at one width passed or returned at another: a cast keeps the low bits a narrower
@@ -2522,6 +2633,12 @@ fn returned_values(inventory: &SemanticObligationInventory, inst: InstId) -> Vec
         .filter(|o| o.id.kind == SemanticObligationKind::ReturnValue)
         .flat_map(|o| o.inputs.iter().copied())
         .collect()
+}
+
+/// A linked load reads what a plain one reads (`r2ssa` machine lowering): its value is assigned,
+/// and its link and ordering, which C has no statement of, are a gap beside it.
+fn reads_beside_effect(op: &SSAOp<ValueId>) -> bool {
+    matches!(op, SSAOp::LoadLinked { .. })
 }
 
 /// Whether an operation's effect is its output alone, so a local assigned its term states it.

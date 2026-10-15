@@ -6,7 +6,9 @@ status is one of:
 ========================  ====================================================
 ``equal``                 every vector inside the original's domain agreed
 ``residual-trap``         agreed wherever it ran; on some vectors execution
-                          reached a counted ``r2sleigh_residual_*`` trap
+                          reached a counted ``r2sleigh_residual_*`` trap, and
+                          what it printed before the trap (and, for a residual
+                          the rendering returns, the memory it wrote) agreed
 ``differs``               some vector returned, wrote, printed or ended
                           differently; the evidence names the vector and field.
                           A rendering that passes control to the original's
@@ -167,11 +169,22 @@ def grade(key: str, workdir: Path, binary: Path, dwarf: Dwarf, spec: CallSpec,
     code = str(pddj.get("code", ""))
     definition = str(pddj.get("definition", ""))
     links = [entry for entry in pddj.get("links", []) if isinstance(entry, dict)]
-    return grade_code(record, workdir, binary, dwarf, spec, code, definition, links, config)
+    sites = residual_sites(pddj.get("residuals"))
+    return grade_code(record, workdir, binary, dwarf, spec, code, definition, links, config,
+                      sites)
+
+
+def residual_sites(residuals) -> dict[int, dict]:
+    """``pddj``'s residuals by site number: what the rendering states each one stands for."""
+    if not isinstance(residuals, list):
+        return {}
+    return {entry["site"]: entry for entry in residuals
+            if isinstance(entry, dict) and isinstance(entry.get("site"), int)}
 
 
 def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: CallSpec,
-               code: str, definition: str, links: list[dict], config: Config) -> Record:
+               code: str, definition: str, links: list[dict], config: Config,
+               sites: dict[int, dict] | None = None) -> Record:
     workdir.mkdir(parents=True, exist_ok=True)
     inside = link.links_into_body(links, spec.guard())
     if inside:
@@ -241,7 +254,7 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
                               link.residual_helpers(builds["O0"].path, target),
                               target.trap_signal)
     status, evidence, counts = classify(vector_lines, vectors, residual, helpers,
-                                        config.floor())
+                                        config.floor(), sites)
     record.status = status
     record.evidence = evidence
     record.vectors = counts
@@ -349,11 +362,26 @@ class ResidualHelpers:
         return None
 
 
+# A residual of this cause is a whole return statement (r2dec render/control.rs), so the
+# state at its trap is the state the original returns with.
+RETURN_POSITION = frozenset({"unproven-return"})
+# The statuses that rest on a floor of vectors compared with the original.
+_FLOORED = ("equal", "residual-trap")
+
+
 def classify(vector_lines: list[dict], vectors: list, residual: int,
-             helpers: ResidualHelpers, min_graded: int = 1) -> tuple[str, dict, dict]:
+             helpers: ResidualHelpers, min_graded: int = 1,
+             sites: dict[int, dict] | None = None) -> tuple[str, dict, dict]:
+    """A record's status from its vectors.
+
+    ``compared`` counts the vectors whose rendering was compared with the
+    original: every pair agreed, or the run trapped at a residual and what it
+    had done by then was compared. Of the trapping ones, ``trap_compared``
+    counts those, and ``trap_memory`` those whose memory was compared too.
+    """
     counts = {"total": len(vector_lines), "dropped": 0, "unstable": 0, "incomplete": 0,
-              "graded": 0, "equal": 0, "residual-trap": 0, "slow": 0, "differs": 0, "uninit": 0,
-              "ub": 0}
+              "graded": 0, "compared": 0, "trap_compared": 0, "trap_memory": 0, "equal": 0,
+              "residual-trap": 0, "slow": 0, "differs": 0, "uninit": 0, "ub": 0}
     first: dict[str, dict] = {}
     unstable_example: dict | None = None
     incomplete_example: dict | None = None
@@ -392,8 +420,11 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
             o0 = runs[O0] if len(runs) > O0 else {}
             helper = helpers.reached(o0) if residual > 0 else None
             if helper is not None:
-                found["residual-trap"] = {"helper": helper,
-                                          "fault_offset": _run_evidence(o0).get("fault_offset")}
+                verdict, at_trap, compared = _at_trap(primary, runs[ORIGINAL], o0, helper,
+                                                      sites or {})
+                found[verdict] = at_trap
+                counts["trap_compared"] += bool(compared)
+                counts["trap_memory"] += compared == "memory"
             elif _timed_out(o0):
                 # Running out of time is a cost, not an answer: nothing it
                 # computed can be compared.
@@ -429,6 +460,8 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
                                **_pair_evidence(optimised)}
         status = next((s for s in _VECTOR_SEVERITY if s in found), "equal")
         counts[status] += 1
+        if status == "equal" or (status == "residual-trap" and primary.get("pre_trap")):
+            counts["compared"] += 1
         if status != "equal" and status not in first:
             first[status] = {"vector": index, "inputs": shown, **found[status]}
     status = next((s for s in _VECTOR_SEVERITY if counts[s]), "equal")
@@ -441,11 +474,15 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
     if incomplete_example is not None:
         return "harness-error", {"cause": "a rendering run could not be made",
                                  **incomplete_example}, counts
-    if counts["graded"] < min_graded:
+    rested = counts["compared"] if status in _FLOORED else counts["graded"]
+    if rested < min_graded:
         if counts["graded"] == 0:
             cause = "no vector survived the original" if counts["dropped"] else "no vectors"
             if counts["unstable"]:
                 cause = "the original does not agree with itself on any surviving vector"
+        elif rested < counts["graded"]:
+            cause = (f"only {rested} of {counts['graded']} graded vectors were compared with "
+                     f"the original; an {status} verdict needs {min_graded}")
         else:
             cause = (f"only {counts['graded']} of {counts['total']} vectors survived the "
                      f"original; an {status} verdict needs {min_graded}")
@@ -457,6 +494,58 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
     if unstable_example is not None:
         evidence["unstable_example"] = unstable_example
     return status, evidence, counts
+
+
+def residual_cause(entry: dict | None) -> str:
+    """What a residual site stands for, as ``pddj`` states it: its cause, and a gap's kind."""
+    if not entry:
+        return "unstated"
+    cause = str(entry.get("cause") or "unstated")
+    return f"{cause}:{entry['gap']}" if cause == "gap" and entry.get("gap") else cause
+
+
+def _at_trap(primary: dict, original: dict, o0: dict, helper: str,
+             sites: dict[int, dict]) -> tuple[str, dict, str]:
+    """A vector whose rendering trapped at a residual, graded on what it did before.
+
+    Its output so far must be a prefix of the original's. Its memory is held to
+    the original's final state only where the trap stands for the return of the
+    call the gate made: a return-position residual in the outermost activation.
+    Returns the vector's status, its evidence and what was compared (``""``,
+    ``"output"`` or ``"memory"``).
+    """
+    site = o0.get("trap_site")
+    entry = sites.get(site) if isinstance(site, int) else None
+    evidence = {"helper": helper, "site": site, "residual_cause": residual_cause(entry),
+                "fault_offset": _run_evidence(o0).get("fault_offset")}
+    snapshot = primary.get("pre_trap")
+    if not snapshot:
+        return "residual-trap", evidence, ""
+    detector = "state before the residual trap"
+    for stream in ("stdout", "stderr"):
+        if not snapshot.get(stream):
+            return "differs", {"detector": detector, "field": stream, **evidence,
+                               "original": _run_evidence(original),
+                               "rendering": _run_evidence(o0)}, "output"
+    if not (evidence["residual_cause"] in RETURN_POSITION and o0.get("trap_depth") == "outermost"
+            and original.get("outcome") == "return"):
+        return "residual-trap", evidence, "output"
+    if not snapshot.get("memory"):
+        return "differs", {"detector": detector, **_pair_evidence(snapshot), **evidence}, "memory"
+    return "residual-trap", evidence, "memory"
+
+
+def trap_comparison(status: str, counts: dict) -> str | None:
+    """What every trapping vector of a ``residual-trap`` record compared before its trap, the
+    weakest of them: ``memory``, ``output`` or ``none``; None for any other status. One vector
+    losing its snapshot weakens the record, so the ratchet sees it."""
+    if status != "residual-trap":
+        return None
+    trapped = counts.get("residual-trap", 0)
+    compared = counts.get("trap_compared", 0)
+    if not compared or compared < trapped:
+        return "none"
+    return "memory" if counts.get("trap_memory", 0) >= compared else "output"
 
 
 def _run_evidence(run: dict) -> dict:
@@ -487,11 +576,48 @@ def _clip(text: str, lines: int) -> str:
 # ------------------------------------------------------------------ ratchet
 
 
+REPO = Path(__file__).resolve().parents[2]
+BASELINE_SCHEMA = 2
+# Causes that say nothing about their record, which the ratchet refuses (audit T20).
+PLACEHOLDER_CAUSES = (
+    re.compile(r"not (?:yet )?triaged", re.I),
+    re.compile(r"\b(?:todo|tbd|fixme|xxx)\b", re.I),
+    re.compile(r"placeholder", re.I),
+    re.compile(r"the run reaches a counted residual", re.I),
+)
+
+
 def load_baseline(path: Path) -> dict:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema") != 1 or not isinstance(payload.get("records"), dict):
-        raise ValueError(f"{path}: not an equivalence baseline (schema 1)")
+    if payload.get("schema") != BASELINE_SCHEMA or not isinstance(payload.get("records"), dict):
+        raise ValueError(f"{path}: not an equivalence baseline (schema {BASELINE_SCHEMA})")
     return payload
+
+
+@functools.lru_cache(maxsize=None)
+def roadmap_items(roadmap: Path = REPO / "ROADMAP.md") -> frozenset[str]:
+    """The items ROADMAP.md's plan tables name (``| **P7** ...``): the owners a cause may name."""
+    return frozenset(re.findall(r"^\| \*\*([A-Z][A-Z0-9]*)\*\*", roadmap.read_text("utf-8"),
+                                re.M))
+
+
+def cause_problems(entry: dict, repo: Path = REPO) -> list[str]:
+    """Why a non-equal baseline entry's cause does not stand: it is missing or a
+    placeholder, its owner is no ROADMAP.md item, or its site no repository path."""
+    cause = str(entry.get("cause") or "").strip()
+    if not cause:
+        return ["has no recorded cause"]
+    problems = []
+    if len(cause.split()) < 6 or any(pattern.search(cause) for pattern in PLACEHOLDER_CAUSES):
+        problems.append(f"has a placeholder cause: {cause[:60]!r}")
+    owner = entry.get("owner")
+    if owner not in roadmap_items(repo / "ROADMAP.md"):
+        problems.append(f"names an owner that is no ROADMAP.md item: {owner!r}")
+    site = entry.get("site")
+    if (not isinstance(site, str) or not site or Path(site).is_absolute()
+            or ".." in Path(site).parts or not (repo / site).exists()):
+        problems.append(f"names a site that is no path in the repository: {site!r}")
+    return problems
 
 
 def reason(status: str, evidence: dict) -> str:
@@ -506,7 +632,7 @@ def reason(status: str, evidence: dict) -> str:
     if status == "equal":
         return ""
     if status == "residual-trap":
-        text = str(evidence.get("helper", ""))
+        text = " ".join(str(evidence.get(key, "")) for key in ("helper", "residual_cause"))
     elif status in ("differs", "ub", "uninit"):
         text = " ".join(str(evidence.get(key, "")) for key in ("detector", "field")).strip()
     elif status == "compile-error":
@@ -524,7 +650,14 @@ def reason(status: str, evidence: dict) -> str:
     return " ".join(text.split())
 
 
-def ratchet(baseline: dict, records: dict[str, "str | tuple[str, str]"],
+def graded(record: Record) -> tuple[str, str, str | None]:
+    """What the ratchet holds of a record: its status, its reason, and what a
+    ``residual-trap`` compared before its traps."""
+    return (record.status, reason(record.status, record.evidence),
+            trap_comparison(record.status, record.vectors))
+
+
+def ratchet(baseline: dict, records: dict[str, "str | tuple"],
             selected: set[str] | None = None) -> list[str]:
     """Every way ``records`` departs from ``baseline``.
 
@@ -537,29 +670,35 @@ def ratchet(baseline: dict, records: dict[str, "str | tuple[str, str]"],
       under its own message, as the worst departure;
     * a non-``equal`` record must fail for the reason the baseline records,
       where it records one;
+    * a ``residual-trap`` must compare what the baseline says it compared
+      before its traps (``memory``, ``output`` or ``none``), so a record cannot
+      silently go back to comparing nothing;
     * a function the baseline knows must still be graded, and one it does not
       know must be blessed (when ``selected`` is given, only the selected keys
       are held);
-    * every non-``equal`` baseline record carries a recorded cause.
+    * every non-``equal`` baseline record carries a cause that stands
+      (:func:`cause_problems`): no placeholder, an owner, a site.
 
-    ``records`` maps a key to its status, or to its status and reason.
+    ``records`` maps a key to its status, or to :func:`graded`'s tuple (or its
+    first two members).
     """
     problems: list[str] = []
     held = baseline["records"]
 
     def split(graded):
-        return graded if isinstance(graded, tuple) else (graded, None)
+        return (*graded, None, None)[:3] if isinstance(graded, tuple) else (graded, None, None)
 
     for key, entry in sorted(held.items()):
         if selected is not None and key not in selected:
             continue
         before = entry.get("status")
-        if before != "equal" and not entry.get("cause"):
-            problems.append(f"{key}: baseline status {before} has no recorded cause")
+        if before != "equal":
+            problems.extend(f"{key}: baseline status {before} {why}"
+                            for why in cause_problems(entry))
         if key not in records:
             problems.append(f"{key}: in the baseline but not graded by this run")
             continue
-        now, why = split(records[key])
+        now, why, compared = split(records[key])
         if now in BLOCKING and now != before:
             problems.append(f"{key}: new {now} (baseline: {before})")
         elif before == "equal" and now != "equal":
@@ -569,10 +708,13 @@ def ratchet(baseline: dict, records: dict[str, "str | tuple[str, str]"],
         elif why is not None and entry.get("reason") is not None and why != entry["reason"]:
             problems.append(f"{key}: still {now}, for another reason: {why!r} "
                             f"(baseline: {entry['reason']!r})")
+        elif compared is not None and compared != entry.get("compared"):
+            problems.append(f"{key}: compares {compared} before its residual traps "
+                            f"(baseline: {entry.get('compared')})")
     for key, graded in sorted(records.items()):
         if key in held:
             continue
-        now, _ = split(graded)
+        now, _, _ = split(graded)
         if now in BLOCKING:
             problems.append(f"{key}: new {now} (baseline: absent)")
         else:
@@ -582,25 +724,28 @@ def ratchet(baseline: dict, records: dict[str, "str | tuple[str, str]"],
 
 def baseline_from(records: list[Record], previous: dict | None = None,
                   toolchain: dict[str, str] | None = None) -> dict:
-    """A baseline holding this run, keeping every cause a previous one recorded
-    for the same status and reason."""
+    """A baseline holding this run, keeping every cause, owner and site a
+    previous one recorded for the same status and reason."""
     old = (previous or {}).get("records", {})
     out: dict[str, dict] = {}
     for record in sorted(records, key=lambda r: r.key):
         entry: dict = {"status": record.status}
         if record.status != "equal":
-            why = reason(record.status, record.evidence)
+            status, why, compared = graded(record)
             kept = old.get(record.key, {})
-            same = kept.get("status") == record.status and kept.get("reason", why) == why
-            entry["cause"] = kept.get("cause") if same else None
+            same = kept.get("status") == status and kept.get("reason", why) == why
+            for name in ("cause", "owner", "site"):
+                entry[name] = kept.get(name) if same else None
             entry["reason"] = why
+            if compared is not None:
+                entry["compared"] = compared
         out[record.key] = entry
     return {
-        "schema": 1,
+        "schema": BASELINE_SCHEMA,
         "toolchain": toolchain if toolchain is not None else (previous or {}).get("toolchain"),
         "note": (previous or {}).get("note") or (
             "Blessed by the integrator after reading records.json. A non-equal record needs a "
-            "cause before the ratchet accepts this file."
+            "cause, its ROADMAP.md owner and its site before the ratchet accepts this file."
         ),
         "records": out,
     }

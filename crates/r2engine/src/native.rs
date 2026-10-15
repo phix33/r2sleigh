@@ -64,15 +64,6 @@ pub trait Program: crate::body::Program {
     /// [`holds_static_data`](crate::program::Section::holds_static_data).
     fn holds_static_data(&self, vaddr: u64) -> bool;
 
-    /// Whether nothing can write any byte of `range` once the program runs:
-    /// a segment mapped without write permission, or one the loader seals
-    /// after it is done. Where the program says nothing of sealing, only the
-    /// region's own permission answers.
-    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
-        self.region(range.start)
-            .is_some_and(|region| !region.write && range.end <= region.end)
-    }
-
     /// Whether the container states the code at this address is instructions:
     /// a section it says holds code, or, where it states no sections, a region
     /// it maps executable.
@@ -80,12 +71,12 @@ pub trait Program: crate::body::Program {
         self.region(vaddr).is_some_and(|region| region.execute)
     }
 
-    /// What the loader writes before the program runs, sorted by place and
-    /// disjoint, with the value the container states for each: the file's
-    /// bytes there are not what the program reads. Nothing, where nothing is
-    /// loaded. Read through [`crate::stated`], never directly.
-    fn loader_writes(&self) -> &[crate::program::LoaderWrite] {
-        &[]
+    /// Whether a function can begin here: code the file holds bytes for (audit W29).
+    fn places_function(&self, vaddr: u64) -> bool {
+        self.holds_code(vaddr)
+            && self
+                .region(vaddr)
+                .is_some_and(|region| vaddr < region.file_end)
     }
 
     /// Where the program's loaded sections lie, code or data.
@@ -120,10 +111,16 @@ pub trait Program: crate::body::Program {
     /// What one callee's body proves, as `read` derives it.
     ///
     /// A callee is prepared against the program and its imports alone, never
-    /// against a body of its own callees or of whichever root calls it, so
-    /// what it proves is a fact about the callee and the state of the program,
-    /// and a program that holds one per state need derive it only once.
-    fn read_callee(&self, _address: u64, read: &mut dyn FnMut() -> CalleeRead) -> Arc<CalleeRead> {
+    /// against a body of whichever root calls it, so what it proves is a fact
+    /// about the callee and the state of the program, and a program that holds
+    /// one per state need derive it only once. Under `aa` (`callers`) a program
+    /// may resolve it against its owners first.
+    fn read_callee(
+        &self,
+        _address: u64,
+        _callers: crate::program::Callers,
+        read: &mut dyn FnMut() -> CalleeRead,
+    ) -> Arc<CalleeRead> {
         Arc::new(read())
     }
 }
@@ -135,8 +132,18 @@ pub struct CalleeRead {
     /// preparation cannot be certified still proved.
     pub interface: Option<r2ssa::SourceFunctionInterface>,
     pub facts: Result<CalleeFacts, Unreadable>,
-    /// Where its result is unproven, the direct callees whose unstated result owns it.
-    pub result_owners: std::collections::BTreeSet<u64>,
+    /// The direct callees whose statement could prove what this body leaves open.
+    pub owners: Owners,
+}
+
+/// The direct callees whose statement could prove what a body leaves open (doc/adr-resolved-bodies.md).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Owners {
+    /// Where its result is unproven, the callees whose unstated result owns it.
+    pub result: std::collections::BTreeSet<u64>,
+    /// Where its parameters are a floor only because calls of unproven arity may be handed a slot,
+    /// those calls' callees.
+    pub arity: std::collections::BTreeSet<u64>,
 }
 
 /// Everything about the machine that does not change between functions.
@@ -165,11 +172,8 @@ pub struct NativeTarget<'a> {
     pub declarations: &'a r2abi::Declarations,
 }
 
-/// Why a native decompile could not be attempted.
-///
-/// These are all refusals to start. Once the request is built, a function the
-/// engine cannot prove comes back as a rendered refusal rather than as an
-/// error here.
+/// Why a native decompile could not be attempted: the record `pdd`, `pddj`, `afi` and the listing
+/// carry, never an error (ROADMAP D29).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeRefusal {
     Body(BodyError),
@@ -181,6 +185,14 @@ pub enum NativeRefusal {
     /// The carriers or the convention slots are not a machine this engine can
     /// describe.
     Machine(&'static str),
+    /// The machine or the function's convention could not be assembled for this program.
+    Unassembled(Unassembled),
+    /// No equivalence target grades this architecture's C, so none is rendered (ROADMAP D32).
+    Unadmitted {
+        architecture: String,
+        bits: u32,
+        big_endian: bool,
+    },
     /// The function's convention passes what no call boundary states (doc/adr-language-profile.md).
     Convention {
         name: &'static str,
@@ -206,14 +218,80 @@ impl NativeRefusal {
             r2ssa::SsaPrepareError::Cancelled | r2ssa::SsaPrepareError::DeadlineExceeded => {
                 Self::Stopped(error)
             }
-            r2ssa::SsaPrepareError::Exhausted(exhausted) => Self::Prepare(exhausted.to_string()),
-            error => Self::Prepare(format!("{error:?}")),
+            error => Self::Prepare(error.to_string()),
         }
     }
 
     /// Whether this refusal is the request's stop rather than the program's answer.
     pub const fn stopped(&self) -> bool {
         matches!(self, Self::Stopped(_))
+    }
+
+    /// Whether the request named an address nothing maps: no function, so the request's error,
+    /// never a record (ROADMAP D29).
+    pub const fn names_no_function(&self) -> bool {
+        matches!(self, Self::Body(BodyError::EntryUnmapped(_)))
+    }
+
+    /// The refusal's kind, as `pddj` tags it.
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Body(BodyError::Oversized(_)) => "oversized",
+            Self::Body(_) => "walk",
+            Self::NoStackPointer
+            | Self::UnknownRegister(_)
+            | Self::Machine(_)
+            | Self::Unassembled(_) => "machine",
+            Self::Unadmitted { .. } => "architecture",
+            Self::Convention { .. } => "convention",
+            Self::Capture(_) => "capture",
+            Self::Lift(_) => "lift",
+            Self::Prepare(_) => "preparation",
+            Self::Stopped(_) => "stopped",
+            Self::Panicked { .. } => "panicked",
+        }
+    }
+}
+
+/// Why the machine a function runs on, or its convention, could not be assembled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unassembled {
+    /// No Sleigh specification decodes this architecture, as the lifter said.
+    NoSpecification(String),
+    /// No calling convention is stated for this architecture and width; `go` for Go's own.
+    NoConvention {
+        architecture: String,
+        bits: u32,
+        go: bool,
+    },
+    /// The convention runs under a compiler the language names none of.
+    NoCompiler(&'static str),
+    /// The compiler specification does not parse, as its parser said.
+    UnparsedCompiler(String),
+    /// The compiler specification states no prototype of the convention's name.
+    NoPrototype(&'static str),
+}
+
+impl std::fmt::Display for Unassembled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSpecification(error) => write!(f, "no Sleigh specification: {error}"),
+            Self::NoConvention {
+                architecture,
+                bits,
+                go,
+            } => {
+                let go = if *go { "Go " } else { "" };
+                write!(f, "no {go}calling convention for {architecture} {bits}")
+            }
+            Self::NoCompiler(compiler) => write!(f, "the language names no {compiler} compiler"),
+            Self::UnparsedCompiler(error) => {
+                write!(f, "the compiler specification does not parse: {error}")
+            }
+            Self::NoPrototype(prototype) => {
+                write!(f, "the compiler specification states no {prototype}")
+            }
+        }
     }
 }
 
@@ -233,6 +311,18 @@ impl std::fmt::Display for NativeRefusal {
             Self::NoStackPointer => write!(f, "the compiler specification names no stack pointer"),
             Self::UnknownRegister(name) => write!(f, "this architecture has no register {name}"),
             Self::Machine(what) => write!(f, "the machine cannot be described: {what}"),
+            Self::Unassembled(why) => write!(f, "the machine is not assembled: {why}"),
+            Self::Unadmitted {
+                architecture,
+                bits,
+                big_endian,
+            } => {
+                let order = if *big_endian { " big-endian" } else { "" };
+                write!(
+                    f,
+                    "no equivalence target grades {architecture} {bits}-bit{order} C, so none is rendered"
+                )
+            }
             Self::Convention { name, reason } => write!(f, "under the {name} convention: {reason}"),
             Self::Capture(error) => write!(f, "{error}"),
             Self::Lift(error) | Self::Prepare(error) => write!(f, "{error}"),
@@ -622,7 +712,8 @@ pub(crate) fn hands_a_function(
     let direct = callees
         .into_iter()
         .filter_map(|callee| program.name_at(callee));
-    let through_a_slot = loads.iter().filter_map(|slot| program.import_at(*slot));
+    let sealed = |slot: &u64| crate::stated::sealed_import(program, *slot).map(str::to_owned);
+    let through_a_slot = loads.iter().filter_map(sealed);
     direct.chain(through_a_slot).any(|name| {
         let prototype = target.prototypes.get(&name);
         prototype.is_some_and(|prototype| {
@@ -785,11 +876,17 @@ fn declare_imports(
             continue;
         };
         let Some(declared) = Declared::import(target, &name) else {
+            callees
+                .unstated
+                .insert(*address, r2ssa::UnstatedImport::Undeclared);
             continue;
         };
         // An import has no body here, so nothing it declares about its own
         // frame is about anything this program can see.
         let Some(interface) = placement.restatement(declared, false).interface else {
+            callees
+                .unstated
+                .insert(*address, r2ssa::UnstatedImport::Unplaced);
             continue;
         };
         if let Some(signature) = placement.function_type(declared)
@@ -844,8 +941,8 @@ fn prepare_callee(
     resolved_alone(native, target, address, ptr_bits, &walked, &[])
 }
 
-/// A resolved body, and where its result is unproven, the callees whose result owns it.
-type Resolution = (Arc<TrustedSsaArtifact>, std::collections::BTreeSet<u64>);
+/// A resolved body, and the callees whose statement could prove what it leaves open.
+type Resolution = (Arc<TrustedSsaArtifact>, Owners);
 
 /// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md).
 fn resolved_alone(
@@ -859,7 +956,7 @@ fn resolved_alone(
     let mut imports = Callees::default();
     let targets = reached(&walked.root.body, native.program);
     declare_imports(native, target, &targets, ptr_bits, &mut imports);
-    // Each resolved owner of its result; r2ssa reads a floor interface for its result alone.
+    // Each resolved owner of its result or arity, read as any callee's statement.
     for (owner, read) in owners {
         if let Ok(facts) = &read.facts {
             imports.record(*owner, facts);
@@ -915,7 +1012,7 @@ pub(crate) fn callee_read(
             return CalleeRead {
                 interface: None,
                 facts: Err(Unreadable::NotPrepared),
-                result_owners: Default::default(),
+                owners: Default::default(),
             };
         }
     };
@@ -941,13 +1038,13 @@ fn read_callee(
 
 /// What a resolved callee proves, derived under isolation.
 fn read_of(resolved: Result<Resolution, Unreadable>, ptr_bits: u32) -> CalleeRead {
-    let (artifact, result_owners) = match resolved {
+    let (artifact, owners) = match resolved {
         Ok(resolved) => resolved,
         Err(reason) => {
             return CalleeRead {
                 interface: None,
                 facts: Err(reason),
-                result_owners: Default::default(),
+                owners: Default::default(),
             };
         }
     };
@@ -967,16 +1064,16 @@ fn read_of(resolved: Result<Resolution, Unreadable>, ptr_bits: u32) -> CalleeRea
     CalleeRead {
         interface,
         facts,
-        result_owners,
+        owners,
     }
 }
 
 fn read_callees(
     native: &Native<'_>,
     target: &NativeTarget<'_>,
-    root: &Walked,
-    entry: u64,
+    (root, entry): (&Walked, u64),
     ptr_bits: u32,
+    callers: crate::program::Callers,
 ) -> Read {
     // What a call takes and returns is a fact about the callee's body, so the
     // bodies it calls are walked first and the root is prepared against them.
@@ -986,16 +1083,18 @@ fn read_callees(
     let targets = reached(&root.body, native.program);
     let declared = declare_imports(native, target, &targets, ptr_bits, &mut callees);
     let mut facts = Vec::new();
-    // A stub is not a body: walking one recovers an interface with no
-    // parameters, which would displace the declaration that has them.
+    // An import has no body here, declared or not: its stub's arity is the loader's (P7). A
+    // sealed import slot is a word of data.
     let bodies: Vec<u64> = targets
         .iter()
         .copied()
         .filter(|address| *address != entry && !callees.interfaces.contains_key(address))
+        .filter(|address| native.program.import_at(*address).is_none())
+        .filter(|address| crate::stated::sealed_import(native.program, *address).is_none())
         .collect();
     let mut unread = Vec::new();
     for address in &bodies {
-        let read = native.program.read_callee(*address, &mut || {
+        let read = native.program.read_callee(*address, callers, &mut || {
             read_callee(native, target, *address, ptr_bits)
         });
         // Taking the interface keeps the call rendered as a call.
@@ -1047,7 +1146,7 @@ fn analyse(
         facts,
         declared,
         unread,
-    } = read_callees(&native, target, &walk.root, entry, ptr_bits);
+    } = read_callees(&native, target, (&walk.root, entry), ptr_bits, callers);
 
     let reads = callers == crate::program::Callers::Read;
     let (artifact, _) = native.resolve(entry, walk, &callees, reads)?;
@@ -1160,6 +1259,8 @@ struct Callees {
     /// What each callee reaches through each pointer it is handed, which is
     /// what makes the bytes one callee covers one object in the caller.
     reach: BTreeMap<u64, BTreeMap<usize, ArgumentReach>>,
+    /// The imports whose declaration states no interface: they have no body to read one off.
+    unstated: BTreeMap<u64, r2ssa::UnstatedImport>,
 }
 
 impl Callees {
@@ -1177,6 +1278,7 @@ impl Callees {
             library,
             reentering,
             exits,
+            unstated_imports: self.unstated.clone(),
         }
     }
 
@@ -1367,11 +1469,12 @@ impl Native<'_> {
         let restated = self.restated(&first, &declared_slots);
         let folded = self.folded_literals(&first, root);
         // Only the first preparation recovers the interface; the restated one is handed it.
-        let owners = first
-            .shared_artifact()
-            .machine_context()
-            .result_owners()
-            .clone();
+        let shared = first.shared_artifact();
+        let context = shared.machine_context();
+        let owners = Owners {
+            result: context.result_owners().clone(),
+            arity: context.arity_owners().clone(),
+        };
         let artifact = match restated.is_none() && folded.is_empty() {
             true => first,
             false => {
@@ -1753,6 +1856,14 @@ impl Native<'_> {
         callees: &Callees,
         capture: Capture<'_>,
     ) -> Result<(r2sleigh_lift::TrustedLiftedFunction, r2ssa::CalleeEvidence), NativeRefusal> {
+        // A body the walk cut at its budget is no function's whole body: analysis refuses it, named.
+        let cut = (walked.body.unresolved.iter())
+            .any(|stop| stop.reason == crate::body::UnresolvedReason::Budget);
+        if cut {
+            return Err(NativeRefusal::Body(crate::body::BodyError::Oversized(
+                walked.body.entry,
+            )));
+        }
         let Capture {
             extra_literals,
             restatement,
@@ -1993,42 +2104,26 @@ impl Native<'_> {
             .collect()
     }
 
-    /// What one call operation calls, where the program names it.
-    ///
-    /// A direct call names its target outright. An import is usually reached
-    /// indirectly, through a slot the loader fills, and what that slot stands
-    /// for is a relocation the program declares -- so the callee is named
-    /// there rather than guessed from the address the load lands on.
+    /// What one call operation calls, as the walk's transfer names it: a direct call its
+    /// target, a call through a sealed import slot that import (`CallSlot`, audit W8).
     fn called_name(
         &self,
-        prepared: &r2ssa::SsaArtifact,
         sites: &[NativeCall],
         op: &r2ssa::SSAOp<r2ssa::ValueId>,
     ) -> Option<(u64, String)> {
-        match op {
-            r2ssa::SSAOp::Call {
-                instruction: Some(instruction),
-                ..
-            } => {
-                let site = sites.iter().find(|site| site.instruction == *instruction)?;
-                Some((*instruction, self.program.name_at(site.target)?))
-            }
-            r2ssa::SSAOp::CallInd {
-                target,
-                instruction: Some(instruction),
-            } => {
-                let graph = prepared.graph();
-                let value = *target;
-                let defined = graph.inst(graph.def_inst(value)?)?;
-                let r2ssa::InstPayload::Op(r2ssa::SSAOp::Load { addr, .. }) = &defined.payload
-                else {
-                    return None;
-                };
-                let slot = prepared.folded_value(*addr)?;
-                Some((*instruction, self.program.import_at(slot)?))
-            }
-            _ => None,
+        let (r2ssa::SSAOp::Call {
+            instruction: Some(instruction),
+            ..
         }
+        | r2ssa::SSAOp::CallInd {
+            instruction: Some(instruction),
+            ..
+        }) = op
+        else {
+            return None;
+        };
+        let site = sites.iter().find(|site| site.instruction == *instruction)?;
+        Some((*instruction, self.program.name_at(site.target)?))
     }
 
     /// Addresses this body hands to a parameter a declaration calls a function.
@@ -2049,8 +2144,7 @@ impl Native<'_> {
                 let (Some(op), Some(id)) = (graph.op(inst), graph.op_for_inst(inst)) else {
                     continue;
                 };
-                let Some((instruction, callee)) = self.called_name(prepared.as_ref(), &sites, op)
-                else {
+                let Some((instruction, callee)) = self.called_name(&sites, op) else {
                     continue;
                 };
                 let Some(declared) = Declared::import(self.target, &callee) else {
@@ -2107,10 +2201,12 @@ pub(crate) fn decodes(disasm: &Disassembler, program: &dyn Program, at: u64) -> 
     if !program.region(at).is_some_and(|region| region.execute) {
         return false;
     }
-    let Some(mut fetch) = program.read(at, WINDOW) else {
+    let Some(window) = program.read(at, WINDOW) else {
         return false;
     };
-    let available = fetch.len();
+    let available = window.len();
+    let endian = disasm.arch_spec().memory_endianness;
+    let mut fetch = crate::stated::code(program.loader_writes(), at, window, endian).bytes;
     fetch.resize(WINDOW, 0);
     disasm
         .lift(&fetch, at)

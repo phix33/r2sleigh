@@ -334,9 +334,10 @@ impl Sealed {
         machine_context: SourceMachineContext,
         finish: super::Finish,
         control: &C,
-        prepare_entry_bytes: usize,
+        prepare_entry_bytes: Option<usize>,
     ) -> Result<super::SsaArtifact, SsaPrepareError> {
-        let prepared_bytes = r2il::allocation::live_bytes();
+        use r2il::allocation::{Evidence, grown, live_bytes};
+        let prepared_bytes = live_bytes();
         let (mut facts, liveness) =
             crate::semantic::PreparedFunctionFacts::collect_with_context_and_control(
                 crate::semantic::CollectionOver {
@@ -363,9 +364,9 @@ impl Sealed {
             "{:#x}/{} holds {} bytes after preparation: function+graph {} facts {}",
             self.ir.entry,
             self.ir.num_blocks(),
-            r2il::allocation::live_bytes().saturating_sub(prepare_entry_bytes),
-            prepared_bytes.saturating_sub(prepare_entry_bytes),
-            r2il::allocation::live_bytes().saturating_sub(prepared_bytes)
+            Evidence(grown(prepare_entry_bytes, live_bytes())),
+            Evidence(grown(prepare_entry_bytes, prepared_bytes)),
+            Evidence(grown(prepared_bytes, live_bytes()))
         );
         let crate::semantic::CollectedLiveness {
             live_out,

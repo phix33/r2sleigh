@@ -2242,9 +2242,6 @@ fn engine_plan_from_decompile_route_kind(kind: r2types::DecompileRouteKind) -> E
     match kind {
         r2types::DecompileRouteKind::Standard => EnginePlan::FastLocal,
         r2types::DecompileRouteKind::StructuredWorker => EnginePlan::SemanticStructured,
-        r2types::DecompileRouteKind::SummaryIslands
-        | r2types::DecompileRouteKind::LinearWorker
-        | r2types::DecompileRouteKind::VmSummary => EnginePlan::SemanticSummary,
         r2types::DecompileRouteKind::FallbackComment => EnginePlan::RefuseWithEvidence,
     }
 }
@@ -2555,10 +2552,7 @@ fn decompile_route_output_from_function_facts(
             .as_ref()
             .or(route.reason.as_ref())
             .cloned(),
-        r2types::DecompileRouteKind::LinearWorker
-        | r2types::DecompileRouteKind::SummaryIslands
-        | r2types::DecompileRouteKind::StructuredWorker
-        | r2types::DecompileRouteKind::VmSummary => function_facts
+        r2types::DecompileRouteKind::StructuredWorker => function_facts
             .decompile_fallback_comment()
             .map(str::to_string),
         r2types::DecompileRouteKind::Standard => None,

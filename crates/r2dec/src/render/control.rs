@@ -409,7 +409,9 @@ impl<'i> Writer<'_, 'i> {
                     .map(|stmt| self.observe(from, stmt))
                     .collect();
             }
-            return vec![self.trap(from, GapKind::TailTransferNotRendered)];
+            let resolution = self.input.callee_resolution();
+            let call = (self.values).and_then(|values| values.tail_gap(from, resolution));
+            return vec![self.trap(from, GapKind::TailTransferNotRendered(call))];
         }
         let mut out = self
             .values

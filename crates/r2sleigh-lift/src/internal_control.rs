@@ -6,17 +6,19 @@
 //! instruction. Those edges are not machine CFG edges. A local loop is replaced
 //! by what it computes where that is proven ([`unroll`] for loops every
 //! decision of which is a constant, [`scan`] for bit scans). Forward branches
-//! over speculatable value operations are converted to explicit value selects;
-//! unsupported local control becomes `Unimplemented` so downstream consumers
-//! refuse instead of inventing a CFG.
+//! become value selects and guarded accesses, innermost first ([`skips`]);
+//! one that cannot turns itself and all it guards into `Unimplemented`, so
+//! downstream consumers refuse instead of inventing a CFG.
 
 mod scan;
+mod skips;
 mod unroll;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 
 use r2il::{
-    BlockStop, BlockTransfer, BlockTransferKind, OpMetadata, R2ILBlock, R2ILOp, SpaceId, Varnode,
+    BlockStop, BlockTransfer, BlockTransferKind, MemoryOrdering, R2ILBlock, R2ILOp, SpaceId,
+    Varnode,
 };
 
 pub(crate) fn normalize_instruction_local_control(
@@ -41,60 +43,7 @@ pub(crate) fn normalize_instruction_local_control(
     // as they say, or is a bit scan, and computes a count. A loop that is
     // neither is left for the guard below.
     resolve_local_loops(block);
-    while let Some((branch_index, branch, target_index)) = block
-        .ops
-        .iter()
-        .enumerate()
-        .find_map(|(index, op)| local_branch(block, index, op))
-    {
-        if target_index <= branch_index || target_index > block.ops.len() {
-            block.ops[branch_index] = R2ILOp::Unimplemented;
-            continue;
-        }
-
-        match branch {
-            LocalBranch::Unconditional(_) => {
-                rewrite_unconditional_forward_branch(block, branch_index, target_index);
-            }
-            LocalBranch::Conditional { cond, .. } => {
-                // A predicated access is a guarded one, and the vocabulary
-                // spells that. Guarding it first is what lets the skip be
-                // rewritten at all: a load or a store cannot be speculated
-                // past, so the whole instruction became `Unimplemented` and
-                // every function containing a Thumb `it` block over a `ldr`
-                // or a `str` refused.
-                if guard_memory_in_range(block, branch_index, target_index, &cond) {
-                    continue;
-                }
-                if block.ops[branch_index + 1..target_index]
-                    .iter()
-                    .all(|op| op.is_speculatable_value() || is_guarded_memory(op))
-                {
-                    rewrite_conditional_forward_branch(block, branch_index, target_index, cond);
-                } else if predicated_transfer_to_next_instruction(block, branch_index, target_index)
-                {
-                    // ARM predicates a whole instruction, transfers included:
-                    // `bxeq lr` returns or falls through. The skip over it is
-                    // a machine edge to the next instruction, not local
-                    // control the lift has to speculate past.
-                    block.ops[branch_index] = R2ILOp::CBranch {
-                        cond,
-                        target: Varnode {
-                            space: SpaceId::Ram,
-                            offset: block.addr.wrapping_add(u64::from(block.size)),
-                            size: block.ops[branch_index..]
-                                .iter()
-                                .find_map(transfer_target_size)
-                                .unwrap_or(8),
-                        },
-                    };
-                    break;
-                } else {
-                    block.ops[branch_index] = R2ILOp::Unimplemented;
-                }
-            }
-        }
-    }
+    skips::normalize(block);
 }
 
 /// Replace an instruction's local loop with what it computes, where that is
@@ -651,25 +600,6 @@ impl LocalBranch {
     }
 }
 
-/// Whether this local skip jumps over the instruction's own transfer to its
-/// end -- what a predicated `bxeq lr` or `moveq pc, lr` is.
-///
-/// The skipped operations end in a transfer and nothing follows them, so the
-/// only outcome the skip selects is "do not transfer, go on to the next
-/// instruction". That is an ordinary machine edge, and spelling it as one is
-/// what keeps a predicated return from refusing the function.
-fn predicated_transfer_to_next_instruction(
-    block: &R2ILBlock,
-    branch_index: usize,
-    target_index: usize,
-) -> bool {
-    target_index == block.ops.len()
-        && block.size != 0
-        && block.ops[branch_index + 1..]
-            .iter()
-            .any(|op| transfer_target_size(op).is_some())
-}
-
 /// The width of the control value a transfer reads, where the operation is one.
 fn transfer_target_size(op: &R2ILOp) -> Option<u32> {
     match op {
@@ -724,291 +654,6 @@ fn relative_target_index(branch_index: usize, target: &Varnode) -> Option<usize>
     branch_index.checked_add_signed(isize::try_from(relative).ok()?)
 }
 
-fn rewrite_unconditional_forward_branch(
-    block: &mut R2ILBlock,
-    branch_index: usize,
-    target_index: usize,
-) {
-    let old_ops = std::mem::take(&mut block.ops);
-    let old_metadata = std::mem::take(&mut block.op_metadata);
-    let mut ops = Vec::with_capacity(old_ops.len().saturating_sub(target_index - branch_index));
-    let mut metadata = BTreeMap::new();
-
-    for (old_index, op) in old_ops.into_iter().enumerate() {
-        if old_index >= branch_index && old_index < target_index {
-            continue;
-        }
-        push_with_old_metadata(&mut ops, &mut metadata, op, &old_metadata, old_index);
-    }
-    block.ops = ops;
-    block.op_metadata = metadata;
-}
-
-fn rewrite_conditional_forward_branch(
-    block: &mut R2ILBlock,
-    branch_index: usize,
-    target_index: usize,
-    cond: Varnode,
-) {
-    let old_ops = std::mem::take(&mut block.ops);
-    let old_metadata = std::mem::take(&mut block.op_metadata);
-    let old_len = old_ops.len();
-    let mut allocator = InstructionTempAllocator::for_ops(&old_ops);
-    let mut ops = Vec::with_capacity(old_ops.len() + target_index - branch_index - 1);
-    let mut metadata = BTreeMap::new();
-    let mut live_at_target = HashSet::new();
-    for op in old_ops[target_index..].iter().rev() {
-        if let Some(output) = op.output() {
-            live_at_target.remove(output);
-        }
-        live_at_target.extend(op.inputs().into_iter().cloned());
-    }
-    let mut candidates = HashMap::<Varnode, Varnode>::new();
-    let mut preserved = Vec::<(Varnode, Varnode, usize)>::new();
-    let mut preserved_index = HashMap::<Varnode, usize>::new();
-
-    let emit_preserved = |ops: &mut Vec<R2ILOp>,
-                          metadata: &mut BTreeMap<usize, OpMetadata>,
-                          preserved: &[(Varnode, Varnode, usize)]| {
-        for (dst, candidate, old_index) in preserved {
-            push_with_old_metadata(
-                ops,
-                metadata,
-                R2ILOp::Select {
-                    dst: dst.clone(),
-                    cond: cond.clone(),
-                    if_true: dst.clone(),
-                    if_false: candidate.clone(),
-                },
-                &old_metadata,
-                *old_index,
-            );
-        }
-    };
-
-    for (old_index, mut op) in old_ops.into_iter().enumerate() {
-        if old_index == branch_index {
-            continue;
-        }
-        if old_index == target_index {
-            emit_preserved(&mut ops, &mut metadata, &preserved);
-        }
-        if old_index > branch_index && old_index < target_index {
-            for input in op.inputs_mut() {
-                if let Some(candidate) = candidates.get(input) {
-                    *input = candidate.clone();
-                }
-            }
-            // An access that already carries the guard needs no speculation:
-            // it performs its effect exactly where the machine does, and its
-            // destination keeps what it held when the guard does not hold,
-            // which is what the machine does too.
-            if is_guarded_memory(&op) {
-                push_with_old_metadata(&mut ops, &mut metadata, op, &old_metadata, old_index);
-                continue;
-            }
-            let Some(dst) = op.output().cloned() else {
-                push_unimplemented(&mut ops, &mut metadata, &old_metadata, old_index);
-                continue;
-            };
-            let Some(candidate) = allocator.allocate(dst.size) else {
-                push_unimplemented(&mut ops, &mut metadata, &old_metadata, old_index);
-                continue;
-            };
-            *op.output_mut()
-                .expect("speculatable value operation has output") = candidate.clone();
-            push_with_old_metadata(&mut ops, &mut metadata, op, &old_metadata, old_index);
-            candidates.insert(dst.clone(), candidate.clone());
-            if dst.space != SpaceId::Unique || live_at_target.contains(&dst) {
-                if let Some(index) = preserved_index.get(&dst).copied() {
-                    preserved[index] = (dst, candidate, old_index);
-                } else {
-                    preserved_index.insert(dst.clone(), preserved.len());
-                    preserved.push((dst, candidate, old_index));
-                }
-            }
-            continue;
-        }
-        push_with_old_metadata(&mut ops, &mut metadata, op, &old_metadata, old_index);
-    }
-    // No old operation visits `target_index` when the local label is one past
-    // the instruction. Emit the externally surviving definitions here.
-    if target_index == old_len {
-        emit_preserved(&mut ops, &mut metadata, &preserved);
-    }
-    block.ops = ops;
-    block.op_metadata = metadata;
-}
-
-/// Whether this access already states the condition it happens under.
-fn is_guarded_memory(op: &R2ILOp) -> bool {
-    matches!(op, R2ILOp::LoadGuarded { .. } | R2ILOp::StoreGuarded { .. })
-}
-
-/// Give every access a forward conditional branch skips the guard it runs
-/// under, so the skip becomes ordinary predication.
-///
-/// Returns whether anything was rewritten, in which case the caller looks for
-/// the branch again: the guard is an operation of its own and the indices have
-/// moved.
-fn guard_memory_in_range(
-    block: &mut R2ILBlock,
-    branch_index: usize,
-    target_index: usize,
-    cond: &Varnode,
-) -> bool {
-    let range = branch_index + 1..target_index;
-    let guarded = block.ops[range.clone()]
-        .iter()
-        .filter(|op| matches!(op, R2ILOp::Load { .. } | R2ILOp::Store { .. }))
-        .count();
-    if guarded == 0 {
-        return false;
-    }
-    // Only where everything else in the skip can be spoken for; otherwise the
-    // instruction is still beyond this and refusing is the honest answer.
-    if !block.ops[range.clone()].iter().all(|op| {
-        op.is_speculatable_value()
-            || is_guarded_memory(op)
-            || matches!(op, R2ILOp::Load { .. } | R2ILOp::Store { .. })
-    }) {
-        return false;
-    }
-    let mut allocator = InstructionTempAllocator::for_ops(&block.ops);
-    let Some(guard) = allocator.allocate(1) else {
-        return false;
-    };
-    // The branch skips the access when the condition holds, so the access
-    // happens when it does not.
-    // Each guarded read adds the copy that takes its value, so a skip spelled
-    // as a count of operations has to count those too. The guard itself goes
-    // before the branch and so leaves the distance alone.
-    let inserted = block.ops[range.clone()]
-        .iter()
-        .filter(|op| matches!(op, R2ILOp::Load { .. }))
-        .count();
-    let mut rewritten = Vec::with_capacity(block.ops.len() + guarded + 1);
-    let mut metadata = BTreeMap::new();
-    for (index, op) in block.ops.iter().enumerate() {
-        if index == branch_index {
-            push_with_old_metadata(
-                &mut rewritten,
-                &mut metadata,
-                R2ILOp::BoolNot {
-                    dst: guard.clone(),
-                    src: cond.clone(),
-                },
-                &block.op_metadata,
-                index,
-            );
-        }
-        if index == branch_index
-            && let R2ILOp::CBranch { target, cond } = op
-            && target.space == SpaceId::Const
-        {
-            push_with_old_metadata(
-                &mut rewritten,
-                &mut metadata,
-                R2ILOp::CBranch {
-                    target: Varnode {
-                        offset: target.offset.wrapping_add(inserted as u64),
-                        ..target.clone()
-                    },
-                    cond: cond.clone(),
-                },
-                &block.op_metadata,
-                index,
-            );
-            continue;
-        }
-        let guarded = match op {
-            // The read goes to a temporary and the destination takes it
-            // through an ordinary copy, because what the destination holds
-            // when the guard does not hold is what it held before -- and a
-            // guarded load writing the destination outright would claim
-            // otherwise. The copy is the one operation the skip rewrite
-            // speculates, and its select is exactly that claim.
-            R2ILOp::Load { dst, space, addr } => allocator.allocate(dst.size).map(|read| {
-                vec![
-                    R2ILOp::LoadGuarded {
-                        dst: read.clone(),
-                        space: *space,
-                        addr: addr.clone(),
-                        guard: guard.clone(),
-                        // A predicated access orders nothing; a machine that
-                        // wanted ordering spells a barrier beside it.
-                        ordering: r2il::MemoryOrdering::Relaxed,
-                    },
-                    R2ILOp::Copy {
-                        dst: dst.clone(),
-                        src: read,
-                    },
-                ]
-            }),
-            R2ILOp::Store { space, addr, val } => Some(vec![R2ILOp::StoreGuarded {
-                space: *space,
-                addr: addr.clone(),
-                val: val.clone(),
-                guard: guard.clone(),
-                ordering: r2il::MemoryOrdering::Relaxed,
-            }]),
-            _ => None,
-        };
-        match guarded.filter(|_| range.contains(&index)) {
-            Some(ops) => {
-                for op in ops {
-                    push_with_old_metadata(
-                        &mut rewritten,
-                        &mut metadata,
-                        op,
-                        &block.op_metadata,
-                        index,
-                    );
-                }
-            }
-            None => push_with_old_metadata(
-                &mut rewritten,
-                &mut metadata,
-                op.clone(),
-                &block.op_metadata,
-                index,
-            ),
-        }
-    }
-    block.ops = rewritten;
-    block.op_metadata = metadata;
-    true
-}
-
-fn push_unimplemented(
-    ops: &mut Vec<R2ILOp>,
-    metadata: &mut BTreeMap<usize, OpMetadata>,
-    old_metadata: &BTreeMap<usize, OpMetadata>,
-    old_index: usize,
-) {
-    push_with_old_metadata(
-        ops,
-        metadata,
-        R2ILOp::Unimplemented,
-        old_metadata,
-        old_index,
-    );
-}
-
-fn push_with_old_metadata(
-    ops: &mut Vec<R2ILOp>,
-    metadata: &mut BTreeMap<usize, OpMetadata>,
-    op: R2ILOp,
-    old_metadata: &BTreeMap<usize, OpMetadata>,
-    old_index: usize,
-) {
-    let new_index = ops.len();
-    ops.push(op);
-    if let Some(meta) = old_metadata.get(&old_index) {
-        metadata.insert(new_index, meta.clone());
-    }
-}
-
 struct InstructionTempAllocator {
     next: u64,
 }
@@ -1035,15 +680,8 @@ impl InstructionTempAllocator {
     }
 }
 
-/// Rewrite ARM's exclusive-access idioms into the linked load and conditional
-/// store they are.
-///
-/// Sleigh writes `ldrex` as a user operation that marks the monitor followed
-/// by an ordinary load, and `strex` as a user operation that tests the
-/// monitor, a branch over the store, and the store. Neither carries any
-/// semantics on its own, so a function using them refused whole -- and the
-/// branch, skipping a store rather than a value, could not be speculated past
-/// either. Both are exactly `LoadLinked` and `StoreConditional`.
+/// Rewrite the exclusive-access idioms, a monitor mark before a load and a
+/// monitor test skipping a store, into `LoadLinked` and `StoreConditional`.
 fn rewrite_exclusive_access(block: &mut R2ILBlock, names: &dyn Fn(u32) -> Option<String>) {
     fn user_op(
         block: &R2ILBlock,
@@ -1060,6 +698,7 @@ fn rewrite_exclusive_access(block: &mut R2ILBlock, names: &dyn Fn(u32) -> Option
         };
         Some((names(*userop)?, output.clone(), inputs.clone()))
     }
+    let mut rewrote = false;
     let mut at = 0;
     while at < block.ops.len() {
         let Some((name, output, inputs)) = user_op(block, at, names) else {
@@ -1067,23 +706,80 @@ fn rewrite_exclusive_access(block: &mut R2ILBlock, names: &dyn Fn(u32) -> Option
             continue;
         };
         let rewritten = match name.as_str() {
-            "ExclusiveAccess" => linked_load(block, at, &inputs),
+            "ExclusiveAccess" | "SetExclusiveMonitors" => linked_load(block, at, &inputs),
             "hasExclusiveAccess" => conditional_store(block, at, output.as_ref(), &inputs),
+            "ExclusiveMonitorPass" => monitored_store(block, at, output.as_ref(), &inputs, names),
             _ => None,
         };
         match rewritten {
             Some((span, ops)) => {
                 block.ops.splice(at..at + span, ops);
                 block.op_metadata = BTreeMap::new();
+                rewrote = true;
             }
             None => at += 1,
         }
     }
+    if rewrote {
+        absorb_ordering(block);
+    }
 }
 
-/// `ExclusiveAccess(addr); dst = LOAD [ram] addr` is `dst = LoadLinked(addr)`.
+/// An exclusive's acquire fence after its linked load, or release fence before its conditional
+/// store, is that access's ordering; without one it is Relaxed (`vendor/README.md`).
+fn absorb_ordering(block: &mut R2ILBlock) {
+    let position = |found: fn(&R2ILOp) -> bool| block.ops.iter().position(found);
+    let linked = position(|op| matches!(op, R2ILOp::LoadLinked { .. }));
+    let conditional = position(|op| matches!(op, R2ILOp::StoreConditional { .. }));
+    let fence = |range: std::ops::Range<usize>, wanted: MemoryOrdering| {
+        (range.start..range.end)
+            .find(|&at| matches!(block.ops[at], R2ILOp::Fence { ordering } if ordering == wanted))
+    };
+    // A pair's second load has no ordering of its own, so the fence after it stays.
+    let acquire = linked
+        .filter(|&at| {
+            !block.ops[at..]
+                .iter()
+                .any(|op| matches!(op, R2ILOp::Load { .. }))
+        })
+        .and_then(|at| Some((at, fence(at..block.ops.len(), MemoryOrdering::Acquire)?)));
+    let release = conditional.and_then(|at| Some((at, fence(0..at, MemoryOrdering::Release)?)));
+    let mut absorbed = Vec::with_capacity(2);
+    if let Some((at, fence)) = acquire
+        && let R2ILOp::LoadLinked { ordering, .. } = &mut block.ops[at]
+    {
+        *ordering = MemoryOrdering::Acquire;
+        absorbed.push(fence);
+    }
+    if let Some((at, fence)) = release {
+        let ok = block.ops[at].output().cloned();
+        for op in &mut block.ops[at..] {
+            match op {
+                R2ILOp::StoreConditional { ordering, .. } => *ordering = MemoryOrdering::Release,
+                R2ILOp::StoreGuarded {
+                    guard, ordering, ..
+                } if ok.as_ref().is_some_and(|ok| same(ok, guard)) => {
+                    *ordering = MemoryOrdering::Release;
+                }
+                _ => {}
+            }
+        }
+        absorbed.push(fence);
+    }
+    if absorbed.is_empty() {
+        return;
+    }
+    absorbed.sort_unstable();
+    for fence in absorbed.into_iter().rev() {
+        block.ops.remove(fence);
+    }
+    block.op_metadata = BTreeMap::new();
+}
+
+/// `mark(addr[, bytes]); dst = LOAD [ram] addr` is `dst = LoadLinked(addr)`, Relaxed until
+/// [`absorb_ordering`] reads its fence; a pair's second load stays a plain one.
 fn linked_load(block: &R2ILBlock, at: usize, inputs: &[Varnode]) -> Option<(usize, Vec<R2ILOp>)> {
-    let [addr] = inputs else {
+    let ([addr] | [addr, _]) = inputs else {
         return None;
     };
     let R2ILOp::Load {
@@ -1101,9 +797,7 @@ fn linked_load(block: &R2ILBlock, at: usize, inputs: &[Varnode]) -> Option<(usiz
                 dst: dst.clone(),
                 space: *space,
                 addr: addr.clone(),
-                // The bare exclusive load orders nothing; an acquiring one
-                // spells its barrier as a separate operation.
-                ordering: r2il::MemoryOrdering::Relaxed,
+                ordering: MemoryOrdering::Relaxed,
             }],
         )
     })
@@ -1179,7 +873,7 @@ fn conditional_store(
                 space: *space,
                 addr: addr.clone(),
                 val: val.clone(),
-                ordering: r2il::MemoryOrdering::Relaxed,
+                ordering: MemoryOrdering::Relaxed,
             },
             R2ILOp::BoolNot {
                 dst: not.clone(),
@@ -1193,6 +887,113 @@ fn conditional_store(
             },
         ],
     ))
+}
+
+/// AArch64's `ok = ExclusiveMonitorPass(addr); if (!ok) skip { stores }; status = ...Status()`
+/// is `ok = StoreConditional`, a pair's +8 store under `ok`, `status = !ok` (Arm ARM C6.2.350).
+fn monitored_store(
+    block: &R2ILBlock,
+    at: usize,
+    ok: Option<&Varnode>,
+    inputs: &[Varnode],
+    names: &dyn Fn(u32) -> Option<String>,
+) -> Option<(usize, Vec<R2ILOp>)> {
+    let ([addr] | [addr, _]) = inputs else {
+        return None;
+    };
+    let ok = ok?;
+    let R2ILOp::BoolNot {
+        dst: not,
+        src: tested,
+    } = block.ops.get(at + 1)?
+    else {
+        return None;
+    };
+    let skip = at + 2;
+    let (_, LocalBranch::Conditional { cond, .. }, done) =
+        local_branch(block, skip, block.ops.get(skip)?)?
+    else {
+        return None;
+    };
+    let reported = done.checked_sub(1).filter(|reported| *reported > skip)?;
+    let R2ILOp::CallOther {
+        userop,
+        output: Some(status),
+        inputs: none,
+    } = block.ops.get(reported)?
+    else {
+        return None;
+    };
+    if !(same(tested, ok)
+        && same(&cond, not)
+        && none.is_empty()
+        && status.size == not.size
+        && names(*userop).as_deref() == Some("ExclusiveMonitorsStatus"))
+    {
+        return None;
+    }
+    let guarded = &block.ops[skip + 1..reported];
+    // The temporaries the skip guarded now run either way, so nothing after it may read one.
+    let temporaries: Vec<&Varnode> = guarded.iter().filter_map(R2ILOp::output).collect();
+    let read_after = block.ops[done..]
+        .iter()
+        .flat_map(R2ILOp::inputs)
+        .any(|input| temporaries.iter().any(|written| same(written, input)));
+    if read_after {
+        return None;
+    }
+    let mut ops = stores_under(guarded, addr, ok)?;
+    ops.push(R2ILOp::BoolNot {
+        dst: not.clone(),
+        src: ok.clone(),
+    });
+    ops.push(R2ILOp::Copy {
+        dst: status.clone(),
+        src: not.clone(),
+    });
+    Some((done - at, ops))
+}
+
+/// The skipped run with its first store, which must be at `addr`, conditional and answering `ok`,
+/// and any later one guarded by `ok`; `None` where anything else but a temporary is under it.
+fn stores_under(guarded: &[R2ILOp], addr: &Varnode, ok: &Varnode) -> Option<Vec<R2ILOp>> {
+    let mut ops = Vec::with_capacity(guarded.len() + 2);
+    let mut linked = false;
+    for op in guarded {
+        match op {
+            R2ILOp::Store {
+                space,
+                addr: stored,
+                val,
+            } if !linked => {
+                if !same(stored, addr) {
+                    return None;
+                }
+                linked = true;
+                ops.push(R2ILOp::StoreConditional {
+                    result: Some(ok.clone()),
+                    space: *space,
+                    addr: addr.clone(),
+                    val: val.clone(),
+                    ordering: MemoryOrdering::Relaxed,
+                });
+            }
+            R2ILOp::Store { space, addr, val } => ops.push(R2ILOp::StoreGuarded {
+                space: *space,
+                addr: addr.clone(),
+                val: val.clone(),
+                guard: ok.clone(),
+                ordering: MemoryOrdering::Relaxed,
+            }),
+            op if op.is_speculatable_value()
+                && op.output().is_some_and(|dst| dst.space == SpaceId::Unique) =>
+            {
+                ops.push(op.clone());
+            }
+            _ => return None,
+        }
+    }
+    linked.then_some(ops)
 }
 
 #[cfg(test)]
@@ -1220,7 +1021,7 @@ mod tests {
                 target: Varnode::constant(2, 8),
                 cond: cond.clone(),
             },
-            R2ILOp::IntSDiv {
+            R2ILOp::IntAdd {
                 dst: result.clone(),
                 a: dividend,
                 b: divisor,

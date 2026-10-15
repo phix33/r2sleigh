@@ -1251,7 +1251,8 @@ mod tests {
         }
         let output = run_action_output(
             "x86-64",
-            "0fa2c3ffffffffffffffffffffffffffff",
+            // rdtsc: one user operation on every path, so its name is the bundle's to state.
+            "0f31c3ffffffffffffffffffffffffffff",
             "0x1000",
             InstructionAction::Lift,
             ExportFormat::Text,

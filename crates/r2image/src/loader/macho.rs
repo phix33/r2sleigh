@@ -11,8 +11,8 @@ use object::macho;
 use object::read::macho::{LoadCommandVariant, MachHeader};
 
 use r2abi::statement::{
-    Applies, Binding, ImportStub, LoaderWrite, Record, Relocation, RelocationSymbol, Visibility,
-    WriteKind,
+    Applies, Binding, Encoding, ImportStub, LoaderWrite, Record, Relocation, RelocationSymbol,
+    Visibility, WriteKind,
 };
 
 use super::written;
@@ -296,6 +296,7 @@ impl<'d> Macho<'d> {
                 place: record.vaddr,
                 width: record.width,
                 kind: self.kind(record),
+                encoding: Encoding::Word,
             })
             .collect();
         Read {
@@ -325,6 +326,7 @@ impl<'d> Macho<'d> {
             {
                 WriteKind::Import {
                     symbol: symbol.name.to_string(),
+                    library: None,
                 }
             }
             _ => WriteKind::Unknown,
@@ -755,6 +757,7 @@ impl<'d> Macho<'d> {
                 addend: None,
                 symbol: None,
                 applies: Applies::Unknown,
+                encoding: Encoding::Word,
             });
         }
     }
@@ -845,6 +848,7 @@ fn pointer_entry(vaddr: u64, entry: (u64, u32), width: u64, name: Option<String>
             None => Applies::Relative,
         },
         symbol: name.map(|name| Box::new(imported(&name, false))),
+        encoding: Encoding::Word,
     }
 }
 
@@ -953,6 +957,7 @@ impl Opcodes<'_> {
                 addend: None,
                 symbol: None,
                 applies: Applies::Relative,
+                encoding: Encoding::Word,
             },
             Stream::Bind | Stream::WeakBind | Stream::Lazy => {
                 let weak = self.kind == Stream::WeakBind;
@@ -968,6 +973,7 @@ impl Opcodes<'_> {
                     addend: Some(self.addend),
                     applies: Applies::SymbolPlusAddend,
                     symbol: symbol.map(Box::new),
+                    encoding: Encoding::Word,
                 }
             }
         }
@@ -1075,6 +1081,7 @@ impl Chain {
             addend: None,
             symbol: None,
             applies: Applies::Unknown,
+            encoding: Encoding::Word,
         };
         let import = |ordinal: u64| chained.imports.get(ordinal as usize);
         match self.fixup(word, chained.header) {

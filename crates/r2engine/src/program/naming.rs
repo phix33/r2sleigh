@@ -24,7 +24,7 @@ const fn binding_strength(binding: Binding) -> u8 {
         Binding::Global => 0,
         Binding::Weak => 1,
         Binding::Local => 2,
-        Binding::Other(_) => 3,
+        Binding::Unique | Binding::Other(_) | Binding::Unstated => 3,
     }
 }
 
@@ -65,9 +65,10 @@ pub fn of(source: &impl Source) -> NameDb {
                     SymbolKind::Function => Namespace::Symbol,
                     SymbolKind::Data => Namespace::Object,
                     // An untyped symbol names a place, not an object, which is the difference `loc.` carries.
-                    SymbolKind::Other | SymbolKind::File | SymbolKind::Mapping(_) => {
-                        Namespace::Label
-                    }
+                    SymbolKind::Other
+                    | SymbolKind::File
+                    | SymbolKind::Tls
+                    | SymbolKind::Mapping(_) => Namespace::Label,
                 },
                 size: symbol.size,
             },
@@ -271,17 +272,25 @@ pub fn name_slots(
             continue;
         }
         // As wide as the word the loader writes there.
-        let size = r2abi::statement::write_at(writes, *slot)
-            .filter(|write| write.place == *slot)
-            .map_or(0, |write| write.width);
-        db.insert(
-            *slot,
-            Name {
+        let write = r2abi::statement::write_at(writes, *slot).filter(|write| write.place == *slot);
+        let size = write.map_or(0, |write| write.width);
+        // A PE program calls through the slot itself, which radare2 names as the import, by its DLL.
+        let name = match write.map(|write| &write.kind) {
+            Some(r2abi::statement::WriteKind::Import {
+                library: Some(library),
+                ..
+            }) => Name {
+                text: format!("{library}_{symbol}").into(),
+                namespace: Namespace::Import,
+                size,
+            },
+            _ => Name {
                 text: symbol.as_str().into(),
                 namespace: Namespace::Reloc,
                 size,
             },
-        );
+        };
+        db.insert(*slot, name);
     }
 }
 
@@ -360,6 +369,8 @@ pub fn imports(source: &impl Source, decoder: &Disassembler, alignment: u32) -> 
         .sections
         .iter()
         .filter(|section| section.loaded && section.is_code() && section.vsize > 0)
+        // A stub is bytes the file holds; the loader's zero fill holds none.
+        .filter(|section| image.file_backed(section.vaddr, 1) > 0)
         .filter(|section| !declared(section))
         .collect();
     for section in decoded {
@@ -395,6 +406,10 @@ pub fn imports(source: &impl Source, decoder: &Disassembler, alignment: u32) -> 
 /// instruction that is none of those ends the question: the section holds
 /// the program's own code, and none of it is a stub. That costs the program's
 /// code sections one run each.
+/// The most instructions one stub runs: x86-64's PLT entry is 3, AArch64's 4, ARM's with its
+/// literal 4, a Mach-O `__stub_helper` header 4; four times that leaves room for padding.
+const STUB_INSTRUCTIONS: usize = 16;
+
 fn section_stubs(
     source: &impl Source,
     decoder: &Disassembler,
@@ -414,6 +429,8 @@ fn section_stubs(
     let mut transfers: Vec<u64> = Vec::new();
     // Whether any run left as linkage code leaves: through a loader word or within the section.
     let mut left = false;
+    // Whether a run has left through a loader word yet.
+    let mut through_word = false;
     // Where the section's own entries jump: the resolver they share, which no import's stub is.
     let mut entered = std::collections::BTreeSet::new();
     // Where each reader's run began, beside it in `readers`.
@@ -428,7 +445,9 @@ fn section_stubs(
         let Some(window) = source.read(pc, DECODE_WINDOW) else {
             break;
         };
-        let mut fetch = window;
+        let endian = decoder.arch_spec().memory_endianness;
+        let code = crate::stated::code(&container.loader_writes, pc, window, endian);
+        let mut fetch = code.bytes.clone();
         fetch.resize(DECODE_WINDOW, 0);
         // A word in a stub section that is not an instruction is the linker's
         // own data -- the offset an ARM stub adds, the padding before one --
@@ -449,7 +468,10 @@ fn section_stubs(
                 continue;
             }
         };
-        if chooses(&lifted.ops, section.vaddr..end, pc + u64::from(lifted.size)) {
+        // A stub's bytes are what the linker wrote; a field it left unstated is no stub's.
+        if code.unstated(&(pc..pc + u64::from(lifted.size)))
+            || chooses(&lifted.ops, section.vaddr..end, pc + u64::from(lifted.size))
+        {
             return None;
         }
         let leaves = lifted
@@ -470,6 +492,10 @@ fn section_stubs(
             }
             _ => None,
         }));
+        // No ABI's stub runs past a few instructions; a longer run is the program's own code.
+        if starts.len() >= STUB_INSTRUCTIONS {
+            return None;
+        }
         starts.push((pc, run.ops.len()));
         run.ops.extend(lifted.ops);
         run.size = (pc + u64::from(lifted.size) - run.addr) as u32;
@@ -490,6 +516,12 @@ fn section_stubs(
         if slot.is_some_and(|slot| container.loader_write_at(slot).is_none()) {
             return None;
         }
+        // A lazy entry's jump within the section follows a jump through a loader word (PLT0,
+        // `__stub_helper`'s header); code that jumps within itself first holds no linkage.
+        if direct && slot.is_none() && !through_word {
+            return None;
+        }
+        through_word |= slot.is_some();
         // Linkage is shown by a jump within the section or through a loader word; an unplaced
         // indirect jump (a tail call, a dispatch) shows nothing.
         left |= direct || slot.is_some();

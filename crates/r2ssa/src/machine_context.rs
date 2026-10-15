@@ -17,16 +17,16 @@ use crate::origin::BlockOrigins;
 pub use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
     SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceAbiClass,
-    SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceBoundaryReads,
-    SourceCallArgumentSpec, SourceCallEffect, SourceCallPreservedCarriers, SourceCallResult,
-    SourceCallSiteIdentity, SourceCallSiteInterface, SourceCallSiteInterfaceError,
-    SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature, SourceConventionSlots,
-    SourceFormatParameterRule, SourceFunctionInterface, SourceFunctionInterfaceError,
-    SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles, SourceMachineRolesError,
-    SourceOpaqueTag, SourceParameterLocation, SourceStackAllocationContract, SourceStackGrowth,
-    SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias,
-    SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
-    StackAddressBase,
+    SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceArity,
+    SourceBoundaryReads, SourceCallArgumentSpec, SourceCallEffect, SourceCallPreservedCarriers,
+    SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
+    SourceCallSiteInterfaceError, SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature,
+    SourceConventionSlots, SourceFormatParameterRule, SourceFunctionInterface,
+    SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles,
+    SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation,
+    SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec,
+    SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure, SourceTypeGraph,
+    SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind, StackAddressBase,
 };
 
 pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 27;
@@ -471,6 +471,8 @@ pub struct SourceMachineContext {
     callee_preserved: crate::function::CalleePreservedCarriers,
     /// Where the recovered result is unproven, the direct callees whose unstated result owns it.
     result_owners: BTreeSet<u64>,
+    /// Where the parameters are a floor, the direct callees whose stated arity could make them exact.
+    arity_owners: BTreeSet<u64>,
     /// Whether the result is unproven because the body writes both result registers.
     result_ambiguous: bool,
     /// How many arguments each callee whose result is unproven reads at least.
@@ -483,6 +485,8 @@ pub struct SourceMachineContext {
     tail_call_sites: BTreeSet<SourceCallSiteIdentity>,
     /// Who each raw call site calls, where the source knew.
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
+    /// The sealed import slot each `CallSlot` site calls through (audit W8).
+    slot_targets: BTreeMap<SourceCallSiteIdentity, u64>,
     /// The name the source gave each raw call site's callee.
     callee_names: BTreeMap<SourceCallSiteIdentity, String>,
     /// How far each callee is proven to touch through each pointer argument,
@@ -495,6 +499,8 @@ pub struct SourceMachineContext {
     callee_library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
     /// The callees a runtime model says re-enter their caller at its entry.
     reentering_callees: BTreeSet<u64>,
+    /// The imports this body calls whose declaration states no interface, and why.
+    unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
     /// The register saves the container's call-frame information states.
     frame_saves: Vec<r2source::SourceFrameSave>,
     /// The premises the engine grants its derivations (`r2engine::premises`).
@@ -869,6 +875,7 @@ impl SourceMachineContext {
                 .unwrap_or_default(),
             callee_preserved: BTreeMap::new(),
             result_owners: BTreeSet::new(),
+            arity_owners: BTreeSet::new(),
             result_ambiguous: false,
             callee_statements: BTreeMap::new(),
             call_effect,
@@ -876,10 +883,12 @@ impl SourceMachineContext {
             raw_call_sites,
             tail_call_sites,
             callee_linkages: BTreeMap::new(),
+            slot_targets: BTreeMap::new(),
             callee_names: BTreeMap::new(),
             callee_argument_reach: BTreeMap::new(),
             callee_library: BTreeMap::new(),
             reentering_callees: BTreeSet::new(),
+            unstated_imports: BTreeMap::new(),
             frame_saves: Vec::new(),
             accepted_premises: BTreeSet::new(),
             code_pointer_entries: BTreeMap::new(),
@@ -1069,6 +1078,16 @@ impl SourceMachineContext {
         self.result_owners = owners;
     }
 
+    /// The direct callees whose stated arity could make this function's exact, where recovery left
+    /// its parameters a floor.
+    pub const fn arity_owners(&self) -> &BTreeSet<u64> {
+        &self.arity_owners
+    }
+
+    pub(crate) fn set_arity_owners(&mut self, owners: BTreeSet<u64>) {
+        self.arity_owners = owners;
+    }
+
     /// Whether recovery left the result unproven because the body writes both result registers,
     /// which what the program's calls read can decide (doc/adr-resolved-bodies.md, "Caller reads").
     pub const fn result_ambiguous(&self) -> bool {
@@ -1210,6 +1229,15 @@ impl SourceMachineContext {
         self.reentering_callees.contains(&target)
     }
 
+    pub(crate) fn set_unstated_imports(&mut self, imports: BTreeMap<u64, crate::UnstatedImport>) {
+        self.unstated_imports = imports;
+    }
+
+    /// Why the import at `target` states no interface, where it is one that states none.
+    pub(crate) fn unstated_import(&self, target: u64) -> Option<crate::UnstatedImport> {
+        self.unstated_imports.get(&target).copied()
+    }
+
     /// The library model of the import at `target`, where the engine named one.
     pub(crate) fn callee_library(
         &self,
@@ -1279,6 +1307,15 @@ impl SourceMachineContext {
     /// The name the source gave the site's callee, where it gave one.
     pub fn callee_name(&self, identity: SourceCallSiteIdentity) -> Option<&str> {
         self.callee_names.get(&identity).map(String::as_str)
+    }
+
+    pub(crate) fn set_slot_targets(&mut self, slots: BTreeMap<SourceCallSiteIdentity, u64>) {
+        self.slot_targets = slots;
+    }
+
+    /// The sealed import slot a call through memory reaches, where the source states one.
+    pub(crate) fn slot_target(&self, identity: SourceCallSiteIdentity) -> Option<u64> {
+        self.slot_targets.get(&identity).copied()
     }
 
     /// Who the site calls, as the source's symbol or relocation said; unknown where it said nothing.
@@ -1503,10 +1540,20 @@ pub fn terminal_indirect_loaded_slot(
     if branch_op_index + 1 != block.ops.len() {
         return None;
     }
-    let R2ILOp::BranchInd { target } = block.ops.get(branch_op_index)? else {
+    let R2ILOp::BranchInd { .. } = block.ops.get(branch_op_index)? else {
         return None;
     };
-    BlockOrigins::upto(block, branch_op_index)
+    loaded_target_slot(block, branch_op_index)
+}
+
+/// The canonical RAM slot an indirect call or branch at `op_index` loads its target from, as the
+/// block's own origins show it: the one reader of `call [slot]` and `jmp [slot]` (audit W8, D3).
+pub fn loaded_target_slot(block: &R2ILBlock, op_index: usize) -> Option<CanonicalStorageId> {
+    let (R2ILOp::CallInd { target } | R2ILOp::BranchInd { target }) = block.ops.get(op_index)?
+    else {
+        return None;
+    };
+    BlockOrigins::upto(block, op_index)
         .of(target)?
         .loaded_slot()
 }
@@ -3000,9 +3047,9 @@ mod tests {
 /// What a callee's body states when it mints no call contract (doc/adr-resolved-bodies.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) struct CalleeStatement {
-    /// The register parameters its body itself proves it reads.
-    pub(crate) at_least: usize,
-    /// Its result, where the body proves it and only the parameters are a floor.
+    /// The arguments its body proves it takes, a floor where a slot past them may be read.
+    pub(crate) arity: crate::SourceArity,
+    /// Its result, where the body proves it: an unproven result leaves an exact arity exact.
     pub(crate) result: Option<crate::SourceCallResult>,
 }
 
@@ -3014,19 +3061,13 @@ impl CalleeStatement {
     ) -> BTreeMap<u64, Self> {
         let unproven = interfaces.iter().filter(|(_, interface)| {
             interface.return_kind() == crate::SourceFunctionReturn::Unproven
-                || interface.reads_past_parameters()
+                || !interface.arity().is_exact()
         });
-        let registers = |interface: &crate::SourceFunctionInterface| {
-            let parameters = interface.parameters().iter();
-            parameters
-                .filter(|parameter| parameter.register_storage().is_some())
-                .count()
-        };
         let statements = unproven.map(|(address, interface)| {
             (
                 *address,
                 Self {
-                    at_least: registers(interface),
+                    arity: interface.arity(),
                     result: match interface.return_kind() {
                         crate::SourceFunctionReturn::Void => Some(crate::SourceCallResult::Void),
                         crate::SourceFunctionReturn::Register { storage } => {

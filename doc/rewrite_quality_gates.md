@@ -53,6 +53,8 @@ Reading failures
 
 - **machete / udeps**: check whether the dependency is really unused.
 - **Dylint**: warnings are reported by default because known debt remains;
+  CI fails when their count rises above
+  `tools/dylints/r2sleigh_lints/warning-baseline.txt` (lower it when it falls);
   use `--strict-dylint` on a cleaned slice. A strict failure usually means
   semantic storage or address facts are classified by string prefix instead of
   a typed contract.

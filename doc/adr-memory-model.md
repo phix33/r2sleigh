@@ -126,7 +126,7 @@ function, table and graph), the machine projection and render structures
 (MM.8), compact identities (MM.7). Then the fixed cost (MM.4, 29.8 MB) and
 the allocator's collect (MM.9). The facts only sealing reads (MM.3) are
 5.3 MB of memory SSA at the render peak, and dropping them needs the
-analysis and its sealing as one query: conditional. The ROADMAP (step 8.9)
+analysis and its sealing as one query: conditional. ROADMAP item MM
 orders them.
 
 ## Gates

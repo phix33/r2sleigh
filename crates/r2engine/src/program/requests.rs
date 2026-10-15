@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::{OpenProgram, ProgramInputs, Source, SymbolKind, View};
+use super::{OpenProgram, ProgramInputs, Source, View};
 use crate::discovery::{Basis, Confidence, Discovered};
 use crate::isolation::isolated;
 use crate::native::{NativeRefusal, Prepared};
@@ -174,15 +174,38 @@ pub struct Rendering {
     pub unread: Vec<crate::native::Unread>,
     /// The function's source language, as the container states it (LP0).
     pub language: r2abi::statement::SourceLanguage,
+    /// Why nothing was analysed to render, where nothing was: the response is then that record's
+    /// comment alone (ROADMAP D29).
+    pub refused: Option<NativeRefusal>,
 }
 
 impl Rendering {
+    /// The record of a function the engine refused to analyse or render, under its name.
+    pub(super) fn refused(
+        name: &str,
+        entry: u64,
+        language: r2abi::statement::SourceLanguage,
+        refusal: NativeRefusal,
+    ) -> Self {
+        let comment = crate::artifact_guard_fallback_comment(name, &refusal.to_string());
+        Self {
+            response: RenderedResponse {
+                output: crate::EngineRendering::Listing(comment),
+                obligation_ledger: None,
+                premises: std::collections::BTreeSet::new(),
+            },
+            definition: r2dec::rendered_name_of(Some(name), entry),
+            unread: Vec::new(),
+            language,
+            refused: Some(refusal),
+        }
+    }
+
     /// The rendering as one object a tool reads: `pddj`.
     ///
     /// `name` is the program's name for the function at `entry`.
     pub fn answer(&self, name: &str, entry: u64) -> crate::RenderedFunctionJson {
-        let definition = self.definition.clone();
-        crate::RenderedFunctionJson::of(&self.response, name, entry, definition, self.language)
+        crate::RenderedFunctionJson::of(self, name, entry)
     }
 }
 
@@ -190,6 +213,8 @@ impl Rendering {
 #[derive(Debug)]
 pub(super) struct Survey {
     functions: Vec<Discovered>,
+    /// Addresses stated or reached as functions that hold no code the file backs (audit W29).
+    placeless: BTreeMap<u64, Confidence>,
     walked: BTreeMap<u64, Result<bool, NativeRefusal>>,
     /// Each walked body's blocks and their bytes, as the walk traced them.
     extents: BTreeMap<u64, crate::body::TraceExtent>,
@@ -316,9 +341,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             super::analysis::Sealing::Refused { response, .. } => {
                 return Ok(Err(Box::new((*response).clone())));
             }
-            super::analysis::Sealing::Unanalysed => {
-                return Err("the function has no analysis to seal".to_owned());
-            }
+            super::analysis::Sealing::Unanalysed(refusal) => return Err(refusal.to_string()),
         };
         let refused = |panicked: crate::isolation::Panicked| {
             let name = prepared.name();
@@ -328,24 +351,39 @@ impl<S: Source + 'static> OpenProgram<S> {
         Ok(isolated(|| read(&sealed)).map_err(refused))
     }
 
-    /// One function rendered.
+    /// One function rendered, or the record of why it was not; an address nothing maps names no
+    /// function, so it is the request's error.
     pub fn rendered(&mut self, entry: u64) -> Result<Rendering, String> {
         self.start_request();
-        self.loaded()?;
-        self.assembled()?;
         let key = self.analysis_key(entry);
         let render = self.db.get::<super::analysis::Rendered>(&key);
         let render = render.map_err(|cycle| format!("{cycle:?}"))?;
-        let drawn = render.0.as_ref().map_err(Clone::clone)?;
-        Ok(Rendering::clone(&drawn.rendering))
+        let rendering = &render.0.rendering;
+        match &rendering.refused {
+            Some(refusal) if refusal.names_no_function() => Err(refusal.to_string()),
+            _ => Ok(Rendering::clone(rendering)),
+        }
     }
 
-    /// What one function is, read off the sealed analysis every rendering draws from.
+    /// What one function is, read off the sealed analysis every rendering draws from; where the
+    /// analysis refused, what the plain walk shows and the record (ROADMAP D29).
     pub fn function_info(&mut self, entry: u64) -> Result<super::info::FunctionInfo, String> {
         self.start_request();
-        let prepared = self.prepare(entry)?;
-        let artifact = prepared.artifact().artifact();
         let noreturn = (!self.comes_back(entry)).then(|| self.view().exit_premises(entry));
+        let prepared = match self.analysed(entry) {
+            Ok(prepared) => prepared,
+            // A stop is the request's, and an address nothing maps names no function.
+            Err(refusal) if refusal.stopped() || refusal.names_no_function() => {
+                return Err(refusal.to_string());
+            }
+            Err(refusal) => {
+                let graph = self.graph_of(entry).ok();
+                let blocks = graph.as_ref().map_or(&[][..], |graph| &graph.blocks);
+                let info = super::info::FunctionInfo::refused(entry, blocks, noreturn, refusal);
+                return Ok(info);
+            }
+        };
+        let artifact = prepared.artifact().artifact();
         let read = |sealed: &SealedFunctionAnalysis| {
             super::info::FunctionInfo::read(entry, artifact, sealed.facts(), noreturn)
         };
@@ -406,6 +444,11 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// O(body + lines): one walk, which the listing already makes.
     pub fn function_graph(&mut self, entry: u64) -> Result<FunctionGraph, String> {
         self.start_request();
+        self.graph_of(entry)
+    }
+
+    /// One function's graph, within a request already started.
+    fn graph_of(&self, entry: u64) -> Result<FunctionGraph, String> {
         let (listing, shape) = self.listed_body(entry)?;
         let starts = shape
             .blocks
@@ -506,8 +549,23 @@ impl<S: Source + 'static> OpenProgram<S> {
         entry: u64,
         reason: NativeRefusal,
     ) -> Result<(FunctionListing, Shape), String> {
-        let body = crate::body::lift_body(entry, target.disasm, self, &BTreeMap::new())
-            .map_err(|error| NativeRefusal::Body(error).to_string())?;
+        let body = match crate::body::lift_body(entry, target.disasm, self, &BTreeMap::new()) {
+            Ok(body) => body,
+            Err(error) => {
+                let reason = NativeRefusal::Body(error);
+                if reason.names_no_function() {
+                    return Err(reason.to_string());
+                }
+                let listing = FunctionListing {
+                    lines: Answer::complete(Vec::new()),
+                    refused: Some(AnalysisRefused {
+                        reason,
+                        unresolved: Vec::new(),
+                    }),
+                };
+                return Ok((listing, shape_of(std::iter::empty(), std::iter::empty())));
+            }
+        };
         let unresolved = body
             .unresolved
             .iter()
@@ -551,6 +609,13 @@ impl<S: Source + 'static> OpenProgram<S> {
     pub fn functions(&mut self) -> Result<Vec<Discovered>, String> {
         self.start_request();
         Ok(self.surveyed()?.functions.clone())
+    }
+
+    /// Every address the container states or a body reaches as a function that holds no code
+    /// the file backs, with the strongest reason given, in address order; none is a function.
+    pub fn placeless_starts(&mut self) -> Result<BTreeMap<u64, Confidence>, String> {
+        self.start_request();
+        Ok(self.surveyed()?.placeless.clone())
     }
 
     /// The entries of every believed body whose walk decoded this address as
@@ -797,9 +862,14 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
         // Discovery decides each body's instruction set itself, so it reads no modes.
         let view = View::new(db, false);
         let seeds = stated_functions(&view);
+        let stated = Confidence::of(Basis::Stated);
+        let mut placeless = (view.stated_starts().placeless())
+            .map(|vaddr| (vaddr, stated.clone()))
+            .collect::<BTreeMap<_, _>>();
         if seeds.is_empty() {
             return Ok(Surveyed(Arc::new(Survey {
                 functions: Vec::new(),
+                placeless,
                 walked: BTreeMap::new(),
                 extents: BTreeMap::new(),
                 supervisor: BTreeMap::new(),
@@ -810,6 +880,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
         let walker = super::returns::Walking::new(view.clone(), true)?;
         let found = crate::discovery::functions(&view, seeds, &walker);
         db.deposit::<super::returns::ComesBack>(found.returns);
+        for (vaddr, confidence) in found.placeless {
+            placeless.entry(vaddr).or_insert(confidence);
+        }
         let extents = found
             .walks
             .iter()
@@ -842,6 +915,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
             .collect();
         Ok(Surveyed(Arc::new(Survey {
             functions: found.functions,
+            placeless,
             walked,
             extents,
             supervisor,
@@ -886,33 +960,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Modes {
 
 /// Where the program states a function begins, and whether it states the code there is Thumb.
 fn stated_functions<S: Source + 'static>(view: &View<'_, S>) -> Vec<(u64, Confidence, bool)> {
-    let container = view.source().container();
-    let imports = view.imports();
-    // Each frame the call-frame information states begins a function, which survives a strip
-    // (ROADMAP I); one in a section of linkage code, or holding a stub, is the stub table's.
-    let linkage = view.linkage();
-    let frames = (container.unwind.frames())
-        .filter(|frame| !linkage.holds(frame.start))
-        .filter(|frame| {
-            imports
-                .range(frame.start..frame.end.max(frame.start + 1))
-                .next()
-                .is_none()
-        })
-        .map(|frame| (frame.start, view.thumb_at(frame.start)));
-    container
-        .entries
-        .iter()
-        .map(|entry| (entry.vaddr, entry.thumb))
-        .chain(
-            container
-                .symbols
-                .iter()
-                .filter(|symbol| symbol.defined && symbol.kind == SymbolKind::Function)
-                .map(|symbol| (symbol.vaddr, symbol.thumb)),
-        )
-        .chain(imports.keys().map(|vaddr| (*vaddr, false)))
-        .chain(frames)
+    let stated = view.stated_starts().iter();
+    stated
         .map(|(vaddr, thumb)| (vaddr, Confidence::of(Basis::Stated), thumb))
         .collect()
 }

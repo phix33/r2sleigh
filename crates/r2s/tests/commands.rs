@@ -155,7 +155,7 @@ fn aa_refuses_a_machine_it_cannot_decode() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(!run.ok, "{}", run.out);
     assert!(
-        run.out.contains("no architecture mapping for S390"),
+        run.out.contains("this build decodes no s390x code"),
         "{}",
         run.out
     );
@@ -487,18 +487,28 @@ fn the_staged_pipeline_keeps_register_classes_and_tail_calls() {
     assert!(!call_store.contains("r2sleigh_residual"), "{call_store}");
 }
 
-/// An indirect call goes through its target value, cast to the function type its classes state:
-/// `_init` calls `__gmon_start__` through the pointer it loads, where one is linked.
+/// `_init`'s call through the `__gmon_start__` pointer is a residual naming whom and why, never
+/// `((uint64_t(*)(void))rax_1)()`: no arity from the registers written (audit D3, M3).
 #[test]
-fn a_staged_indirect_call_goes_through_its_target_value() {
+fn an_indirect_call_nothing_describes_is_a_residual() {
     let staged = r2s("pdd @ 0x401000");
+    assert!(!staged.out.contains("(*)("), "{}", staged.out);
     assert!(
-        staged
-            .out
-            .contains("((uint64_t(*)(void))(uint64_t)rax_1)();"),
+        staged.out.contains(
+            "r2dec gap: CallNotRendered at 0x401014:4 covering 1 op (render::values): call to an \
+             indirect target: no arity is stated, only the registers written before it */"
+        ),
         "{}",
         staged.out
     );
+    let answer: serde_json::Value =
+        serde_json::from_str(r2s("pddj @ 0x401000").out.trim()).expect("pddj is JSON");
+    let residuals = answer["residuals"].as_array().expect("residuals");
+    let call = (residuals.iter())
+        .find(|residual| residual["gap"] == "CallNotRendered")
+        .expect("the call's gap");
+    assert_eq!(call["callee"], "indirect", "{call}");
+    assert_eq!(call["reason"], "count-from-registers", "{call}");
 }
 
 /// siphash24's tail switch dispatches through a table on `len & 7`, a value only the elided
@@ -555,7 +565,7 @@ fn a_staged_ledger_elides_what_the_certificates_elide() {
     assert!(
         staged
             .out
-            .contains("22 source obligations: 12 rendered, 10 elided, 0 refused;"),
+            .contains("22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual;"),
         "{}",
         staged.out
     );
@@ -630,7 +640,8 @@ fn a_staged_tail_call_returns_its_callee_s_result() {
 }
 
 /// A staged control residual says why in `pddj` (an untargeted `jmp rax`, an unproven return),
-/// and the proof counts no residual the text does not hold.
+/// and the proof counts no residual the text does not hold. `__do_global_dtors_aux`'s calls to
+/// floors past their floor are gaps beside its unproven returns (audit W7).
 #[test]
 fn a_staged_control_residual_states_its_cause() {
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g");
@@ -647,9 +658,13 @@ fn a_staged_control_residual_states_its_cause() {
             serde_json::from_str(staged.out.trim()).expect("pddj is JSON");
         let residuals = answer["residuals"].as_array().expect("residuals");
         assert!(!residuals.is_empty(), "{function}: {answer}");
-        for residual in residuals {
-            assert_eq!(residual["cause"], cause, "{function}: {residual}");
-            assert_eq!(residual["gap"].as_str(), gap, "{function}: {residual}");
+        let stated = |residual: &&serde_json::Value| {
+            residual["cause"] == cause && residual["gap"].as_str() == gap
+        };
+        assert!(residuals.iter().any(|r| stated(&r)), "{function}: {answer}");
+        for residual in residuals.iter().filter(|r| !stated(r)) {
+            assert_eq!(residual["cause"], "gap", "{function}: {residual}");
+            assert!(residual["gap"].is_string(), "{function}: {residual}");
         }
     }
 }
@@ -858,7 +873,7 @@ fn a_patch_is_discovered_again_in_the_same_session() {
 /// The import table is *decoded*: which address is a linkage stub, and which
 /// import it stands for, comes from lifting the stub and following the slot it
 /// reads. So does the set of addresses a body walk may not run past, because
-/// `is_entry` answers from that same table. Deriving it once and holding it
+/// the stated starts `is_entry` reads include it. Deriving it once and holding it
 /// meant a patched stub left the walk bounded by a function that was no longer
 /// there -- a wrong body, reported as a clean one.
 #[test]
@@ -917,11 +932,24 @@ fn a_write_where_nothing_is_mapped_is_refused() {
     assert!(!run.ok, "{}", run.out);
 }
 
+/// A directory is said to be one, not reported as the OS error reading it gave (audit D14).
+#[test]
+fn a_directory_is_no_binary() {
+    let run = on(fixture().parent().expect("a directory").to_owned(), "i");
+    assert!(!run.ok, "{}", run.out);
+    assert!(
+        run.out.contains("is a directory, not a binary"),
+        "{}",
+        run.out
+    );
+    assert!(!run.out.contains("os error"), "{}", run.out);
+}
+
 #[test]
 fn the_image_reports_what_the_container_states() {
     let run = r2s("i");
     assert!(run.ok, "{}", run.out);
-    assert!(run.out.contains("Elf"), "{}", run.out);
+    assert!(run.out.contains("format   elf64\n"), "{}", run.out);
     assert!(run.out.contains("x86"), "{}", run.out);
     // The fixture is C, which its compile units state (LP0), spelled as radare2 does.
     assert!(run.out.contains("lang     c\n"), "{}", run.out);
@@ -1147,7 +1175,7 @@ mod listing {
 /// An aarch64 Mach-O whose dispatcher calls through a table of function
 /// pointers, which is the shape the engine has to derive for itself.
 mod dispatch_table {
-    use super::{Run, common, on};
+    use super::{Run, on};
     use std::path::PathBuf;
 
     fn fixture() -> PathBuf {
@@ -1168,40 +1196,15 @@ mod dispatch_table {
         assert!(!run.out.contains("= X1_0;"), "{}", run.out);
     }
 
+    /// A call through a table entry no prototype describes is shown unproven, never cast to the
+    /// arity the caller's registers suggest (audit D3); the entries' common prototype is SM's.
     #[test]
-    fn a_call_through_a_table_renders_as_a_call_through_a_pointer() {
+    fn a_call_through_a_table_is_shown_unproven() {
         let run = r2s("s 0x100000420; pdd");
         assert!(run.ok, "{}", run.out);
-        // The dispatcher loads an entry and calls it. Spelling that as a
-        // function-pointer call is the proof the target came from the table
-        // rather than from a guess.
         assert!(run.out.contains("_table_dispatch("), "{}", run.out);
-        // The entry loaded from the table is cast to a two-argument function and called with two.
-        let call = run
-            .out
-            .lines()
-            .find(|line| line.contains("(*)(") && line.trim_end().ends_with(");"))
-            .unwrap_or_else(|| panic!("no call through a pointer: {}", run.out));
-        let pointer = call.split_once("(*)(").map_or("", |(_, rest)| rest);
-        let parameters = pointer.split_once(')').map_or("", |(list, _)| list);
-        assert_eq!(parameters.split(", ").count(), 2, "{call}");
-        let open = call.rfind(")(").map_or(0, |at| at + 1);
-        let arguments = common::arguments_at(call, open);
-        assert_eq!(arguments.len(), 2, "{call}");
-        // The first argument is x0 on entry: the first parameter, through its spill and the loop.
-        let parameters = common::parameter_names(&run.out);
-        assert_eq!(parameters.len(), 2, "{}", run.out);
-        assert!(
-            common::starts_from(&run.out, &arguments[0], &parameters[0]),
-            "{} does not start from {}: {}",
-            arguments[0],
-            parameters[0],
-            run.out
-        );
-        assert!(
-            !common::starts_from(&run.out, &arguments[1], &parameters[0]),
-            "{call}"
-        );
+        assert!(!run.out.contains("(*)("), "{}", run.out);
+        assert!(run.out.contains("CallNotRendered"), "{}", run.out);
         assert!(run.out.contains("0 refused"), "{}", run.out);
     }
 
@@ -1482,4 +1485,58 @@ fn help_lists_the_verbs_dispatch_runs_and_each_answers_its_own_usage() {
     assert!(r2s("q?").out.contains("aliases: quit exit"));
     let unknown = r2s("zz");
     assert!(!unknown.ok);
+}
+
+/// A reader that stops reading ends the shell as SIGPIPE ends radare2 (status 141), with no
+/// panic: printing past a closed pipe used to exit 101 (audit W52).
+#[test]
+fn a_closed_pipe_ends_the_shell_quietly() {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_r2s"))
+        // Twenty listings, past any pipe's buffer, so a write meets the closed end.
+        .args(["-q", "-c", &["pd 20000"; 20].join(";")])
+        .arg(fixture())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the shell runs");
+    let mut first = [0; 64];
+    let mut stdout = child.stdout.take().expect("piped");
+    stdout.read_exact(&mut first).expect("the listing starts");
+    drop(stdout);
+    let done = child.wait_with_output().expect("the shell is waited for");
+    let stderr = String::from_utf8_lossy(&done.stderr);
+    assert_eq!(done.status.code(), Some(141), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+/// A reader gone between prompts ends the shell when the prompt is flushed, not at the next line.
+#[test]
+fn a_pipe_closed_between_prompts_ends_the_shell_at_the_prompt() {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_r2s"))
+        .arg(fixture())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the shell runs");
+    let mut stdout = child.stdout.take().expect("piped");
+    let mut seen = Vec::new();
+    while !seen.ends_with(b"]> ") {
+        let mut byte = [0];
+        stdout
+            .read_exact(&mut byte)
+            .expect("the first prompt is printed");
+        seen.push(byte[0]);
+    }
+    drop(stdout);
+    let mut stdin = child.stdin.take().expect("piped");
+    stdin.write_all(b"\n").expect("the shell reads");
+    drop(stdin);
+    let done = child.wait_with_output().expect("the shell is waited for");
+    let stderr = String::from_utf8_lossy(&done.stderr);
+    assert_eq!(done.status.code(), Some(141), "{stderr}");
 }

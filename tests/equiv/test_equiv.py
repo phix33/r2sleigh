@@ -260,11 +260,13 @@ class AnswerStatusTests(unittest.TestCase):
 
 class RatchetTests(unittest.TestCase):
     BASELINE = {
-        "schema": 1,
+        "schema": 2,
         "records": {
             "a::gcc-O0::f": {"status": "equal"},
-            "a::gcc-O0::g": {"status": "differs", "cause": "D9: printf arguments dropped"},
-            "a::gcc-O0::h": {"status": "refused", "cause": "P4: -O0 switch"},
+            "a::gcc-O0::g": {"status": "differs", "owner": "P7", "site": "crates/r2dec/src",
+                             "cause": "The printf call drops its stack-passed arguments."},
+            "a::gcc-O0::h": {"status": "refused", "owner": "P4", "site": "crates/r2ssa/src",
+                             "cause": "The -O0 switch table refuses on its unbounded index."},
         },
     }
 
@@ -334,6 +336,71 @@ class RatchetTests(unittest.TestCase):
         self.assertEqual(gate.ratchet(baseline, now),
                          ["a::gcc-O0::g: baseline status differs has no recorded cause"])
 
+    def test_a_cause_that_describes_nothing_blocks(self):
+        # Audit T20: a placeholder, an owner the plan does not name, or a site
+        # that is no path in the repository is no recorded cause.
+        now = {"a::gcc-O0::f": "equal", "a::gcc-O0::g": "differs", "a::gcc-O0::h": "refused"}
+        for change, problem in (
+                ({"cause": "[r2dec render gap] A counted residual is reached; not yet triaged "
+                           "per function."}, "has a placeholder cause"),
+                ({"cause": "known"}, "has a placeholder cause"),
+                ({"owner": "#122"}, "names an owner that is no ROADMAP.md item: '#122'"),
+                ({"owner": None}, "names an owner that is no ROADMAP.md item: None"),
+                ({"site": "crates/r2dec/src/fold/op_lower"}, "names a site that is no path"),
+                ({"site": "../elsewhere"}, "names a site that is no path")):
+            baseline = json.loads(json.dumps(self.BASELINE))
+            baseline["records"]["a::gcc-O0::g"].update(change)
+            problems = gate.ratchet(baseline, now)
+            self.assertEqual(len(problems), 1, (change, problems))
+            self.assertIn(problem, problems[0])
+
+    def test_owners_are_the_items_the_roadmap_names(self):
+        items = gate.roadmap_items()
+        self.assertTrue({"GT", "P7", "PE", "LS"} <= items, items)
+        self.assertNotIn("D30", items)
+
+    def test_a_residual_trap_compares_what_it_compared_before(self):
+        # Audit T1: a record cannot silently go back to comparing nothing.
+        baseline = json.loads(json.dumps(self.BASELINE))
+        baseline["records"]["a::gcc-O0::g"].update(
+            status="residual-trap", reason="r2sleigh_residual_u64 unproven-return",
+            compared="memory")
+        trap = ("residual-trap", "r2sleigh_residual_u64 unproven-return")
+        now = {"a::gcc-O0::f": "equal", "a::gcc-O0::g": (*trap, "memory"),
+               "a::gcc-O0::h": "refused"}
+        self.assertEqual(gate.ratchet(baseline, now), [])
+        now["a::gcc-O0::g"] = (*trap, "output")
+        self.assertEqual(gate.ratchet(baseline, now),
+                         ["a::gcc-O0::g: compares output before its residual traps "
+                          "(baseline: memory)"])
+        del baseline["records"]["a::gcc-O0::g"]["compared"]
+        self.assertIn("(baseline: None)", gate.ratchet(baseline, now)[0])
+
+    def test_a_record_holds_the_least_any_trapping_vector_compared(self):
+        def compared(trap_compared, trap_memory):
+            counts = {"residual-trap": 3, "trap_compared": trap_compared,
+                      "trap_memory": trap_memory}
+            return gate.trap_comparison("residual-trap", counts)
+        self.assertEqual(compared(3, 3), "memory")
+        self.assertEqual(compared(3, 2), "output")
+        self.assertEqual(compared(2, 2), "none")
+
+    def test_a_bless_keeps_a_cause_only_for_the_same_reason(self):
+        trap = gate.Record("a::gcc-O0::g", "g", 0, "residual-trap",
+                           evidence={"helper": "r2sleigh_residual_u64",
+                                     "residual_cause": "unproven-return"},
+                           vectors={"residual-trap": 3, "trap_compared": 3, "trap_memory": 3})
+        previous = json.loads(json.dumps(self.BASELINE))
+        previous["records"]["a::gcc-O0::g"].update(
+            status="residual-trap", reason="r2sleigh_residual_u64 unproven-return")
+        entry = gate.baseline_from([trap], previous)["records"]["a::gcc-O0::g"]
+        self.assertEqual((entry["owner"], entry["site"], entry["compared"]),
+                         ("P7", "crates/r2dec/src", "memory"))
+        trap.evidence["residual_cause"] = "gap:TermNotSpelled"
+        entry = gate.baseline_from([trap], previous)["records"]["a::gcc-O0::g"]
+        self.assertEqual((entry["cause"], entry["owner"], entry["site"], entry["reason"]),
+                         (None, None, None, "r2sleigh_residual_u64 gap:TermNotSpelled"))
+
 
 class ClassifyTests(unittest.TestCase):
     """How a vector's runs become a status, without running anything."""
@@ -370,6 +437,7 @@ class ClassifyTests(unittest.TestCase):
 
         def status(o0, residual=1, helpers=self.HELPERS):
             line = self.line(0, o0=o0, pairs={(0, 2): False})
+            line["pairs"][1]["pre_trap"] = {"stdout": True, "stderr": True, "memory": True}
             return gate.classify([line], [], residual, helpers)[0]
 
         self.assertEqual(status(trap(0x1108)), "residual-trap")
@@ -377,6 +445,75 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(status(trap(0x1108, "/y/O0.so")), "differs")
         self.assertEqual(status(trap(0x1120)), "differs")  # past the helper's end
         self.assertEqual(status({**trap(0x1108), "status": 11}), "differs")  # SIGSEGV
+
+    SITES = gate.residual_sites([
+        {"site": 1, "type": "s32", "cause": "unproven-return", "gap": None, "line": 4},
+        {"site": 2, "type": "s32", "cause": "gap", "gap": "TermNotSpelled", "line": 6}])
+
+    def trapped(self, index, site=1, depth="outermost", original="return", snapshot=True,
+                **pre_trap):
+        """A vector whose -O0 run trapped in a residual helper at ``site``."""
+        o0 = {"run": 2, "outcome": "signal", "status": 4, "fault_object": "/x/O0.so",
+              "fault_pc": hex(0x7F0000001108), "fault_base": "0x7f0000000000",
+              "trap_site": site, "trap_depth": depth}
+        line = self.line(index, original=original, o0=o0, pairs={(0, 2): False})
+        primary = next(p for p in line["pairs"] if (p["a"], p["b"]) == (0, 2))
+        primary["field"] = "exit"
+        if snapshot:
+            primary["pre_trap"] = {"stdout": True, "stderr": True, "memory": True, **pre_trap}
+        return line
+
+    def grade_traps(self, *lines, min_graded=1):
+        return gate.classify(list(lines), [], 1, self.HELPERS, min_graded, self.SITES)
+
+    WRONG_GLOBAL = {"memory": False, "field": "memory", "address": "0x404028",
+                    "a_bytes": "0e", "b_bytes": "0d"}
+
+    def test_state_before_a_returned_residual_is_the_original_s_end(self):
+        status, evidence, counts = self.grade_traps(self.trapped(0, **self.WRONG_GLOBAL))
+        self.assertEqual((status, evidence["field"], evidence["address"]),
+                         ("differs", "memory", "0x404028"))
+        self.assertEqual(gate.reason(status, evidence), "state before the residual trap memory")
+        status, evidence, counts = self.grade_traps(self.trapped(0), self.trapped(1))
+        self.assertEqual((status, counts["compared"], counts["trap_memory"]),
+                         ("residual-trap", 2, 2))
+        self.assertEqual(gate.reason(status, evidence), "r2sleigh_residual_s32 unproven-return")
+        self.assertEqual(gate.trap_comparison(status, counts), "memory")
+
+    def test_memory_is_compared_only_where_the_trap_is_the_original_s_end(self):
+        # A residual inside the body, one in an inner activation, one whose
+        # depth the runtime could not tell, and one where the original exited.
+        for line in (self.trapped(0, site=2, **self.WRONG_GLOBAL),
+                     self.trapped(0, site=7, **self.WRONG_GLOBAL),
+                     self.trapped(0, depth="nested", **self.WRONG_GLOBAL),
+                     self.trapped(0, depth="unknown", **self.WRONG_GLOBAL),
+                     self.trapped(0, original="exit", **self.WRONG_GLOBAL)):
+            status, _, counts = self.grade_traps(line)
+            self.assertEqual((status, counts["trap_compared"], counts["trap_memory"]),
+                             ("residual-trap", 1, 0), line)
+            self.assertEqual(gate.trap_comparison(status, counts), "output")
+        _, evidence, _ = self.grade_traps(self.trapped(0, site=2))
+        self.assertEqual(gate.reason("residual-trap", evidence),
+                         "r2sleigh_residual_s32 gap:TermNotSpelled")
+
+    def test_output_before_any_residual_is_a_prefix_of_the_original_s(self):
+        for stream in ("stdout", "stderr"):
+            status, evidence, _ = self.grade_traps(self.trapped(0, site=2, **{stream: False}))
+            self.assertEqual((status, evidence["field"]), ("differs", stream))
+
+    def test_a_defect_only_where_it_traps_is_found(self):
+        status, evidence, counts = self.grade_traps(
+            self.line(0), self.line(1), self.trapped(2, **self.WRONG_GLOBAL))
+        self.assertEqual((status, evidence["vector"], counts["equal"]), ("differs", 2, 2))
+
+    def test_a_trap_with_no_state_to_compare_rests_on_nothing(self):
+        status, evidence, counts = self.grade_traps(self.trapped(0, snapshot=False),
+                                                    self.trapped(1, snapshot=False))
+        self.assertEqual((status, counts["graded"], counts["compared"]), ("untested", 2, 0))
+        self.assertIn("0 of 2 graded vectors were compared", evidence["cause"])
+        status, _, counts = self.grade_traps(self.line(0), self.trapped(1, snapshot=False))
+        self.assertEqual((status, counts["compared"]), ("residual-trap", 1))
+        self.assertEqual(gate.trap_comparison(status, counts), "none")
 
     def test_a_build_that_runs_out_of_time_is_slow_not_undefined_or_wrong(self):
         timeout = {"run": 2, "outcome": "timeout"}
@@ -705,7 +842,7 @@ class _PipelineCases(_OnTarget):
     original is never equal.
     """
 
-    FUNCTIONS = 19  # eighteen functions and main, per level
+    FUNCTIONS = 22  # twenty-one functions and main, per level
 
     def run_gate(self, tmp: Path, *extra: str, **env: str) -> tuple[int, dict]:
         # --out is given relative to the working directory, as a person types
@@ -740,7 +877,7 @@ class _PipelineCases(_OnTarget):
         got = {k: r["status"] for k, r in records.items()}
         want = {k: self.known(k.rsplit("::", 1)[1]) for k in records}
         self.assertEqual(got, want)
-        self.assertEqual(sum(s == "equal" for s in got.values()), 2 * 16)
+        self.assertEqual(sum(s == "equal" for s in got.values()), 2 * 17)
         configs = {key.split("::")[1] for key in records}
         self.assertEqual(configs, {self.TARGET.config("gcc", opt) for opt in ("O0", "O2")})
 
@@ -774,9 +911,17 @@ class _PipelineCases(_OnTarget):
                                         STUB_R2S_FAULTS="")
             clamp = next(r for k, r in first.items() if k.endswith("gcc-O2::st_clamp"))
             baseline = tmp / "baseline.json"
-            baseline.write_text(json.dumps({"schema": 1, "records": {
-                k: {"status": r["status"], "cause": "known" if r["status"] != "equal" else None}
+            cause = {"owner": "GT", "site": "tests/equiv/selftest.py",
+                     "cause": "The self-test rendering for this function is known to end so."}
+            baseline.write_text(json.dumps({"schema": 2, "records": {
+                k: {"status": r["status"],
+                    "compared": gate.trap_comparison(r["status"], r["vectors"]),
+                    **(cause if r["status"] != "equal" else {})}
                 for k, r in first.items()}}))
+            # The baseline holds the first run, so the crash is the one departure.
+            self.assertEqual(gate.ratchet(json.loads(baseline.read_text()), {
+                k: (r["status"], None, gate.trap_comparison(r["status"], r["vectors"]))
+                for k, r in first.items()}), [])
             code, records = self.run_gate(
                 tmp / "second", "--opts", "O2", "--baseline", str(baseline),
                 STUB_R2S_MODE="fixture", STUB_R2S_FAULTS=f"abort@{clamp['address'][2:]}")

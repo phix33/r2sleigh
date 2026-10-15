@@ -127,6 +127,10 @@ class DeclarationTests(unittest.TestCase):
     def test_a_goto_is_not_a_declaration(self) -> None:
         self.assertIsNone(gate.DECLARATION.match("    goto L2;"))
 
+    def test_a_block_scope_extern_is_not_a_declaration(self) -> None:
+        # The object is defined elsewhere and assigned there (rv_O0g's `g_table`).
+        self.assertIsNone(gate.DECLARATION.match("        extern int32_t g_table;"))
+
     def test_a_declaration_is_one(self) -> None:
         self.assertEqual(
             gate.DECLARATION.match("        const int8_t* name;").group(1), "name"
@@ -170,6 +174,39 @@ class ProofAccountingTests(unittest.TestCase):
     def test_a_residual_is_no_unassigned_read(self) -> None:
         self.assertEqual(gate.uncertified_reads(lines(RESIDUALS)), "")
 
+
+
+
+class EnumerationTests(unittest.TestCase):
+    def test_a_function_of_no_blocks_is_counted_not_graded(self) -> None:
+        listing = '[{"addr": 0, "name": "fcn.00000000", "nbbs": 0}, {"addr": 4096, "name": "main", "nbbs": 3}]'
+        original = gate.run
+        gate.run = lambda argv, timeout: (listing, "")
+        try:
+            self.assertEqual(gate.functions("r2s", "bin", 1), ([(4096, "main")], 1, ""))
+        finally:
+            gate.run = original
+
+    def test_a_file_is_graded_where_r2s_opens_it(self) -> None:
+        self.assertTrue(gate.opens("true", "a.out"))
+        self.assertFalse(gate.opens("false", "a.s"))
+
+    def test_a_binary_analysis_could_not_list_fails_the_gate(self) -> None:
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ("a", "b"):
+                Path(directory, name).write_bytes(b"")
+            listed = {"a": ([], 0, "timeout"), "b": ([(4096, "main")], 0, "")}
+            argv = ["certify", "--no-build", "--r2s", "r2s", "--bins", directory]
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(gate, "opens", lambda r2s, path: True), \
+                    mock.patch.object(gate, "functions",
+                                      lambda r2s, binary, timeout: listed[Path(binary).name]), \
+                    mock.patch.object(gate, "lint", lambda *_: {"rendered": 1}), \
+                    mock.patch.object(gate, "arity", lambda *_: {}):
+                self.assertEqual(gate.main(), 1)
 
 if __name__ == "__main__":
     unittest.main()

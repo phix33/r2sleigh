@@ -121,7 +121,7 @@ struct PhaseRecorder {
     who: String,
     blocks: usize,
     since: std::time::Instant,
-    bytes: usize,
+    bytes: Option<usize>,
 }
 
 impl PhaseRecorder {
@@ -136,11 +136,7 @@ impl PhaseRecorder {
             },
             blocks: function.num_blocks(),
             since: std::time::Instant::now(),
-            bytes: if tracing {
-                r2il::allocation::live_bytes()
-            } else {
-                0
-            },
+            bytes: tracing.then(r2il::allocation::live_bytes).flatten(),
         }
     }
 
@@ -149,7 +145,7 @@ impl PhaseRecorder {
             return;
         }
         let live = r2il::allocation::live_bytes();
-        let grew = live.saturating_sub(self.bytes);
+        let grew = r2il::allocation::Evidence(r2il::allocation::grown(self.bytes, live));
         let spent = self.since.elapsed();
         self.bytes = live;
         self.since = std::time::Instant::now();

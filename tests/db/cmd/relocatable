@@ -1,0 +1,46 @@
+# An x86-64 relocatable object: each record at its placed section, spelled as radare2 lists ET_REL
+# relocations (crates/r2image/tests/data/relocated.py writes the fixture).
+
+NAME=relocatable object records
+FILE=crates/r2image/tests/data/relocated.elf
+CMDS=ir
+EXPECT=<<EOF
+vaddr      paddr      type   ntype name
+----------------------------------------
+0x08000041 0x00000041 ADD_32 4     ext - 0x08000045
+0x08000046 0x00000046 ADD_32 4     g - 0x0800004a
+0x0800004d 0x0000004d ADD_32 2     .data - 0x08000049
+0x08000054 0x00000054 ADD_32 42    ext - 0x08000058
+0x0800005a 0x0000005a ADD_32 2     counter - 0x0800005e
+0x08000060 0x00000060 ADD_64 1     g
+0x08000090 0x00000090 ADD_32 2     .text - 0x08000090
+0x080000a4 0x000000a4 ADD_32 2     .text - 0x08000085
+0x080000b8 0x000000b8 ADD_32 2     ext - 0x080000b8
+EOF
+RUN
+
+# Each frame starts where its pc_begin relocation resolves: f and g, and no function at a raw
+# .eh_frame offset; the FDE against the undefined `ext` is refused.
+NAME=relocatable object functions
+FILE=crates/r2image/tests/data/relocated.elf
+CMDS=aa; afl
+EXPECT=<<EOF
+0x08000040    1     31 sym.f
+0x0800005f    1      1 sym.g
+EOF
+RUN
+
+# Each field decodes as the value its relocation states: the import through its stub, the local
+# function, the data, the table slot and the .bss object; never the next instruction.
+NAME=relocatable object listing
+FILE=crates/r2image/tests/data/relocated.elf
+CMDS=pdf @ sym.f
+EXPECT=<<EOF
+            0x08000040      e8bb0f0000     call 0x8001000 ; sym.imp.ext: arguments unproven (certified)
+            0x08000045      e815000000     call sym.g ; sym.g() (certified)
+            0x0800004a      488d3d1700..   lea rdi, [0x8000068] ; "*" (certified)
+            0x08000051      488b05b00f..   mov rax, qword [0x8001008]
+            0x08000058      8b053a050000   mov eax, dword [obj.counter] ; [0x8000598:4]=0x0 (decoded)
+            0x0800005e      c3             ret ; returns rax (certified)
+EOF
+RUN

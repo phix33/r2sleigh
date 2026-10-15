@@ -125,6 +125,27 @@ NOINL int st_pong(const struct st_node *n);
 NOINL int st_ping(const struct st_node *n) { return n ? 1 + 2 * st_pong(n->next) : 0; }
 NOINL int st_pong(const struct st_node *n) { return n ? 3 + 5 * st_ping(n->next) : 0; }
 
+/* Mutually recursive with st_tpong's call in tail position, so -O2 makes it a
+ * jump: the program reaches st_tping's entry with the rendering's call as the
+ * return address, a recursion through the program and not a delegation. */
+NOINL uint64_t st_tpong(uint64_t d, uint64_t a);
+NOINL uint64_t st_tping(uint64_t d, uint64_t a)
+{
+    return d & 7 ? 7 * st_tpong((d & 7) - 1, a + d) : a ^ 0x55;
+}
+NOINL uint64_t st_tpong(uint64_t d, uint64_t a) { return d ? st_tping(d - 1, a * 3 + 1) : a; }
+
+/* Counts its list into st_counter after recursing, so an inner activation's
+ * return comes before the outer activations' writes. */
+NOINL int st_rcount(const struct st_node *n)
+{
+    if (!n)
+        return 0;
+    int r = st_rcount(n->next) + 1;
+    st_counter += 1;
+    return r;
+}
+
 /* Calls into libm, which only the original's DT_NEEDED brings in. */
 NOINL double st_cosine(double x) { return cos(x) * 2.0; }
 
@@ -139,5 +160,6 @@ int main(void)
         + (int)st_len("x") + st_sum_list(&a) + buf[0] + (int)st_many(1, 2, 3, 4, 5, 6, 7, 8)
         + (int)st_many_fp(1, 2, 3, 4, 5, 6, 7, 8, 9) + (int)st_many_int(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
         + st_say(3) + st_first("x")
-        + (int)st_cosine(0.5) + st_rsum(&a) + st_ping(&a);
+        + (int)st_cosine(0.5) + st_rsum(&a) + st_ping(&a) + st_rcount(&a)
+        + (int)st_tping(5, 1);
 }

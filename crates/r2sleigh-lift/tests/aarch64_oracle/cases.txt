@@ -1,0 +1,409 @@
+# name | flags | asm (; separated)   flags: P=x9,x10 pointer  I=x11 small index  F=fp lanes  B=branch(TGT)  E=cas-equal mem  N=x regs small  A=writes addresses computed from the code
+add_lsl0|-|add x0, x1, x2
+add_lsl7|-|add x0, x1, x2, lsl #7
+add_lsr33|-|add x0, x1, x2, lsr #33
+add_asr63|-|add x0, x1, x2, asr #63
+add_w_lsl31|-|add w0, w1, w2, lsl #31
+add_w_asr5|-|add w0, w1, w2, asr #5
+add_uxtb2|-|add x0, x1, w2, uxtb #2
+add_uxth|-|add x0, x1, w2, uxth
+add_uxtw4|-|add x0, x1, w2, uxtw #4
+add_sxtb|-|add x0, x1, w2, sxtb
+add_sxth1|-|add x0, x1, w2, sxth #1
+add_sxtw3|-|add x0, x1, w2, sxtw #3
+add_sxtx|-|add x0, x1, x2, sxtx #2
+add_uxtx|-|add x0, x1, x2, uxtx #4
+add_w_uxtb1|-|add w0, w1, w2, uxtb #1
+add_w_sxth|-|add w0, w1, w2, sxth
+add_imm|-|add x0, x1, #0xfff
+add_imm12|-|add x0, x1, #0x123, lsl #12
+add_w_imm|-|add w0, w1, #0x801
+sub_lsl|-|sub x0, x1, x2, lsl #3
+sub_lsr|-|sub w0, w1, w2, lsr #30
+sub_asr|-|sub x0, x1, x2, asr #1
+sub_sxtw|-|sub x0, x1, w2, sxtw #1
+sub_uxtb|-|sub w0, w1, w2, uxtb
+sub_imm12|-|sub x0, x1, #0xabc, lsl #12
+adds_x|-|adds x0, x1, x2
+adds_w|-|adds w0, w1, w2
+adds_asr|-|adds x0, x1, x2, asr #17
+adds_lsl_w|-|adds w0, w1, w2, lsl #4
+adds_sxtw|-|adds x0, x1, w2, sxtw #2
+adds_uxtb_w|-|adds w0, w1, w2, uxtb #3
+adds_imm|-|adds x0, x1, #1
+adds_w_imm|-|adds w0, w1, #0xfff
+subs_x|-|subs x0, x1, x2
+subs_w|-|subs w0, w1, w2
+subs_lsr|-|subs x0, x1, x2, lsr #9
+subs_w_asr|-|subs w0, w1, w2, asr #31
+subs_uxth|-|subs x0, x1, w2, uxth #1
+subs_sxtb_w|-|subs w0, w1, w2, sxtb
+subs_imm_w|-|subs w0, w1, #0x7ff
+subs_imm12|-|subs x0, x1, #0x1, lsl #12
+cmp_x|-|cmp x1, x2
+cmp_w0|-|cmp w1, #0
+cmn_w|-|cmn w1, w2
+cmn_x_imm|-|cmn x1, #5
+tst_imm|-|tst x1, #0xff00
+tst_w_lsl|-|tst w1, w2, lsl #4
+ands_ror|-|ands x0, x1, x2, ror #13
+ands_imm|-|ands x0, x1, #0xf0f0f0f0f0f0f0f0
+bics_w|-|bics w0, w1, w2
+adc_x|-|adc x0, x1, x2
+adcs_x|-|adcs x0, x1, x2
+adcs_w|-|adcs w0, w1, w2
+sbc_x|-|sbc x0, x1, x2
+sbcs_x|-|sbcs x0, x1, x2
+sbcs_w|-|sbcs w0, w1, w2
+negs_x|-|negs x0, x2
+ngcs_w|-|ngcs w0, w2
+neg_w_lsl|-|neg w0, w1, lsl #3
+csel_eq|-|csel x0, x1, x2, eq
+csel_ne|-|csel x0, x1, x2, ne
+csel_hs|-|csel x0, x1, x2, hs
+csel_lo|-|csel x0, x1, x2, lo
+csel_mi|-|csel x0, x1, x2, mi
+csel_pl|-|csel x0, x1, x2, pl
+csel_vs|-|csel x0, x1, x2, vs
+csel_vc|-|csel x0, x1, x2, vc
+csel_hi|-|csel x0, x1, x2, hi
+csel_ls|-|csel x0, x1, x2, ls
+csel_ge|-|csel x0, x1, x2, ge
+csel_lt|-|csel x0, x1, x2, lt
+csel_gt|-|csel x0, x1, x2, gt
+csel_le|-|csel x0, x1, x2, le
+csel_al|-|.inst 0x9a82e020
+csel_nv|-|.inst 0x9a82f020
+csel_w|-|csel w0, w1, w2, hi
+csinc_w|-|csinc w0, w1, w2, gt
+csinc_x|-|csinc x0, x1, x2, vs
+csneg_x|-|csneg x0, x1, x2, le
+csneg_w|-|csneg w0, w1, w2, lo
+csinv_x|-|csinv x0, x1, x2, hi
+cset_w|-|cset w0, ge
+csetm_x|-|csetm x0, lt
+cinc_x|-|cinc x0, x1, mi
+ccmp_x_ne|-|ccmp x1, x2, #5, ne
+ccmp_w_imm|-|ccmp w1, #17, #0xa, gt
+ccmp_x_ls|-|ccmp x1, x2, #0, ls
+ccmp_w_reg|-|ccmp w1, w2, #0xf, vs
+ccmn_x|-|ccmn x1, x2, #3, hs
+ccmn_w_imm|-|ccmn w1, #31, #12, vs
+ccmn_x_lt|-|ccmn x1, x2, #9, lt
+ubfx_x|-|ubfx x0, x1, #7, #13
+ubfx_w|-|ubfx w0, w1, #31, #1
+ubfx_x63|-|ubfx x0, x1, #1, #63
+sbfx_x|-|sbfx x0, x1, #60, #4
+sbfx_w|-|sbfx w0, w1, #3, #17
+bfi_x|-|bfi x0, x1, #13, #21
+bfi_w|-|bfi w0, w1, #28, #4
+bfxil_x|-|bfxil x0, x1, #5, #40
+bfxil_w|-|bfxil w0, w1, #0, #31
+bfc_x|-|bfc x0, #3, #50
+extr_x|-|extr x0, x1, x2, #17
+extr_w|-|extr w0, w1, w2, #31
+ror_x|-|ror x0, x1, #5
+sbfiz_x|-|sbfiz x0, x1, #3, #10
+ubfiz_w|-|ubfiz w0, w1, #4, #28
+sxtb_x|-|sxtb x0, w1
+sxth_w|-|sxth w0, w1
+sxtw_x|-|sxtw x0, w1
+uxtb_w|-|uxtb w0, w1
+lsl_x63|-|lsl x0, x1, #63
+lsr_w31|-|lsr w0, w1, #31
+asr_x1|-|asr x0, x1, #1
+lslv_x|-|lsl x0, x1, x2
+lsrv_w|-|lsr w0, w1, w2
+asrv_x|-|asr x0, x1, x2
+asrv_w|-|asr w0, w1, w2
+rorv_w|-|ror w0, w1, w2
+rorv_x|-|ror x0, x1, x2
+orn_w|-|orn w0, w1, w2, lsr #3
+eon_x|-|eon x0, x1, x2, ror #63
+bic_x|-|bic x0, x1, x2, asr #2
+eor_w_imm|-|eor w0, w1, #0xff
+orr_imm|-|orr x0, xzr, #0x5555555555555555
+mvn_x|-|mvn x0, x1
+movk_x|-|movk x0, #0xbeef, lsl #48
+movk_w|-|movk w0, #0xbeef, lsl #16
+movn_w|-|movn w0, #5
+movn_x|-|movn x0, #5, lsl #32
+clz_x|-|clz x0, x1
+clz_w|-|clz w0, w1
+cls_x|-|cls x0, x1
+cls_w|-|cls w0, w1
+rbit_x|-|rbit x0, x1
+rbit_w|-|rbit w0, w1
+rev_x|-|rev x0, x1
+rev_w|-|rev w0, w1
+rev16_x|-|rev16 x0, x1
+rev16_w|-|rev16 w0, w1
+rev32_x|-|rev32 x0, x1
+madd_x|-|madd x0, x1, x2, x3
+madd_w|-|madd w0, w1, w2, w3
+msub_x|-|msub x0, x1, x2, x3
+msub_w|-|msub w0, w1, w2, w3
+mneg_x|-|mneg x0, x1, x2
+smulh_x|-|smulh x0, x1, x2
+umulh_x|-|umulh x0, x1, x2
+smaddl_x|-|smaddl x0, w1, w2, x3
+umsubl_x|-|umsubl x0, w1, w2, x3
+smull_x|-|smull x0, w1, w2
+umull_x|-|umull x0, w1, w2
+sdiv_x|-|sdiv x0, x1, x2
+sdiv_w|-|sdiv w0, w1, w2
+udiv_x|-|udiv x0, x1, x2
+udiv_w|-|udiv w0, w1, w2
+crc32b|-|crc32b w0, w1, w2
+crc32cx|-|crc32cx w0, w1, x2
+mrs_nzcv|-|mrs x0, nzcv
+msr_nzcv|-|msr nzcv, x1
+ldr_pre|P|ldr x0, [x9, #8]!
+ldr_post|P|ldr x0, [x9], #-16
+ldr_w_reg_lsl|PI|ldr w0, [x9, x11, lsl #2]
+ldr_sxtw3|PJ|ldr x0, [x9, w11, sxtw #3]
+ldr_uxtw|PU|ldr x0, [x9, w11, uxtw]
+ldr_imm|P|ldr x0, [x9, #4088]
+ldrsw_pre|P|ldrsw x0, [x9, #-4]!
+ldrsb_post|P|ldrsb w0, [x9], #1
+ldrsb_x|P|ldrsb x0, [x9, #3]
+ldrsh_reg|PI|ldrsh x0, [x9, x11]
+ldrb_sxtw|PJ|ldrb w0, [x9, w11, sxtw]
+ldrh_lsl|PI|ldrh w0, [x9, x11, lsl #1]
+ldur_x|P|ldur x0, [x9, #-3]
+ldp_pre|P|ldp x0, x1, [x9, #16]!
+ldp_post|P|ldp x0, x1, [x9], #-32
+ldp_w|P|ldp w0, w1, [x9, #-8]
+ldpsw_x|P|ldpsw x0, x1, [x9, #8]
+stp_pre|P|stp x0, x1, [x9, #-16]!
+stp_w_post|P|stp w0, w1, [x9], #24
+stp_x|P|stp x0, x1, [x9, #8]
+str_pre|P|str x0, [x9, #8]!
+str_w_post|P|str w0, [x9], #-4
+str_reg_lsl|PI|str x0, [x9, x11, lsl #3]
+strb_uxtw|PU|strb w0, [x9, w11, uxtw]
+strh_lsl|PI|strh w0, [x9, x11, lsl #1]
+stur_w|P|stur w0, [x9, #5]
+str_xzr|P|str xzr, [x9, #16]
+ldr_q_pre|P|ldr q0, [x9, #16]!
+str_q_post|P|str q1, [x9], #32
+ldp_q_pre|P|ldp q0, q1, [x9, #-32]!
+stp_q|P|stp q2, q3, [x9, #32]
+ldr_d_reg|PI|ldr d0, [x9, x11, lsl #3]
+ldr_s|P|ldr s0, [x9, #4]
+ldr_b|P|ldr b0, [x9, #1]
+str_h|P|str h1, [x9, #2]
+adrp|A|adrp x0, _oracle_mem@PAGE
+adr_fwd|A|adr x0, . + 0x7fc
+adr_back|A|adr x0, . - 0x1001
+tbz_37|B|tbz x1, #37, TGT
+tbnz_3|B|tbnz w1, #3, TGT
+tbz_63|B|tbz x1, #63, TGT
+cbz_x|B|cbz x1, TGT
+cbz_w|B|cbz w1, TGT
+cbnz_w|B|cbnz w1, TGT
+cbnz_x|B|cbnz x1, TGT
+bcond_hi|B|b.hi TGT
+bcond_ge|B|b.ge TGT
+bcond_vs|B|b.vs TGT
+bcond_le|B|b.le TGT
+bcond_ls|B|b.ls TGT
+ins_s|F|mov v0.s[3], w1
+ins_d|F|mov v0.d[1], v1.d[0]
+ins_b|F|mov v0.b[5], v1.b[13]
+dup_4s|F|dup v0.4s, w1
+dup_16b_elem|F|dup v0.16b, v1.b[7]
+dup_2d_elem|F|dup v0.2d, v1.d[1]
+dup_8b|F|dup v0.8b, w1
+umov_h|F|umov w0, v1.h[5]
+umov_d|F|mov x0, v1.d[1]
+smov_b|F|smov x0, v1.b[3]
+smov_h|F|smov w0, v1.h[2]
+addv_4s|F|addv s0, v1.4s
+addv_16b|F|addv b0, v1.16b
+addv_8h|F|addv h0, v1.8h
+uaddlv_16b|F|uaddlv h0, v1.16b
+umaxv_4s|F|umaxv s0, v1.4s
+sminv_8h|F|sminv h0, v1.8h
+uzp1_4s|F|uzp1 v0.4s, v1.4s, v2.4s
+uzp2_16b|F|uzp2 v0.16b, v1.16b, v2.16b
+zip1_8h|F|zip1 v0.8h, v1.8h, v2.8h
+zip2_2d|F|zip2 v0.2d, v1.2d, v2.2d
+zip1_8b|F|zip1 v0.8b, v1.8b, v2.8b
+trn1_4s|F|trn1 v0.4s, v1.4s, v2.4s
+ext_16b|F|ext v0.16b, v1.16b, v2.16b, #5
+ext_8b|F|ext v0.8b, v1.8b, v2.8b, #3
+add_v4s|F|add v0.4s, v1.4s, v2.4s
+sub_v2d|F|sub v0.2d, v1.2d, v2.2d
+mul_v8h|F|mul v0.8h, v1.8h, v2.8h
+cmeq_16b|F|cmeq v0.16b, v1.16b, v2.16b
+cmgt_4s|F|cmgt v0.4s, v1.4s, v2.4s
+cmhi_2d|F|cmhi v0.2d, v1.2d, v2.2d
+and_v|F|and v0.16b, v1.16b, v2.16b
+bsl_v|F|bsl v0.16b, v1.16b, v2.16b
+bif_v|F|bif v0.16b, v1.16b, v2.16b
+movi_2d|F|movi v0.2d, #0xff00ff00ff00ff00
+movi_4s|F|movi v0.4s, #0x4d, lsl #8
+mvni_8h|F|mvni v0.8h, #0x12
+tbl_1|F|tbl v0.16b, {v1.16b}, v2.16b
+tbl_2|F|tbl v0.16b, {v1.16b, v2.16b}, v3.16b
+mov_v|F|mov v0.16b, v1.16b
+cnt_8b|F|cnt v0.8b, v1.8b
+xtn_8b|F|xtn v0.8b, v1.8h
+uxtl_8h|F|uxtl v0.8h, v1.8b
+sxtl2_4s|F|sxtl2 v0.4s, v1.8h
+ushr_4s|F|ushr v0.4s, v1.4s, #3
+sshr_8h|F|sshr v0.8h, v1.8h, #15
+shl_2d|F|shl v0.2d, v1.2d, #13
+ushl_4s|F|ushl v0.4s, v1.4s, v2.4s
+addp_4s|F|addp v0.4s, v1.4s, v2.4s
+addp_d|F|addp d0, v1.2d
+umull_8h|F|umull v0.8h, v1.8b, v2.8b
+rev64_16b|F|rev64 v0.16b, v1.16b
+neg_v|F|neg v0.4s, v1.4s
+fmov_dx|F|fmov d0, x1
+fmov_xd|F|fmov x0, d1
+fmov_hi|F|fmov v0.d[1], x1
+fmov_sw|F|fmov s0, w1
+fmov_imm|F|fmov d0, #1.5
+ld1_16b|PF|ld1 {v0.16b}, [x9]
+st1_4s_post|PF|st1 {v0.4s}, [x9], #16
+ld1r_4s|PF|ld1r {v0.4s}, [x9]
+ld1_lane|PF|ld1 {v0.s}[2], [x9]
+ld2_4s|PF|ld2 {v0.4s, v1.4s}, [x9]
+st2_8h|PF|st2 {v0.8h, v1.8h}, [x9]
+ld1_2reg_post|PF|ld1 {v0.2d, v1.2d}, [x9], x11
+fadd_d|F|fadd d0, d1, d2
+fadd_s|F|fadd s0, s1, s2
+fsub_d|F|fsub d0, d1, d2
+fmul_s|F|fmul s0, s1, s2
+fdiv_d|F|fdiv d0, d1, d2
+fmadd_d|F|fmadd d0, d1, d2, d3
+fmsub_s|F|fmsub s0, s1, s2, s3
+fnmadd_d|F|fnmadd d0, d1, d2, d3
+fnmul_d|F|fnmul d0, d1, d2
+fsqrt_d|F|fsqrt d0, d1
+fabs_s|F|fabs s0, s1
+fneg_d|F|fneg d0, d1
+fmax_d|F|fmax d0, d1, d2
+fmin_s|F|fmin s0, s1, s2
+fmaxnm_d|F|fmaxnm d0, d1, d2
+fminnm_d|F|fminnm d0, d1, d2
+fcvtzs_xd|F|fcvtzs x0, d1
+fcvtzs_wd|F|fcvtzs w0, d1
+fcvtzs_ws|F|fcvtzs w0, s1
+fcvtzs_xs|F|fcvtzs x0, s1
+fcvtzu_xd|F|fcvtzu x0, d1
+fcvtzu_ws|F|fcvtzu w0, s1
+fcvtzs_fix|F|fcvtzs x0, d1, #8
+fcvtas_xd|F|fcvtas x0, d1
+fcvtms_xd|F|fcvtms x0, d1
+fcvtps_ws|F|fcvtps w0, s1
+fcvtns_xd|F|fcvtns x0, d1
+fcvtzs_v4s|F|fcvtzs v0.4s, v1.4s
+scvtf_dx|F|scvtf d0, x1
+scvtf_sw|F|scvtf s0, w1
+scvtf_dw|F|scvtf d0, w1
+ucvtf_dx|F|ucvtf d0, x1
+ucvtf_sx|F|ucvtf s0, x1
+scvtf_fix|F|scvtf d0, x1, #4
+fcvt_ds|F|fcvt d0, s1
+fcvt_sd|F|fcvt s0, d1
+fcmp_d|F|fcmp d1, d2
+fcmp_s0|F|fcmp s1, #0.0
+fcmpe_d|F|fcmpe d1, d2
+fccmp_d|F|fccmp d1, d2, #4, ne
+fcsel_d|F|fcsel d0, d1, d2, gt
+frintm_d|F|frintm d0, d1
+frintp_s|F|frintp s0, s1
+frintn_d|F|frintn d0, d1
+frinta_s|F|frinta s0, s1
+frintz_d|F|frintz d0, d1
+frintx_d|F|frintx d0, d1
+frinti_d|F|frinti d0, d1
+fadd_v2d|F|fadd v0.2d, v1.2d, v2.2d
+fmul_v4s|F|fmul v0.4s, v1.4s, v2.4s
+faddp_d|F|faddp d0, v1.2d
+fmla_elem|F|fmla v0.4s, v1.4s, v2.s[1]
+ldaxr_x|P|ldaxr x0, [x9]
+ldxr_w|P|ldxr w0, [x9]
+ldar_x|P|ldar x0, [x9]
+ldarb|P|ldarb w0, [x9]
+stlr_w|P|stlr w1, [x9]
+ldaxr_stlxr|P|ldaxr x0, [x9]; stlxr w2, x3, [x9]
+ldxr_stxr_w|P|ldxr w0, [x9]; stxr w2, w3, [x9]
+ldaxp_stlxp|P|ldaxp x0, x1, [x9]; stlxp w4, x2, x3, [x9]
+cas_x|PE|cas x0, x1, [x9]
+casal_w|PE|casal w0, w1, [x9]
+casb|PE|casb w0, w1, [x9]
+casp_x|PE|casp x0, x1, x2, x3, [x9]
+ldadd_x|P|ldadd x1, x0, [x9]
+ldaddal_w|P|ldaddal w1, w0, [x9]
+swp_x|P|swp x1, x0, [x9]
+swpal_w|P|swpal w1, w0, [x9]
+ldclr_x|P|ldclr x1, x0, [x9]
+ldset_w|P|ldset w1, w0, [x9]
+ldeor_x|P|ldeor x1, x0, [x9]
+ldsmax_x|P|ldsmax x1, x0, [x9]
+ldumin_w|P|ldumin w1, w0, [x9]
+ldaddh|P|ldaddh w1, w0, [x9]
+stadd_x|P|stadd x1, [x9]
+ldursb_w|P|ldursb w0, [x9, #-1]
+ldursh_w|P|ldursh w0, [x9, #-2]
+ldrsb_w_uimm|P|ldrsb w0, [x9, #3]
+ldrsb_w_pre|P|ldrsb w0, [x9, #-1]!
+ldrsb_w_reg|PI|ldrsb w0, [x9, x11]
+ldrsh_w_uimm|P|ldrsh w0, [x9, #2]
+ldrsh_w_post|P|ldrsh w0, [x9], #2
+ldrsh_w_reg|PI|ldrsh w0, [x9, x11, lsl #1]
+ldursw_x|P|ldursw x0, [x9, #-4]
+ldursb_x|P|ldursb x0, [x9, #-1]
+ldrsw_reg|PI|ldrsw x0, [x9, x11, lsl #2]
+ldtrsb_w|P|ldtrsb w0, [x9, #1]
+ldpsw_pre|P|ldpsw x0, x1, [x9, #-8]!
+ldpsw_post|P|ldpsw x0, x1, [x9], #8
+ldapr_w|P|ldapr w0, [x9]
+ldaprb|P|ldaprb w0, [x9]
+fmadd_s|F|fmadd s0, s1, s2, s3
+fnmsub_d|F|fnmsub d0, d1, d2, d3
+fmul_d|F|fmul d0, d1, d2
+swpb|P|swpb w1, w0, [x9]
+ldeor_w|P|ldeor w1, w0, [x9]
+cas_w|PE|cas w0, w1, [x9]
+casah|PE|casah w0, w1, [x9]
+ldaddb|P|ldaddb w1, w0, [x9]
+ldsmax_w|P|ldsmax w1, w0, [x9]
+ldsminh|P|ldsminh w1, w0, [x9]
+eor3|-|eor3 v0.16b, v1.16b, v2.16b, v3.16b
+bcax|-|bcax v0.16b, v1.16b, v2.16b, v3.16b
+rax1|-|rax1 v0.2d, v1.2d, v2.2d
+xar|-|xar v0.2d, v1.2d, v2.2d, #13
+ldxp_stxp|P|ldxp x0, x1, [x9]; stxp w4, x2, x3, [x9]
+ldxp_stxp_w|P|ldxp w0, w1, [x9]; stxp w4, w2, w3, [x9]
+ldxrb_stxrb|P|ldxrb w0, [x9]; stxrb w2, w3, [x9]
+ldaxrh_stlxrh|P|ldaxrh w0, [x9]; stlxrh w2, w3, [x9]
+stxr_twice|P|ldxr x0, [x9]; stxr w2, x3, [x9]; stxr w4, x5, [x9]
+clrex_stxr|P|ldxr x0, [x9]; clrex; stxr w2, x3, [x9]
+ldadda_x|P|ldadda x1, x0, [x9]
+ldaddl_w|P|ldaddl w1, w0, [x9]
+ldaddal_x|P|ldaddal x1, x0, [x9]
+staddl_w|P|staddl w1, [x9]
+swpa_x|P|swpa x1, x0, [x9]
+swpl_w|P|swpl w1, w0, [x9]
+swpalb|P|swpalb w1, w0, [x9]
+ldclral_w|P|ldclral w1, w0, [x9]
+ldeora_x|P|ldeora x1, x0, [x9]
+ldsetl_x|P|ldsetl x1, x0, [x9]
+ldsmaxal_w|P|ldsmaxal w1, w0, [x9]
+lduminah|P|lduminah w1, w0, [x9]
+casa_x|PE|casa x0, x1, [x9]
+casl_w|PE|casl w0, w1, [x9]
+casalh|PE|casalh w0, w1, [x9]
+caspal_x|PE|caspal x0, x1, x2, x3, [x9]
+ldapr_x|P|ldapr x0, [x9]
+ldapurh|P|ldapurh w0, [x9, #2]
+stlur_w|P|stlur w1, [x9, #4]
+stlrb|P|stlrb w1, [x9]
+ldarh|P|ldarh w0, [x9]
+ldaxrb_stlxrb|P|ldaxrb w0, [x9]; stlxrb w2, w3, [x9]
+ldaxp_stlxp_w|P|ldaxp w0, w1, [x9]; stlxp w4, w2, w3, [x9]

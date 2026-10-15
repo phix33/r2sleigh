@@ -1735,6 +1735,15 @@ fn unique_call_site_identity(
                             crate::origin::folded_call_target(block, op_index)?,
                         )
                     }
+                    // The site is the target value; the address is the slot its block loads it from.
+                    (r2source::AdvisoryCallTransfer::CallSlot, R2ILOp::CallInd { target })
+                        if instruction().is_some() =>
+                    {
+                        (
+                            CanonicalStorageId::from_varnode(target),
+                            crate::machine_context::loaded_target_slot(block, op_index)?.offset,
+                        )
+                    }
                     (r2source::AdvisoryCallTransfer::TailJump, R2ILOp::Branch { target })
                         if last =>
                     {
@@ -1862,6 +1871,8 @@ struct CorrelatedCallSites {
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
     /// The name the source gave each correlated site's callee.
     callee_names: BTreeMap<SourceCallSiteIdentity, String>,
+    /// The sealed import slot each correlated `CallSlot` site calls through.
+    slot_targets: BTreeMap<SourceCallSiteIdentity, u64>,
 }
 
 fn correlate_call_site_interfaces(
@@ -1872,6 +1883,7 @@ fn correlate_call_site_interfaces(
     let mut tail_calls = Vec::new();
     let mut interfaces = Vec::new();
     let mut callee_linkages = BTreeMap::new();
+    let mut slot_targets = BTreeMap::new();
     let mut callee_names = BTreeMap::new();
     for call in source.advisory_calls() {
         let Some(identity) = unique_call_site_identity(blocks, calls, call) else {
@@ -1894,6 +1906,9 @@ fn correlate_call_site_interfaces(
         }
         if call.linkage() != r2source::AdvisoryCalleeLinkage::Unknown {
             callee_linkages.insert(identity, call.linkage());
+        }
+        if call.transfer() == r2source::AdvisoryCallTransfer::CallSlot {
+            slot_targets.insert(identity, call.target_address());
         }
         if let Some(name) = call.target_name() {
             callee_names.insert(identity, name.to_string());
@@ -2022,6 +2037,7 @@ fn correlate_call_site_interfaces(
         interfaces,
         callee_linkages,
         callee_names,
+        slot_targets,
     }
 }
 
@@ -2327,6 +2343,7 @@ impl TrustedSsaArtifact {
             library,
             reentering,
             exits,
+            unstated_imports,
         } = evidence;
         let callee_statements = crate::machine_context::CalleeStatement::of(callee_interfaces);
         let source = lifted.source().clone();
@@ -2420,6 +2437,7 @@ impl TrustedSsaArtifact {
         let stated_interface = source.function_interface().is_some();
         let mut built = None;
         let mut result_owners = BTreeSet::new();
+        let mut arity_owners = BTreeSet::new();
         let mut result_ambiguous = false;
         // Whether the recovered result is void on the premise that no caller outside the image reads it.
         let mut closed_world = false;
@@ -2459,7 +2477,10 @@ impl TrustedSsaArtifact {
                     .bind_source_string_literals(source.image().string_literals());
                 provisional_machine_context.bind_read_only(source.image().read_only());
                 provisional_machine_context.set_callee_statements(&callee_statements);
+                provisional_machine_context
+                    .set_slot_targets(correlated_call_sites.slot_targets.clone());
                 provisional_machine_context.set_reentering_callees(reentering.clone());
+                provisional_machine_context.set_unstated_imports(unstated_imports.clone());
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
                 let Ok(preliminary) =
@@ -2505,7 +2526,7 @@ impl TrustedSsaArtifact {
                     &preliminary_prep,
                     source.convention_slots(),
                     &provisional_machine_context,
-                    crate::recover_interface::Stated::of(source.function()),
+                    crate::recover_interface::Stated::of(&source),
                 );
                 let Some(recovered) = recovered else {
                     break 'recovered None;
@@ -2514,6 +2535,7 @@ impl TrustedSsaArtifact {
                     preliminary.note_exhausted(exhausted);
                 }
                 result_owners.clone_from(recovered.result_owners());
+                arity_owners.clone_from(recovered.arity_owners());
                 result_ambiguous = recovered.result_ambiguous();
                 closed_world = recovered.assumes_closed_world();
                 let minted = crate::recover_interface::mint_recovered_interface(
@@ -2580,10 +2602,22 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
         machine_context.set_callee_library(library.clone());
         machine_context.set_reentering_callees(reentering.clone());
+        machine_context.set_unstated_imports(unstated_imports.clone());
         machine_context.set_callee_preserved(callees.preserved().clone());
         machine_context.set_result_owners(result_owners);
+        machine_context.set_arity_owners(arity_owners);
         machine_context.set_result_ambiguous(result_ambiguous);
+        // A call to this function itself is stated by the interface just settled, where it mints none.
+        let mut callee_statements = callee_statements;
+        let entry = source.image().entry_address();
+        if let Some(own) = machine_context.function_interface()
+            && !callee_interfaces.contains_key(&entry)
+        {
+            let own = BTreeMap::from([(entry, own.clone())]);
+            callee_statements.extend(crate::machine_context::CalleeStatement::of(&own));
+        }
         machine_context.set_callee_statements(&callee_statements);
+        machine_context.set_slot_targets(correlated_call_sites.slot_targets);
         machine_context.set_frame_saves(source.image().frame_saves());
         machine_context.set_accepted_premises(premises.clone());
         // What each entry of a captured code pointer table names, recorded
@@ -3561,6 +3595,8 @@ pub struct CalleeEvidence {
     pub reentering: BTreeSet<u64>,
     /// The calls the walk ended the body at because a model says the callee never returns.
     pub exits: AssumedExits,
+    /// The imports called whose declaration states no interface, and why.
+    pub unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
 }
 
 /// Calls whose fall-through a body's walk ended because a model, not the program, says the callee

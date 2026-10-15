@@ -86,6 +86,11 @@ fn main() {
         .warnings(false) // Not interested in the warnings for Ghidra code
         .compile("sla");
 
+    // Dependents read Ghidra's headers from here as DEP_SLA_INCLUDE, so a crate that links this
+    // libsla (sleigh-compiler) compiles against the same class layouts.
+    let include = std::fs::canonicalize(source_path).expect("Ghidra's decompiler sources");
+    println!("cargo:include={}", include.display());
+
     // Rerun if any of the C++ to Rust bindings have changed
     println!("cargo:rerun-if-changed=src/sys.rs");
 

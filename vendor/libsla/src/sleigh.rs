@@ -89,6 +89,11 @@ pub trait Sleigh {
     #[must_use]
     fn user_op_names(&self) -> Vec<String>;
 
+    /// The byte modulo every instruction begins on, as the specification's
+    /// `define alignment` states it; 1 where it states none.
+    #[must_use]
+    fn instruction_alignment(&self) -> u32;
+
     /// The name of the user-defined p-code operation at `index`, or `None` when
     /// the language declares no operation there.
     #[must_use]
@@ -291,7 +296,7 @@ impl std::fmt::Display for AddressSpace {
 }
 
 /// One spelling per address-space name for the process: a specification has a handful, and a
-/// borrowed name makes every [`AddressSpace`] clone a copy (r2sleigh).
+/// borrowed name makes every [`AddressSpace`] clone a copy.
 fn interned_space_name(name: &str) -> &'static str {
     static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
     let mut names = NAMES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -504,7 +509,7 @@ impl api::AssemblyEmit for NativeDisassemblyOutput {
     }
 }
 
-/// The p-code of one decode, its spaces read from the specification's list (r2sleigh: each
+/// The p-code of one decode, its spaces read from the specification's list (each
 /// varnode once cost an allocated `Address`, four calls and a copy of its space's name).
 struct PcodeDisassemblyOutput<'a> {
     spaces: &'a [AddressSpace],
@@ -754,7 +759,7 @@ pub struct GhidraSleigh {
     sleigh: UniquePtr<sys::SleighProxy>,
     /// The processor context defaults reapplied after a decode-cache reset.
     processor_spec: UniquePtr<sys::DocumentStorage>,
-    /// The specification's address spaces, read once: a reset keeps them (r2sleigh).
+    /// The specification's address spaces, read once: a reset keeps them.
     spaces: Vec<AddressSpace>,
 }
 
@@ -891,6 +896,14 @@ impl Sleigh for GhidraSleigh {
             .into_iter()
             .map(|data| (data.register().into(), data.name().to_string()))
             .collect()
+    }
+
+    fn instruction_alignment(&self) -> u32 {
+        // Ghidra stores a positive modulo; anything else states no alignment.
+        u32::try_from(self.sleigh.alignment())
+            .ok()
+            .filter(|alignment| *alignment > 0)
+            .unwrap_or(1)
     }
 
     fn user_op_names(&self) -> Vec<String> {

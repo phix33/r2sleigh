@@ -48,11 +48,37 @@ pub struct RenderedFunctionJson {
     pub links: Vec<RenderedLinkJson>,
     /// Every residual in `code`, in site order.
     pub residuals: Vec<RenderedResidualJson>,
+    /// Every call to a function `code` spells, in text order.
+    pub calls: Vec<RenderedCallJson>,
 }
 
+/// One call `code` spells: whom it calls and how many arguments it hands on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenderedCallJson {
+    /// `function`, `import`, `self`, or `pointer` for a computed target.
+    pub kind: &'static str,
+    pub callee: Option<String>,
+    pub addr: Option<u64>,
+    pub arguments: usize,
+    pub variadic: bool,
+}
+
+/// Why a unit defines nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RenderRefusalJson {
+    /// What refused: an analysis record's kind (`NativeRefusal::kind`), or `rendering`.
+    pub kind: &'static str,
     pub reason: String,
+}
+
+impl RenderRefusalJson {
+    /// A refusal the renderer wrote, not an analysis record.
+    fn rendering(reason: String) -> Self {
+        Self {
+            kind: "rendering",
+            reason,
+        }
+    }
 }
 
 /// What became of every obligation the function's source imposes.
@@ -126,6 +152,10 @@ pub struct RenderedResidualJson {
     pub cause: &'static str,
     /// For a gap, the kind its marker names.
     pub gap: Option<String>,
+    /// For a call gap, who the call reaches: a name, a hex address, or `indirect`.
+    pub callee: Option<String>,
+    /// For a call gap, why no statement states it: a `CallRefusal` tag, such as `arity-floor`.
+    pub reason: Option<&'static str>,
     pub line: usize,
 }
 
@@ -155,13 +185,11 @@ impl RenderedFunctionJson {
     ///
     /// `definition` is the C name the renderer gives the function, which is
     /// what a unit that defines nothing still names.
-    pub(crate) fn of(
-        response: &crate::program::RenderedResponse,
-        name: &str,
-        addr: u64,
-        definition: String,
-        language: r2abi::statement::SourceLanguage,
-    ) -> Self {
+    pub(crate) fn of(rendering: &crate::program::Rendering, name: &str, addr: u64) -> Self {
+        let response = &rendering.response;
+        let definition = rendering.definition.clone();
+        let language = rendering.language;
+        let record = rendering.refused.as_ref();
         let proof = RenderProofJson::of(response.obligation_ledger.as_ref());
         // Each decided check states what it rests on in the ledger: a canary the UB-free source, a
         // runtime's stack bound nothing.
@@ -182,19 +210,28 @@ impl RenderedFunctionJson {
             // A listing is what the engine answers with when nothing was
             // rendered: it is the reason, and the unit is only that.
             EngineRendering::Listing(text) => {
+                let refused = record.map_or_else(
+                    || {
+                        RenderRefusalJson::rendering(
+                            Some(comment_body(text))
+                                .filter(|reason| !reason.is_empty())
+                                .unwrap_or_else(|| {
+                                    "the engine rendered nothing and stated no reason".to_owned()
+                                }),
+                        )
+                    },
+                    |record| RenderRefusalJson {
+                        kind: record.kind(),
+                        reason: record.to_string(),
+                    },
+                );
                 return Self {
                     name: name.to_owned(),
                     addr,
                     language: language.spelled(),
                     definition,
                     signature: String::new(),
-                    refused: Some(RenderRefusalJson {
-                        reason: Some(comment_body(text))
-                            .filter(|reason| !reason.is_empty())
-                            .unwrap_or_else(|| {
-                                "the engine rendered nothing and stated no reason".to_owned()
-                            }),
-                    }),
+                    refused: Some(refused),
                     code: text.clone(),
                     proof,
                     premises,
@@ -202,6 +239,7 @@ impl RenderedFunctionJson {
                     lines: Vec::new(),
                     links: Vec::new(),
                     residuals: Vec::new(),
+                    calls: Vec::new(),
                 };
             }
         };
@@ -218,7 +256,7 @@ impl RenderedFunctionJson {
             language: language.spelled(),
             definition: function.name.clone(),
             signature: emission.signature().unwrap_or_default().to_owned(),
-            refused: refused.map(|reason| RenderRefusalJson { reason }),
+            refused: refused.map(RenderRefusalJson::rendering),
             code: emission.unit().to_owned(),
             proof,
             premises,
@@ -240,10 +278,39 @@ impl RenderedFunctionJson {
                     ty: residual.ty.tag(),
                     cause: residual.cause.tag(),
                     gap: residual.gap.as_ref().map(ToString::to_string),
+                    callee: call_gap(residual).map(|call| match &call.callee {
+                        r2dec::ast::GapCallee::Named(name) => name.clone(),
+                        r2dec::ast::GapCallee::Address(addr) => format!("{addr:#x}"),
+                        r2dec::ast::GapCallee::Indirect => "indirect".to_owned(),
+                    }),
+                    reason: call_gap(residual).map(|call| call.reason.tag()),
                     line: residual.line,
                 })
                 .collect(),
+            calls: emission.calls().iter().map(call_json).collect(),
         }
+    }
+}
+
+/// The call a residual's gap stands for.
+fn call_gap(residual: &r2dec::ResidualSite) -> Option<&r2dec::ast::CallGap> {
+    residual.gap.as_ref()?.call()
+}
+
+/// One rendered call, as `pddj` spells it.
+fn call_json(call: &r2dec::report::RenderedCall) -> RenderedCallJson {
+    use r2dec::report::CallKind;
+    RenderedCallJson {
+        kind: match call.kind {
+            CallKind::Function => "function",
+            CallKind::Import => "import",
+            CallKind::Itself => "self",
+            CallKind::Pointer => "pointer",
+        },
+        callee: call.callee.clone(),
+        addr: call.addr,
+        arguments: call.arguments,
+        variadic: call.variadic,
     }
 }
 

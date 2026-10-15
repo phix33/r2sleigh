@@ -84,7 +84,11 @@ pub(crate) fn collect_call_sites(
             let target_id = target;
             next_id = next_id.saturating_add(1);
             let direct_target = resolve_graph_literal_value(graph, prep_facts, target_id)
-                .or_else(|| raw_identity.and_then(direct_target_from_raw_identity));
+                .or_else(|| raw_identity.and_then(direct_target_from_raw_identity))
+                .or_else(|| {
+                    let (identity, context) = raw_identity.zip(machine_context)?;
+                    context.slot_target(identity)
+                });
             by_inst.insert(inst_id, id);
             by_id.insert(
                 id,

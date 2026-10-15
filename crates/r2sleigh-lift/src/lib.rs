@@ -36,7 +36,7 @@ pub mod translate;
 use thiserror::Error;
 
 pub use context::LiftContext;
-pub use disasm::syntax::{NumberSpan, Syntax};
+pub use disasm::syntax::{NumberSpan, Span, Syntax};
 pub use disasm::{
     Continuation, Decoded, Disassembler, GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION,
     GenuineInstructionSpan, GenuineLiftAuthority, GenuineLiftedBlock, GenuineLiftedFunction,

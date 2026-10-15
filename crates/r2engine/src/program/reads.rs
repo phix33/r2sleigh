@@ -256,10 +256,13 @@ fn padding<S: Source + 'static>(
             at += 1;
             continue;
         }
-        let mut window = [0u8; crate::body::WINDOW];
         let end = (at + crate::body::WINDOW).min(held.len());
-        window[..end - at].copy_from_slice(&held[at..end]);
         let address = bytes.start + at as u64;
+        let endian = disasm.arch_spec().memory_endianness;
+        let writes = &view.source().container().loader_writes;
+        let code = crate::stated::code(writes, address, held[at..end].to_vec(), endian);
+        let mut window = [0u8; crate::body::WINDOW];
+        window[..end - at].copy_from_slice(&code.bytes);
         let inert = |lifted: &r2il::R2ILBlock| {
             let mut transfers = lifted
                 .ops
@@ -276,7 +279,11 @@ fn padding<S: Source + 'static>(
                     }))
         };
         match disasm.lift_after(&window, address, None) {
-            Ok((lifted, _)) if lifted.size > 0 && inert(&lifted) => {
+            Ok((lifted, _))
+                if lifted.size > 0
+                    && inert(&lifted)
+                    && !code.unstated(&(address..address + u64::from(lifted.size))) =>
+            {
                 targets.extend(
                     (lifted.ops.iter())
                         .filter_map(r2il::R2ILOp::transfer)

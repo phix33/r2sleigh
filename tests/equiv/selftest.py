@@ -23,6 +23,11 @@ graded through the same path an engine rendering takes:
 * a reached residual must be ``residual-trap``, also where the function prints
   on every vector and traps on some only; a trap outside every residual helper
   must be ``differs`` even when the proof counts a residual;
+* what a rendering did before a residual trap is graded: a wrong global
+  written before a returned residual (on every vector, or only where it
+  traps) and a wrong value printed before any residual must be ``differs``,
+  while a right one must stay ``residual-trap``, with memory compared only
+  for a returned residual in the outermost activation;
 * a function that writes to stderr and then faults on its NULL vector must be
   ``equal`` on most of its vectors: a dropped vector's output is not carried
   into the next;
@@ -56,6 +61,10 @@ _RESIDUAL_S32 = (
     "static inline int32_t r2sleigh_residual_s32(uint32_t site)\n"
     "{\n    (void)site;\n    __builtin_trap();\n}\n"
 )
+_RESIDUAL_U64 = (
+    "static inline uint64_t r2sleigh_residual_u64(uint32_t site)\n"
+    "{\n    (void)site;\n    __builtin_trap();\n}\n"
+)
 _NODE = "struct st_node { int32_t key; struct st_node *next; };\n"
 _MANY_INT = (
     "int64_t sub_many_int(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f,\n"
@@ -79,6 +88,10 @@ class Case:
     residual: int = 0
     refused: str | None = None
     expect_guard: str | None = None
+    # pddj's residual sites, as (site, type, cause[, gap kind]).
+    residuals: list[tuple] = field(default_factory=list)
+    # What a residual-trap compared before its traps (gate.trap_comparison).
+    expect_compared: str | None = None
 
 
 def _tu(body: str, headers: str = "#include <stdint.h>\n#include <stddef.h>\n") -> str:
@@ -198,14 +211,63 @@ CASES = [
     Case("residual-reached", "st_clamp", "residual-trap", _tu(
         _RESIDUAL_S32 + "int32_t sub_clamp(int32_t x)\n{\n    if (x < 0)\n"
         "        return r2sleigh_residual_s32(1);\n    if (x > 100)\n        return 100;\n"
-        "    return x;\n}\n"), residual=1),
-    # Prints on every vector and traps on some: a vector the rendering trapped
-    # on (its buffered output lost) must not skew the stdout of the next.
+        "    return x;\n}\n"), residual=1, residuals=[(1, "s32", "unproven-return")],
+        expect_compared="memory"),
+    # Prints on every vector and traps on some: what it printed before the trap
+    # is the original's so far, and must not skew the stdout of the next vector.
     Case("residual-reached-after-printing", "st_say", "residual-trap", _tu(
         _RESIDUAL_S32 + "int32_t sub_say(int32_t x)\n{\n    printf(\"%d\\n\", x);\n"
         "    if (x > 5)\n        return r2sleigh_residual_s32(1);\n    return x;\n}\n",
         "#include <stdint.h>\n#include <stdio.h>\n"),
-        links=[("printf", "import")], residual=1),
+        links=[("printf", "import")], residual=1,
+        residuals=[(1, "s32", "gap", "TermNotSpelled")], expect_compared="output"),
+    # State before a trap (audit T1): what a rendering wrote before a residual
+    # is graded, on every vector it traps on and where it traps on some only.
+    Case("wrong-global-before-a-returned-residual", "st_bump", "differs", _tu(
+        _RESIDUAL_U64 + "extern int32_t st_other;\nuint64_t sub_bump(int32_t by)\n{\n"
+        "    st_other = (int32_t)((uint32_t)st_other + (uint32_t)by);\n"
+        "    return r2sleigh_residual_u64(1);\n}\n"),
+        links=[("st_other", "object")], residual=1,
+        residuals=[(1, "u64", "unproven-return")], expect_field="memory"),
+    Case("wrong-global-only-where-it-traps", "st_bump", "differs", _tu(
+        _RESIDUAL_U64 + "extern int32_t st_counter;\nuint64_t sub_bump(int32_t by)\n{\n"
+        "    if (by > 3) {\n"
+        "        st_counter = (int32_t)((uint32_t)st_counter + (uint32_t)by + 1u);\n"
+        "        return r2sleigh_residual_u64(1);\n    }\n"
+        "    st_counter = (int32_t)((uint32_t)st_counter + (uint32_t)by);\n    return 0;\n}\n"),
+        links=[("st_counter", "object")], residual=1,
+        residuals=[(1, "u64", "unproven-return")], expect_field="memory"),
+    Case("wrong-print-before-a-residual", "st_say", "differs", _tu(
+        _RESIDUAL_S32 + "int32_t sub_say(int32_t x)\n{\n    printf(\"%d\\n\", x ^ 1);\n"
+        "    return r2sleigh_residual_s32(1);\n}\n",
+        "#include <stdint.h>\n#include <stdio.h>\n"),
+        links=[("printf", "import")], residual=1,
+        residuals=[(1, "s32", "gap", "TermNotSpelled")], expect_field="stdout"),
+    # Right before its traps: a returned residual compares memory and agrees.
+    Case("global-before-a-returned-residual", "st_bump", "residual-trap", _tu(
+        _RESIDUAL_U64 + "extern int32_t st_counter;\nuint64_t sub_bump(int32_t by)\n{\n"
+        "    st_counter = (int32_t)((uint32_t)st_counter + (uint32_t)by);\n"
+        "    return r2sleigh_residual_u64(1);\n}\n"),
+        links=[("st_counter", "object")], residual=1,
+        residuals=[(1, "u64", "unproven-return")], expect_compared="memory"),
+    # A residual before the write the original makes: the state at the trap is
+    # not the original's end, so only the output is compared.
+    Case("residual-before-a-global-write", "st_bump", "residual-trap", _tu(
+        _RESIDUAL_U64 + "extern int32_t st_counter;\nvoid sub_bump(int32_t by)\n{\n"
+        "    if (by > 3)\n        (void)r2sleigh_residual_u64(1);\n"
+        "    st_counter = (int32_t)((uint32_t)st_counter + (uint32_t)by);\n}\n"),
+        links=[("st_counter", "object")], residual=1,
+        residuals=[(1, "u64", "gap", "CallNotRendered")], expect_compared="output"),
+    # A returned residual reached in an inner activation, before the outer ones
+    # write: only the outermost activation's return is the original's end.
+    Case("returned-residual-in-an-inner-activation", "st_rcount", "residual-trap", _tu(
+        _RESIDUAL_S32 + _NODE + "extern int32_t st_counter;\n"
+        "int32_t sub_rcount(const struct st_node *n)\n{\n    if (!n)\n"
+        "        return r2sleigh_residual_s32(1);\n"
+        "    int32_t r = (int32_t)((uint32_t)sub_rcount(n->next) + 1u);\n"
+        "    st_counter = (int32_t)((uint32_t)st_counter + 1u);\n    return r;\n}\n"),
+        links=[("st_counter", "object")], residual=1,
+        residuals=[(1, "s32", "unproven-return")]),
     # A trap the rendering wrote itself is not a residual, whatever the proof
     # counters claim: only a trap inside a residual helper is.
     Case("trap-outside-a-residual", "st_clamp", "differs", _tu(
@@ -227,6 +289,13 @@ CASES = [
         "int32_t sub_ping(const struct st_node *n)\n{\n"
         "    return n ? (int32_t)(1u + 2u * (uint32_t)st_pong(n->next)) : 0;\n}\n"),
         links=[("st_pong", "function")]),
+    # The program reaches the entry by a tail jump from a function the rendering
+    # called: the return address is the rendering's call, and it is a recursion.
+    Case("recursion-through-a-tail-jump", "st_tping", "equal", _tu(
+        "extern uint64_t st_tpong(uint64_t, uint64_t);\n"
+        "uint64_t sub_tping(uint64_t d, uint64_t a)\n{\n"
+        "    return d & 7 ? 7 * st_tpong((d & 7) - 1, a + d) : a ^ 0x55;\n}\n"),
+        links=[("st_tpong", "function")]),
     # Wrong only where the program calls it back (depth > 1): only a gate
     # whose rendering replaced the function in the image can see it.
     Case("wrong-only-when-called-back", "st_ping", "differs", _tu(
@@ -287,6 +356,8 @@ def synthetic_pddj(case: Case, address: int, symbols: dict[str, int]) -> dict:
         "variables": [],
         "lines": [],
         "links": links,
+        "residuals": [{"site": site, "type": ty, "cause": cause, "gap": gap[0] if gap else None,
+                       "line": 0} for site, ty, cause, *gap in case.residuals],
     }
 
 
@@ -330,6 +401,10 @@ def run_self_tests(config: gate.Config, workdir: Path,
             got_field = graded.evidence.get("field")
             ok = got_field == case.expect_field
             why = f"expected field {case.expect_field}, got {got_field}"
+        if ok and case.expect_compared:
+            compared = gate.trap_comparison(graded.status, graded.vectors)
+            ok = compared == case.expect_compared
+            why = f"expected {case.expect_compared} compared before the trap, got {compared}"
         if ok and case.expect_guard:
             got_guard = graded.evidence.get("guard")
             ok = got_guard == case.expect_guard

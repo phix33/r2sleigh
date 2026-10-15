@@ -57,6 +57,104 @@ fn x86_32_bit_register_write_explicitly_zero_extends_its_declared_carrier() {
     );
 }
 
+/// `stlxp`/`stxp w0, x1, x2, [x3]` store Rt2 at [Xn + 8] in the p-code (Arm ARM: one 16-byte
+/// access), and the lift keeps it: conditional at [Xn], guarded by its success at [Xn + 8].
+#[cfg(feature = "arm")]
+#[test]
+fn aarch64_store_exclusive_pair_stores_eight_bytes_up_under_the_conditional_store() {
+    let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::Aarch64Le)
+        .expect("trusted AArch64 specification");
+    let added = |ops: &[R2ILOp], address: &Varnode| {
+        ops.iter().find_map(|op| match op {
+            R2ILOp::IntAdd { dst, b, .. } if dst == address => b.const_value(),
+            _ => None,
+        })
+    };
+    for (name, word) in [("stlxp", 0xc820_8861u32), ("stxp", 0xc820_0861)] {
+        let bytes = padded_instruction(word.to_le_bytes());
+        disassembler.clear_decode_cache().expect("fresh decode");
+        let pcode = disassembler.pcode(&bytes, 0x1000).expect("p-code");
+        let raw = disassembler
+            .translate_pcode(pcode, 0x1000)
+            .expect("translation");
+        let offsets: Vec<u64> = raw
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                R2ILOp::Store { addr, .. } => Some(added(&raw.ops, addr).unwrap_or(0)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(offsets, vec![0, 8], "{name}");
+
+        let lifted = disassembler
+            .lift_genuine_block(&bytes, 0x1000, 4)
+            .expect("lift");
+        let ops = &lifted.block().ops;
+        let stores: Vec<(&str, u64)> = ops
+            .iter()
+            .filter_map(|op| match op {
+                R2ILOp::StoreConditional { addr, .. } => {
+                    Some(("conditional", added(ops, addr).unwrap_or(0)))
+                }
+                R2ILOp::StoreGuarded { addr, .. } => {
+                    Some(("guarded", added(ops, addr).unwrap_or(0)))
+                }
+                R2ILOp::Store { .. } => Some(("plain", 0)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stores,
+            vec![("conditional", 0), ("guarded", 8)],
+            "{name}: {ops:?}"
+        );
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, R2ILOp::Unimplemented | R2ILOp::CallOther { .. })),
+            "{name}: {ops:?}"
+        );
+    }
+}
+
+/// `casp x0, x1, x2, x3, [x9]` compares x0 with [x9] and x1 with [x9 + 8], then stores x2 and x3
+/// there: the Arm ARM's comparevalue is s2:s1 little-endian, s1:s2 big, so Xs is at [Xn] in both.
+#[cfg(feature = "arm")]
+#[test]
+fn aarch64_casp_compares_and_stores_its_first_register_at_the_address() {
+    let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::Aarch64Le)
+        .expect("trusted AArch64 specification");
+    let arch = disassembler.arch_spec();
+    let x = |n: u32| register_varnode(declared_register_storage(arch, &format!("x{n}")));
+    let bytes = padded_instruction(0x4820_7d22u32.to_le_bytes());
+    disassembler.clear_decode_cache().expect("fresh decode");
+    let pcode = disassembler.pcode(&bytes, 0x1000).expect("p-code");
+    let raw = disassembler
+        .translate_pcode(pcode, 0x1000)
+        .expect("translation");
+    // The register a temporary last copied before operation `at`.
+    let copied = |at: usize, value: &Varnode| {
+        raw.ops[..at].iter().rev().find_map(|op| match op {
+            R2ILOp::Copy { dst, src } if dst == value => Some(src.clone()),
+            _ => None,
+        })
+    };
+    let compared: Vec<_> = (0..raw.ops.len())
+        .filter_map(|at| match &raw.ops[at] {
+            R2ILOp::IntNotEqual { b, .. } => copied(at, b),
+            _ => None,
+        })
+        .collect();
+    let stored: Vec<_> = (0..raw.ops.len())
+        .filter_map(|at| match &raw.ops[at] {
+            R2ILOp::Store { val, .. } => copied(at, val),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(compared, vec![x(0), x(1)], "{:?}", raw.ops);
+    assert_eq!(stored, vec![x(2), x(3)], "{:?}", raw.ops);
+}
+
 #[cfg(feature = "arm")]
 #[test]
 fn aarch64_w_register_write_explicitly_zero_extends_its_declared_carrier() {
@@ -232,6 +330,7 @@ fn x86_byte_register_writes_do_not_invent_full_carrier_zero_extensions() {
     }
 }
 
+#[cfg(feature = "arm")]
 #[test]
 fn pinned_arm64_memory_space_is_ram_and_instance_stable() {
     let first = Disassembler::from_sla(

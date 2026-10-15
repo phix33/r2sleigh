@@ -50,12 +50,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Analysed {
 
     fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb, callers): &Key) -> Analysis {
         let view = View::new(db, true);
-        let target = view
-            .machine_in(thumb)
-            .ok_or("no Sleigh specification for this architecture")
-            .and_then(|machine| view.target_of(machine, entry).map_err(|_| "unassembled"));
-        let Ok(target) = target else {
-            return Analysis(Err(NativeRefusal::Machine("the machine is not assembled")));
+        let target = match target(&view, entry, thumb) {
+            Ok(target) => target,
+            Err(refusal) => return Analysis(Err(refusal)),
         };
         let walk = db
             .get::<Walked>(&(entry, thumb))
@@ -82,6 +79,22 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Analysed {
     }
 }
 
+/// The machine the function at `entry` runs on, under its language's convention, or why there is none.
+fn target<'a, S: Source + 'static>(
+    view: &View<'a, S>,
+    entry: u64,
+    thumb: bool,
+) -> Result<crate::native::NativeTarget<'a>, NativeRefusal> {
+    let Some(machine) = view.machine_in(thumb) else {
+        return Err(view.unloaded().map_or(
+            NativeRefusal::Machine("the architecture has no Thumb decoder"),
+            NativeRefusal::Unassembled,
+        ));
+    };
+    view.target_of(machine, entry)
+        .map_err(NativeRefusal::Unassembled)
+}
+
 /// One function's walk through the dispatch tables it reads, by its entry and whether it is Thumb.
 pub(super) struct Walked;
 
@@ -104,11 +117,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Walked {
 
     fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Walking {
         let view = View::new(db, true);
-        let Some(Ok(target)) = view
-            .machine_in(thumb)
-            .map(|machine| view.target_of(machine, entry))
-        else {
-            return Walking(Err(NativeRefusal::Machine("the machine is not assembled")));
+        let target = match target(&view, entry, thumb) {
+            Ok(target) => target,
+            Err(refusal) => return Walking(Err(refusal)),
         };
         let walked = crate::isolation::isolated(|| crate::native::walk(&target, &view, entry));
         Walking(
@@ -156,7 +167,7 @@ pub(super) fn callee_read<S: Source + 'static>(
     let unread = |reason| CalleeRead {
         interface: None,
         facts: Err(reason),
-        result_owners: Default::default(),
+        owners: Default::default(),
     };
     let view = View::new(db, true);
     let target = view
@@ -178,7 +189,8 @@ pub(super) fn callee_read<S: Source + 'static>(
 /// The type analysis sealed from one function's analysis.
 pub(super) struct Sealed;
 
-/// A sealing, a refusal and whether the request's control could have caused it, or no analysis to seal.
+/// A sealing, a refusal and whether the request's control could have caused it, or why there is no
+/// analysis to seal.
 #[derive(Clone)]
 pub(super) enum Sealing {
     Sealed(Shared<SealedFunctionAnalysis>),
@@ -186,7 +198,7 @@ pub(super) enum Sealing {
         response: Rc<EngineDecompileResponse>,
         stopped: bool,
     },
-    Unanalysed,
+    Unanalysed(NativeRefusal),
 }
 
 impl PartialEq for Sealing {
@@ -206,15 +218,14 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Sealed {
         let analysis = db
             .get::<Analysed>(key)
             .expect("an analysis asks for no sealing");
-        let Ok(prepared) = &analysis.0 else {
-            return Sealing::Unanalysed;
+        let prepared = match &analysis.0 {
+            Ok(prepared) => prepared,
+            Err(refusal) => return Sealing::Unanalysed(refusal.clone()),
         };
         let view = View::new(db, true);
-        let target = view
-            .machine_in(key.1)
-            .map(|machine| view.target_of(machine, key.0));
-        let Some(Ok(target)) = target else {
-            return Sealing::Unanalysed;
+        let target = match target(&view, key.0, key.1) {
+            Ok(target) => target,
+            Err(refusal) => return Sealing::Unanalysed(refusal),
         };
         let control = db.inputs().control.clone();
         let sealed = crate::isolation::isolated(|| {
@@ -238,6 +249,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Sealed {
     fn hold(value: &Sealing) -> Hold {
         match value {
             Sealing::Refused { stopped: true, .. } => Hold::Stopped,
+            Sealing::Unanalysed(refusal) if refusal.stopped() => Hold::Stopped,
             _ => Hold::Held,
         }
     }
@@ -246,9 +258,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Sealed {
 /// One function rendered: a session redraws what it rendered.
 pub(super) struct Rendered;
 
-/// A rendering, or why the function has none.
+/// A rendering: the C, or the record of why the function has none (ROADMAP D29).
 #[derive(Clone)]
-pub(super) struct Render(pub(super) Result<Rc<Drawn>, String>);
+pub(super) struct Render(pub(super) Rc<Drawn>);
 
 /// A rendering and whether the request's control could have cut it short.
 pub(super) struct Drawn {
@@ -258,7 +270,7 @@ pub(super) struct Drawn {
 
 impl PartialEq for Render {
     fn eq(&self, other: &Self) -> bool {
-        matches!((&self.0, &other.0), (Ok(one), Ok(other)) if Rc::ptr_eq(one, other))
+        Rc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -271,12 +283,26 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
 
     fn compute(db: &Db<ProgramInputs<S>>, key: &Key) -> Render {
         let entry = key.0;
+        let control = db.inputs().control.clone();
+        // A fact the container states, fixed for the program's life: no read to record.
+        let language = db.inputs().source.container().languages.at(entry);
+        let refused = |refusal: NativeRefusal| {
+            let stopped = control.stopped() || refusal.stopped();
+            let name = crate::native::Program::name_at(&View::new(db, true), entry);
+            let name = name.unwrap_or_else(|| r2source::unnamed_function(entry));
+            let rendering = super::Rendering::refused(&name, entry, language, refusal);
+            Render(Rc::new(Drawn { rendering, stopped }))
+        };
+        // D32's admission is the container's fact, asked before any analysis is paid for.
+        if let Err(unadmitted) = crate::route::admitted(&db.inputs().source.container().arch) {
+            return refused(unadmitted);
+        }
         let analysis = db
             .get::<Analysed>(key)
             .expect("an analysis asks for no rendering");
         let prepared = match &analysis.0 {
             Ok(prepared) => prepared,
-            Err(refusal) => return Render(Err(refusal.to_string())),
+            Err(refusal) => return refused(refusal.clone()),
         };
         let function = prepared.artifact().artifact().function();
         let definition = r2dec::rendered_name_of(function.name.as_deref(), entry);
@@ -284,7 +310,6 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
         let sealing = db
             .get::<Sealed>(key)
             .expect("a sealing asks for no rendering");
-        let control = db.inputs().control.clone();
         let response = match &*sealing {
             Sealing::Sealed(sealed) => {
                 let render = || EngineSession::new().render_sealed(&sealed.0, &control);
@@ -294,25 +319,23 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
                 })
             }
             Sealing::Refused { response, .. } => EngineDecompileResponse::clone(response),
-            Sealing::Unanalysed => {
-                return Render(Err("the function has no analysis to render".to_owned()));
-            }
+            Sealing::Unanalysed(refusal) => return refused(refusal.clone()),
         };
         let rendering = super::Rendering {
             response: response.into(),
             definition,
             unread,
-            // A fact the container states, fixed for the program's life: no read to record.
-            language: db.inputs().source.container().languages.at(entry),
+            language,
+            refused: None,
         };
         let stopped = control.stopped();
-        Render(Ok(Rc::new(Drawn { rendering, stopped })))
+        Render(Rc::new(Drawn { rendering, stopped }))
     }
 
     fn hold(value: &Render) -> Hold {
-        match &value.0 {
-            Ok(drawn) if drawn.stopped => Hold::Stopped,
-            _ => Hold::Held,
+        match value.0.stopped {
+            true => Hold::Stopped,
+            false => Hold::Held,
         }
     }
 }

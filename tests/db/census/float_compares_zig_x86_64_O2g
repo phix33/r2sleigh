@@ -25,15 +25,13 @@ EXPECT=<<EOF
 void _start(void)
 {
     uint64_t tmp_55400_2;
-    uint64_t tmp_3cb80_1;
 
-    /* r2dec proof: 5 constructs are marked below; 27 source obligations: 2 rendered, 3 elided, 0 refused, 22 residual; 2 statements rendered; 1 held from entry, read as residuals (stack_p0) */
+    /* r2dec proof: 5 constructs are marked below; 27 source obligations: 0 rendered, 5 elided, 0 refused, 22 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0) */
     {
         tmp_55400_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x1001520:29 covering 1 op (render::values) */
         r2sleigh_residual_void(3); /* r2dec gap: StoreNotSpelled at 0x1001520:32 covering 1 op (render::values) */
-        tmp_3cb80_1 = r2sleigh_load_u64((void*)(uint64_t)0x10027b8U);
-        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x1001520:46 covering 1 op (render::values) */
+        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x1001520:46 covering 1 op (render::values): call to __libc_start_main: the import's declaration has an argument this convention does not place */
         r2sleigh_residual_void(5); /* r2dec gap: TailTransferNotRendered at 0x1001520 (render::control) */
     }
 }
@@ -182,7 +180,7 @@ void __libc_csu_init(int32_t argc, char** argv, char** envp)
     uint64_t tmp_11f80_1;
     uint64_t r13_6;
 
-    /* r2dec proof: no individual construct is marked; 61 source obligations: 31 rendered, 30 elided, 0 refused; 12 statements rendered */
+    /* r2dec proof: 2 constructs are marked below; 61 source obligations: 22 rendered, 30 elided, 0 refused, 9 residual; 11 statements rendered */
     {
         if ((uint8_t)1U) {
         } else {
@@ -190,7 +188,8 @@ void __libc_csu_init(int32_t argc, char** argv, char** envp)
             r13_5 = 1;
             for (; ; ) {
                 tmp_11f80_1 = r2sleigh_load_u64((void*)r12_2);
-                ((uint64_t(*)(uint64_t, uint64_t, uint64_t))(uint64_t)tmp_11f80_1)((uint64_t)(uint32_t)argc, (uint64_t)argv, (uint64_t)envp);
+                r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1001670:13 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
+                r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x1001670:19 covering 1 op (render::values) */
                 r13_6 = (uint64_t)((uint64_t)r13_5 - (uint64_t)1U);
                 if ((uint8_t)((uint64_t)r13_6 != (uint64_t)0U)) {
                     r12_2 = (uint64_t)((uint64_t)r12_2 + (uint64_t)8U);

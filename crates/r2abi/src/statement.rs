@@ -25,6 +25,8 @@ pub struct Container {
     /// radare2 presents `baddr`. Presentation only: no value the engine
     /// computes is relative to it.
     pub base_address: u64,
+    /// An object which states no addresses (ELF, COFF): each section is where this reader placed it.
+    pub relocatable: bool,
     /// Where the loader maps the program and what it permits there, sorted by
     /// address and disjoint.
     pub segments: Vec<Segment>,
@@ -149,7 +151,9 @@ impl Container {
         self.loader_writes
             .iter()
             .filter_map(|write| match &write.kind {
-                WriteKind::Import { symbol } if !symbol.is_empty() => {
+                WriteKind::Import { symbol, .. }
+                    if !symbol.is_empty() && write.encoding == Encoding::Word =>
+                {
                     Some((write.place, symbol.as_str()))
                 }
                 _ => None,
@@ -297,6 +301,12 @@ impl Permissions {
         write: false,
         execute: true,
     };
+
+    /// Whether the loader backs the range at all: any access maps it; none (Mach-O `__PAGEZERO`)
+    /// is a reservation. An execute-only section's bytes are still the program's code.
+    pub const fn mapped(self) -> bool {
+        self.read || self.write || self.execute
+    }
 }
 
 /// One run of addresses the loader maps, and what the program may do there.
@@ -475,6 +485,8 @@ pub enum SymbolKind {
     Section,
     /// The source file an object came from, which names no address.
     File,
+    /// A thread-local variable; ELF states its value as an offset into each thread's block.
+    Tls,
     #[default]
     Other,
     /// An ARM mapping symbol: where the bytes become code of one instruction
@@ -514,6 +526,9 @@ pub struct Symbol {
     /// Where each symbol table states it: one name at one address is one
     /// symbol, whichever of the two tables states it.
     pub origin: SymbolOrigin,
+    /// The module the container names beside it: a PE import's DLL, or the
+    /// module name a PE export directory states for itself.
+    pub library: Option<std::sync::Arc<str>>,
 }
 
 /// Where each symbol table states a symbol, by its index there.
@@ -523,6 +538,8 @@ pub struct SymbolOrigin {
     pub table: Option<usize>,
     /// The dynamic table the loader reads: ELF's `.dynsym`.
     pub dynamic: Option<usize>,
+    /// A PE import or export directory, by position within its library's list, from one.
+    pub directory: Option<usize>,
 }
 
 /// One relocation record the loader, or the program's own start-up, applies.
@@ -550,6 +567,8 @@ pub struct Relocation {
     pub symbol: Option<Box<RelocationSymbol>>,
     /// What the loader computes for it.
     pub applies: Applies,
+    /// How the bytes at `vaddr` hold what it computes.
+    pub encoding: Encoding,
 }
 
 /// Where a relocation record is stated in the file.
@@ -570,7 +589,7 @@ pub struct Record {
 pub struct RelocationSymbol {
     /// The C identifier the record binds, Mach-O's decoration dropped once.
     pub name: std::sync::Arc<str>,
-    /// The address this image defines it at; `None` where it is an import.
+    /// The address this image defines it at; `None` where it is an import, or an object's common symbol the static linker places.
     pub defined: Option<u64>,
     pub size: u64,
     pub binding: Binding,
@@ -589,6 +608,14 @@ pub enum Applies {
     Symbol,
     /// The symbol's address plus the addend (`R_X86_64_64`, `R_AARCH64_ABS64`).
     SymbolPlusAddend,
+    /// The symbol plus the addend, less the place (`R_X86_64_PC32`, `R_AARCH64_PREL32`).
+    PcRelative,
+    /// The symbol's linkage entry plus the addend, less the place; a static link of a defined symbol makes it the symbol (`R_X86_64_PLT32`).
+    PltRelative,
+    /// A global offset table slot for the symbol, which the static linker creates (`R_X86_64_GOTPCREL`).
+    GotRelative,
+    /// The symbol plus the addend, or less the place, in an instruction's immediate (`R_AARCH64_CALL26`, `R_ARM_MOVW_ABS_NC`).
+    Field,
     /// The address a resolver function returns; the addend is the resolver.
     Resolver,
     /// A thread-local module number or offset, which is no address.
@@ -607,8 +634,12 @@ pub enum Binding {
     #[default]
     Global,
     Weak,
+    /// GNU's `STB_GNU_UNIQUE`: one definition across the process, whatever loaded it.
+    Unique,
     /// A binding the format numbers but this reader does not name.
     Other(u8),
+    /// The container states none: a PE import or export has no binding.
+    Unstated,
 }
 
 /// A symbol's visibility, as ELF's `st_other` states it.
@@ -632,6 +663,20 @@ pub struct LoaderWrite {
     pub place: u64,
     pub width: u64,
     pub kind: WriteKind,
+    /// How the bytes hold `kind`'s value: a `call rel32` field is written, but holds no pointer.
+    pub encoding: Encoding,
+}
+
+/// How the bytes at a loader write hold the value its kind states.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Encoding {
+    /// The bytes are the value: a pointer word.
+    #[default]
+    Word,
+    /// The bytes are the value less the write's place: a PC-relative field.
+    FromPlace,
+    /// As the psABI states for the record's type: an instruction's immediate, or a type this reader does not decode.
+    Typed,
 }
 
 impl LoaderWrite {
@@ -644,8 +689,10 @@ impl LoaderWrite {
     /// states it outright: an address of this image, or a definition in it
     /// no other image can replace.
     pub const fn value(&self) -> Option<u64> {
-        match self.kind {
-            WriteKind::Relative(value) | WriteKind::Absolute(value) => Some(value),
+        match (self.encoding, &self.kind) {
+            (Encoding::Word, WriteKind::Relative(value) | WriteKind::Absolute(value)) => {
+                Some(*value)
+            }
             _ => None,
         }
     }
@@ -654,6 +701,19 @@ impl LoaderWrite {
     /// program starts, which is a reference from the word whether or not
     /// another image may replace it later.
     pub const fn stated_address(&self) -> Option<u64> {
+        match (self.encoding, &self.kind) {
+            (
+                Encoding::Word,
+                WriteKind::Relative(value)
+                | WriteKind::Absolute(value)
+                | WriteKind::Preemptible { default: value, .. },
+            ) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// The address the written bytes resolve to when nothing replaces the definition, however they encode it: a pointer word's value, or a PC-relative field's target.
+    pub const fn target(&self) -> Option<u64> {
         match self.kind {
             WriteKind::Relative(value)
             | WriteKind::Absolute(value)
@@ -672,8 +732,12 @@ pub enum WriteKind {
     /// replace: the executable's own, a hidden or protected one, or any under
     /// `DT_SYMBOLIC`.
     Absolute(u64),
-    /// The address of an import, which another image defines.
-    Import { symbol: String },
+    /// The address of an import, which another image defines; `library` where
+    /// the container names that image (a PE import's DLL).
+    Import {
+        symbol: String,
+        library: Option<String>,
+    },
     /// This image's own definition, which an image loaded ahead of it may
     /// replace; `default` is what the word holds when none does.
     Preemptible { symbol: String, default: u64 },
@@ -791,6 +855,7 @@ mod tests {
             place,
             width,
             kind: WriteKind::Unknown,
+            encoding: Encoding::Word,
         };
         let container = Container {
             loader_writes: vec![write(0x10, 8), write(0x18, 8), write(0x40, 8)],

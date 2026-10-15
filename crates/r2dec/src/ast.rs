@@ -1421,7 +1421,7 @@ pub enum CStmt {
 }
 
 /// Why a marked gap opened, which the marker prints and control reads.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GapKind {
     /// A block's values, or a merge copy, D2 could not spell.
     ValuesNotRendered,
@@ -1429,7 +1429,8 @@ pub enum GapKind {
     UnsupportedInstruction,
     /// A user operation the specification names, by that name.
     UserOperation(String),
-    CallNotRendered,
+    /// A call no statement states: who it reaches and the first fact it lacks (audit M3).
+    CallNotRendered(CallGap),
     EffectNotRendered,
     StoreNotSpelled,
     TermNotSpelled,
@@ -1440,9 +1441,8 @@ pub enum GapKind {
     /// A transfer the text cannot make: control does not go on past it.
     UnresolvedIndirectBranch,
     TransferNotFollowed,
-    TailTransferNotRendered,
-    /// A name no other kind spells, kept as read.
-    Refused(String),
+    /// A tail transfer with no C; the call it stands for where its plan was refused.
+    TailTransferNotRendered(Option<CallGap>),
 }
 
 impl GapKind {
@@ -1452,17 +1452,17 @@ impl GapKind {
             self,
             Self::UnresolvedIndirectBranch
                 | Self::TransferNotFollowed
-                | Self::TailTransferNotRendered
+                | Self::TailTransferNotRendered(_)
         )
     }
 
-    /// The kind as a marker spells it; a refusal's name is its owner's.
+    /// The kind as a marker spells it.
     pub fn name(&self) -> std::borrow::Cow<'_, str> {
         let fixed = match self {
             Self::ValuesNotRendered => "ValuesNotRendered",
             Self::UnsupportedInstruction => "UnsupportedInstruction",
             Self::UserOperation(name) => return format!("UserOperation({name})").into(),
-            Self::CallNotRendered => "CallNotRendered",
+            Self::CallNotRendered(_) => "CallNotRendered",
             Self::EffectNotRendered => "EffectNotRendered",
             Self::StoreNotSpelled => "StoreNotSpelled",
             Self::TermNotSpelled => "TermNotSpelled",
@@ -1471,37 +1471,16 @@ impl GapKind {
             Self::UnprovenReturn => "UnprovenReturn",
             Self::UnresolvedIndirectBranch => "UnresolvedIndirectBranch",
             Self::TransferNotFollowed => "TransferNotFollowed",
-            Self::TailTransferNotRendered => "TailTransferNotRendered",
-            Self::Refused(name) => name.as_str(),
+            Self::TailTransferNotRendered(_) => "TailTransferNotRendered",
         };
         fixed.into()
     }
 
-    /// The kind a marker's spelling names: a name no fixed kind has is a refusal's.
-    fn from_name(name: String) -> Self {
-        const FIXED: [GapKind; 12] = [
-            GapKind::ValuesNotRendered,
-            GapKind::UnsupportedInstruction,
-            GapKind::CallNotRendered,
-            GapKind::EffectNotRendered,
-            GapKind::StoreNotSpelled,
-            GapKind::TermNotSpelled,
-            GapKind::ValueHasNoCType,
-            GapKind::ValueNotComputed,
-            GapKind::UnprovenReturn,
-            GapKind::UnresolvedIndirectBranch,
-            GapKind::TransferNotFollowed,
-            GapKind::TailTransferNotRendered,
-        ];
-        if let Some(fixed) = FIXED.into_iter().find(|kind| kind.name() == name.as_str()) {
-            return fixed;
-        }
-        match name
-            .strip_prefix("UserOperation(")
-            .and_then(|rest| rest.strip_suffix(')'))
-        {
-            Some(userop) => Self::UserOperation(userop.to_owned()),
-            None => Self::Refused(name),
+    /// The call a call gap stands for.
+    pub const fn call(&self) -> Option<&CallGap> {
+        match self {
+            Self::CallNotRendered(call) | Self::TailTransferNotRendered(Some(call)) => Some(call),
+            _ => None,
         }
     }
 }
@@ -1512,15 +1491,178 @@ impl std::fmt::Display for GapKind {
     }
 }
 
-impl Serialize for GapKind {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.name())
+/// A call the rendering states no statement for.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CallGap {
+    pub callee: GapCallee,
+    pub reason: CallRefusal,
+}
+
+impl std::fmt::Display for CallGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "call to {}: {}", self.callee, self.reason)
     }
 }
 
-impl<'de> Deserialize<'de> for GapKind {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer).map(Self::from_name)
+/// Who an unrendered call reaches, as the facts name it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum GapCallee {
+    /// The callee `r2types` resolved, by the name the rendering would call it.
+    Named(String),
+    /// A direct target no name covers.
+    Address(u64),
+    /// A target computed at run time.
+    Indirect,
+}
+
+impl std::fmt::Display for GapCallee {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Named(name) => f.write_str(name),
+            Self::Address(addr) => write!(f, "{addr:#x}"),
+            Self::Indirect => f.write_str("an indirect target"),
+        }
+    }
+}
+
+/// Why a call has no statement: r2ssa's boundary refusal, or the first fact the plan or the
+/// spelling needed that the facts do not state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CallRefusal {
+    Boundary(r2ssa::CallBoundaryRefusal),
+    NoCallSite,
+    NoCertificate,
+    NoCallee,
+    ResultUnclear,
+    VariadicWithoutFixedCount,
+    SignatureArity,
+    ArgumentClass,
+    ResultClass,
+    IndirectVariadic,
+    ArgumentType,
+    ArgumentOperand,
+    ArgumentFit,
+    FloatOnStack,
+    TargetNotSpelled,
+    CalleeShadowed,
+    DeclarationDisagrees,
+    ResultNotSpelled,
+    SelfCallNotSpelled,
+}
+
+impl CallRefusal {
+    /// The reason's stable tag, as `pddj` states it.
+    pub const fn tag(self) -> &'static str {
+        use r2ssa::CallBoundaryRefusal as B;
+        match self {
+            Self::Boundary(boundary) => match boundary {
+                B::NoConvention => "no-convention",
+                B::InterfaceIncomplete => "interface-incomplete",
+                B::ArgumentAreaUnseen => "argument-area-unseen",
+                B::DeclaredArgumentUnreached { .. } => "declared-argument-unreached",
+                B::StatedArgumentUnreached { .. } => "stated-argument-unreached",
+                B::VariadicCount(_) => "variadic-count",
+                B::ResultUnreached => "result-unreached",
+                B::Floor { .. } => "arity-floor",
+                B::MayHandOn { .. } => "may-hand-on",
+                B::SlotSkipped { .. } => "slot-skipped",
+                B::ResultPassedOn { .. } => "result-passed-on",
+                B::CountFromRegisters => "count-from-registers",
+                B::ImportUnstated(r2ssa::UnstatedImport::Undeclared) => "import-undeclared",
+                B::ImportUnstated(r2ssa::UnstatedImport::Unplaced) => "import-unplaced",
+            },
+            Self::NoCallSite => "no-call-site",
+            Self::NoCertificate => "no-certificate",
+            Self::NoCallee => "no-callee",
+            Self::ResultUnclear => "result-unclear",
+            Self::VariadicWithoutFixedCount => "variadic-without-fixed-count",
+            Self::SignatureArity => "signature-arity",
+            Self::ArgumentClass => "argument-class",
+            Self::ResultClass => "result-class",
+            Self::IndirectVariadic => "indirect-variadic",
+            Self::ArgumentType => "argument-type",
+            Self::ArgumentOperand => "argument-operand",
+            Self::ArgumentFit => "argument-fit",
+            Self::FloatOnStack => "float-on-stack",
+            Self::TargetNotSpelled => "target-not-spelled",
+            Self::CalleeShadowed => "callee-shadowed",
+            Self::DeclarationDisagrees => "declaration-disagrees",
+            Self::ResultNotSpelled => "result-not-spelled",
+            Self::SelfCallNotSpelled => "self-call-not-spelled",
+        }
+    }
+}
+
+impl std::fmt::Display for CallRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use r2ssa::CallBoundaryRefusal as B;
+        let fixed = match self {
+            Self::Boundary(boundary) => match boundary {
+                B::NoConvention => "no calling convention describes it",
+                B::InterfaceIncomplete => "its declared interface is incomplete",
+                B::ArgumentAreaUnseen => "its stack argument area is not placed",
+                B::DeclaredArgumentUnreached { index } => {
+                    return write!(f, "no value reaches its declared argument {index}");
+                }
+                B::StatedArgumentUnreached { count } => {
+                    return write!(f, "it takes {count} arguments, and one reaches no value");
+                }
+                B::VariadicCount(why) => {
+                    return write!(f, "variadic, its argument count unproven ({})", why.kind());
+                }
+                B::ResultUnreached => "no value reaches its declared result",
+                B::Floor { floor, written } => {
+                    return write!(
+                        f,
+                        "its arity is only at least {floor} (a floor), and this call writes {written}"
+                    );
+                }
+                B::MayHandOn { slot } => {
+                    return write!(
+                        f,
+                        "argument slot {slot} may hand on what this function was passed"
+                    );
+                }
+                B::SlotSkipped { slot } => {
+                    return write!(
+                        f,
+                        "argument slot {slot} is unwritten, and a later one is written"
+                    );
+                }
+                B::ResultPassedOn { slot } => {
+                    return write!(
+                        f,
+                        "argument slot {slot} holds an earlier call's result, and a later one is written"
+                    );
+                }
+                B::CountFromRegisters => "no arity is stated, only the registers written before it",
+                B::ImportUnstated(r2ssa::UnstatedImport::Undeclared) => {
+                    "the import has no declaration to state its arguments"
+                }
+                B::ImportUnstated(r2ssa::UnstatedImport::Unplaced) => {
+                    "the import's declaration has an argument this convention does not place"
+                }
+            },
+            Self::NoCallSite => "r2ssa states no call site here",
+            Self::NoCertificate => "no callsite certificate",
+            Self::NoCallee => "no callee is named",
+            Self::ResultUnclear => "its result is unclear",
+            Self::VariadicWithoutFixedCount => "variadic, with no fixed argument count",
+            Self::SignatureArity => "its signature's arity disagrees with the call",
+            Self::ArgumentClass => "an argument's class disagrees with its signature",
+            Self::ResultClass => "its result's class is unproven",
+            Self::IndirectVariadic => "an indirect call to a variadic callee",
+            Self::ArgumentType => "an argument has no machine type",
+            Self::ArgumentOperand => "an argument has no C spelling",
+            Self::ArgumentFit => "an argument does not fit its class",
+            Self::FloatOnStack => "a float argument passes on the stack",
+            Self::TargetNotSpelled => "its target has no C spelling",
+            Self::CalleeShadowed => "a variable holds the callee's name",
+            Self::DeclarationDisagrees => "another call disagrees with its declaration",
+            Self::ResultNotSpelled => "its result is not assigned",
+            Self::SelfCallNotSpelled => "the call to itself disagrees with the definition",
+        };
+        f.write_str(fixed)
     }
 }
 
@@ -1543,22 +1685,27 @@ impl std::fmt::Display for GapMarker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // A gap over no operation marks control the text could not state.
         if self.ops == 0 {
-            return write!(
+            write!(
                 f,
                 "r2dec gap: {} at {:#x} ({})",
                 self.kind, self.block_addr, self.origin
-            );
+            )?;
+        } else {
+            write!(
+                f,
+                "r2dec gap: {} at {:#x}:{} covering {} op{} ({})",
+                self.kind,
+                self.block_addr,
+                self.op_idx,
+                self.ops,
+                if self.ops == 1 { "" } else { "s" },
+                self.origin
+            )?;
         }
-        write!(
-            f,
-            "r2dec gap: {} at {:#x}:{} covering {} op{} ({})",
-            self.kind,
-            self.block_addr,
-            self.op_idx,
-            self.ops,
-            if self.ops == 1 { "" } else { "s" },
-            self.origin
-        )
+        match self.kind.call() {
+            Some(call) => write!(f, ": {call}"),
+            None => Ok(()),
+        }
     }
 }
 

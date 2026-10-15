@@ -116,7 +116,7 @@ void SleighBase::buildXrefs(vector<string> &errorPairs)
 void SleighBase::reregisterContext(void)
 
 {
-  // r2sleigh: the fields buildXrefs found, in the same symbol-table order, with no walk per reset.
+  // The fields buildXrefs found, in the same symbol-table order, with no walk per reset.
   for(ContextSymbol *csym : contextsymbols) {
     ContextField *field = (ContextField *)csym->getPatternValue();
     registerContext(csym->getName(),field->getStartBit(),field->getEndBit());

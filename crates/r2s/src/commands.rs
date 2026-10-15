@@ -488,12 +488,29 @@ fn seek(session: &mut Session, argument: &str) -> Result<String, String> {
     Ok(String::new())
 }
 
+/// A container format as radare2's `i` spells it: `elf64`, `mach064`, `pe`.
+pub(crate) fn format_name(format: r2image::Format, bits: u32) -> String {
+    let (name, wide) = match format {
+        r2image::Format::Elf => ("elf", "elf64"),
+        r2image::Format::MachO => ("mach0", "mach064"),
+        r2image::Format::Pe => ("pe", "pe64"),
+        r2image::Format::Coff => ("coff", "coff"),
+        r2image::Format::Wasm => ("wasm", "wasm"),
+        r2image::Format::Xcoff => ("xcoff", "xcoff64"),
+        r2image::Format::Other => ("any", "any"),
+    };
+    (if bits == 64 { wide } else { name }).to_owned()
+}
+
 fn info(session: &Session) -> Result<String, String> {
     let image = session.image();
     let arch = image.arch();
     let mut out = String::new();
     out.push_str(&format!("file     {}\n", session.path));
-    out.push_str(&format!("format   {:?}\n", image.format()));
+    out.push_str(&format!(
+        "format   {}\n",
+        format_name(image.format(), arch.bits)
+    ));
     out.push_str(&format!("arch     {}\n", arch.name));
     out.push_str(&format!("bits     {}\n", arch.bits));
     out.push_str(&format!(
@@ -644,14 +661,14 @@ fn write_text(session: &mut Session, bytes: &[u8]) -> Result<String, String> {
 fn write_hex(session: &mut Session, argument: &str) -> Result<String, String> {
     let digits = argument.replace(' ', "");
     if !digits.len().is_multiple_of(2) {
-        return Err("r2s: a byte is two hex digits".to_owned());
+        return Err("a byte is two hex digits".to_owned());
     }
     let bytes = digits
         .as_bytes()
         .chunks(2)
         .map(|pair| {
-            let text = std::str::from_utf8(pair).map_err(|_| "r2s: not hex".to_owned())?;
-            u8::from_str_radix(text, 16).map_err(|_| format!("r2s: '{text}' is not hex"))
+            let text = std::str::from_utf8(pair).map_err(|_| "not hex".to_owned())?;
+            u8::from_str_radix(text, 16).map_err(|_| format!("'{text}' is not hex"))
         })
         .collect::<Result<Vec<u8>, String>>()?;
     patch(session, &bytes)
@@ -667,7 +684,7 @@ fn patch(session: &mut Session, bytes: &[u8]) -> Result<String, String> {
     session
         .image_mut()
         .write(addr, bytes)
-        .map_err(|error| format!("r2s: {error}"))?;
+        .map_err(|error| error.to_string())?;
     Ok(format!("{} bytes at {addr:#x}", bytes.len()))
 }
 
@@ -694,7 +711,7 @@ fn revert(session: &mut Session) -> Result<String, String> {
 /// Where each address is named from, how, and on what evidence.
 fn cross_references(session: &mut Session, argument: &str) -> Result<String, String> {
     if !argument.trim().is_empty() {
-        return Err("r2s: ax takes no argument; use axt <address>".to_owned());
+        return Err("ax takes no argument; use axt <address>".to_owned());
     }
     let index = session.program.references()?.value;
     let mut out = String::from("from       to         role     size support\n");
@@ -1154,10 +1171,10 @@ pub(crate) fn symbols(session: &Session) -> Result<Table, String> {
         .collect();
     // Numbered as the static table numbers them, where it states them.
     let nth = |symbol: &r2image::Symbol| {
-        symbol
-            .origin
-            .table
-            .map_or((true, symbol.origin.dynamic), |index| (false, Some(index)))
+        symbol.origin.table.map_or(
+            (true, symbol.origin.dynamic.or(symbol.origin.directory)),
+            |index| (false, Some(index)),
+        )
     };
     stated.sort_by_key(|symbol| nth(symbol));
     for symbol in stated {
@@ -1165,25 +1182,36 @@ pub(crate) fn symbols(session: &Session) -> Result<Table, String> {
         table.row(
             mapped,
             format!(
-                "{:<3} {} {} {:<6} {:<6} {:<4}     {}",
+                "{:<3} {} {} {:<6} {:<6} {:<4} {} {}",
                 nth(symbol).1.unwrap_or_default(),
                 spelled(mapped.and_then(|vaddr| file_offset_of(session, vaddr))),
                 spelled(Some(symbol.vaddr)),
                 binding(symbol.binding),
                 symbol_type(symbol.kind),
                 symbol.size,
+                symbol.library.as_deref().unwrap_or("   "),
                 symbol.name
             ),
         );
     }
+    import_rows(session, &mut table);
+    Ok(table)
+}
+
+/// `is`'s import rows, after the symbols.
+fn import_rows(session: &Session, table: &mut Table) {
+    let spelled = |value: Option<u64>| {
+        value.map_or_else(|| "----------".to_owned(), |value| format!("{value:#010x}"))
+    };
     let dynamic = session
         .image()
         .symbols()
         .iter()
         .any(|symbol| symbol.import && symbol.origin.dynamic.is_some());
-    let index = |symbol: &r2image::Symbol| match dynamic {
-        true => symbol.origin.dynamic,
-        false => symbol.origin.table,
+    let index = |symbol: &r2image::Symbol| match (symbol.origin.directory, dynamic) {
+        (Some(nth), _) => Some(nth),
+        (None, true) => symbol.origin.dynamic,
+        (None, false) => symbol.origin.table,
     };
     let mut imports: Vec<&r2image::Symbol> = session
         .image()
@@ -1191,16 +1219,30 @@ pub(crate) fn symbols(session: &Session) -> Result<Table, String> {
         .iter()
         .filter(|symbol| symbol.import && index(symbol).is_some())
         .collect();
-    imports.sort_by_key(|symbol| index(symbol));
+    // A PE import is listed in its directory's order, which is its slot's.
+    imports.sort_by_key(|symbol| {
+        (
+            symbol.library.is_some().then_some(symbol.vaddr),
+            index(symbol),
+        )
+    });
     let linkage = session.program.imports();
-    let stubs = &linkage.stubs;
+    // The first stub naming each import, as the stubs are ordered.
+    let mut stubs = std::collections::BTreeMap::new();
+    for (at, stub) in &linkage.stubs {
+        stubs.entry(&*stub.symbol).or_insert((at, stub));
+    }
     for symbol in imports {
-        let stub = stubs.iter().find(|(_, stub)| *stub.symbol == *symbol.name);
-        let at = stub.map(|(at, _)| *at);
+        let stub = stubs.get(&*symbol.name).copied();
+        // A PE import is its slot, which a call reads; no stub stands for it.
+        let at = match symbol.library {
+            Some(_) => Some(symbol.vaddr),
+            None => stub.map(|(at, _)| *at),
+        };
         table.row(
             at,
             format!(
-                "{:<3} {} {} {:<6} {:<6} {:<4}     imp.{}",
+                "{:<3} {} {} {:<6} {:<6} {:<4} {} imp.{}",
                 index(symbol).unwrap_or_default(),
                 spelled(at.and_then(|at| file_offset_of(session, at))),
                 spelled(at),
@@ -1208,11 +1250,11 @@ pub(crate) fn symbols(session: &Session) -> Result<Table, String> {
                 symbol_type(symbol.kind),
                 // An import's size is the stub's, which is what a call to it reaches.
                 stub.map_or(symbol.size, |(_, stub)| stub.size),
+                symbol.library.as_deref().unwrap_or("   "),
                 symbol.name
             ),
         );
     }
-    Ok(table)
 }
 
 /// A symbol's binding, as radare2 spells it.
@@ -1221,7 +1263,9 @@ fn binding(binding: r2image::Binding) -> String {
         r2image::Binding::Local => "LOCAL".to_owned(),
         r2image::Binding::Global => "GLOBAL".to_owned(),
         r2image::Binding::Weak => "WEAK".to_owned(),
+        r2image::Binding::Unique => "UNIQUE".to_owned(),
         r2image::Binding::Other(other) => format!("{other}"),
+        r2image::Binding::Unstated => "NONE".to_owned(),
     }
 }
 
@@ -1232,6 +1276,7 @@ fn symbol_type(kind: r2image::SymbolKind) -> &'static str {
         r2image::SymbolKind::Data => "OBJ",
         r2image::SymbolKind::Section => "SECT",
         r2image::SymbolKind::File => "FILE",
+        r2image::SymbolKind::Tls => "TLS",
         r2image::SymbolKind::Other | r2image::SymbolKind::Mapping(_) => "NOTYPE",
     }
 }
@@ -1321,7 +1366,15 @@ pub(crate) fn relocations(session: &Session) -> Table {
             .as_ref()
             .map(|symbol| symbol.name.to_string())
             .unwrap_or_default();
+        // A field holding the target less its place is spelled as radare2 spells it: less the place, net of the addend.
+        let from_place = relocation.encoding == r2image::Encoding::FromPlace;
         match relocation.addend {
+            _ if from_place => {
+                let less = relocation
+                    .vaddr
+                    .wrapping_sub(relocation.addend.unwrap_or(0) as u64);
+                name.push_str(&format!(" - {less:#010x}"));
+            }
             Some(addend) if addend < 0 => name.push_str(&format!(" - {:#010x}", -addend)),
             Some(addend) if addend > 0 && !name.is_empty() => {
                 name.push_str(&format!(" + {addend:#010x}"));
@@ -1400,9 +1453,11 @@ fn obligations(session: &mut Session, argument: &str) -> Result<String, String> 
     let addr = parse_number(session, argument)?;
     let rendering = session.program.rendered(addr)?;
     let Some(ledger) = rendering.response.obligation_ledger.as_ref() else {
-        return Ok(
-            "no obligation ledger: the function did not reach native rendering\n".to_owned(),
+        let why = rendering.refused.as_ref().map_or_else(
+            || "the function did not reach native rendering".to_owned(),
+            ToString::to_string,
         );
+        return Ok(format!("no obligation ledger: {why}"));
     };
     let mut out = format!("{}\n", ledger.report());
     if !rendering.unread.is_empty() {
@@ -1417,7 +1472,17 @@ fn obligations(session: &mut Session, argument: &str) -> Result<String, String> 
 /// The offset in the file of what `vaddr` holds: in a fat Mach-O, past the slice's own start.
 fn file_offset_of(session: &Session, vaddr: u64) -> Option<u64> {
     let image = session.image();
-    let segment = image.segment_at(vaddr)?;
+    let Some(segment) = image.segment_at(vaddr) else {
+        // An object's unloaded sections have the place this reader gave them; a linked image's none.
+        let section = image.sections().iter().find(|section| {
+            image.relocatable()
+                && !section.loaded
+                && section.vaddr != 0
+                && (section.vaddr..section.vaddr + section.vsize).contains(&vaddr)
+        })?;
+        let into = vaddr - section.vaddr;
+        return (into < section.file_size).then(|| image.file_base() + section.file_offset + into);
+    };
     let offset_in_segment = vaddr - segment.vaddr;
     (offset_in_segment < segment.file_size)
         .then(|| image.file_base() + segment.file_offset + offset_in_segment)

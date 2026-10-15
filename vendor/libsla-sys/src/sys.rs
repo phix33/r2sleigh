@@ -367,6 +367,10 @@ mod default {
         #[rust_name = "user_op_names"]
         fn getUserOpNamesProxy(self: &SleighProxy) -> UniquePtr<CxxVector<CxxString>>;
 
+        // The byte modulo every instruction begins on (`define alignment`).
+        #[rust_name = "alignment"]
+        fn getAlignmentProxy(self: &SleighProxy) -> i32;
+
         /// Discard parser contexts cached by instruction address without
         /// decoding the Sleigh specification again.
         #[rust_name = "clear_cache"]

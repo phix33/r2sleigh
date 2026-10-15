@@ -94,7 +94,7 @@ uint4 getSize(const VarnodeData &data) {
     return data.size;
 }
 
-/// r2sleigh: a varnode's space and offset, read in place where getAddress allocates an Address.
+/// A varnode's space and offset, read in place where getAddress allocates an Address.
 AddrSpace *getVarnodeSpace(const VarnodeData &data) {
     return data.space;
 }
@@ -171,6 +171,12 @@ std::unique_ptr<std::vector<std::string>> SleighProxy::getUserOpNamesProxy() con
     auto names = std::unique_ptr<std::vector<std::string>>(new std::vector<std::string>());
     getUserOpNames(*names);
     return names;
+}
+
+/// The byte modulo every instruction begins on, as the specification's
+/// `define alignment` states it (1 where it states none).
+int32_t SleighProxy::getAlignmentProxy() const {
+    return getAlignment();
 }
 
 /// Discard every parser context cached by instruction address while retaining

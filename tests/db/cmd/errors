@@ -1,0 +1,40 @@
+# What the shell says when it cannot do what was asked: one `r2s:` prefix, a sentence, never a
+# Rust spelling of an error (audit D14).
+
+NAME=a byte is two hex digits
+FILE=tests/fixtures/rv_O0g
+CMDS=wx 414
+EXPECT_ERR=<<EOF
+r2s: a byte is two hex digits
+EOF
+EXPECT=<<EOF
+EOF
+RUN
+
+NAME=a write past the address space
+FILE=tests/fixtures/rv_O0g
+CMDS=wx 4142 @ 0xfffffffffffffffe
+EXPECT_ERR=<<EOF
+r2s: a write at 0xfffffffffffffffe runs past the end of the address space
+EOF
+EXPECT=<<EOF
+EOF
+RUN
+
+NAME=a write where nothing is mapped
+FILE=tests/fixtures/rv_O0g
+CMDS=s 0x17cc; wx 9090909090909090909090909090909090909090
+EXPECT_ERR=<<EOF
+r2s: nothing mapped at 0x17cc..0x17e0 to write over
+EOF
+EXPECT=<<EOF
+EOF
+RUN
+
+NAME=the format as radare2 spells it
+FILE=tests/fixtures/rv_O0g
+CMDS=i~format
+EXPECT=<<EOF
+format   elf64
+EOF
+RUN

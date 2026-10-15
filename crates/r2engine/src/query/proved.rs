@@ -60,8 +60,7 @@ impl Anchored {
             let Some(line) = graph.instruction_for_inst(call.at) else {
                 continue;
             };
-            // An arity read off the registers written before the call is no proof the callee reads them.
-            let proven = call.arguments_complete && call.described;
+            let proven = call.arguments_proven;
             let handed = proven.then(|| handed(artifact, call));
             let support = handed.as_ref().map_or(Basis::Certified, |(_, rung)| *rung);
             let uncounted = call
