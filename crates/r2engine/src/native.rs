@@ -745,8 +745,17 @@ pub(crate) fn handed(
         }
     };
     let walked = native.walked(body);
-    match native.prepare(&walked, &Callees::default()) {
-        Ok(artifact) => native.handed_functions(&artifact, &walked),
+    // What reaches a call's argument is read off the seal: no fact is collected for it.
+    let seal = native.seal(
+        &walked,
+        &Callees::default(),
+        Vec::new(),
+        Restatement::default(),
+        &[],
+        None,
+    );
+    match seal {
+        Ok(seal) => native.handed_functions(&seal, &walked),
         Err(error) => {
             r2il::refusal_evidence!(
                 "handed-function",
@@ -1726,15 +1735,6 @@ impl Native<'_> {
         found.into_iter().collect()
     }
 
-    /// Capture what was walked and prepare it for the engine.
-    fn prepare(
-        &self,
-        walked: &Walked,
-        callees: &Callees,
-    ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
-        self.prepare_with_literals(walked, callees, Vec::new())
-    }
-
     /// The interface the first pass recovered, restated with the frame slots the debug
     /// information declares; `None` where it declares none. A slot the body proves is the frame
     /// model's own (`SsaArtifact::stack_slot_role`), never restated as a declaration.
@@ -1761,22 +1761,6 @@ impl Native<'_> {
         Declared::body(self.target, address)
             .map(|declared| Placement::new(self.target, &self.machine).restatement(declared, true))
             .unwrap_or_default()
-    }
-
-    fn prepare_with_literals(
-        &self,
-        walked: &Walked,
-        callees: &Callees,
-        extra_literals: Vec<(u64, String)>,
-    ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
-        self.prepare_restated(
-            walked,
-            callees,
-            extra_literals,
-            Restatement::default(),
-            &[],
-            None,
-        )
     }
 
     fn prepare_restated(
@@ -2146,11 +2130,10 @@ impl Native<'_> {
     /// Nothing here guesses: a constant is believed only where a declared type
     /// says that slot holds a function, and the caller checks it decodes in
     /// the instruction set the pointer names.
-    fn handed_functions(&self, artifact: &TrustedSsaArtifact, walked: &Walked) -> Vec<u64> {
-        let prepared = artifact.shared_artifact();
+    fn handed_functions(&self, seal: &r2ssa::TrustedSeal, walked: &Walked) -> Vec<u64> {
         let sites = call_sites(&walked.body, self.program);
         let mut found = Vec::new();
-        let graph = prepared.graph();
+        let graph = seal.graph();
         for block in &graph.blocks {
             for &inst in graph.op_insts(block.id) {
                 let (Some(op), Some(id)) = (graph.op(inst), graph.op_for_inst(inst)) else {
@@ -2171,8 +2154,8 @@ impl Native<'_> {
                     if !parameter.is_function() {
                         continue;
                     }
-                    let Some(address) = r2ssa::value_reaching(prepared.as_ref(), id, *storage)
-                        .and_then(|value| prepared.folded_value(value))
+                    let Some(address) = (seal.value_reaching(id, *storage))
+                        .and_then(|value| seal.folded_value(value))
                     else {
                         continue;
                     };

@@ -509,25 +509,21 @@ pub(crate) fn ensure_source_formal_parameter_values(
     }
 }
 
-/// The value a storage holds immediately before one operation.
-///
-/// The walk `semantic.rs` does for a call's own arguments, named and made
-/// public: an engine that wants to know what a body put in a register before
-/// a call has no other way to ask, and a second walk would be a second answer
-/// to one question.
-pub fn value_reaching(
-    artifact: &crate::SsaArtifact,
+/// The value a storage holds immediately before one operation of a sealed function: the walk a
+/// call's own arguments take, which needs the seal and no collected fact.
+pub(crate) fn value_reaching(
+    sealed: &crate::Sealed,
+    machine_context: &SourceMachineContext,
     op: crate::OpId,
     storage: CanonicalStorageId,
 ) -> Option<ValueId> {
-    let (block_addr, op_index) = artifact
-        .graph()
-        .walk_start(artifact.graph().inst_for_op(op)?)?;
+    let graph = sealed.graph();
+    let (block_addr, op_index) = graph.walk_start(graph.inst_for_op(op)?)?;
     match reaching_abi_value_in_block_with_policy(
-        artifact.function(),
-        Some(artifact.decompile_prep_facts()),
-        artifact.graph(),
-        artifact.machine_context(),
+        sealed.function(),
+        Some(sealed.decompile_prep_facts()),
+        graph,
+        machine_context,
         block_addr,
         op_index,
         storage,

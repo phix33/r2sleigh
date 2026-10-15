@@ -196,7 +196,7 @@ pub use semantic::{
     StructuredMemoryAccessFact, StructuredRecursiveCallFact, SupervisorCall, SwitchCertificate,
     SwitchGuardCertificate, SwitchPredicateFact, TripCount, TripGuard, TripRefusal, TripTest,
     UnstatedImport, ValueOwner, VariadicCallsiteArgumentCountEvidence,
-    VariadicCallsiteArgumentCountRefusal, returned_bytes, value_reaching,
+    VariadicCallsiteArgumentCountRefusal, returned_bytes,
 };
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use slot_promotion::promoted_slot_offset;

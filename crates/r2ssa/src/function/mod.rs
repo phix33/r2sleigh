@@ -494,6 +494,25 @@ impl TrustedSeal {
         folded.filter_map(|(_, value)| *value)
     }
 
+    /// The constant one value folds to with what preparation admitted.
+    pub fn folded_value(&self, value: crate::graph::ValueId) -> Option<u64> {
+        self.sealed.folded().prepared.get(value).copied().flatten()
+    }
+
+    /// The sealed graph, which owns each operation.
+    pub fn graph(&self) -> &crate::graph::SsaGraph {
+        self.sealed.graph()
+    }
+
+    /// The value a storage holds immediately before one operation, as a call's arguments read it.
+    pub fn value_reaching(
+        &self,
+        op: crate::OpId,
+        storage: r2source::CanonicalStorageId,
+    ) -> Option<crate::graph::ValueId> {
+        crate::semantic::value_reaching(&self.sealed, &self.machine_context, op, storage)
+    }
+
     /// The artifact: the sealed function's facts collected.
     pub fn collect<C: SsaWorkControl + ?Sized>(
         self,
