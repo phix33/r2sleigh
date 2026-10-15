@@ -2656,6 +2656,9 @@ impl Disassembler {
                 ops.push(op);
             }
         }
+        if let Some(how) = crate::temporary_move::requested() {
+            crate::temporary_move::move_temporaries(&mut ops, how);
+        }
 
         // Where an expansion's own temporaries may live: above every temporary
         // this instruction already uses. Sleigh scopes the unique space to the
