@@ -204,6 +204,10 @@ class Judged(unittest.TestCase):
         )
 
 
+# The side a register is missing from, as a judgment's `lacking` names radare2's.
+RADARE2_LACKS = "r2"
+
+
 def sample(*rows, arch="x86-64"):
     return json.dumps({"arch": arch, "rows": list(rows)})
 
@@ -236,7 +240,8 @@ class Registers(unittest.TestCase):
         )
         # radare2's `I` and `W` against r2s's reads and writes; the side named is the one lacking it.
         self.assertEqual(wide[1][:4], (0x10, "reads", "rax", "r2s"))
-        self.assertEqual(rax[1][:4], (0x10, "writes", "rax", "r2"))
+        self.assertEqual(rax[1][:3], (0x10, "writes", "rax"))
+        self.assertEqual(rax[1][3], RADARE2_LACKS)
         self.assertEqual(eax[1][:4], (0x10, "writes", "eax", "r2s"))
         self.assertEqual(wide[1][6]["ours"], "eax")
         self.assertEqual(wide[1][6]["theirs"], "eax rax")
