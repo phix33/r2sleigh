@@ -63,12 +63,13 @@ impl Source for Mixed {
 }
 
 fn opened() -> OpenProgram<Mixed> {
-    opened_as(Endian::Little)
+    opened_as(Endian::Little, None)
 }
 
 /// ARM code, a Thumb function stated only by the entry point, and an ARM pool.
-fn opened_as(endian: Endian) -> OpenProgram<Mixed> {
+fn opened_as(endian: Endian, instructions: Option<Endian>) -> OpenProgram<Mixed> {
     let mut mixed = arm_only(&CODE, endian);
+    mixed.container.arch.instructions = instructions;
     // `$a` at the ARM code too, which the Thumb function after it outranks.
     for vaddr in [ARM, DATA] {
         mixed.container.symbols.push(Symbol {
@@ -190,8 +191,8 @@ fn a_thumb_mapping_symbol_switches_one_arm_function_to_thumb() {
 #[test]
 fn a_pool_word_reads_in_the_container_s_order_not_the_decoder_s() {
     // BE8: little-endian instructions in a big-endian program.
-    let holds = |endian| {
-        let mut program = opened_as(endian);
+    let holds = |endian, instructions| {
+        let mut program = opened_as(endian, instructions);
         let answer = program
             .listing(Listing {
                 start: ARM,
@@ -206,8 +207,25 @@ fn a_pool_word_reads_in_the_container_s_order_not_the_decoder_s() {
                 _ => None,
             })
     };
-    assert_eq!(holds(Endian::Little), Some((DATA, 0xe3a0_0000)));
-    assert_eq!(holds(Endian::Big), Some((DATA, 0x0000_a0e3)));
+    assert_eq!(holds(Endian::Little, None), Some((DATA, 0xe3a0_0000)));
+    let be8 = Some(Endian::Little);
+    assert_eq!(holds(Endian::Big, be8), Some((DATA, 0x0000_a0e3)));
+}
+
+#[test]
+fn a_be32_program_reads_its_instructions_in_its_data_order() {
+    // BE32, no `EF_ARM_BE8`: `bx lr` most significant byte first (audit W26).
+    let mut program = opened_over(&[0xe1, 0x2f, 0xff, 0x1e], Endian::Big);
+    let listed = program
+        .listing(Listing {
+            start: ARM,
+            stop: Stop::After(1),
+        })
+        .expect("it lists");
+    let line = &listed.value[0];
+    let text = line.syntax.as_ref().map(|syntax| syntax.text());
+    assert_eq!(text.as_deref(), Some("bx lr"));
+    assert_eq!(line.flow, Some(r2engine::Flow::Return));
 }
 
 #[test]

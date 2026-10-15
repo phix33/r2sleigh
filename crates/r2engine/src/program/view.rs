@@ -20,7 +20,12 @@ pub(super) fn modes<S: Source + 'static>(
 
 /// How this program spells a word in memory: the container states it, not the decoder (ARM BE8).
 pub(super) fn endian<S: Source>(source: &S) -> r2il::Endianness {
-    match source.container().arch.endian {
+    endianness(source.container().arch.endian)
+}
+
+/// The lift's spelling of a byte order the container states.
+pub(super) fn endianness(endian: super::Endian) -> r2il::Endianness {
+    match endian {
         super::Endian::Little => r2il::Endianness::Little,
         super::Endian::Big => r2il::Endianness::Big,
     }

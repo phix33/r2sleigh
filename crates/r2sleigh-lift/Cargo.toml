@@ -20,7 +20,7 @@ optional = true
 default = []
 # The languages each feature reads (`TrustedSleighProfile`, `selection`); only these are compiled.
 x86 = ["sleigh-config/sla-x86", "sleigh-config/sla-x86-64"]
-arm = ["sleigh-config/sla-ARM8_le", "sleigh-config/sla-AARCH64", "sleigh-config/sla-AARCH64_AppleSilicon"]
+arm = ["sleigh-config/sla-ARM8_le", "sleigh-config/sla-ARM8_be", "sleigh-config/sla-AARCH64", "sleigh-config/sla-AARCH64_AppleSilicon"]
 mips = [
     "sleigh-config/sla-mips32be",
     "sleigh-config/sla-mips32le",

@@ -15,7 +15,7 @@ use libsla::{
     Address, AddressSpace, AddressSpaceId, BoolOp, FloatOp, GhidraSleigh, InstructionLoader, IntOp,
     IntSign, OpCode, PcodeDisassembly, PcodeInstruction, PseudoOp, Sleigh, VarnodeData,
 };
-use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode, select_register_name};
+use r2il::{Endianness, R2ILBlock, R2ILOp, SpaceId, Varnode, select_register_name};
 use r2source::SourceEndianness;
 use r2source::{
     AdvisorySuccessorKind, CanonicalStorageId, CanonicalStorageSpace, MachineProfile,
@@ -175,6 +175,10 @@ pub enum TrustedSleighProfile {
     #[cfg(feature = "arm")]
     ArmThumbLe,
     #[cfg(feature = "arm")]
+    ArmCortexBe,
+    #[cfg(feature = "arm")]
+    ArmThumbBe,
+    #[cfg(feature = "arm")]
     Aarch64Le,
     #[cfg(feature = "arm")]
     Aarch64AppleSilicon,
@@ -206,6 +210,8 @@ impl TrustedSleighProfile {
         all.extend([
             Self::ArmCortexLe,
             Self::ArmThumbLe,
+            Self::ArmCortexBe,
+            Self::ArmThumbBe,
             Self::Aarch64Le,
             Self::Aarch64AppleSilicon,
         ]);
@@ -229,6 +235,22 @@ impl TrustedSleighProfile {
         })
     }
 
+    /// ARM in either byte order (BE8 is the little-endian one), TMode clear as Ghidra pairs it
+    /// (ARMt; a Cortex pspec sets TMode, lifting every A32 instruction as Thumb) or set.
+    #[cfg(feature = "arm")]
+    fn arm(self) -> (&'static [u8], &'static str, &'static str) {
+        use sleigh_config::processor_arm as arm;
+        let sla = match self {
+            Self::ArmCortexBe | Self::ArmThumbBe => arm::SLA_ARM8_BE,
+            _ => arm::SLA_ARM8_LE,
+        };
+        let pspec = match self {
+            Self::ArmThumbLe | Self::ArmThumbBe => arm::PSPEC_ARMTTHUMB,
+            _ => arm::PSPEC_ARMT,
+        };
+        (sla, pspec, "ARM")
+    }
+
     pub fn specification(self) -> (&'static [u8], &'static str, &'static str) {
         match self {
             #[cfg(feature = "x86")]
@@ -244,22 +266,9 @@ impl TrustedSleighProfile {
                 "x86-64",
             ),
             #[cfg(feature = "arm")]
-            // Ghidra's own ARM.ldefs pairs ARM8_le with ARMt, which leaves
-            // TMode clear. A Cortex pspec sets TMode, and Cortex-M is
-            // Thumb-only, so pairing it here would lift every A32 instruction
-            // as Thumb: wrong instruction, wrong length, wrong control flow.
-            Self::ArmCortexLe => (
-                sleigh_config::processor_arm::SLA_ARM8_LE,
-                sleigh_config::processor_arm::PSPEC_ARMT,
-                "ARM",
-            ),
-            // The same language with TMode set: Ghidra's own Thumb decoder.
-            #[cfg(feature = "arm")]
-            Self::ArmThumbLe => (
-                sleigh_config::processor_arm::SLA_ARM8_LE,
-                sleigh_config::processor_arm::PSPEC_ARMTTHUMB,
-                "ARM",
-            ),
+            Self::ArmCortexLe | Self::ArmThumbLe | Self::ArmCortexBe | Self::ArmThumbBe => {
+                self.arm()
+            }
             #[cfg(feature = "arm")]
             Self::Aarch64Le => (
                 sleigh_config::processor_aarch64::SLA_AARCH64,
@@ -341,6 +350,10 @@ impl TrustedSleighProfile {
             ("arm", "arm", 32, SourceEndianness::Little) => Ok(Self::ArmCortexLe),
             #[cfg(feature = "arm")]
             ("arm", "thumb", 32, SourceEndianness::Little) => Ok(Self::ArmThumbLe),
+            #[cfg(feature = "arm")]
+            ("arm", "arm", 32, SourceEndianness::Big) => Ok(Self::ArmCortexBe),
+            #[cfg(feature = "arm")]
+            ("arm", "thumb", 32, SourceEndianness::Big) => Ok(Self::ArmThumbBe),
             #[cfg(feature = "riscv")]
             ("riscv", "riscv", 64, SourceEndianness::Little) => Ok(Self::RiscV64Gc),
             _ => Err(LiftError::Unsupported(format!(
@@ -1689,24 +1702,60 @@ impl EmbeddedMachine {
     }
 }
 
-/// Load the embedded machine an architecture name selects.
+/// The byte orders a program states for its machine, which select the language.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ByteOrder {
+    pub data: Endianness,
+    /// Where the program states it apart from `data` (ARM BE8); `None` is the language's own.
+    pub instructions: Option<Endianness>,
+}
+
+impl ByteOrder {
+    pub const LITTLE: Self = Self {
+        data: Endianness::Little,
+        instructions: None,
+    };
+    pub const BIG: Self = Self {
+        data: Endianness::Big,
+        instructions: None,
+    };
+
+    #[cfg(any(feature = "x86", feature = "riscv"))]
+    fn is_little(self) -> bool {
+        self.data == Endianness::Little
+            && matches!(self.instructions, None | Some(Endianness::Little))
+    }
+}
+
+/// Load the embedded machine an architecture name selects, little-endian
+/// unless the name ends in `-be`.
 ///
 /// It carries the compiler specification of the platform's usual toolchain
 /// and, where the language has one, the Windows toolchain's.
 pub fn embedded_machine(arch_name: &str) -> Result<EmbeddedMachine> {
-    machine_of(arch_name, false)
+    let name = arch_name.to_ascii_lowercase();
+    match name.strip_suffix("-be") {
+        Some(name) => machine_of(name, ByteOrder::BIG, false),
+        None => machine_of(&name, ByteOrder::LITTLE, false),
+    }
 }
 
-/// The machine a Windows program for this architecture runs on, where its language differs.
-pub fn embedded_windows_machine(arch_name: &str) -> Result<EmbeddedMachine> {
-    machine_of(arch_name, true)
+/// The machine a program runs on, by its architecture, its byte orders and whether a
+/// Windows toolchain built it, where that toolchain's language differs.
+pub fn embedded_program_machine(
+    arch_name: &str,
+    order: ByteOrder,
+    windows: bool,
+) -> Result<EmbeddedMachine> {
+    machine_of(&arch_name.to_ascii_lowercase(), order, windows)
 }
 
-fn machine_of(arch_name: &str, windows: bool) -> Result<EmbeddedMachine> {
-    let spec =
-        embedded_specification(&arch_name.to_ascii_lowercase(), windows).ok_or_else(|| {
-            LiftError::Unsupported(format!("no embedded Sleigh specification for {arch_name}"))
-        })?;
+fn machine_of(arch_name: &str, order: ByteOrder, windows: bool) -> Result<EmbeddedMachine> {
+    let spec = embedded_specification(arch_name, order, windows).ok_or_else(|| {
+        LiftError::Unsupported(format!(
+            "no embedded Sleigh specification for {arch_name} in {order:?}"
+        ))
+    })?;
     // One parse per thread: the trusted lift reads the same specification through its profile.
     let (arch, disasm) =
         match TrustedSleighProfile::of_specification(spec.sla, spec.pspec, spec.name) {
@@ -1725,9 +1774,12 @@ fn machine_of(arch_name: &str, windows: bool) -> Result<EmbeddedMachine> {
 
 /// The Thumb decoder of an architecture that has one: ARM's second processor
 /// context, which Ghidra ships as the same language with TMode set.
-pub fn embedded_thumb_machine(arch_name: &str) -> Option<Result<EmbeddedMachine>> {
+pub fn embedded_thumb_machine(
+    arch_name: &str,
+    order: ByteOrder,
+) -> Option<Result<EmbeddedMachine>> {
     match arch_name.to_ascii_lowercase().as_str() {
-        "arm" | "arm32" => Some(embedded_machine("arm-thumb")),
+        "arm" | "arm32" => Some(machine_of("arm-thumb", order, false)),
         _ => None,
     }
 }
@@ -1761,9 +1813,27 @@ struct Selection {
     cpu: &'static str,
 }
 
+/// ARM's language for a byte order, as Ghidra's ELF opinion picks it: BE8 is
+/// `v8LEInstruction`, big-endian data over the little-endian instructions.
+#[cfg(feature = "arm")]
+fn arm_language(order: ByteOrder) -> Option<&'static str> {
+    match (order.data, order.instructions.unwrap_or(order.data)) {
+        (Endianness::Little, Endianness::Little) => Some("ARM:LE:32:v8"),
+        (Endianness::Big, Endianness::Big) => Some("ARM:BE:32:v8"),
+        (Endianness::Big, Endianness::Little) => Some("ARM:LEBE:32:v8LEInstruction"),
+        _ => None,
+    }
+}
+
 /// AppleSilicon is the superset decoder; it names no Windows compiler, which v8A does.
+/// AArch64 reads its instructions little-endian in either data order.
 fn selection(
     arch_name: &str,
+    #[cfg_attr(
+        not(any(feature = "x86", feature = "arm", feature = "riscv")),
+        expect(unused_variables, reason = "no architecture is enabled")
+    )]
+    order: ByteOrder,
     #[cfg_attr(
         not(feature = "arm"),
         expect(unused_variables, reason = "only AArch64 has a Windows language")
@@ -1803,11 +1873,13 @@ fn selection(
     };
     match arch_name {
         #[cfg(feature = "x86")]
-        "x86-64" | "x86_64" | "x64" | "amd64" => {
+        "x86-64" | "x86_64" | "x64" | "amd64" if order.is_little() => {
             select(x86, "x86:LE:64:default", None, "x86-64", "x86")
         }
         #[cfg(feature = "x86")]
-        "x86" | "x86-32" | "i386" | "i686" => select(x86, "x86:LE:32:default", None, "x86", "x86"),
+        "x86" | "x86-32" | "i386" | "i686" if order.is_little() => {
+            select(x86, "x86:LE:32:default", None, "x86", "x86")
+        }
         #[cfg(feature = "arm")]
         "aarch64" | "arm64" | "arm64e" if windows => {
             select(aarch64, "AARCH64:LE:64:v8A", None, "aarch64", "arm")
@@ -1821,13 +1893,17 @@ fn selection(
             "arm",
         ),
         #[cfg(feature = "arm")]
-        "arm" | "arm32" => select(arm, "ARM:LE:32:v8", None, "ARM", "arm"),
+        "arm" | "arm32" => select(arm, arm_language(order)?, None, "ARM", "arm"),
         #[cfg(feature = "arm")]
-        "arm-thumb" | "thumb" => {
-            select(arm, "ARM:LE:32:v8", Some("ARMtTHUMB.pspec"), "ARM", "thumb")
-        }
+        "arm-thumb" | "thumb" => select(
+            arm,
+            arm_language(order)?,
+            Some("ARMtTHUMB.pspec"),
+            "ARM",
+            "thumb",
+        ),
         #[cfg(feature = "riscv")]
-        "riscv64" | "riscv" | "rv64" => {
+        "riscv64" | "riscv" | "rv64" if order.is_little() => {
             select(riscv, "RISCV:LE:64:RV64GC", None, "riscv64", "riscv")
         }
         _ => None,
@@ -1835,8 +1911,12 @@ fn selection(
 }
 
 /// The embedded data one lower-cased architecture name selects, read through its language definition.
-fn embedded_specification(arch_name: &str, windows: bool) -> Option<EmbeddedSpecification> {
-    let chosen = selection(arch_name, windows)?;
+fn embedded_specification(
+    arch_name: &str,
+    order: ByteOrder,
+    windows: bool,
+) -> Option<EmbeddedSpecification> {
+    let chosen = selection(arch_name, order, windows)?;
     let Bundle { files, slas } = chosen.bundle;
     let file = |name: &str| {
         files

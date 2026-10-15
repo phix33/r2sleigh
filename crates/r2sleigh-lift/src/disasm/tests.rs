@@ -431,13 +431,21 @@ fn trusted_arm32_tuples_select_the_instruction_set_the_symbol_named() {
         TrustedSleighProfile::from_tuple("arm", "thumb", 32, SourceEndianness::Little).unwrap(),
         TrustedSleighProfile::ArmThumbLe
     );
+    // BE32; a BE8 lift reads the little-endian language, so its tuple is little-endian.
+    assert_eq!(
+        TrustedSleighProfile::from_tuple("arm", "arm", 32, SourceEndianness::Big).unwrap(),
+        TrustedSleighProfile::ArmCortexBe
+    );
+    assert_eq!(
+        TrustedSleighProfile::from_tuple("arm", "thumb", 32, SourceEndianness::Big).unwrap(),
+        TrustedSleighProfile::ArmThumbBe
+    );
 }
 
 #[test]
 #[cfg(feature = "arm")]
 fn trusted_arm64_radare_tuple_refuses_unverified_neighbors() {
     for (arch_id, cpu_id, bits, endianness) in [
-        ("arm", "arm", 32, SourceEndianness::Big),
         ("arm", "arm", 64, SourceEndianness::Big),
         ("aarch64", "arm", 64, SourceEndianness::Little),
         ("arm", "arm64", 64, SourceEndianness::Little),
@@ -1458,7 +1466,7 @@ fn fixed_value_pcode_uses_the_typed_sleigh_translation() {
 #[cfg(feature = "arm")]
 #[test]
 fn a_windows_aarch64_machine_carries_the_windows_compiler_specification() {
-    let windows = embedded_windows_machine("aarch64").expect("v8A");
+    let windows = embedded_program_machine("aarch64", ByteOrder::LITTLE, true).expect("v8A");
     assert_eq!(
         windows.compiler_spec_of("windows"),
         Some(sleigh_config::processor_aarch64::CSPEC_AARCH64_WIN)

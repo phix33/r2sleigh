@@ -65,19 +65,26 @@ struct Machines {
     go_unstated: Option<Result<Assembled, Unassembled>>,
 }
 
+/// The byte orders the container states, which select the machine's language.
+fn byte_order(arch: &Arch) -> r2sleigh_lift::ByteOrder {
+    r2sleigh_lift::ByteOrder {
+        data: view::endianness(arch.endian),
+        instructions: arch.instructions.map(view::endianness),
+    }
+}
+
 impl Machines {
     fn load(container: &Container) -> Result<Self, Unassembled> {
         let arch = container.arch.name.clone();
+        let order = byte_order(&container.arch);
         // A PE runs under the Windows toolchain, whose language may differ.
-        let machine = match container.format {
-            Format::Pe => r2sleigh_lift::embedded_windows_machine(&arch),
-            _ => r2sleigh_lift::embedded_machine(&arch),
-        }
-        .map(Machine::new)
-        .map_err(|error| Unassembled::NoSpecification(error.to_string()))?;
+        let windows = container.format == Format::Pe;
+        let machine = r2sleigh_lift::embedded_program_machine(&arch, order, windows)
+            .map(Machine::new)
+            .map_err(|error| Unassembled::NoSpecification(error.to_string()))?;
         // Whether any function is Thumb is discovery's answer, so the
         // decoder is loaded wherever the architecture has one.
-        let thumb = r2sleigh_lift::embedded_thumb_machine(&arch)
+        let thumb = r2sleigh_lift::embedded_thumb_machine(&arch, order)
             .map(|machine| machine.map(Machine::new))
             .transpose()
             .map_err(|error| Unassembled::NoSpecification(error.to_string()))?;

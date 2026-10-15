@@ -31,6 +31,8 @@ fn arm_lifts_random_bytes_without_faulting() {
     sweep("aarch64");
     sweep("arm");
     sweep("arm-thumb");
+    sweep("arm-be");
+    sweep("arm-thumb-be");
 }
 
 #[cfg(feature = "riscv")]
