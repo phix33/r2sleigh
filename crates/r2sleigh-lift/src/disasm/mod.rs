@@ -2457,6 +2457,7 @@ impl Disassembler {
         crate::internal_control::normalize_instruction_local_control(&mut block, &|userop| {
             self.user_op_name(userop).map(str::to_owned)
         });
+        r2il::number_temporaries(&mut block.ops);
         Ok(block)
     }
 
