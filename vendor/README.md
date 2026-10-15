@@ -50,6 +50,18 @@ CMPS, SCAS, INC, DEC, NEG, XADD and CMPXCHG state it (`ia.sinc`,
 unwritten where the SDM leaves it undefined: the logical operations, shifts and
 rotates, multiplies, AAM and AAD.
 
+Carried in this tree, not yet in the fork or in Ghidra (a sleigh-config pull
+request owed; Ghidra master's ARM and AArch64 pspecs mark nothing hidden): the
+ARM and AArch64 processor specs mark Sleigh's scratch registers
+`hidden="true"`, as x86's marks `xmmTmp1`: ARM's `tmpNG`, `tmpZR`, `tmpCY`,
+`tmpOV`, `shift_carry`, `mult_addr`, `mult_dat8`, `mult_dat16` and
+`ISAModeSwitch` in all six ARM pspecs, and AArch64's `shift_carry`, the four
+`tmp` flags, `glob_mask32`/`glob_mask64`, `VecMemAddr`, `VectorSelem`,
+`VecRegAddr`, `tmp_ldWn`/`tmp_ldXn`/`tmp_stWn`/`tmp_stXn` and `TMPZ1`..`TMPZ6`
+with their Q, D and S views. None carries a value between instructions: once
+a dead write to one is dropped, no instruction of 20,000 random words per
+language reads one on entry (`crates/r2sleigh-lift/tests/scratch_registers.rs`).
+
 Carried in this tree, its Ghidra half on 0verflowme/ghidra
 `r2sleigh-sleigh-context-12` (`ec9a9312`) and not yet in the forks' mains (fork
 pull requests owed to 0verflowme/libsla-sys and 0verflowme/libsla; audit W2):

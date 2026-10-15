@@ -59,6 +59,16 @@
     <register name="q13" group="NEON" vector_lane_sizes="1,2,4"/> 
     <register name="q14" group="NEON" vector_lane_sizes="1,2,4"/> 
     <register name="q15" group="NEON" vector_lane_sizes="1,2,4"/> 
+    <!-- Sleigh's scratch: written and read within one instruction, no machine state -->
+    <register name="tmpNG" hidden="true"/>
+    <register name="tmpZR" hidden="true"/>
+    <register name="tmpCY" hidden="true"/>
+    <register name="tmpOV" hidden="true"/>
+    <register name="shift_carry" hidden="true"/>
+    <register name="mult_addr" hidden="true"/>
+    <register name="mult_dat8" hidden="true"/>
+    <register name="mult_dat16" hidden="true"/>
+    <register name="ISAModeSwitch" hidden="true"/>
   </register_data>
 
   
