@@ -262,7 +262,6 @@
 				<register name="RSP"/>
 				<register name="RBP"/>
 				<register name="R14"/>        
-				<register name="RDX"/>        
 			</unaffected>
 		</prototype>
 	</default_proto>
@@ -292,7 +291,6 @@
 			<register name="RSP"/>
 			<register name="RBP"/>
 			<register name="R14"/>        
-			<register name="RDX"/>        
 		</unaffected>
 	</prototype>
     
