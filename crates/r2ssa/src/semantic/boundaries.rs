@@ -2069,8 +2069,9 @@ fn scrubs_the_guard(
     };
     let inserted = function.compiler_inserted();
     let mut current = previous;
-    // Through the lanes and copies the guard reached the register by, to the protector's read.
-    for _ in 0..4 {
+    // Through the lanes and copies the guard reached the register by, to the protector's read. It
+    // ends: each step is to a non-phi op's source, whose def dominates it, so the chain is acyclic.
+    loop {
         let Some(def) = graph.def_inst(current) else {
             return false;
         };
@@ -2089,7 +2090,6 @@ fn scrubs_the_guard(
             _ => return false,
         }
     }
-    false
 }
 
 /// Whether a value is the fresh definition a call leaves in a register it may
@@ -2301,5 +2301,97 @@ pub(crate) fn call_result_values_after_call(
             value: *value,
         }]),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
+
+    use super::*;
+
+    /// The guard's read reaches the count register through six lanes and zero-extensions, past
+    /// any fixed depth, and the zero written over it is still the protector's scrub.
+    #[test]
+    fn the_scrub_is_found_at_the_end_of_a_long_lane_chain() {
+        let rax = Varnode::register(0, 8);
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x10, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x9000, 8),
+        });
+        let mut from = Varnode::unique(0x10, 8);
+        for step in 1..=5_u64 {
+            let (dst, op) = if step % 2 == 1 {
+                let dst = Varnode::unique(0x10 + 0x10 * step, 4);
+                let op = R2ILOp::Subpiece {
+                    dst: dst.clone(),
+                    src: from,
+                    offset: 0,
+                };
+                (dst, op)
+            } else {
+                let dst = Varnode::unique(0x10 + 0x10 * step, 8);
+                let op = R2ILOp::IntZExt {
+                    dst: dst.clone(),
+                    src: from,
+                };
+                (dst, op)
+            };
+            block.push(op);
+            from = dst;
+        }
+        block.push(R2ILOp::IntZExt {
+            dst: rax.clone(),
+            src: from,
+        });
+        block.push(R2ILOp::IntXor {
+            dst: rax.clone(),
+            a: rax.clone(),
+            b: rax,
+        });
+        block.push(R2ILOp::Call {
+            target: Varnode::constant(0x2000, 8),
+        });
+        block.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let context = SourceMachineContext::from_blocks(&[block.clone()], None);
+        let mut function = SSAFunction::from_blocks_raw(&[block], None).expect("a function");
+        let load = function
+            .get_block(0x1000)
+            .and_then(|block| {
+                (block.sited()).find_map(|(id, op)| matches!(op, SSAOp::Load { .. }).then_some(id))
+            })
+            .expect("the guard's read");
+        let mut inserted = crate::dense::IdSet::default();
+        inserted.insert(load);
+        function.record_compiler_inserted(inserted, BTreeSet::new());
+        let sealed = crate::function::Lifted::new(function)
+            .validate()
+            .expect("it validates")
+            .seal(&context)
+            .expect("it seals");
+        let graph = sealed.graph();
+        let scrub = (graph.insts.iter())
+            .find_map(|inst| match &inst.payload {
+                InstPayload::Op(SSAOp::IntXor { .. }) => inst.output,
+                _ => None,
+            })
+            .expect("the scrub");
+        let at = CallPosition {
+            function: sealed.function(),
+            prep: Some(sealed.decompile_prep_facts()),
+            graph,
+            block_addr: 0x1000,
+            op_index: 0,
+        };
+        let count = CanonicalStorageId {
+            space: r2source::CanonicalStorageSpace::Register,
+            offset: 0,
+            size: 8,
+        };
+        assert!(scrubs_the_guard(at, &context, scrub, count));
     }
 }
