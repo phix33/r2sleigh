@@ -11,7 +11,7 @@ specifications do (ROADMAP D33). Each pin is in the table under Upstream pins.
 
 | Processor | Ghidra | Carried on that text (below) |
 |---|---|---|
-| x86 | master `918acd744d` | AF; RDRAND r32's r/m register; SHR/SHRD OF at count 1; CVTTSD2SI/CVTTSS2SI's integer indefinite; VEX VPEXTRW 0F3A 15's r/m register; the Go cspec's RDX (fork #2) |
+| x86 | master `918acd744d` | AF; RDRAND r32's r/m register; SHR/SHRD OF at count 1; CVTTSD2SI/CVTTSS2SI's integer indefinite; VEX VPEXTRW 0F3A 15's r/m register; PREFETCHh and MPX decoded where the `0F 18`-`0F 1F` hint NOP took them; the Go cspec's RDX (fork #2) |
 | ARM | master `918acd744d` | the hidden scratch marks; `ARM.cspec`'s `<returnaddress>` (fork #1) |
 | AARCH64 | master `918acd744d` | the fork's #2 to #15; #16 and #17; `AtomicBegin`/`AtomicEnd` on the LSE atomics; `fcvtzu`'s full-width scale; CSSC's W forms; the hidden scratch marks; `AARCH64_apple.cspec`'s `<returnaddress>` x30, which Ghidra master omits (fork pull request owed) |
 | MIPS | master `918acd744d` | none |
@@ -80,6 +80,19 @@ VEX `VPEXTRW reg, xmm, imm8` (0F3A 15) writes its ModRM r/m register, where
 GP-7017 wrote the reg field's (`vpextrw ecx, xmm0, 1` wrote EAX); AArch64
 CSSC's W forms (`abs`, `cnt`, `smax`, `smin`, `umax`, `umin`) write X
 zero-extended, as GP-6448's own `ctz` does (the AArch64 oracle).
+
+Carried in this tree, not yet in the fork or in Ghidra (a sleigh-config pull
+request and a Ghidra issue owed; 918acd744d still decodes both as NOP): x86's catch-all
+hint `NOP rm16`/`NOP rm32` (`0F 18` to `0F 1F`, `ia.sinc`) took `0F 18 /0-3` with a
+memory operand (PREFETCHNTA, T0, T1, T2; `libc-2.31` 0x16868d) and every MPX
+instruction (BNDMOV, BNDLDX, BNDSTX, BNDCL, BNDCU, BNDCN, BNDMK; `ld-2.31` 0x16b22),
+because Sleigh orders two patterns that neither specialises by definition order and
+the NOP's states `opsize` where theirs did not. They now state `opsize` as `ENDBR64`
+does, and the MPX memory forms state `mod != 0b11`, so a register form of `0F 1A`/`0F 1B`
+with no matching prefix is still the hint NOP, where they matched and then failed to
+resolve their memory operand (Intel SDM Vol. 2, PREFETCHh and the MPX chapter;
+`crates/r2sleigh-lift/tests/x86_hints.rs`). No oracle case: a prefetch changes no state,
+and the recording CPU has no MPX, where `bndmov` would execute as a NOP.
 
 Carried in this tree, not yet in the fork or in Ghidra (a sleigh-config pull
 request and a Ghidra issue owed; 918acd744d still says `# AF not implemented`): x86's
