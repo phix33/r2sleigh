@@ -149,8 +149,8 @@ fn arms_of(
     body: &WalkedBody<'_>,
     instruction: u64,
 ) -> impl Iterator<Item = (AnnotationKind, Basis)> {
-    let arms = body.arms_at(instruction).iter();
-    arms.map(|&address| {
+    let arms = body.arms_at(instruction).into_iter();
+    arms.map(|address| {
         (
             AnnotationKind::Target {
                 address,

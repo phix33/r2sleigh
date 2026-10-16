@@ -111,8 +111,6 @@ pub struct WalkedBody<'a> {
     built: std::cell::OnceCell<Option<(r2ssa::SsaGraph, Fates)>>,
     blocks: &'a [r2il::R2ILBlock],
     arch: &'a r2ssa::Arch,
-    /// Where each dispatch the walk followed goes, by its instruction: the distinct arm targets, ascending.
-    dispatches: std::collections::BTreeMap<u64, Vec<u64>>,
 }
 
 impl<'a> WalkedBody<'a> {
@@ -125,27 +123,24 @@ impl<'a> WalkedBody<'a> {
             built: std::cell::OnceCell::new(),
             blocks,
             arch,
-            dispatches: std::collections::BTreeMap::new(),
         }
     }
 
-    /// The body with the dispatches its walk followed, each instruction with the target of each arm.
-    pub fn dispatching<'t>(
-        mut self,
-        dispatches: impl IntoIterator<Item = (u64, &'t [u64])>,
-    ) -> Self {
-        for (instruction, targets) in dispatches {
-            let mut arms = targets.to_vec();
-            arms.sort_unstable();
-            arms.dedup();
-            self.dispatches.insert(instruction, arms);
-        }
-        self
-    }
-
-    /// The arms the walk followed from the dispatch at this instruction, ascending.
-    pub fn arms_at(&self, instruction: u64) -> &[u64] {
-        self.dispatches.get(&instruction).map_or(&[], Vec::as_slice)
+    /// The distinct targets of the arms the dispatch at this instruction follows, ascending: the cases its block carries.
+    pub fn arms_at(&self, instruction: u64) -> Vec<u64> {
+        let after = self
+            .blocks
+            .partition_point(|block| block.addr <= instruction);
+        let held = after.checked_sub(1);
+        let switch = held.and_then(|at| self.blocks[at].switch_info.as_ref());
+        let switch = switch.filter(|switch| switch.switch_addr == instruction);
+        let mut arms = switch
+            .into_iter()
+            .flat_map(|switch| switch.cases.iter().map(|case| case.target))
+            .collect::<Vec<_>>();
+        arms.sort_unstable();
+        arms.dedup();
+        arms
     }
 
     /// Where the block holding this address begins: the last block starting at or before it, where it runs past it.
