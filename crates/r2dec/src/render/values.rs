@@ -2255,6 +2255,20 @@ impl<'a> Values<'a> {
                 None => vec![input],
             };
             let source = self.operand_alone(input, inst.id);
+            // An edge that carries the merge's own variable copies nothing (adr-decompiler-rewrite, "Merges").
+            let own = self.names[output.0 as usize]
+                .as_ref()
+                .map(|(name, _)| CExpr::Var(*name));
+            let source = match (source, own) {
+                (Some((spelled, attempt)), Some(own)) if spelled == own => {
+                    *self.pending.borrow_mut() = attempt;
+                    self.mark(inst.id);
+                    self.keep();
+                    self.assigns(output);
+                    continue;
+                }
+                (source, _) => source,
+            };
             copies.push((inst.id, output, source, reads));
         }
         let mut out = Vec::new();
