@@ -439,9 +439,10 @@ residual, and `VariadicCallsiteArgumentCountEvidence` names its basis (`Format` 
 Carriers are placed as for a format count, so the tail past the registers is the stack's.
 
 **Cost.** Only a body with a save area runs it: O(insts + uses) scans, a dominator query per
-store, and one predicate collection; the callsite is O(1). Release `pdd` instructions, before and
-after: 0pack `0x62ecf0` 20.33 to 20.34 G and pumasim `0x23fdf0` 19.23 to 19.26 G (noise 0.3%),
-output byte-identical, peak RSS 241 and 256 MB unchanged.
+store, and one predicate collection; the callsite is O(1). Release `pdd` instructions, base and
+head, two runs each: 0pack `0x62ecf0` 20.32 and 20.26 G to 20.26 and 20.29 G, pumasim `0x23fdf0`
+19.18 and 19.15 G to 19.15 and 19.17 G (noise 0.3%), output byte-identical, peak RSS 241 and 256
+MB to 240 and 260 MB.
 
 **Measured (2026-10-16).** shapes.c, stripped, `aa; pdd`: gcc -O0 on x86-64 proves `vfold`
 (`counter` below `count`, one `va_arg` per trip), so `shape_variadic_local` renders
