@@ -3,7 +3,7 @@
 
 use crate::common;
 
-use common::{BASE, Literal};
+use common::{BASE, Literal, TEXT};
 use r2engine::program::OpenProgram;
 
 /// `code` at `BASE`, an import stub at `STUB` and its slot after it, little-endian words.
@@ -28,7 +28,7 @@ fn rendered(literal: Literal, at: u64) -> String {
         .into_text()
 }
 
-/// `tail`: `if (++*arg0 != 0) fts_close()` as a bare `b` to the import's stub; `call`: `bl` to it.
+/// `tail` is `if (++*arg0 != 0) f()` as a bare `b` to the import `f`, `call` a `bl` to it.
 fn program() -> Literal {
     let code = arm64_with_stub(&[
         (BASE, 0xb940_0008),        // ldr w8, [x0]
@@ -46,7 +46,7 @@ fn program() -> Literal {
     Literal::of_code(code, &[("tail", BASE, 0x18), ("call", BASE + 0x30, 0x14)])
         .in_aarch64()
         .mach_o()
-        .importing("fts_close")
+        .importing("mbr_identifier_translate")
 }
 
 /// A call and a tail jump to an import nothing declares are both gaps naming it and the refusal,
@@ -57,10 +57,63 @@ fn an_undeclared_import_is_a_typed_gap_for_a_call_and_a_tail_jump() {
         let text = rendered(program(), at);
         assert!(
             text.contains(
-                "call to fts_close: the import has no declaration to state its arguments"
+                "call to mbr_identifier_translate: the import has no declaration to state its arguments"
             ),
             "{text}"
         );
         assert!(!text.contains("UnsupportedInstruction"), "{text}");
     }
+}
+
+/// Apple's specification states x30 the return address, as AAPCS64 does: a function saving it
+/// around a `bl` holds no x30 from entry (Ghidra's `AARCH64_apple.cspec` left the register out).
+#[test]
+fn a_mach_o_arm64_function_saving_x30_holds_no_link_register_from_entry() {
+    let text = rendered(program(), BASE + 0x30);
+    assert!(!text.contains("X30"), "{text}");
+    assert!(!text.contains("frame["), "{text}");
+}
+
+/// `varargs`: `printf("%d\n", 7)`, the 7 stored at `[sp]` as Apple's convention puts the variadic
+/// tail, `x1` never written.
+fn printing(mach_o: bool) -> OpenProgram<Literal> {
+    let code = arm64_with_stub(&[
+        (BASE + 0x50, 0xa9be_7bfd), // stp x29, x30, [sp, #-32]!
+        (BASE + 0x54, 0x5280_00e8), // mov w8, #7
+        (BASE + 0x58, 0xf900_03e8), // str x8, [sp]
+        (BASE + 0x5c, 0x9000_0000), // adrp x0, 0x1000
+        (BASE + 0x60, 0x9102_8000), // add x0, x0, #0xa0
+        (BASE + 0x64, 0x9400_000b), // bl stub
+        (BASE + 0x68, 0xa8c2_7bfd), // ldp x29, x30, [sp], #32
+        (BASE + 0x6c, 0xd65f_03c0), // ret
+    ]);
+    let program = Literal::of_code(code, &[("varargs", BASE + 0x50, 0x20)])
+        .in_aarch64()
+        .with_data()
+        .importing("printf");
+    let mut program = OpenProgram::of(if mach_o { program.mach_o() } else { program });
+    program.source_mut().write(TEXT, b"%d\n\0");
+    program
+}
+
+/// Under Apple's compiler specification the variadic `7` is the stack slot it was stored in; under
+/// the usual one it would be `x1`, which nothing wrote.
+#[test]
+fn a_mach_o_variadic_tail_is_read_from_the_stack_and_an_elf_s_from_registers() {
+    let text = |mach_o| {
+        (printing(mach_o).rendered(BASE + 0x50))
+            .expect("it renders")
+            .response
+            .output
+            .into_text()
+    };
+    let apple = text(true);
+    assert!(apple.contains("printf(\"%d\\n\", (uint64_t)7U)"), "{apple}");
+    assert!(!apple.contains("X1_0"), "{apple}");
+    let usual = text(false);
+    assert!(usual.contains("X1_0"), "{usual}");
+    assert!(
+        !usual.contains("printf(\"%d\\n\", (uint64_t)7U)"),
+        "{usual}"
+    );
 }
