@@ -127,3 +127,20 @@ fn an_export_table_past_the_file_states_no_export() {
             .any(|symbol| symbol.library.as_deref() == Some("fixture.dll"))
     );
 }
+
+/// An ordinal base past 16 bits still lists the exports, each by its name where it has one.
+#[test]
+fn an_ordinal_base_past_sixteen_bits_lists_its_exports() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/pe_imports_x64.dll"
+    );
+    let mut bytes = std::fs::read(path).expect("the fixture reads");
+    bytes[0x810..0x814].copy_from_slice(&0xffff_fff9u32.to_le_bytes()); // Base
+    let image = r2image::Image::parse(bytes).expect("the patched fixture parses");
+    let found = image
+        .symbols()
+        .iter()
+        .any(|symbol| symbol.defined && &*symbol.name == "start_here");
+    assert!(found);
+}
