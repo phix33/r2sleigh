@@ -107,7 +107,9 @@ r2engine reads it.
 **D38. The cost verdict counts retired instructions.** Owner: GT.
 - Native runs count user-space instructions with `perf_event_open`
   (HW_INSTRUCTIONS, `exclude_kernel`) and stop past the budget. Emulated runs
-  fall back to CPU time (`ITIMER_VIRTUAL`).
+  count retired guest instructions with qemu's instruction-count plugin
+  (`-plugin libinsn.so`). CPU time (`ITIMER_VIRTUAL`) is only a hang guard,
+  never the `slow` verdict: the host's load moves it.
 - Each record states its measure and budget, and the ratchet refuses to
   compare across measures.
 - Gate: `slow` verdicts are identical on an idle and a loaded host.
