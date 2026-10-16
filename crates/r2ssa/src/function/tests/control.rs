@@ -1560,3 +1560,27 @@ fn an_exhausted_pass_refuses_the_function() {
     );
     assert_eq!(prepared.err(), Some(SsaPrepareError::Exhausted(exhausted)));
 }
+
+/// The seal itself refuses an exhausted function, so no seal-only reader sees its partial facts.
+#[test]
+fn an_exhausted_seal_is_refused_before_its_facts_are_read() {
+    let mut block = R2ILBlock::new(0x1000, 4);
+    block.push_from(
+        R2ILOp::Return {
+            target: make_const(0, 8),
+        },
+        0x1000,
+    );
+    let context = SourceMachineContext::from_blocks(&[block.clone()], None);
+    let function = SSAFunction::from_blocks_for_decompile(&[block], None).expect("SSA");
+    let mut prepared = Lifted::new(function).validate().expect("it validates");
+    let exhausted = crate::fixpoint::Exhausted {
+        pass: "frame-address-merges",
+        height: 2,
+    };
+    prepared.note_exhausted(exhausted);
+    assert_eq!(
+        prepared.seal(&context).err(),
+        Some(SsaPrepareError::Exhausted(exhausted))
+    );
+}
