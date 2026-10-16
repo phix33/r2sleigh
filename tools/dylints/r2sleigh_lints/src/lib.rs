@@ -2129,9 +2129,8 @@ rustc_lint::declare_lint!(
 );
 
 rustc_lint::declare_lint!(
-    /// A `match` on `R2ILOp` outside r2il that names two or more operations, answers a `bool` or
-    /// varnodes, and lets a wildcard drop the rest restates an op property r2il owns (ROADMAP D41).
-    /// phi.rs's copy of `output()` dropped `Select` that way (#287). A wildcard that asks r2il passes.
+    /// A `match` on `R2ILOp` outside r2il that names two or more operations, answers a `bool` or varnodes,
+    /// and lets a wildcard that does not ask r2il drop the rest restates an op property r2il owns (ROADMAP D41).
     pub R2IL_OP_PROPERTY_OUTSIDE_R2IL,
     Deny,
     "a property of an R2ILOp has one owner in r2il, stated as an exhaustive list"
