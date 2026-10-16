@@ -1841,6 +1841,8 @@ struct Selection {
     language: &'static str,
     /// A processor specification the language does not list: Thumb's TMode-set context.
     pspec: Option<&'static str>,
+    /// The language whose compilers the platform uses, where the decoder's own name another's.
+    compilers: Option<&'static str>,
     name: &'static str,
     cpu: &'static str,
 }
@@ -1899,6 +1901,7 @@ fn selection(
             bundle,
             language,
             pspec,
+            compilers: None,
             name,
             cpu,
         })
@@ -1916,14 +1919,18 @@ fn selection(
         "aarch64" | "arm64" | "arm64e" if windows => {
             select(aarch64, "AARCH64:LE:64:v8A", None, "aarch64", "arm")
         }
+        // Since GP-3139 AppleSilicon's compiler is Apple's variadic convention; the platform's are v8A's.
         #[cfg(feature = "arm")]
-        "aarch64" | "arm64" | "arm64e" => select(
-            aarch64,
-            "AARCH64:LE:64:AppleSilicon",
-            None,
-            "aarch64",
-            "arm",
-        ),
+        "aarch64" | "arm64" | "arm64e" => Some(Selection {
+            compilers: Some("AARCH64:LE:64:v8A"),
+            ..select(
+                aarch64,
+                "AARCH64:LE:64:AppleSilicon",
+                None,
+                "aarch64",
+                "arm",
+            )?
+        }),
         #[cfg(feature = "arm")]
         "arm" | "arm32" => select(arm, arm_language(order)?, None, "ARM", "arm"),
         #[cfg(feature = "arm")]
@@ -1956,19 +1963,30 @@ fn embedded_specification(
             .find(|(file, _)| *file == name)
             .map(|(_, text)| *text)
     };
-    let definition = files
-        .iter()
-        .filter(|(file, _)| file.ends_with(".ldefs"))
-        .flat_map(|(_, text)| crate::profile::LanguageDefinition::parse_all(text))
-        .find(|language| language.id == chosen.language)?;
-    let usual = definition
+    let language = |id: &str| {
+        files
+            .iter()
+            .filter(|(file, _)| file.ends_with(".ldefs"))
+            .flat_map(|(_, text)| crate::profile::LanguageDefinition::parse_all(text))
+            .find(|language| language.id == id)
+    };
+    let definition = language(chosen.language)?;
+    let named;
+    let toolchains = match chosen.compilers {
+        Some(id) => {
+            named = language(id)?;
+            &named
+        }
+        None => &definition,
+    };
+    let usual = toolchains
         .compiler("gcc")
-        .or_else(|| definition.compiler("default"))?;
+        .or_else(|| toolchains.compiler("default"))?;
     Some(EmbeddedSpecification {
         sla: slas.iter().find(|(sla, _)| *sla == definition.sla)?.1,
         pspec: file(chosen.pspec.unwrap_or(&definition.pspec))?,
         cspec: file(usual)?,
-        compilers: definition
+        compilers: toolchains
             .compilers
             .iter()
             .filter_map(|(id, spec)| Some((id.clone(), file(spec)?)))

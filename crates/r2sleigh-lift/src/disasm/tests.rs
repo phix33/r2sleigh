@@ -1471,11 +1471,25 @@ fn a_windows_aarch64_machine_carries_the_windows_compiler_specification() {
         windows.compiler_spec_of("windows"),
         Some(sleigh_config::processor_aarch64::CSPEC_AARCH64_WIN)
     );
-    let usual = embedded_machine("aarch64").expect("AppleSilicon");
-    assert_eq!(usual.compiler_spec_of("windows"), None);
     // Both languages name Go's toolchain.
-    assert!(usual.compiler_spec_of("golang").is_some());
     assert!(windows.compiler_spec_of("golang").is_some());
+}
+
+/// The AppleSilicon decoder runs under v8A's compilers: since GP-3139 its own default is Apple's
+/// variadic convention (AARCH64_apple.cspec), which an ELF's toolchain does not follow.
+#[cfg(feature = "arm")]
+#[test]
+fn an_aarch64_machine_carries_the_v8a_compiler_specifications() {
+    let usual = embedded_machine("aarch64").expect("AppleSilicon");
+    assert_eq!(
+        usual.compiler_spec,
+        sleigh_config::processor_aarch64::CSPEC_AARCH64
+    );
+    assert_ne!(
+        usual.compiler_spec,
+        sleigh_config::processor_aarch64::CSPEC_AARCH64_APPLE
+    );
+    assert!(usual.compiler_spec_of("golang").is_some());
 }
 
 /// The walk's machine and the trusted lift read one parse of the specification on a thread.
