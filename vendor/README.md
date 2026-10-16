@@ -60,8 +60,9 @@ at or above 2^(N-1) the maximum, at or below -2^(N-1) the minimum), where it con
 sources into W and X) stop at the old text and agree now, and `fcvtzs_fix` left the list. Left, each
 a gap: `scvtf` and `ucvtf` into H divide by
 `FBits16`, float16's 2^fbits, infinite from 16 bits, and `r2il::eval` cannot narrow into
-binary16, so no oracle grades them; `fmov` between H and W or X converts the value with
-`float2float` where the Arm ARM moves the bits (four forms). `fcvta*`, `fcvtm*`, `fcvtn*` and
+binary16, so no oracle grades them. `fmov` between H and W or X moves the bits (Arm ARM C7.2.131:
+`Wd = ZeroExtend(Hn)`, `Hd = Wn<15:0>`), where Ghidra converted the value with `float2float` (four
+forms; two oracle cases on an Apple M5 disagreed or stopped at the old text). `fcvta*`, `fcvtm*`, `fcvtn*` and
 `fcvtp*` have no fixed-point form.
 
 A 32-bit register destination zero-extends into its 64-bit register in 64-bit
