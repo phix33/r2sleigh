@@ -94,5 +94,11 @@ fn a_32_bit_result_of_a_user_operation_is_zero_extended() {
                 if *src == narrow && dst.offset == offset && dst.size == 8)
         });
         assert!(widened, "{text}: {ops:?}");
+        // No other register is widened: GP-7027's RDRAND widened the ModRM reg field's.
+        let stray = ops.iter().any(|op| {
+            matches!(op, R2ILOp::IntZExt { dst, src }
+                if dst.space == SpaceId::Register && src.size == 4 && dst.offset != offset)
+        });
+        assert!(!stray, "{text}: {ops:?}");
     }
 }
