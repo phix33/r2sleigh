@@ -481,9 +481,8 @@ fn rebuilds_holders(name: &str, words: &[&[u8]]) {
     }
 }
 
-// MOVBE written byte by byte (GP-7027), and VPADDW and VPADDD written lane by lane (GP-6061). ARM's
-// immediate `vmov`, `vorr` and `vbic` do the same but read the local back through a `Load` from the
-// const space, which `r2il::eval` does not run, so no ARM word is judged (ROADMAP).
+// MOVBE byte by byte (GP-7027), VPADDW and VPADDD lane by lane (GP-6061); no ARM word is judged
+// (doc/adr-verified-layers.md, D34).
 #[cfg(feature = "x86")]
 #[test]
 fn x86_pieces_written_into_a_live_temporary_rebuild_their_holder() {
