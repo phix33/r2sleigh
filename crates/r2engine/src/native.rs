@@ -1345,13 +1345,11 @@ pub enum TableBytes {
     /// The program may write them once it runs, and nothing the container states seals them
     /// after load: what the file holds is not what a dispatch reads, so the table is refused.
     Unsealed,
-    /// Mapped without write permission, and the loader writes some -- a rebased pointer, a
-    /// chained fixup: each entry is what the container states the loader writes there, or the
-    /// file's where it writes nothing.
+    /// Read-only once mapped, but the loader writes some (a rebase, a chained fixup): each entry
+    /// is the word the container states it writes there, else the file's.
     LoaderWritten,
-    /// Writable until start-up seals them (RELRO, `SG_READ_ONLY`), and start-up code may write
-    /// them first: each entry is a word the container states the loader writes, or the table is
-    /// refused (ld.so's `__rtld_malloc` holds 0 in the file and its own code fills it).
+    /// Writable until start-up seals them (RELRO, `SG_READ_ONLY`): each entry is a word the
+    /// container states the loader writes, or the table is refused (ROADMAP P5).
     Sealed,
 }
 
