@@ -20,6 +20,7 @@ SINC = "vendor/sleigh-config/ghidra/Ghidra/Processors/x86/data/languages/ia.sinc
 PSPEC = "vendor/sleigh-config/ghidra/Ghidra/Processors/x86/data/languages/x86-64.pspec"
 SLASPEC = "vendor/sleigh-config/ghidra/Ghidra/Processors/ARM/data/languages/ARM8_le.slaspec"
 CASES = "crates/r2sleigh-lift/tests/x86_64_oracle/cases.txt"
+TEST = "crates/r2sleigh-lift/tests/cmpxchg.rs"
 
 
 class Unevidenced(unittest.TestCase):
@@ -34,11 +35,33 @@ class Unevidenced(unittest.TestCase):
     def test_an_oracle_case_or_lift_test_beside_it_passes(self) -> None:
         self.assertEqual(spec_evidence.unevidenced([SINC, CASES]), [])
         self.assertEqual(
-            spec_evidence.unevidenced([PSPEC, "crates/r2sleigh-lift/tests/cmpxchg.rs"]), []
+            spec_evidence.unevidenced([PSPEC, TEST]), []
         )
         self.assertEqual(
             spec_evidence.unevidenced([SINC, "crates/r2sleigh-lift/src/disasm/tests.rs"]), []
         )
+
+    def test_an_oracle_ratchet_line_is_evidence(self) -> None:
+        self.assertEqual(
+            spec_evidence.unevidenced([SINC, "crates/r2sleigh-lift/tests/aarch64_oracle/expected.txt"]),
+            [],
+        )
+
+    def test_an_oracle_artifact_or_helper_is_not_evidence(self) -> None:
+        for path in [
+            "crates/r2sleigh-lift/tests/x86_64_oracle/README.md",
+            "crates/r2sleigh-lift/tests/x86_64_oracle/record.sh",
+            "crates/r2sleigh-lift/tests/x86_64_oracle/driver.c",
+            "crates/r2sleigh-lift/tests/aarch64_oracle/gen.py",
+            "crates/r2sleigh-lift/tests/aarch64_oracle/recorded.txt",
+            "crates/r2sleigh-lift/tests/oracle_common/stream.h",
+            "crates/r2sleigh-lift/tests/oracle_common/mod.rs",
+        ]:
+            self.assertEqual(spec_evidence.unevidenced([SINC, path]), [SINC], path)
+
+    def test_a_deleted_test_is_not_evidence(self) -> None:
+        self.assertEqual(spec_evidence.unevidenced([SINC, TEST], [TEST]), [SINC])
+        self.assertEqual(spec_evidence.unevidenced([SINC, TEST, CASES], [TEST]), [])
 
     def test_a_test_elsewhere_is_not_lift_evidence(self) -> None:
         self.assertEqual(spec_evidence.unevidenced([SINC, "crates/r2il/tests/eval.rs"]), [SINC])
@@ -80,6 +103,7 @@ class AgainstGit(unittest.TestCase):
         self.git("config", "user.email", "oracle@example.invalid")
         self.git("config", "user.name", "oracle")
         self.write(SINC, "old\n")
+        self.write(TEST, "#[test]\nfn old() {}\n")
         self.git("commit", "-q", "-m", "base")
         self.git("checkout", "-q", "-b", "change")
 
@@ -104,6 +128,17 @@ class AgainstGit(unittest.TestCase):
         self.write(CASES, "lodsd|P|lodsd\n")
         self.git("commit", "-q", "-m", "spec and case")
         self.assertEqual(self.gate(), 0)
+
+    def test_a_branch_deleting_a_test_beside_a_sinc_fails(self) -> None:
+        self.write(SINC, "new\n")
+        self.git("rm", "-q", TEST)
+        self.git("commit", "-q", "-m", "spec, test gone")
+        self.assertEqual(self.gate(), 1)
+
+    def test_a_branch_deleting_a_sinc_alone_fails(self) -> None:
+        self.git("rm", "-q", SINC)
+        self.git("commit", "-q", "-m", "spec gone")
+        self.assertEqual(self.gate(), 1)
 
     def test_a_case_on_the_base_after_the_fork_is_not_the_branchs_evidence(self) -> None:
         self.write(SINC, "new\n")
