@@ -436,6 +436,8 @@ fn exports_of(
     let placed = addresses.into_iter().zip(names);
     placed
         .filter(|((_, _, address), _)| size == 0 || !table.is_forward(*address))
+        // An unused ordinal's slot is 0, which states no export.
+        .filter(|((_, _, address), _)| *address != 0)
         .enumerate()
         .map(|(index, ((_, ordinal, address), name))| Exported {
             vaddr: layout.at(u64::from(address)),

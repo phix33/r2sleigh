@@ -56,3 +56,29 @@ fn an_export_is_a_defined_symbol_of_this_image_with_no_stated_type() {
     assert_eq!(export.kind, r2image::SymbolKind::Other);
     assert_eq!(export.library.as_deref(), Some("fixture.dll"));
 }
+
+/// An unused ordinal's address slot is 0, which states no export: none lands at the image base.
+#[test]
+fn a_null_export_address_slot_states_no_export() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/pe_imports_x64.dll"
+    );
+    let mut bytes = std::fs::read(path).expect("the fixture reads");
+    // `.edata` lies at RVA 0x3000, file 0x800; its zero bytes at 0x3034 hold a gapped table.
+    let at = |rva: usize| rva - 0x3000 + 0x800;
+    let mut put =
+        |rva: usize, value: &[u8]| bytes[at(rva)..at(rva) + value.len()].copy_from_slice(value);
+    put(0x3014, &2u32.to_le_bytes()); // NumberOfFunctions
+    put(0x301c, &0x3034u32.to_le_bytes()); // AddressOfFunctions
+    put(0x3034, &[0, 0, 0, 0, 0, 0x10, 0, 0]); // slot 0 unused, slot 1 start_here
+    put(0x3030, &1u16.to_le_bytes()); // start_here's slot
+    let image = r2image::Image::parse(bytes).expect("the patched fixture parses");
+    let exports: Vec<_> = image
+        .symbols()
+        .iter()
+        .filter(|symbol| symbol.defined && symbol.library.as_deref() == Some("fixture.dll"))
+        .map(|symbol| (symbol.vaddr, &*symbol.name, symbol.origin.directory))
+        .collect();
+    assert_eq!(exports, [(0x1_4000_1000, "start_here", Some(1))]);
+}
