@@ -82,3 +82,48 @@ fn a_null_export_address_slot_states_no_export() {
         .collect();
     assert_eq!(exports, [(0x1_4000_1000, "start_here", Some(1))]);
 }
+
+/// The name and address tables may lie before the directory; every read stays in the mapped image.
+#[test]
+fn an_export_name_before_the_directory_resolves() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/pe_imports_x64.dll"
+    );
+    let mut bytes = std::fs::read(path).expect("the fixture reads");
+    let at = |rva: usize| rva - 0x3000 + 0x800;
+    // Move the 40-byte directory after its tables and names, then point the data directory at it.
+    let header: Vec<u8> = bytes[at(0x3000)..at(0x3028)].to_vec();
+    bytes[at(0x3080)..at(0x30a8)].copy_from_slice(&header);
+    bytes[at(0x3000)..at(0x3028)].fill(0);
+    let pe = u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap()) as usize;
+    let entry = pe + 24 + 112;
+    bytes[entry..entry + 4].copy_from_slice(&0x3080u32.to_le_bytes());
+    bytes[entry + 4..entry + 8].copy_from_slice(&40u32.to_le_bytes());
+    let image = r2image::Image::parse(bytes).expect("the patched fixture parses");
+    let exports: Vec<_> = image
+        .symbols()
+        .iter()
+        .filter(|symbol| symbol.defined && symbol.library.as_deref() == Some("fixture.dll"))
+        .map(|symbol| (symbol.vaddr, &*symbol.name))
+        .collect();
+    assert_eq!(exports, [(0x1_4000_1000, "start_here")]);
+}
+
+/// A table count past the bytes the file holds states no export, not a truncated or huge one.
+#[test]
+fn an_export_table_past_the_file_states_no_export() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/pe_imports_x64.dll"
+    );
+    let mut bytes = std::fs::read(path).expect("the fixture reads");
+    bytes[0x814..0x818].copy_from_slice(&u32::MAX.to_le_bytes()); // NumberOfFunctions
+    let image = r2image::Image::parse(bytes).expect("the patched fixture parses");
+    assert!(
+        !image
+            .symbols()
+            .iter()
+            .any(|symbol| symbol.library.as_deref() == Some("fixture.dll"))
+    );
+}
