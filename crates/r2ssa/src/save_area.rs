@@ -209,6 +209,7 @@ mod tests {
                 anchor: SourceSaveAreaAnchor::End,
                 offset_field: 16,
                 offset_width: 4,
+                stack_field: -8,
             }))
     }
 

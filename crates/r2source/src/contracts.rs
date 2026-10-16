@@ -4049,6 +4049,8 @@ pub struct SourceRegisterSaveArea {
     /// from the bound's own field, and its width.
     pub offset_field: i64,
     pub offset_width: u32,
+    /// The pointer `va_arg` fetches stack arguments through, in bytes from the bound's own field.
+    pub stack_field: i64,
 }
 
 /// The bound of the general register save area a `va_list` holds.
