@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 mod oracle_common;
-use oracle_common::{Stream, fnv, ratchet, same_lanes};
+use oracle_common::{Lane, Stream, assembly, fnv, ratchet, same_lanes};
 
 const MEMSZ: usize = 1024;
 /// Zero bytes after the random ones (`driver.c`).
@@ -107,6 +107,51 @@ struct Case {
     target: u64,
     words: Vec<u32>,
     runs: Vec<(u64, String)>,
+    /// The float result lanes the case writes, by vector register.
+    produced: BTreeMap<usize, Vec<Lane>>,
+}
+
+/// The float result lanes `asm` writes, by vector register: `h`, `s` or `d` lane 0, `vN.<k><t>`
+/// every lane, `vN.<t>[i]` lane i. A move, select, compare or integer conversion produces no float.
+fn produced(asm: &str) -> BTreeMap<usize, Vec<Lane>> {
+    let mut out: BTreeMap<usize, Vec<Lane>> = BTreeMap::new();
+    for inst in asm.split(';').map(str::trim) {
+        let (mnemonic, operands) = inst.split_once(' ').unwrap_or((inst, ""));
+        let integer = mnemonic.len() == 6
+            && mnemonic.starts_with("fcvt")
+            && mnemonic[4..5].contains(['a', 'm', 'n', 'p', 'z'])
+            && mnemonic[5..].contains(['s', 'u']);
+        let moves = ["fmov", "fcsel", "fcm", "fccmp"];
+        if !mnemonic.starts_with('f') || integer || moves.iter().any(|m| mnemonic.starts_with(m)) {
+            continue;
+        }
+        let destination = operands.split(',').next().unwrap_or("").trim();
+        if let Some((n, lanes)) = float_lanes(destination) {
+            out.entry(n).or_default().extend(lanes);
+        }
+    }
+    out
+}
+
+/// A float destination operand's register and lanes: `d3`, `v0.4s` or `v1.d[1]`.
+fn float_lanes(operand: &str) -> Option<(usize, Vec<Lane>)> {
+    let width = |t: &str| match t {
+        "h" => Some(16),
+        "s" => Some(32),
+        "d" => Some(64),
+        _ => None,
+    };
+    let Some((register, arrangement)) = operand.split_once('.') else {
+        let (t, n) = operand.split_at_checked(1)?;
+        return Some((n.parse().ok()?, vec![(width(t)?, 0)]));
+    };
+    let n = register.strip_prefix('v')?.parse().ok()?;
+    if let Some((t, lane)) = arrangement.split_once('[') {
+        return Some((n, vec![(width(t)?, lane.strip_suffix(']')?.parse().ok()?)]));
+    }
+    let (count, t) = arrangement.split_at_checked(arrangement.len().checked_sub(1)?)?;
+    let (bits, count) = (width(t)?, count.parse::<u32>().ok()?);
+    Some((n, (0..count).map(|lane| (bits, lane)).collect()))
 }
 
 fn hex(text: &str) -> u64 {
@@ -132,6 +177,7 @@ fn cases(text: &str) -> Vec<Case> {
                     target,
                     words,
                     runs: Vec::new(),
+                    produced: BTreeMap::new(),
                 });
             }
             Some("R") => {
@@ -249,7 +295,7 @@ impl Lift {
     ) -> BTreeSet<String> {
         let mut state = self.start(case, before);
         match self.execute(case, lifted, &mut state) {
-            Ok(taken) => self.compare(&mut state, cpu, taken),
+            Ok(taken) => self.compare(case, &mut state, cpu, taken),
             Err(stop) => BTreeSet::from([stop]),
         }
     }
@@ -349,6 +395,7 @@ impl Lift {
     /// Every register, flag, vector and memory byte that differs from what the CPU left.
     fn compare<M: Mapped>(
         &self,
+        case: &Case,
         state: &mut State<M>,
         cpu: &Machine,
         taken: bool,
@@ -368,10 +415,13 @@ impl Lift {
         }
         for (n, lane) in cpu.v.iter().enumerate() {
             let (offset, _) = self.register(&format!("q{n}"));
-            if !state
-                .register(offset, 16)
-                .is_some_and(|lifted| same_lanes(lifted, *lane))
-            {
+            if !state.register(offset, 16).is_some_and(|lifted| {
+                same_lanes(
+                    lifted,
+                    *lane,
+                    case.produced.get(&n).map_or(&[], Vec::as_slice),
+                )
+            }) {
                 wrong.insert(format!("v{n}"));
             }
             let (z, _) = self.register(&format!("z{n}"));
@@ -413,7 +463,9 @@ fn every_case_computes_what_the_cpu_computed_or_is_listed() {
     let mut stream = Stream(0x9e37_79b9_7f4a_7c15);
     let mut outcomes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut order = Vec::new();
-    for case in cases(&recording) {
+    let asm = assembly(&std::fs::read_to_string(data("cases.txt")).expect("cases.txt"));
+    for mut case in cases(&recording) {
+        case.produced = produced(&asm[&case.name]);
         let lifted: Result<Vec<Vec<R2ILOp>>, String> = case
             .words
             .iter()

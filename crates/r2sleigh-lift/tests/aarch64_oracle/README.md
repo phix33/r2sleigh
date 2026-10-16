@@ -14,8 +14,9 @@ computes what an arm64 CPU computes (ROADMAP VC, LS0; audit T7).
   cases keeps every earlier run's inputs; an `A` case's encoding and result
   move when the code grows (`adrp`'s `f0000120` became `f0000140` at #276).
 - The test draws the same states (checking each hash), lifts each case, runs it,
-  and compares every register, flag, vector (a NaN matches any NaN in its lane:
-  p-code leaves the payload open) and memory byte, including an 8 KiB zero guard
-  after the random memory.
+  and compares every register, flag, vector and memory byte bit for bit,
+  including an 8 KiB zero guard after the random memory. A NaN matches any NaN
+  only in a lane a float instruction of the case writes, at its element width
+  (p-code leaves a result's payload open).
 - `expected.txt` lists the cases that stop or disagree, a ratchet: a case leaving
   it must be removed, one joining it fails. `R2S_BLESS=1` rewrites it.
