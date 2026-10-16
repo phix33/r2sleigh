@@ -33,7 +33,8 @@ structural decisions that close each gap.
 | Container (`r2image`) | bytes, sections, symbols, relocations, byte orders | `diff_r2` against radare2, DWARF | present; field relocations open (I) |
 | Decoder (Sleigh, vendored) | instruction length and text | `diff_r2 pd`; `decode_sweep` (random words per language, no fault) | present |
 | Lift semantics (specs) | each instruction's effect | the CPU oracle: AArch64 (Apple M5) and x86-64 (contabo, D35) present; ARM32 refused (D32) | present |
-| Lift passes (`translate.rs`, `internal_control`) | a rewrite of one instruction's ops | **none**: no eval before and after (D34) | missing |
+| Lift passes (`translate.rs`, user-operation expansion) | a rewrite of one instruction's ops | `decode_sweep`: each pass's input and output through `r2il::eval` from the same seeded states (D34) | present |
+| `internal_control` | an instruction's local loops and skips as values and guarded accesses | `local_control_tests`: Sleigh's p-code and the lift through `r2il::eval::run` | present (x86 loops) |
 | Temporary names (`r2il::number_temporaries`, r2ssa `naming.rs`) | which value a `tmp_` name is | `stable_temporaries`: every census function's `pdd`, `pdil` and `ao` byte-identical with Sleigh's temporaries shifted or reversed (D36) | present |
 | Register effects | reads and writes per instruction | AO against radare2's `aeaj` | present (#284) |
 | r2ssa rewrites | value-preserving IR edits | `EditPlan` with stable ids ([stable identity](adr-stable-identity.md)), the semantic kernel | present |
@@ -45,21 +46,47 @@ structural decisions that close each gap.
 ## Decisions
 
 **D34. Lift passes edit through one instruction plan, and each is checked by
-`r2il::eval`.** Owner: `r2sleigh-lift`.
-- A pass over one instruction's ops states insertions before or after an op
-  and replacements. It never pushes into a fresh `Vec`.
+`r2il::eval`.** Done (2026-10-16). Owner: `r2sleigh-lift`.
+- A pass over one instruction's ops states insertions before or after an op,
+  a replacement or a removal (`plan::Plan`), in operation order. It never
+  pushes into a fresh `Vec`; an empty plan returns the ops untouched.
 - One applier keeps every instruction-relative label on the op it named, as
-  r2ssa's `EditPlan` does for the IR. The per-pass `starts`/`at` vectors of
-  `whole_unique_reads` and `canonicalize_memory_operands` are deleted (D1).
+  r2ssa's `EditPlan` does for the IR: a label naming op `t` names the start of
+  what `t` became (its insertions before it, or what follows if it was
+  removed). A replaced branch keeps its label; inserted ops carry none. The
+  per-pass `starts`/`at` vectors and `relabel_local_branches` are deleted
+  (D1). `whole_unique_reads`, `canonicalize_memory_operands`,
+  `split_odd_register_zeroes`, `forward_repeated_loads` and user-operation
+  expansion all edit through it. The last three kept no label (the middle one
+  declines an instruction that has one), so an expansion beside a local label
+  would have moved it.
+- The label's encoding has one owner in r2il: `Varnode::signed_label`,
+  `R2ILOp::local_offset` and `set_local_offset`, which `internal_control` and
+  its tests read too; `r2il::eval::run` follows the labels of one instruction.
+- `internal_control` is not on the plan. It resolves every label into values
+  and guarded accesses, so none survives it, and it departs from the
+  specification by design where BSF's or BSR's source is zero. It keeps
+  `local_control_tests`, now on `eval::run`.
 - `canonicalize_memory_operands` exists because SSA would rename a ram-space
   varnode like a register, making a read undefined and a write invisible. A
   read loads into a fresh temporary, a written output stores from one, and a
   copy needs none. A direct transfer's target (`R2ILOp::transfer`) is code,
   not memory; an indirect transfer's slot is loaded like any other operand.
-- Gate: `decode_sweep` runs each pass's input and output through `r2il::eval`
-  from the same seeded states and compares registers and memory. A pass that
-  moves a label or drops an effect fails it. This is D31's "each IR rewrite
-  against `r2il::eval` before and after" applied to the lift.
+- Gate: `decode_sweep` lifts each word with `Disassembler::lift_passes`, which
+  records every pass's input and output, and runs both through `eval::run`
+  from four seeded entry states (the registers the input reads, memory every
+  byte of which is mapped). The exit, every register either writes and every
+  store with its value must agree. A user operation, which `r2il::eval` does
+  not run, is given the same seeded value on both sides, except in the pass
+  that expands it. A pass that moves a label, drops an effect or reads the
+  wrong piece fails it (`the_gate_fails_a_pass_that_moves_a_label_or_drops_an_effect`
+  tests the comparison, and three live mutants of the passes failed it).
+  This is D31's "each IR rewrite against `r2il::eval` before and after"
+  applied to the lift.
+- A label crosses an inserted op in few real instructions (a skip over a
+  store of a piece of a temporary: AArch64's `stxrb`, `stxrh`), so the
+  applier itself is also tested against random programs of forward branches
+  with neutral ops inserted around them (`plan::tests`).
 
 **D35. x86-64 has a CPU oracle, and a spec change merges with oracle
 evidence.** Owner: VC.
