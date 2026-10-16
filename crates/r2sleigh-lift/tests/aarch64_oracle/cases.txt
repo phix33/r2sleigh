@@ -454,3 +454,6 @@ umin_x_reg|-|umin x0, x1, x2
 ldr_x_reg|PI|ldr x0, [x9, x11]
 add_ext_uxtw|-|add x0, x1, w2, uxtw #2
 adds_ext_sxtw|-|adds x0, x1, w2, sxtw
+cnt_w|-|cnt w0, w1
+smax_w_imm|-|smax w0, w1, #-5
+umin_w_reg|-|umin w0, w1, w2

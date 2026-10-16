@@ -8468,11 +8468,12 @@ is b_1231=0b11010101000000000100 & b_0007=0b00111111
 
 # FEAT_CSSC
 :abs Rd_GPR32, Rn_GPR32
-is sf=0 & b_30=1 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1620=0x0 & b_1015=0x8 & Rd_GPR32 & Rn_GPR32
+is sf=0 & b_30=1 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1620=0x0 & b_1015=0x8 & Rd_GPR32 & Rn_GPR32 & Rd_GPR64
 {
 	local tmp = Rn_GPR32;
 	local test = tmp s< 0;
-	Rd_GPR32 = (zext(!test)*tmp) + (zext(test)*(-tmp));
+	local result:4 = (zext(!test)*tmp) + (zext(test)*(-tmp));
+	Rd_GPR64 = zext(result);
 }
 
 :abs Rd_GPR64, Rn_GPR64
@@ -8484,10 +8485,11 @@ is sf=1 & b_30=1 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1620=0x0 & b_1015=0x8 & Rd
 }
 
 :cnt Rd_GPR32, Rn_GPR32
-is sf=0 & b_30=1 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1620=0x0 & b_1015=0x7 & Rd_GPR32 & Rn_GPR32
+is sf=0 & b_30=1 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1620=0x0 & b_1015=0x7 & Rd_GPR32 & Rn_GPR32 & Rd_GPR64
 {
 	local tmp = Rn_GPR32;
-	Rd_GPR32 = popcount(tmp);
+	local result:4 = popcount(tmp);
+	Rd_GPR64 = zext(result);
 }
 
 :cnt Rd_GPR64, Rn_GPR64
@@ -8532,12 +8534,13 @@ cssc_imm64: "#"^val is imm8 [ val = imm8 * 1; ] { export *[const]:8 val; }
 
 
 :smax Rd_GPR32, Rn_GPR32, cssc_simm32
-is sf=0 & b_30=0 & S=0 & b_2428=0x11 & b_2123=0x6 & b_1820=0x0 & Rd_GPR32 & Rn_GPR32 & cssc_simm32
+is sf=0 & b_30=0 & S=0 & b_2428=0x11 & b_2123=0x6 & b_1820=0x0 & Rd_GPR32 & Rn_GPR32 & cssc_simm32 & Rd_GPR64
 {
 	local tmp = Rn_GPR32;
 	local tmp2 = cssc_simm32;
 	local test:1 = tmp s>= tmp2;
-	Rd_GPR32 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	local result:4 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	Rd_GPR64 = zext(result);
 }
 
 :smax Rd_GPR64, Rn_GPR64, cssc_simm64
@@ -8550,12 +8553,13 @@ is sf=1 & b_30=0 & S=0 & b_2428=0x11 & b_2123=0x6 & b_1820=0x0 & Rd_GPR64 & Rn_G
 }
 
 :smax Rd_GPR32, Rn_GPR32, Rm_GPR32
-is sf=0 & b_30=0 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1015=0x18 & Rd_GPR32 & Rn_GPR32 & Rm_GPR32
+is sf=0 & b_30=0 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1015=0x18 & Rd_GPR32 & Rn_GPR32 & Rm_GPR32 & Rd_GPR64
 {
 	local tmp = Rn_GPR32;
 	local tmp2 = Rm_GPR32;
 	local test = tmp s>= tmp2;
-	Rd_GPR32 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	local result:4 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	Rd_GPR64 = zext(result);
 }
 
 :smax Rd_GPR64, Rn_GPR64, Rm_GPR64
@@ -8568,12 +8572,13 @@ is sf=1 & b_30=0 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1015=0x18 & Rd_GPR64 & Rn_
 }
 
 :smin Rd_GPR32, Rn_GPR32, cssc_simm32
-is sf=0 & b_30=0 & S=0 & b_2428=0x11 & b_2123=0x6 & b_1820=0x2 & Rd_GPR32 & Rn_GPR32 & cssc_simm32
+is sf=0 & b_30=0 & S=0 & b_2428=0x11 & b_2123=0x6 & b_1820=0x2 & Rd_GPR32 & Rn_GPR32 & cssc_simm32 & Rd_GPR64
 {
 	local tmp = Rn_GPR32;
 	local tmp2 = cssc_simm32;
 	local test:1 = tmp s<= tmp2;
-	Rd_GPR32 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	local result:4 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	Rd_GPR64 = zext(result);
 }
 
 :smin Rd_GPR64, Rn_GPR64, cssc_simm64
@@ -8586,12 +8591,13 @@ is sf=1 & b_30=0 & S=0 & b_2428=0x11 & b_2123=0x6 & b_1820=0x2 & Rd_GPR64 & Rn_G
 }
 
 :smin Rd_GPR32, Rn_GPR32, Rm_GPR32
-is sf=0 & b_30=0 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1015=0x1a & Rd_GPR32 & Rn_GPR32 & Rm_GPR32
+is sf=0 & b_30=0 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1015=0x1a & Rd_GPR32 & Rn_GPR32 & Rm_GPR32 & Rd_GPR64
 {
 	local tmp = Rn_GPR32;
 	local tmp2 = Rm_GPR32;
 	local test = tmp s<= tmp2;
-	Rd_GPR32 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	local result:4 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	Rd_GPR64 = zext(result);
 }
 
 :smin Rd_GPR64, Rn_GPR64, Rm_GPR64
@@ -8604,12 +8610,13 @@ is sf=1 & b_30=0 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1015=0x1a & Rd_GPR64 & Rn_
 }
 
 :umax Rd_GPR32, Rn_GPR32, cssc_imm32
-is sf=0 & b_30=0 & S=0 & b_2428=0x11 & b_2123=0x6 & b_1820=0x1 & Rd_GPR32 & Rn_GPR32 & cssc_imm32
+is sf=0 & b_30=0 & S=0 & b_2428=0x11 & b_2123=0x6 & b_1820=0x1 & Rd_GPR32 & Rn_GPR32 & cssc_imm32 & Rd_GPR64
 {
 	local tmp = Rn_GPR32;
 	local tmp2 = cssc_imm32;
 	local test:1 = tmp >= tmp2;
-	Rd_GPR32 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	local result:4 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	Rd_GPR64 = zext(result);
 }
 
 :umax Rd_GPR64, Rn_GPR64, cssc_imm64
@@ -8622,12 +8629,13 @@ is sf=1 & b_30=0 & S=0 & b_2428=0x11 & b_2123=0x6 & b_1820=0x1 & Rd_GPR64 & Rn_G
 }
 
 :umax Rd_GPR32, Rn_GPR32, Rm_GPR32
-is sf=0 & b_30=0 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1015=0x19 & Rd_GPR32 & Rn_GPR32 & Rm_GPR32
+is sf=0 & b_30=0 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1015=0x19 & Rd_GPR32 & Rn_GPR32 & Rm_GPR32 & Rd_GPR64
 {
 	local tmp = Rn_GPR32;
 	local tmp2 = Rm_GPR32;
 	local test = tmp >= tmp2;
-	Rd_GPR32 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	local result:4 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	Rd_GPR64 = zext(result);
 }
 
 :umax Rd_GPR64, Rn_GPR64, Rm_GPR64
@@ -8640,12 +8648,13 @@ is sf=1 & b_30=0 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1015=0x19 & Rd_GPR64 & Rn_
 }
 
 :umin Rd_GPR32, Rn_GPR32, cssc_imm32
-is sf=0 & b_30=0 & S=0 & b_2428=0x11 & b_2123=0x6 & b_1820=0x3 & Rd_GPR32 & Rn_GPR32 & cssc_imm32
+is sf=0 & b_30=0 & S=0 & b_2428=0x11 & b_2123=0x6 & b_1820=0x3 & Rd_GPR32 & Rn_GPR32 & cssc_imm32 & Rd_GPR64
 {
 	local tmp = Rn_GPR32;
 	local tmp2 = cssc_imm32;
 	local test:1 = tmp <= tmp2;
-	Rd_GPR32 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	local result:4 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	Rd_GPR64 = zext(result);
 }
 
 :umin Rd_GPR64, Rn_GPR64, cssc_imm64
@@ -8658,12 +8667,13 @@ is sf=1 & b_30=0 & S=0 & b_2428=0x11 & b_2123=0x6 & b_1820=0x3 & Rd_GPR64 & Rn_G
 }
 
 :umin Rd_GPR32, Rn_GPR32, Rm_GPR32
-is sf=0 & b_30=0 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1015=0x1b & Rd_GPR32 & Rn_GPR32 & Rm_GPR32
+is sf=0 & b_30=0 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1015=0x1b & Rd_GPR32 & Rn_GPR32 & Rm_GPR32 & Rd_GPR64
 {
 	local tmp = Rn_GPR32;
 	local tmp2 = Rm_GPR32;
 	local test = tmp <= tmp2;
-	Rd_GPR32 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	local result:4 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+	Rd_GPR64 = zext(result);
 }
 
 :umin Rd_GPR64, Rn_GPR64, Rm_GPR64

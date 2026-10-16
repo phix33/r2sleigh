@@ -7733,3 +7733,54 @@ R 2e604ee200dfef10 x0=1 n=0
 R 2e956cb1b2195e0b x0=7ffffffe n=2
 R ed1aeabb9299c56a x0=fffffffffffffffe n=a
 R a892c00d026c9c7f x0=0
+C cnt_w - 8e8 188 5ac01c20
+R 471715967cbc823a x0=4
+R d1e9166bac5816c8 x0=20
+R 7c6fdd0eb5c118bb x0=1
+R da5ba94ab6631a0f
+R 055c7379b63fea6d x0=1
+R e201cc49a2a9577d x0=1
+R 6a0128a0b306d7dc x0=1
+R 70ae0d67794fbd5b x0=20
+R cc62b836f90c0d7f x0=20
+R fbd0e5b709d93a59 x0=20
+R 017153a1fe2f3339 x0=1f
+R 27607c5183f79fb1 x0=1
+R d68f319f29ebf2a5 x0=20
+R 7a68ae11a47f2edf x0=1
+R f7ffdb8d19a60d6a x0=12
+R 73f4e83095a8cb14 x0=0
+C smax_w_imm - b08 188 11c3ec20
+R 84344d3d455b7724 x0=0
+R acee422dd8f6ab88 x0=1
+R b244f12cabe6e0e1 x0=fffffffb
+R 353c4d2bf8700d05
+R 41c4e22944d23813 x0=0
+R 25c72b92ea3a4c1f x0=fffffffb
+R 5168f9c4adc2eb10 x0=7fffffff
+R 03a9fd7fc325473a x0=12
+R fffb8ad5c2703904 x0=1
+R 2d4f6d0ffe70703e x0=ffffffff
+R af3ea56f6a06dfd2 x0=fffffffb
+R 988cfa5ff323a355 x0=0
+R 5caaf79be14cae24 x0=ffffffff
+R 918d1b54fd06f2a3 x0=ffffffff
+R cdaf18f86992ca07 x0=0
+R c58e3010d3c0b88e x0=7fffffff
+C umin_w_reg - d28 188 1ac26c20
+R 39f9d31eebb3f56a x0=1
+R cd61bb875b1eb1d5 x0=0
+R 4e593313b01dd9dd x0=e6821c6
+R 1f1a6db54e6888e6 x0=1972ddb6
+R 4ceb9d8edf04fde2 x0=1
+R 07011dcf9ea623db x0=f
+R 04ec08a1ed110a50 x0=1f
+R d5a1dea20c09d510
+R dbe3f991ec946f2c x0=0
+R 1966e1a1a503fdaf x0=0
+R f9827e48c8074ec9 x0=0
+R 400a6563a44790e4 x0=7fffffff
+R e8bad23b8d016768 x0=658db03c
+R 1d68c53d45b46652 x0=0
+R f73e7762a47e9023 x0=7fffffff
+R 2d4f2e61233a61c4 x0=0
