@@ -54,8 +54,11 @@ through `int2float` at 63, so `fcvtzs`, `fcvtzu`, `scvtf` and `ucvtf` of an X re
 scaled in float32: Ghidra multiplied by `FBitsOp`, the fraction-bit count read as a float16 bit
 pattern, in three of the four, and in float16, where 2^fbits is infinite from 16 bits, in the
 fourth. 19 oracle cases (Apple M5) pin them (a sleigh-config pull request is owed, and a Ghidra
-issue for the scale constants and the H operand). Left, each a gap: the fixed-point `fcvtzs` still converts by `trunc`, so it stops
-past the signed range (the signed family, ROADMAP VC); `scvtf` and `ucvtf` into H divide by
+issue for the scale constants and the H operand). The fixed-point `fcvtzs` into W and X saturates as FPToFixed states (Arm ARM C7.2.91; NaN gives 0,
+at or above 2^(N-1) the maximum, at or below -2^(N-1) the minimum), where it converted by a bare
+`trunc` and so stopped in `r2il::eval` past the signed range; six oracle cases (Apple M5, D, S and H
+sources into W and X) stop at the old text and agree now, and `fcvtzs_fix` left the list. Left, each
+a gap: `scvtf` and `ucvtf` into H divide by
 `FBits16`, float16's 2^fbits, infinite from 16 bits, and `r2il::eval` cannot narrow into
 binary16, so no oracle grades them; `fmov` between H and W or X converts the value with
 `float2float` where the Arm ARM moves the bits (four forms). `fcvta*`, `fcvtm*`, `fcvtn*` and
