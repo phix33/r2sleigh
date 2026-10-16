@@ -6,8 +6,8 @@
 use r2il::ValueUse;
 use r2il::{R2ILOp, SpaceId, Varnode};
 use r2sleigh_lift::{NumberSpan, Syntax};
-use r2ssa::CanonicalStorageId;
 use r2ssa::origin::{BlockOrigins, ValueOrigin, encoded_target};
+use r2ssa::{CanonicalStorageId, CanonicalStorageSpace};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::Work;
@@ -57,14 +57,10 @@ pub(super) fn over_run(
     let body = (work >= Work::Function).then_some(answered.body).flatten();
     let fresh = fresh_over(lines, body);
     let mut named = named_over(run.lifts, &fresh, call_effect);
-    // A number the program does not map names nothing in it, whatever it moves with.
-    for one in named.iter_mut().flatten() {
-        if one
-            .computed
-            .as_ref()
-            .is_some_and(|computed| !memory.maps(computed.value))
-        {
-            one.computed = None;
+    let spelled = spelled_over(answered, lines);
+    for (one, spelled) in named.iter_mut().zip(&spelled) {
+        if let Some(one) = one {
+            one.keep_named(memory, spelled.as_deref());
         }
     }
     let relative = relative_over(answered, run, lines, &named, &fresh);
@@ -192,6 +188,20 @@ struct Named {
 }
 
 impl Named {
+    /// Forget a computed number the program does not map, whatever it moves with, and one left in a
+    /// register no operand of the instruction names: the machine's own bookkeeping, like x87's
+    /// instruction pointer, is no result.
+    fn keep_named(&mut self, memory: &Memory<'_>, spelled: Option<&[CanonicalStorageId]>) {
+        let named = |output: &Varnode| {
+            spelled.is_none_or(|spelled| spelled.iter().any(|register| holds(register, output)))
+        };
+        let kept = (self.computed.as_ref())
+            .is_none_or(|computed| memory.maps(computed.value) && named(&computed.output));
+        if !kept {
+            self.computed = None;
+        }
+    }
+
     /// The number the run leaves in a storage after this instruction, where it folds one.
     fn left(&self, storage: CanonicalStorageId) -> Option<u64> {
         self.folded
@@ -573,6 +583,28 @@ fn op_fate(
         None => {}
     }
     None
+}
+
+/// The registers each decoded line's operands spell, which is where the instruction states its result goes.
+fn spelled_over(answered: &Answered<'_>, lines: &[Line]) -> Vec<Option<Vec<CanonicalStorageId>>> {
+    let spelled = |line: &Line| {
+        let syntax = line.syntax.as_ref()?;
+        let arch = answered.decoders.at(line.address)?.tables();
+        let names = arch.registers_by_name();
+        let found = syntax.registers.iter().filter_map(|span| {
+            let name = syntax.body.get(span.start..span.end)?.to_ascii_lowercase();
+            names.get(&name).copied()
+        });
+        Some(found.collect())
+    };
+    lines.iter().map(spelled).collect()
+}
+
+/// Whether a register the operands name shares a byte with a storage the instruction writes.
+fn holds(register: &CanonicalStorageId, output: &Varnode) -> bool {
+    register.space == CanonicalStorageSpace::Register
+        && register.offset < output.offset + u64::from(output.size)
+        && output.offset < register.offset + u64::from(register.size)
 }
 
 /// Whether two storages share a byte.

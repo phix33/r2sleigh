@@ -274,6 +274,16 @@ fn the_index_holds_what_every_arm_of_a_solved_dispatch_names() {
     assert!(index.coverage.is_closed(), "{:?}", index.coverage);
 }
 
+/// `fstp st0; ret`: x87 writes its own address to the FPU instruction pointer, which no operand names.
+const X87: &[u8] = &[0xdd, 0xd8, 0xc3];
+
+#[test]
+fn an_address_the_machine_records_in_a_register_no_operand_names_is_no_reference() {
+    let mut program = OpenProgram::of(Literal::of_code(X87, &[("x87", BASE, 3)]));
+    let index = program.references().expect("the index builds").value;
+    assert_eq!(listed(index.facts()), []);
+}
+
 /// `left`: `test edi, edi; je tail; mov eax, 1; ret`; `tail`: `call leaf; ret`; `right`: `jmp tail`; `leaf`: `mov eax, 2; ret`.
 const SHARED: &[u8] = &[
     0x85, 0xff, // 0x1000 test edi, edi
