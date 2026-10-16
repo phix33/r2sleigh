@@ -362,9 +362,15 @@ fn aarch64_listing_spells_the_preferred_alias_at_each_precondition_boundary() {
         (0x12a0_0001, "movn w1, 0x0, lsl 0x10"),
         (0x129f_ffe1, "movn w1, 0xffff"),
         (0x92a0_0001, "movn x1, 0x0, lsl 0x10"),
-        // USHLL and SSHLL by zero are UXTL and SXTL.
+        // USHLL and SSHLL by zero are Sleigh's UXTL and SXTL already; any other shift stays.
         (0x0f08_a441, "sxtl v1.8h, v2.8b"),
         (0x2f09_a441, "ushll v1.8h, v2.8b, 0x1"),
+        // The carry conditions are HS and LO, where Sleigh writes CS and CC.
+        (0x5400_0022, "b.hs 0x1004"),
+        (0x5400_0023, "b.lo 0x1004"),
+        (0x5400_0021, "b.ne 0x1004"),
+        (0x1a81_2021, "csel w1, w1, w1, hs"),
+        (0x1a9f_27e1, "cset w1, lo"),
     ];
     for (word, expected) in words {
         let decoded = disassembler

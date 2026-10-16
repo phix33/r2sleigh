@@ -26,6 +26,8 @@ spelling in two places.
 | ORR shifted, Rn zero | `mov Rd, Rm` | shift `lsl #0` only; any other shift stays `orr Rd, zr, Rm, shift` |
 | ORR immediate, Rn zero | `mov Rd, imm` | not `MoveWidePreferred`: no one MOVZ or MOVN writes the value |
 | MOVZ, MOVN | `mov Rd, imm` | not (`imm16 = 0` and `hw != 0`); MOVN 32-bit not `imm16 = 0xffff` |
+| any `cs`, `cc` condition | `hs`, `lo` | the spelling LLVM, binutils and radare2 write |
+| any `cs`, `cc` condition | `hs`, `lo` | the spelling LLVM, binutils and radare2 write |
 
 `MoveWidePreferred` is a test on the encoding (`immN`, `imms`, `immr`), and the
 MOVZ/MOVN rule on `hw`; the operands drop those fields, so the decoder passes

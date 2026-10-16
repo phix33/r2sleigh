@@ -182,7 +182,7 @@ fn radare2_text(text: &str, arch: &str, word: Option<u32>) -> String {
             let out = out.replace(", 0x0]", "]");
             arm_alias(&arm_it_condition(&arm_role_registers(&out)))
         }
-        "aarch64" => aarch64_alias(&out, word),
+        "aarch64" => aarch64_condition(&aarch64_alias(&out, word)),
         _ => {
             // Nor a scale of one: `[rax + rax*0x1]` is `[rax + rax]`.
             let out = out.replace("*0x1]", "]").replace("*0x1 ", " ");
@@ -327,6 +327,31 @@ fn move_wide_preferred(sf: bool, n: u32, immr: u32, imms: u32) -> bool {
         return (16 - immr % 16) % 16 <= 15 - imms;
     }
     imms + 17 >= width && immr % 16 <= imms + 17 - width
+}
+
+/// A Sleigh condition name for the carry flag is `cs` and `cc`; the Arm ARM, binutils and LLVM write `hs` and `lo`.
+fn aarch64_condition(text: &str) -> String {
+    fn rename(condition: &str) -> &str {
+        match condition {
+            "cs" => "hs",
+            "cc" => "lo",
+            other => other,
+        }
+    }
+
+    let (head, body) = text.split_once(' ').unwrap_or((text, ""));
+    let head = match head.split_once('.') {
+        Some((verb, condition)) => format!("{verb}.{}", rename(condition)),
+        None => head.to_owned(),
+    };
+    let body = match body.rsplit_once(", ") {
+        Some((front, last)) => format!("{front}, {}", rename(last)),
+        None => body.to_owned(),
+    };
+    match body.is_empty() {
+        true => head,
+        false => format!("{head} {body}"),
+    }
 }
 
 fn is_zero_register(name: &str) -> bool {
@@ -498,6 +523,17 @@ mod tests {
         );
         assert_eq!(text("bfm", "w1, wzr, #0x1, #0x0"), "bfc w1, 0x1f, 0x1");
         assert_eq!(text("bfm", "w1, w2, #0x1, #0x1"), "bfxil w1, w2, 0x1, 0x1");
+    }
+
+    #[test]
+    fn aarch64_carry_conditions_read_hs_and_lo() {
+        let text = |mnemonic, body| radare2(mnemonic, body, 4, "aarch64", &[]).text();
+        assert_eq!(text("b.cs", "0x10"), "b.hs 0x10");
+        assert_eq!(text("bc.cc", "0x10"), "bc.lo 0x10");
+        assert_eq!(text("csel", "w1, w2, w3, cc"), "csel w1, w2, w3, lo");
+        assert_eq!(text("cset", "x1, cs"), "cset x1, hs");
+        assert_eq!(text("ccmp", "x1, x2, #0x4, cs"), "ccmp x1, x2, 0x4, hs");
+        assert_eq!(text("b.ne", "0x10"), "b.ne 0x10");
     }
 
     /// `move_wide_preferred` is the Arm ARM's test on the encoding; as a test on the value it is
