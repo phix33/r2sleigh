@@ -326,9 +326,11 @@ impl Lift {
                 Flow::Next => None,
                 flow => Some((op, flow)),
             }) else {
+                state.end_instruction();
                 at += 1;
                 continue;
             };
+            state.end_instruction();
             let Flow::Transfer(transfer) = flow else {
                 return Err(self.stopped(op, flow));
             };

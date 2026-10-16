@@ -1112,6 +1112,7 @@ fn run(
         };
         following.extend(ledger.rule(lift, &after, &mut track, &described));
         previous = Some(at);
+        state.end_instruction();
         match ran.flow {
             Flow::Transfer(transfer) if transfer.kind == TransferKind::Jump => at = transfer.to,
             Flow::Next => at = instruction.next,

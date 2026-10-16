@@ -306,9 +306,11 @@ impl Lift {
                 Flow::Next => None,
                 flow => Some((op, flow)),
             }) else {
+                state.end_instruction();
                 at += 1;
                 continue;
             };
+            state.end_instruction();
             match self.after(case, lifted.len(), op, flow)? {
                 Next::Instruction(next) => at = next,
                 Next::Done { taken } => return Ok(taken),

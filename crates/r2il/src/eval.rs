@@ -137,6 +137,11 @@ impl<M: Mapped> State<M> {
         self.write(&Varnode::register(offset, size), value)
     }
 
+    /// Close one instruction: its temporaries die with it, so the next one's unwritten read stops.
+    pub fn end_instruction(&mut self) {
+        self.unique.clear();
+    }
+
     /// The memory accesses since the last call, oldest first.
     pub fn take_accesses(&mut self) -> Vec<Access> {
         std::mem::take(&mut self.accesses)
@@ -1422,6 +1427,26 @@ mod tests {
         assert_eq!(machine.register(0, 32), Some(7));
         machine.set_register(31, 1, 1).expect("its top byte");
         assert_eq!(machine.register(0, 32), None);
+    }
+
+    #[test]
+    fn a_temporary_does_not_outlive_its_instruction() {
+        let mut machine = state();
+        let write = R2ILOp::Copy {
+            dst: Varnode::unique(0, 8),
+            src: Varnode::constant(5, 8),
+        };
+        let read = R2ILOp::Copy {
+            dst: register(0, 8),
+            src: Varnode::unique(0, 8),
+        };
+        assert_eq!(step(&write, &mut machine), Flow::Next);
+        machine.end_instruction();
+        let unwritten = Stop::Unwritten {
+            space: SpaceId::Unique,
+            offset: 0,
+        };
+        assert_eq!(step(&read, &mut machine), Flow::Stop(unwritten));
     }
 
     #[test]
