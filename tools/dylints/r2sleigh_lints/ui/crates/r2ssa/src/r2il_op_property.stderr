@@ -1,5 +1,5 @@
 error: this `match` on `R2ILOp` answers `std::option::Option<&Varnode>` and its wildcard drops every other operation; read the property from r2il or add it there as an exhaustive list
-  --> $DIR/r2il_op_property.rs:27:5
+  --> $DIR/r2il_op_property.rs:32:5
    |
 LL | /     match op {
 LL | |         R2ILOp::Copy { dst, .. } | R2ILOp::Select { dst, .. } => Some(dst),
@@ -10,13 +10,13 @@ LL | |     }
    = note: `#[deny(r2il_op_property_outside_r2il)]` on by default
 
 error: this `match` on `R2ILOp` answers `bool` and its wildcard drops every other operation; read the property from r2il or add it there as an exhaustive list
-  --> $DIR/r2il_op_property.rs:35:5
+  --> $DIR/r2il_op_property.rs:40:5
    |
 LL |     matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. })
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error: this `match` on `R2ILOp` answers `std::vec::Vec<&Varnode>` and its wildcard drops every other operation; read the property from r2il or add it there as an exhaustive list
-  --> $DIR/r2il_op_property.rs:40:5
+  --> $DIR/r2il_op_property.rs:45:5
    |
 LL | /     match op {
 LL | |         R2ILOp::Copy { src, .. } => vec![src],
@@ -25,5 +25,14 @@ LL | |         _other => Vec::new(),
 LL | |     }
    | |_____^
 
-error: aborting due to 3 previous errors
+error: this `match` on `R2ILOp` answers `ValueUse` and its wildcard drops every other operation; read the property from r2il or add it there as an exhaustive list
+  --> $DIR/r2il_op_property.rs:54:5
+   |
+LL | /     match op {
+LL | |         R2ILOp::Copy { .. } | R2ILOp::Select { .. } => ValueUse::Carries,
+LL | |         _ => ValueUse::Consumes,
+LL | |     }
+   | |_____^
+
+error: aborting due to 4 previous errors
 
