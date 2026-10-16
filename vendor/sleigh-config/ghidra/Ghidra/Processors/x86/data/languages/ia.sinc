@@ -7282,51 +7282,99 @@ CMPSS_OPERAND: ", "^imm8 is imm8   { }
   FPUTagWord = 0x0000;         
 }
 
+# Truncation; NaN or out of range is the integer indefinite (Intel SDM Vol. 2A, CVTTSD2SI, CVTTSS2SI).
+# lo and hi are the nearest values of the source format outside the range on either side.
+macro cvttsd2si32(dest, x) {
+  local lo:8 = int2float(0xffffffff7fffffff:8);
+  local hi:8 = int2float(0x80000000:8);
+  local fits:1 = (x f> lo) && (x f< hi);
+  local c:8 = x;
+  if (fits) goto <converted>;
+  c = int2float(0:4);
+<converted>
+  dest = trunc(c) | (zext(!fits) * 0x80000000:4);
+}
+
+macro cvttsd2si64(dest, x) {
+  local min:8 = int2float(0x8000000000000000:8);
+  local lo:8 = min f- int2float(0x800:8);
+  local hi:8 = f- min;
+  local fits:1 = (x f> lo) && (x f< hi);
+  local c:8 = x;
+  if (fits) goto <converted>;
+  c = int2float(0:4);
+<converted>
+  dest = trunc(c) | (zext(!fits) * 0x8000000000000000:8);
+}
+
+macro cvttss2si32(dest, x) {
+  local lo:4 = int2float(0xffffffff7fffff00:8);
+  local hi:4 = int2float(0x80000000:8);
+  local fits:1 = (x f> lo) && (x f< hi);
+  local c:4 = x;
+  if (fits) goto <converted>;
+  c = int2float(0:4);
+<converted>
+  dest = trunc(c) | (zext(!fits) * 0x80000000:4);
+}
+
+macro cvttss2si64(dest, x) {
+  local min:4 = int2float(0x8000000000000000:8);
+  local lo:4 = min f- int2float(0x10000000000:8);
+  local hi:4 = f- min;
+  local fits:1 = (x f> lo) && (x f< hi);
+  local c:4 = x;
+  if (fits) goto <converted>;
+  c = int2float(0:4);
+<converted>
+  dest = trunc(c) | (zext(!fits) * 0x8000000000000000:8);
+}
+
 :CVTTSD2SI    Reg32, m64  is vexMode=0 & $(PRE_F2) & byte=0x0F; byte=0x2C; (Reg32 & check_Reg32_dest) ... & m64
 {
-  Reg32 = trunc(m64);
+  cvttsd2si32(Reg32, m64);
   build check_Reg32_dest;
 }
 
 :CVTTSD2SI    Reg32, XmmReg2  is vexMode=0 & $(PRE_F2) & byte=0x0F; byte=0x2C; xmmmod=3 & Reg32 & check_Reg32_dest & XmmReg2
 {
-  Reg32 = trunc(XmmReg2[0,64]);
+  cvttsd2si32(Reg32, XmmReg2[0,64]);
   build check_Reg32_dest;
 }
 
 @ifdef IA64
 :CVTTSD2SI    Reg64, m64  is $(LONGMODE_ON) & vexMode=0 & opsize=2 & $(PRE_F2) & byte=0x0F; byte=0x2C; Reg64 ... & m64
 {
-  Reg64 = trunc(m64);
+  cvttsd2si64(Reg64, m64);
 }
 
 :CVTTSD2SI    Reg64, XmmReg2  is vexMode=0 & opsize=2 & $(PRE_F2) & byte=0x0F; byte=0x2C; xmmmod=3 & Reg64 & XmmReg2
 {
-  Reg64 = trunc(XmmReg2[0,64]);
+  cvttsd2si64(Reg64, XmmReg2[0,64]);
 }
 @endif
                 
 :CVTTSS2SI    Reg32, m32  is vexMode=0 & $(PRE_F3) & byte=0x0F; byte=0x2C; (Reg32 & check_Reg32_dest) ... & m32
 {
-  Reg32 = trunc(m32);
+  cvttss2si32(Reg32, m32);
   build check_Reg32_dest;
 }
 
 :CVTTSS2SI    Reg32, XmmReg2  is vexMode=0 & $(PRE_F3) & byte=0x0F; byte=0x2C; xmmmod=3 & Reg32 & check_Reg32_dest & XmmReg2
 {
-  Reg32 = trunc(XmmReg2[0,32]);
+  cvttss2si32(Reg32, XmmReg2[0,32]);
   build check_Reg32_dest;
 }
 
 @ifdef IA64
 :CVTTSS2SI    Reg64, m32  is $(LONGMODE_ON) & vexMode=0 & opsize=2 & $(PRE_F3) & byte=0x0F; byte=0x2C; Reg64 ... & m32
 {
-  Reg64 = trunc(m32);
+  cvttss2si64(Reg64, m32);
 }
 
 :CVTTSS2SI    Reg64, XmmReg2  is vexMode=0 & opsize=2 & $(PRE_F3) & byte=0x0F; byte=0x2C; xmmmod=3 & Reg64 & XmmReg2
 {
-  Reg64 = trunc(XmmReg2[0,32]);
+  cvttss2si64(Reg64, XmmReg2[0,32]);
 }
 @endif
 

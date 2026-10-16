@@ -1,6 +1,0 @@
-cvttsd2si_64: stop Undefined
-cvttsd2si_32: stop Undefined
-cvttss2si_64: stop Undefined
-cvttss2si_32: stop Undefined
-vcvttsd2si_32: stop Undefined; wrong rax
-vcvttss2si_64: stop Undefined
