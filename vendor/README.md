@@ -57,12 +57,15 @@ fourth. 19 oracle cases (Apple M5) pin them (a sleigh-config pull request is owe
 issue for the scale constants and the H operand). The fixed-point `fcvtzs` into W and X saturates as FPToFixed states (Arm ARM C7.2.91; NaN gives 0,
 at or above 2^(N-1) the maximum, at or below -2^(N-1) the minimum), where it converted by a bare
 `trunc` and so stopped in `r2il::eval` past the signed range; six oracle cases (Apple M5, D, S and H
-sources into W and X) stop at the old text and agree now, and `fcvtzs_fix` left the list. Left, each
-a gap: `scvtf` and `ucvtf` into H divide by
-`FBits16`, float16's 2^fbits, infinite from 16 bits, and `r2il::eval` cannot narrow into
-binary16, so no oracle grades them. `fmov` between H and W or X moves the bits (Arm ARM C7.2.131:
-`Wd = ZeroExtend(Hn)`, `Hd = Wn<15:0>`), where Ghidra converted the value with `float2float` (four
-forms; two oracle cases on an Apple M5 disagreed or stopped at the old text). `fcvta*`, `fcvtm*`, `fcvtn*` and
+sources into W and X) stop at the old text and agree now, and `fcvtzs_fix` left the list. The fixed-point
+`scvtf` and `ucvtf` into H divided by `FBits16`, float16's 2^fbits, infinite from 16 bits; they convert
+to a double, divide by `FBits64` (exact) and narrow once (Arm ARM C7.2.235, FixedToFP), an X source
+folding the bits below 2^11 into a sticky bit once past 2^53 so the double's rounding cannot differ from
+the half's (`ucvtf h0, x1, #64` of 0x8010000000000001 is 0x3801 on the CPU, one past the tie a bare
+double would round to). `r2il::eval` narrows into binary16, ties to even, and four oracle cases
+(Apple M5) pin them. `fmov` between H and W or X moves the bits (Arm ARM C7.2.131: `Wd =
+ZeroExtend(Hn)`, `Hd = Wn<15:0>`), where Ghidra converted the value with `float2float` (four forms;
+two oracle cases on an Apple M5 disagreed or stopped at the old text). `fcvta*`, `fcvtm*`, `fcvtn*` and
 `fcvtp*` have no fixed-point form.
 
 A 32-bit register destination zero-extends into its 64-bit register in 64-bit
