@@ -25,7 +25,11 @@ ones), where #9's text wrapped (`fp_to_unsigned`, `fp_to_unsigned64`;
 `AARCH64neon.sinc`). The scalar fixed-point `fcvtzu` into H and D reads its
 fraction bits with `Imm_shr_imm16` and `Imm_shr_imm64`, as `fcvtzs` does, where
 Ghidra read `Imm_shr_imm32`: `fcvtzu d0, d1, #8` decoded as `#-0x38` and
-`fcvtzu h0, h1, #8` as `#0x28`.
+`fcvtzu h0, h1, #8` as `#0x28`. At the full width the scale stays exact: D takes
+2^fbits as a product of two in-range powers (`1:8 << 64` is 0, and `1 << 63` reads
+negative through `int2float`), and H scales in float32 (2^16 is past float16's
+range): `fcvtzu d0, d1, #64` of 0.5 gives 0x8000000000000000, `fcvtzu h0, h1, #16`
+0x8000.
 
 Carried in this tree, not yet in the fork (a sleigh-config pull request owed): a
 32-bit register destination zero-extends into its 64-bit register in 64-bit mode
