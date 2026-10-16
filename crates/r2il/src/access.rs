@@ -73,6 +73,9 @@ fn effective(ops: &[R2ILOp], scratch: impl Fn(&Varnode) -> bool) -> Vec<bool> {
             used[index] = false;
             continue;
         }
+        if let Some(out) = op.output().filter(|out| scratch(out)) {
+            kill(&mut needed, out);
+        }
         let scratches = op.inputs().into_iter().filter(|vn| scratch(vn));
         needed.extend(scratches.map(|vn| {
             let (from, to) = range(vn);
@@ -82,37 +85,66 @@ fn effective(ops: &[R2ILOp], scratch: impl Fn(&Varnode) -> bool) -> Vec<bool> {
     used
 }
 
-/// Disjoint `ranges` with each run of adjacent ones that exactly fills a `declared` register
-/// joined into it at its first member's place (four lanes of `xmm6` are `xmm6`). O(r log r).
+/// Remove the bytes `out` defines from `needed`: no earlier write of them reaches a read after it.
+fn kill(needed: &mut Vec<(SpaceId, u64, u64)>, out: &Varnode) {
+    let (start, end) = range(out);
+    let mut kept = Vec::with_capacity(needed.len() + 1);
+    for &(space, from, to) in needed.iter() {
+        if space != out.space || to <= start || end <= from {
+            kept.push((space, from, to));
+            continue;
+        }
+        kept.extend((from < start).then_some((space, from, start)));
+        kept.extend((end < to).then_some((space, end, to)));
+    }
+    *needed = kept;
+}
+
+/// Disjoint `ranges` with each longest run of adjacent ones that exactly fills a `declared` register
+/// joined into it at its first member's place (four lanes of `xmm6` are `xmm6`). O(r log r + k²).
 pub fn join_tiles(ranges: Vec<Varnode>, declared: impl Fn(&Varnode) -> bool) -> Vec<Varnode> {
     let mut order: Vec<usize> = (0..ranges.len()).collect();
     order.sort_by_key(|&index| ranges[index].offset);
     let mut joined: Vec<Option<Varnode>> = ranges.into_iter().map(Some).collect();
     let mut start = 0;
     while start < order.len() {
-        let mut end = start + 1;
-        let mut reach = joined[order[start]].as_ref().map_or(0, |vn| range(vn).1);
-        while let Some(next) = order.get(end).and_then(|&index| joined[index].as_ref()) {
-            if next.offset != reach {
-                break;
-            }
-            reach = range(next).1;
-            end += 1;
-        }
-        let run = &order[start..end];
+        let Some((members, whole)) = declared_prefix(&order[start..], &joined, &declared) else {
+            start += 1;
+            continue;
+        };
+        let run = &order[start..start + members];
         let first = run.iter().copied().min().unwrap_or(order[start]);
-        let offset = joined[order[start]].as_ref().map_or(0, |vn| vn.offset);
-        let size = u32::try_from(reach - offset).unwrap_or(u32::MAX);
-        let whole = Varnode::new(SpaceId::Register, offset, size);
-        if run.len() > 1 && declared(&whole) {
-            for &index in run {
-                joined[index] = None;
-            }
-            joined[first] = Some(whole);
+        for &index in run {
+            joined[index] = None;
         }
-        start = end;
+        joined[first] = Some(whole);
+        start += members;
     }
     joined.into_iter().flatten().collect()
+}
+
+/// The longest run of two or more adjacent tiles from `order[0]` that fills a `declared` register:
+/// its length and that register (`ldp d0, d1` zero-fills z0 then z1, not one 64-byte register).
+fn declared_prefix(
+    order: &[usize],
+    joined: &[Option<Varnode>],
+    declared: &impl Fn(&Varnode) -> bool,
+) -> Option<(usize, Varnode)> {
+    let first = joined[*order.first()?].as_ref()?;
+    let mut reach = range(first).1;
+    let mut longest = None;
+    for (members, &index) in (2..).zip(&order[1..]) {
+        let Some(next) = joined[index].as_ref().filter(|next| next.offset == reach) else {
+            break;
+        };
+        reach = range(next).1;
+        let size = u32::try_from(reach - first.offset).unwrap_or(u32::MAX);
+        let whole = Varnode::new(SpaceId::Register, first.offset, size);
+        if declared(&whole) {
+            longest = Some((members, whole));
+        }
+    }
+    longest
 }
 
 fn range(vn: &Varnode) -> (u64, u64) {
@@ -294,6 +326,30 @@ mod tests {
     }
 
     #[test]
+    fn an_overwritten_scratch_value_reaches_no_read() {
+        // u = RAX; u = RBX; RCX = u: only RBX reaches the write, for a temporary or a hidden register.
+        for scratch in [unique(0x100, 8), reg(0x400, 8)] {
+            let ops = [
+                R2ILOp::Copy {
+                    dst: scratch.clone(),
+                    src: reg(0x0, 8),
+                },
+                R2ILOp::Copy {
+                    dst: scratch.clone(),
+                    src: reg(0x18, 8),
+                },
+                R2ILOp::Copy {
+                    dst: reg(0x8, 8),
+                    src: scratch.clone(),
+                },
+            ];
+            let accesses = register_accesses(&ops, |vn| vn.offset == 0x400).unwrap();
+            assert_eq!(accesses.reads, vec![reg(0x18, 8)], "{scratch:?}");
+            assert_eq!(accesses.writes, vec![reg(0x8, 8)], "{scratch:?}");
+        }
+    }
+
+    #[test]
     fn lanes_that_fill_a_register_are_that_register() {
         let lanes = vec![
             reg(0x1208, 4),
@@ -309,6 +365,18 @@ mod tests {
         assert_eq!(
             join_tiles(flags.clone(), |vn| *vn == reg(0x1200, 16)),
             flags
+        );
+    }
+
+    #[test]
+    fn adjacent_registers_split_at_their_declared_boundary() {
+        // ldp d0, d1: eight 8-byte tiles over z0 and z1, each declared as d, q and z.
+        let tiles = (0..8).map(|at| reg(0x5000 + 8 * at, 8)).collect();
+        let declared =
+            |vn: &Varnode| [0x5000, 0x5020].contains(&vn.offset) && [8, 16, 32].contains(&vn.size);
+        assert_eq!(
+            join_tiles(tiles, declared),
+            vec![reg(0x5000, 32), reg(0x5020, 32)]
         );
     }
 

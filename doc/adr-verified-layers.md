@@ -51,6 +51,11 @@ structural decisions that close each gap.
 - One applier keeps every instruction-relative label on the op it named, as
   r2ssa's `EditPlan` does for the IR. The per-pass `starts`/`at` vectors of
   `whole_unique_reads` and `canonicalize_memory_operands` are deleted (D1).
+- `canonicalize_memory_operands` exists because SSA would rename a ram-space
+  varnode like a register, making a read undefined and a write invisible. A
+  read loads into a fresh temporary, a written output stores from one, and a
+  copy needs none. A direct transfer's target (`R2ILOp::transfer`) is code,
+  not memory; an indirect transfer's slot is loaded like any other operand.
 - Gate: `decode_sweep` runs each pass's input and output through `r2il::eval`
   from the same seeded states and compares registers and memory. A pass that
   moves a label or drops an effect fails it. This is D31's "each IR rewrite
@@ -88,16 +93,23 @@ instruction's temporaries, r2ssa names them, r2dec and the low tier spell them.
 
 **D37. r2ssa states why an arity is a floor.** Owner: r2ssa (boundaries);
 r2engine reads it.
-- The cause is a typed fact: an indirect call, a call into an unresolved cycle
-  member, or a missing prototype.
+- The cause is a typed fact, one variant per branch of `recover_interface`'s
+  floor: an unresolved transfer; a supervisor entry; an argument area no exit
+  places; an argument area read past an unproven register prefix; a register
+  slot read past the prefix; or the next slot handed to a call of unproven
+  arity, split as an indirect call, a call into an unresolved cycle member or
+  a missing prototype.
 - The cycle fixpoint (#279) then needs no discovery round, and a cycle's
   results become the same fixpoint over return values (`shape_mutual_even`).
-- Gate: an engine test per cause, and the `shape_mutual_even` record equal.
+- Gate: an engine test per cause variant, and the `shape_mutual_even` record
+  equal.
 
 **D38. The cost verdict counts retired instructions.** Owner: GT.
 - Native runs count user-space instructions with `perf_event_open`
   (HW_INSTRUCTIONS, `exclude_kernel`) and stop past the budget. Emulated runs
-  fall back to CPU time (`ITIMER_VIRTUAL`).
+  count retired guest instructions with qemu's instruction-count plugin
+  (`-plugin libinsn.so`). CPU time (`ITIMER_VIRTUAL`) is only a hang guard,
+  never the `slow` verdict: the host's load moves it.
 - Each record states its measure and budget, and the ratchet refuses to
   compare across measures.
 - Gate: `slow` verdicts are identical on an idle and a loaded host.

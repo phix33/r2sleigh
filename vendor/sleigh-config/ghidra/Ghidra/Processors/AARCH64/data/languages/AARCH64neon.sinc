@@ -7121,11 +7121,11 @@ is b_3131=0 & q=1 & u=1 & b_2428=0xf & b_2023=1 & Imm_shr_imm16 & b_1115=0x1f & 
 :fcvtzu Rd_FPR16, Rn_FPR16, Imm_shr_imm16
 is b_2331=0b011111110 & b_2022=0b001 & b_1015=0b111111 & Imm_shr_imm16 & Rn_FPR16 & Rd_FPR16 & Zd
 {
-	local tmp1:4 = 1:4 << Imm_shr_imm16;
-	local tmp2:2 = int2float(tmp1);
-	local tmp3:2 = Rn_FPR16 f* tmp2;
-	local zero:2 = int2float(0:2);
-	local lim:2 = int2float(0x10000:8);
+	# x * 2^16 passes float16's range, so the product is taken in float32, where it is exact.
+	local x:4 = float2float(Rn_FPR16);
+	local tmp3:4 = x f* int2float(1:4 << Imm_shr_imm16);
+	local zero:4 = int2float(0:4);
+	local lim:4 = int2float(0x10000:8);
 	local wide:8 = 0;
 	fp_to_unsigned(tmp3, zero, lim, 0xffff:8, wide);
 	Rd_FPR16 = wide:2;
@@ -7163,9 +7163,10 @@ is b_2331=0b011111110 & b_2122=0b01 & b_1015=0b111111 & Imm_shr_imm32 & Rn_FPR32
 :fcvtzu Rd_FPR64, Rn_FPR64, Imm_shr_imm64
 is b_2331=0b011111110 & b_22=1 & b_1015=0b111111 & Imm_shr_imm64 & Rn_FPR64 & Rd_FPR64 & Zd
 {
+	# 2^fbits reaches 2^64, past a 64-bit shift, so it is the product of two in-range powers.
 	local tmp1:8 = zext(Imm_shr_imm64);
-	local tmp2:8 = 1:8 << tmp1;
-	local tmp3:8 = int2float(tmp2);
+	local lo:8 = tmp1 >> 1;
+	local tmp3:8 = int2float(1:8 << lo) f* int2float(1:8 << (tmp1 - lo));
 	local tmp4:8 = Rn_FPR64 f* tmp3;
 	local zero:8 = int2float(0:8);
 	local two63:8 = int2float(0x4000000000000000:8) f* int2float(2:8);

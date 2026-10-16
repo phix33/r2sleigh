@@ -26,8 +26,8 @@ format (`../aarch64_oracle/README.md`), drawn from the same stream
   recording and does not re-record.
 - The test draws the same states (checking each hash), lifts each instruction,
   runs the case, and compares RAX to R15, RSP (never loaded, so it must not
-  move), CF PF AF ZF SF DF OF, XMM0 to XMM15 (a NaN matches any NaN in its lane),
-  that YMM's upper halves are not written (legacy SSE keeps them), and every
+  move), CF PF AF ZF SF DF OF, XMM0 to XMM15 bit for bit (a NaN matches any NaN
+  only in a lane the case's `ss`/`sd`/`ps`/`pd` arithmetic writes), that YMM's upper halves are not written (legacy SSE keeps them), and every
   memory byte including an 8 KiB zero guard. MXCSR starts at 0x1f80 and is not
   compared.
 - `expected.txt` lists the cases that stop or disagree, a ratchet: a case leaving

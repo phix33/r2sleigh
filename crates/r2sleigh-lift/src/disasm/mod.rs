@@ -2465,7 +2465,8 @@ impl Disassembler {
             &|userop| self.user_op_name(userop).map(str::to_owned),
             self.spec.register_big_endian,
         );
-        r2il::number_temporaries(&mut block.ops);
+        r2il::number_temporaries(&mut block.ops)
+            .map_err(|overlap| LiftError::Unsupported(overlap.to_string()))?;
         Ok(block)
     }
 

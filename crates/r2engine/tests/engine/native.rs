@@ -6475,15 +6475,10 @@ fn a_parameter_read_once_or_by_index_lays_out_no_structure() {
 }
 
 /// Whether the `RAX` a block of the prepared tier begins with merges its ways in.
-fn merges_rax_at(dump: &str, block: u64) -> bool {
-    let header = format!("Block {block:#x}:");
-    dump.split("\n\n")
-        .find(|section| section.trim_start().starts_with(&header))
-        .is_some_and(|section| {
-            section
-                .lines()
-                .any(|line| line.trim_start().starts_with("RAX_") && line.contains("= phi("))
-        })
+fn merges_rax_at(artifact: &r2ssa::SsaArtifact, block: u64) -> bool {
+    artifact
+        .named_block(block)
+        .is_some_and(|block| block.phis().iter().any(|phi| phi.dst.name() == "RAX"))
 }
 
 /// Whether a `rax` the C assigns before its loop is assigned again inside it: the value the
@@ -6579,8 +6574,8 @@ fn a_loop_carries_a_register_only_a_conditional_write_defines() {
             name,
         };
         let artifact = r2engine::native::prepared(&target, &program, BASE).expect("prepared");
-        let dump = artifact.artifact().dump();
-        assert!(merges_rax_at(&dump, header), "{name}: {dump}");
+        let ssa = artifact.artifact();
+        assert!(merges_rax_at(ssa, header), "{name}: {}", ssa.dump());
         let response = decompile(&target, &program, BASE).expect("decompile");
         let output = response.output.text();
         assert!(loop_carries_rax(output), "{name}: {output}");
@@ -6604,8 +6599,8 @@ fn a_conditional_write_on_one_arm_merges_where_the_arms_join() {
         name: "exchange_if",
     };
     let artifact = r2engine::native::prepared(&target, &program, BASE).expect("prepared");
-    let dump = artifact.artifact().dump();
-    assert!(merges_rax_at(&dump, 0x100a), "{dump}");
+    let ssa = artifact.artifact();
+    assert!(merges_rax_at(ssa, 0x100a), "{}", ssa.dump());
     let output = decompile(&target, &program, BASE)
         .expect("decompile")
         .output;

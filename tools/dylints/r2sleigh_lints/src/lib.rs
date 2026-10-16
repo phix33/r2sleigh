@@ -2129,9 +2129,8 @@ rustc_lint::declare_lint!(
 );
 
 rustc_lint::declare_lint!(
-    /// A `match` on `R2ILOp` outside r2il that names two or more operations, answers a `bool` or
-    /// varnodes, and lets a wildcard drop the rest restates an op property r2il owns (ROADMAP D41).
-    /// phi.rs's copy of `output()` dropped `Select` that way (#287). A wildcard that asks r2il passes.
+    /// A `match` on `R2ILOp` outside r2il that names two or more operations, answers in an op property's
+    /// type and lets a wildcard that does not ask r2il drop the rest restates a property r2il owns (D41).
     pub R2IL_OP_PROPERTY_OUTSIDE_R2IL,
     Deny,
     "a property of an R2ILOp has one owner in r2il, stated as an exhaustive list"
@@ -5692,20 +5691,29 @@ fn is_r2il_op(cx: &LateContext<'_>, ty: rustc_middle::ty::Ty<'_>) -> bool {
     matches!(ty.peel_refs().kind(), rustc_middle::ty::Adt(op, _) if cx.tcx.item_name(op.did()).as_str() == "R2ILOp")
 }
 
-/// `bool`, or an `Option`, `Vec`, slice or array of varnodes or references to them.
+/// `bool`, or a type an `R2ILOp` property answers in, bare or in an `Option`, `Vec`, slice or
+/// array, or references to them.
 fn answers_an_op_property(cx: &LateContext<'_>, ty: rustc_middle::ty::Ty<'_>) -> bool {
     use rustc_middle::ty::{Adt, Array, Bool, Slice};
-    let is_varnode = |ty: rustc_middle::ty::Ty<'_>| matches!(ty.peel_refs().kind(), Adt(varnode, _) if cx.tcx.item_name(varnode.did()).as_str() == "Varnode");
+    let named = |ty: rustc_middle::ty::Ty<'_>| match ty.peel_refs().kind() {
+        Adt(item, _) => Some(cx.tcx.item_name(item.did())),
+        _ => None,
+    };
+    let is_property = |ty: rustc_middle::ty::Ty<'_>| {
+        named(ty).is_some_and(|name| R2IL_OP_PROPERTY_TYPES.contains(&name.as_str()))
+    };
     match ty.peel_refs().kind() {
         Bool => true,
-        Slice(element) | Array(element, _) => is_varnode(*element),
-        Adt(holder, args) => {
-            matches!(cx.tcx.item_name(holder.did()).as_str(), "Option" | "Vec")
-                && args.types().next().is_some_and(is_varnode)
+        Slice(element) | Array(element, _) => is_property(*element),
+        Adt(holder, args) if matches!(cx.tcx.item_name(holder.did()).as_str(), "Option" | "Vec") => {
+            args.types().next().is_some_and(is_property)
         }
-        _ => false,
+        _ => is_property(ty),
     }
 }
+
+/// The types `R2ILOp`'s own property methods answer in (`output`, `value_use`, `transfer`, `memory_accesses`).
+const R2IL_OP_PROPERTY_TYPES: [&str; 4] = ["Varnode", "ValueUse", "ControlTransfer", "MemoryAccess"];
 
 /// The `R2ILOp` variants a pattern names, at any depth.
 fn named_r2il_variants(

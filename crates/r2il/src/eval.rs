@@ -137,6 +137,11 @@ impl<M: Mapped> State<M> {
         self.write(&Varnode::register(offset, size), value)
     }
 
+    /// Close one instruction: its temporaries die with it, so the next one's unwritten read stops.
+    pub fn end_instruction(&mut self) {
+        self.unique.clear();
+    }
+
     /// The memory accesses since the last call, oldest first.
     pub fn take_accesses(&mut self) -> Vec<Access> {
         std::mem::take(&mut self.accesses)
@@ -895,6 +900,21 @@ impl Float {
     }
 }
 
+/// An IEEE binary16 value, exactly: only widening reads one, so no float16 rounding is modelled.
+fn binary16(bits: u16) -> f64 {
+    let magnitude = match (bits >> 10) & 0x1f {
+        0 => f64::from(bits & 0x3ff) * 2f64.powi(-24),
+        0x1f if bits & 0x3ff == 0 => f64::INFINITY,
+        0x1f => f64::NAN,
+        exponent => f64::from(0x400 | (bits & 0x3ff)) * 2f64.powi(i32::from(exponent) - 25),
+    };
+    if bits & 0x8000 == 0 {
+        magnitude
+    } else {
+        -magnitude
+    }
+}
+
 /// The sign bit of a float `bytes` wide.
 fn sign(bytes: u32) -> Result<u128, Stop> {
     match width(bytes)? {
@@ -957,7 +977,11 @@ fn floating<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<bool, Stop> 
             (dst, u128::from(float(a)?.wide() <= float(b)?.wide()))
         }
         R2ILOp::FloatFloat { dst, src } => {
-            (dst, Float::of(0, dst.size)?.at(float(src)?.wide()).bits())
+            let x = match src.size {
+                2 => binary16(state.read(src)? as u16),
+                _ => float(src)?.wide(),
+            };
+            (dst, Float::of(0, dst.size)?.at(x).bits())
         }
         R2ILOp::Int2Float { dst, src } => {
             let integer = Word::new(state.read(src)?, src.size)?.signed()?;
@@ -1425,6 +1449,26 @@ mod tests {
     }
 
     #[test]
+    fn a_temporary_does_not_outlive_its_instruction() {
+        let mut machine = state();
+        let write = R2ILOp::Copy {
+            dst: Varnode::unique(0, 8),
+            src: Varnode::constant(5, 8),
+        };
+        let read = R2ILOp::Copy {
+            dst: register(0, 8),
+            src: Varnode::unique(0, 8),
+        };
+        assert_eq!(step(&write, &mut machine), Flow::Next);
+        machine.end_instruction();
+        let unwritten = Stop::Unwritten {
+            space: SpaceId::Unique,
+            offset: 0,
+        };
+        assert_eq!(step(&read, &mut machine), Flow::Stop(unwritten));
+    }
+
+    #[test]
     fn a_word_lies_in_the_order_the_endianness_says() {
         let mapped = |address: u64| (0x100..0x108).contains(&address).then_some(0);
         let mut big = State::new(Endianness::Big, mapped, u64::MAX).expect("big-endian");
@@ -1595,6 +1639,44 @@ mod tests {
         };
         let third = u128::from((1f32 / 3.0).to_bits());
         assert_eq!(float_run(&narrow, &[(0, 8, double(1.0 / 3.0))]), Ok(third));
+    }
+
+    #[test]
+    fn a_half_widens_exactly_and_never_narrows() {
+        let widen = R2ILOp::FloatFloat {
+            dst: register(32, 4),
+            src: register(0, 2),
+        };
+        let single = |x: f32| u128::from(x.to_bits());
+        for (half, wide) in [
+            (0x3800, 0.5),
+            (0xbc00, -1.0),
+            (0x7bff, 65504.0),
+            (0x0001, 2f32.powi(-24)),
+            (0x03ff, 1023.0 * 2f32.powi(-24)),
+            (0x0400, 2f32.powi(-14)),
+            (0x8000, -0.0),
+            (0x7c00, f32::INFINITY),
+            (0xfc00, f32::NEG_INFINITY),
+        ] {
+            assert_eq!(
+                float_run(&widen, &[(0, 2, half)]),
+                Ok(single(wide)),
+                "{half:#x}"
+            );
+        }
+        assert_eq!(
+            float_run(&widen, &[(0, 2, 0x7e01)]),
+            Ok(u128::from(SINGLE_NAN))
+        );
+        let narrow = R2ILOp::FloatFloat {
+            dst: register(32, 2),
+            src: register(0, 4),
+        };
+        assert_eq!(
+            float_run(&narrow, &[(0, 4, single(0.5))]),
+            Err(Stop::Unmodelled)
+        );
     }
 
     #[test]

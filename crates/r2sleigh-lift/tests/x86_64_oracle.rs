@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 mod oracle_common;
-use oracle_common::{Stream, fnv, ratchet, same_lanes};
+use oracle_common::{Lane, Stream, assembly, fnv, ratchet, same_lanes};
 
 const MEMSZ: usize = 1024;
 /// Zero bytes after the random ones (`driver.c`).
@@ -132,6 +132,33 @@ struct Case {
     undefined: BTreeSet<String>,
     bytes: Vec<u8>,
     runs: Vec<(u64, String)>,
+    /// The float result lanes the case writes, by XMM register.
+    produced: BTreeMap<usize, Vec<Lane>>,
+}
+
+/// The float result lanes `asm` writes, by XMM register: a scalar `ss`/`sd` writes lane 0, a
+/// packed `ps`/`pd` every lane; a move or a compare produces no float.
+fn produced(asm: &str) -> BTreeMap<usize, Vec<Lane>> {
+    let mut out: BTreeMap<usize, Vec<Lane>> = BTreeMap::new();
+    for inst in asm.split(';').map(str::trim) {
+        let (mnemonic, operands) = inst.split_once(' ').unwrap_or((inst, ""));
+        let destination = operands.split(',').next().unwrap_or("").trim();
+        let Some(n) = destination.strip_prefix("xmm").and_then(|n| n.parse().ok()) else {
+            continue;
+        };
+        if mnemonic.starts_with("mov") || mnemonic.contains("comis") {
+            continue;
+        }
+        let lanes: Vec<Lane> = match &mnemonic[mnemonic.len().saturating_sub(2)..] {
+            "ss" => vec![(32, 0)],
+            "sd" => vec![(64, 0)],
+            "ps" => (0..4).map(|lane| (32, lane)).collect(),
+            "pd" => (0..2).map(|lane| (64, lane)).collect(),
+            _ => continue,
+        };
+        out.entry(n).or_default().extend(lanes);
+    }
+    out
 }
 
 fn hex(text: &str) -> u64 {
@@ -161,6 +188,7 @@ fn cases(text: &str) -> Vec<Case> {
                     undefined,
                     bytes,
                     runs: Vec::new(),
+                    produced: BTreeMap::new(),
                 });
             }
             Some("R") => {
@@ -326,9 +354,11 @@ impl Lift {
                 Flow::Next => None,
                 flow => Some((op, flow)),
             }) else {
+                state.end_instruction();
                 at += 1;
                 continue;
             };
+            state.end_instruction();
             let Flow::Transfer(transfer) = flow else {
                 return Err(self.stopped(op, flow));
             };
@@ -385,10 +415,13 @@ impl Lift {
         }
         for (n, lane) in cpu.xmm.iter().enumerate() {
             let (offset, _) = self.register(&format!("xmm{n}"));
-            if !state
-                .register(offset, 16)
-                .is_some_and(|lifted| same_lanes(lifted, *lane))
-            {
+            if !state.register(offset, 16).is_some_and(|lifted| {
+                same_lanes(
+                    lifted,
+                    *lane,
+                    case.produced.get(&n).map_or(&[], Vec::as_slice),
+                )
+            }) {
                 wrong.insert(format!("xmm{n}"));
             }
             // Legacy SSE leaves YMM's upper half as it was; the lift may not write it.
@@ -424,7 +457,9 @@ fn every_case_computes_what_the_cpu_computed_or_is_listed() {
     let mut stream = Stream(0x9e37_79b9_7f4a_7c15);
     let mut outcomes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut order = Vec::new();
-    for case in cases(&recording) {
+    let asm = assembly(&std::fs::read_to_string(data("cases.txt")).expect("cases.txt"));
+    for mut case in cases(&recording) {
+        case.produced = produced(&asm[&case.name]);
         let lifted = lift.lift(&case.bytes);
         let mut seen = BTreeSet::new();
         for (hash, changes) in &case.runs {

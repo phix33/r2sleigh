@@ -3,6 +3,11 @@
 #[derive(Clone, PartialEq)]
 struct Varnode(u64);
 
+enum ValueUse {
+    Carries,
+    Consumes,
+}
+
 enum R2ILOp {
     Copy { dst: Varnode, src: Varnode },
     Select { dst: Varnode, cond: Varnode },
@@ -44,6 +49,14 @@ fn reads(op: &R2ILOp) -> Vec<&Varnode> {
     }
 }
 
+// Restates `value_use()`: an r2il property answered in its own type.
+fn value_use(op: &R2ILOp) -> ValueUse {
+    match op {
+        R2ILOp::Copy { .. } | R2ILOp::Select { .. } => ValueUse::Carries,
+        _ => ValueUse::Consumes,
+    }
+}
+
 // One operation named: "is it this one", not a class.
 fn is_store(op: &R2ILOp) -> bool {
     matches!(op, R2ILOp::Store { .. })
@@ -81,7 +94,7 @@ fn guardable(op: &R2ILOp) -> bool {
 
 fn main() {
     let op = R2ILOp::Nop;
-    let _ = (output(&op), calls(&op), reads(&op), is_store(&op));
+    let _ = (output(&op), calls(&op), reads(&op), value_use(&op), is_store(&op));
     let _ = (reads_but_zeroing(&op), boundary(&op), rank(&op), guardable(&op));
 }
 

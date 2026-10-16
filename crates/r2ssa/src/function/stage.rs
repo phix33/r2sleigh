@@ -198,15 +198,13 @@ impl Prepared {
     /// `O(n)` per rewrite and per collection; the graph is built once, twice
     /// for a function the demand pass changes.
     ///
-    /// The sealed function validates as the prepared one did: the steps add
-    /// no definition at version zero and no read its definition does not
-    /// dominate. Where one does, the typed failure is the refusal.
-    #[expect(
-        clippy::result_large_err,
-        reason = "the validator's typed failure is the refusal; it is mapped once, at the artifact boundary"
-    )]
-    pub fn seal(self, machine_context: &SourceMachineContext) -> Result<Sealed, SsaIntegrityError> {
+    /// The sealed function validates as the prepared one did, and a function whose recovery or
+    /// prep pass exhausted refuses here, so no seal-only reader sees partial facts.
+    pub fn seal(self, machine_context: &SourceMachineContext) -> Result<Sealed, SsaPrepareError> {
         let mut ir = self.ir;
+        if let Some(exhausted) = ir.exhausted() {
+            return Err(SsaPrepareError::Exhausted(exhausted));
+        }
         ir.seal_written();
         ir.apply_boundary_constants(machine_context);
         ir.mint_entry_lane_projections(machine_context);
@@ -232,12 +230,15 @@ impl Prepared {
                 &crate::control::UncheckedSsaWorkControl,
             )
             .expect("an unchecked control never stops");
+        if let Some(exhausted) = prep.exhausted {
+            return Err(SsaPrepareError::Exhausted(exhausted));
+        }
         crate::semantic::ensure_source_formal_parameter_values(&mut graph, machine_context);
         graph.shrink_to_fit();
         let formal_parameters =
             crate::semantic::collect_source_formal_parameter_facts(&graph, machine_context);
         prep.install_exact_formal_parameters(&graph, &formal_parameters);
-        validate_ssa_function(&ir)?;
+        validate_ssa_function(&ir).map_err(super::integrity_refusal)?;
         ir.drop_operations();
         let folded = Folded {
             prepared: crate::constant::fold_all(&graph, Some(&prep)),
@@ -350,11 +351,8 @@ impl Sealed {
                 },
                 control,
             )?;
-        // A pass that moved a state past its stated height is a defect in it: the function refuses.
-        let exhausted = (self.ir.exhausted())
-            .or(self.prep.exhausted)
-            .or(facts.exhausted());
-        if let Some(exhausted) = exhausted {
+        // The seal refused the function's and its prep facts' exhaustion; this is the collection's.
+        if let Some(exhausted) = facts.exhausted() {
             return Err(SsaPrepareError::Exhausted(exhausted));
         }
         // What one prepared function holds is the space every later stage has

@@ -504,7 +504,7 @@ jobs:
         # ungraded, so a new source file has to be added to one part here.
         part:
           - name: a
-            sources: tests/corpus/branchy.c tests/corpus/hashes.c tests/corpus/values.c tests/gold/flag_materialisation.c tests/gold/review.c tests/gold/manual_limits.c tests/gold/code_pointer_table.c
+            sources: tests/corpus/branchy.c tests/corpus/hashes.c tests/corpus/values.c tests/gold/flag_materialisation.c tests/gold/review.c tests/gold/manual_limits.c tests/gold/code_pointer_table.c tests/gold/loop_carried.c tests/gold/atomics.c
           - name: shapes
             sources: tests/corpus/shapes.c
     steps:
@@ -585,7 +585,7 @@ jobs:
           - name: a
             sources: tests/corpus/branchy.c tests/corpus/hashes.c
           - name: b
-            sources: tests/corpus/values.c tests/gold/flag_materialisation.c tests/gold/review.c tests/gold/manual_limits.c tests/gold/code_pointer_table.c
+            sources: tests/corpus/values.c tests/gold/flag_materialisation.c tests/gold/review.c tests/gold/manual_limits.c tests/gold/code_pointer_table.c tests/gold/loop_carried.c tests/gold/atomics.c
           - name: shapes
             sources: tests/corpus/shapes.c
     steps:

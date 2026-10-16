@@ -22,12 +22,9 @@ use crate::op::{AtomicUpdateOp, SSAOp};
 use crate::semantic::ObjectKind;
 use crate::{CallSiteId, SSAVar};
 
-/// Current serialized interprocedural report schema.
-///
-/// Version 1 denotes the historical unversioned encoding. Version 2 is the
-/// first encoding that carries and mirrors an explicit schema stamp at both
-/// the report-set and per-function levels.
-pub const INTERPROC_SUMMARY_SCHEMA_VERSION: u32 = 2;
+/// The serialized interprocedural report schema: 1 is unversioned, 2 stamps the set and each
+/// function, 3 adds `SummaryAtomicOp::ReadModifyWrite`.
+pub const INTERPROC_SUMMARY_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterprocSummarySchemaError {

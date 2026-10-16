@@ -652,7 +652,6 @@ pub fn def_use_graph(blocks: &[R2ILBlock], arch: Option<&crate::Arch>) -> Option
         .map_err(integrity_refusal)
         .ok()?
         .seal(&machine_context)
-        .map_err(integrity_refusal)
         .ok()?;
     let graph = sealed.graph().clone();
     (!graph.blocks.is_empty()).then_some(graph)
@@ -724,7 +723,7 @@ impl SsaArtifact {
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
         let prepare_entry_bytes = r2il::allocation::live_bytes();
-        let sealed = prepared.seal(&machine_context).map_err(integrity_refusal)?;
+        let sealed = prepared.seal(&machine_context)?;
         Self::collect_sealed(
             sealed,
             machine_context,
@@ -2426,7 +2425,7 @@ impl TrustedSsaArtifact {
         } = Self::construct(lifted, arch, control, evidence, premises, recovery)?;
         control.poll()?;
         let entry_bytes = r2il::allocation::live_bytes();
-        let sealed = function.seal(&machine_context).map_err(integrity_refusal)?;
+        let sealed = function.seal(&machine_context)?;
         control.poll()?;
         Ok(TrustedSeal {
             sealed,

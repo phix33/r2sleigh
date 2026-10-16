@@ -37,8 +37,13 @@ fn a_byte_reduction_zeroes_the_lanes_above_its_result() {
         state
             .set_register(x0.offset, x0.size, u128::from(input))
             .expect("x0");
-        for op in &lifted.block().ops {
-            assert_eq!(step(op, &mut state), Flow::Next, "{op:?}");
+        for span in lifted.instruction_spans() {
+            let first = span.first_canonical_op() as usize;
+            let ops = &lifted.block().ops[first..first + span.canonical_op_count() as usize];
+            for op in ops {
+                assert_eq!(step(op, &mut state), Flow::Next, "{op:?}");
+            }
+            state.end_instruction();
         }
         assert_eq!(
             state.register(x0.offset, x0.size),

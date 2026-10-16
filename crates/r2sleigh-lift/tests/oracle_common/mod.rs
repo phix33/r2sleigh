@@ -1,5 +1,5 @@
 //! What both CPU oracles share: the input stream their recorders draw (`stream.h`), the
-//! hash of an input state, NaN-tolerant lane equality and the `expected.txt` ratchet.
+//! hash of an input state, lane equality open to a produced NaN's payload and the `expected.txt` ratchet.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -130,18 +130,80 @@ pub fn fnv(mut hash: u64, bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Equal, or equal but for NaNs at one lane width: p-code leaves a NaN's payload open.
-pub fn same_lanes(lifted: u128, cpu: u128) -> bool {
-    let lanes = |bits: u32, nan: fn(u128) -> bool| {
-        (0..128 / bits).all(|lane| {
-            let (a, b) = (lifted >> (lane * bits), cpu >> (lane * bits));
-            let mask = (1u128 << bits) - 1;
-            a & mask == b & mask || (nan(a & mask) && nan(b & mask))
+/// A float result lane an instruction writes: its width in bits and its index in the register.
+pub type Lane = (u32, u32);
+
+fn nan(bits: u32, x: u128) -> bool {
+    match bits {
+        16 => (x >> 10) & 0x1f == 0x1f && x & 0x3ff != 0,
+        32 => f32::from_bits(x as u32).is_nan(),
+        64 => f64::from_bits(x as u64).is_nan(),
+        _ => false,
+    }
+}
+
+/// Bit-equal but where both are NaNs in a `produced` lane: p-code leaves a result NaN's payload open.
+pub fn same_lanes(lifted: u128, cpu: u128, produced: &[Lane]) -> bool {
+    let open = produced.iter().fold(0u128, |open, &(bits, lane)| {
+        let at = lane * bits;
+        let mask = (u128::MAX >> (128 - bits)) << at;
+        match nan(bits, (lifted & mask) >> at) && nan(bits, (cpu & mask) >> at) {
+            true => open | mask,
+            false => open,
+        }
+    });
+    (lifted ^ cpu) & !open == 0
+}
+
+/// Each case's assembly by name, from a `cases.txt` (`name|flags|asm|...`).
+pub fn assembly(cases: &str) -> BTreeMap<String, String> {
+    cases
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .filter_map(|line| {
+            let mut fields = line.split('|');
+            let name = fields.next()?;
+            Some((name.to_string(), fields.nth(1)?.to_string()))
         })
-    };
-    lifted == cpu
-        || lanes(64, |x| f64::from_bits(x as u64).is_nan())
-        || lanes(32, |x| f32::from_bits(x as u32).is_nan())
+        .collect()
+}
+
+#[test]
+fn a_nan_payload_is_open_only_in_a_produced_lane() {
+    let one = 0x3ff0_0000_0000_0000u128;
+    let hi = |x: u64| u128::from(x) << 64;
+    let scalar = [(64, 0)];
+    // A preserved upper lane keeps its NaN's payload.
+    let upper = (
+        one | hi(0x7ff8_0000_0000_0001),
+        one | hi(0x7ff8_0000_0000_0000),
+    );
+    assert!(!same_lanes(upper.0, upper.1, &scalar));
+    // A double whose 32-bit halves are NaNs is no NaN at its own width.
+    assert!(!same_lanes(
+        0x7fc0_0000_7fc0_0001,
+        0x7fc0_0000_7fc0_0000,
+        &scalar
+    ));
+    // A register no instruction writes a float into is bit-equal.
+    assert!(!same_lanes(
+        0x7ff8_0000_0000_0001,
+        0x7ff8_0000_0000_0000,
+        &[]
+    ));
+    let produced = (hi(5) | 0x7ff8_0000_0000_0001, hi(5) | 0xfff8_dead_0000_0000);
+    assert!(same_lanes(produced.0, produced.1, &scalar));
+    assert!(!same_lanes(
+        hi(6) | 0x7ff8_0000_0000_0001,
+        produced.1,
+        &scalar
+    ));
+    assert!(same_lanes(0x7e00, 0x7c01, &[(16, 0)]));
+    assert!(same_lanes(
+        0x7fc0_0001_0000_0000,
+        0xffc0_0000_0000_0000,
+        &[(32, 1)]
+    ));
 }
 
 /// The cases that stop or disagree, in case order, held exactly: `R2S_BLESS=1` rewrites the list.

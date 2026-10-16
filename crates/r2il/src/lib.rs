@@ -62,7 +62,7 @@ pub use serialize::{
     RegisterProjectionQuery, RegisterProjectionRefusal, RegisterStorage, TrackedRegisterValue,
 };
 pub use space::{AddressSpace, SpaceId};
-pub use temporary::number_temporaries;
+pub use temporary::{TemporariesOverlap, number_temporaries};
 pub use validate::{
     ValidationError, ValidationIssue, effective_arch_address_size, validate_archspec,
     validate_block, validate_block_full, validate_block_semantic, validate_op,
