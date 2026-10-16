@@ -352,7 +352,7 @@ fn evaluate_terminator_sccp(
     func: &SSAFunction,
     values: &Minting<'_>,
     block_addr: u64,
-    lattice: &IdVec<VarId, LatticeValue>,
+    lattice: Option<&IdVec<VarId, LatticeValue>>,
     cfg_worklist: &mut VecDeque<(u64, u64)>,
 ) {
     let Some(cfg_block) = func.cfg().get_block(block_addr) else {
@@ -363,7 +363,9 @@ fn evaluate_terminator_sccp(
         BlockTerminator::ConditionalBranch {
             true_target,
             false_target,
-        } => match find_cbranch_condition(func, values, block_addr, lattice) {
+        } => match lattice.map_or(LatticeValue::Bottom, |lattice| {
+            find_cbranch_condition(func, values, block_addr, lattice)
+        }) {
             LatticeValue::Const(0) => cfg_worklist.push_back((block_addr, *false_target)),
             LatticeValue::Const(_) => cfg_worklist.push_back((block_addr, *true_target)),
             LatticeValue::Top | LatticeValue::Bottom => {
@@ -393,6 +395,8 @@ struct Sccp<'f> {
     lattice: IdVec<VarId, LatticeValue>,
     executable: HashSet<(u64, u64)>,
     block_visited: HashSet<u64>,
+    /// Blocks an operation with unstated effects can precede (`after_unmodelled_effects`).
+    unmodelled: HashSet<u64>,
     cfg_worklist: VecDeque<(u64, u64)>,
     ssa_worklist: VecDeque<VarId>,
 }
@@ -424,11 +428,17 @@ impl Sccp<'_> {
     }
 
     fn evaluate_terminator(&mut self, block_addr: u64) {
+        // A guard after an operation with unstated effects reads values that may be stale.
+        let lattice = if self.unmodelled.contains(&block_addr) {
+            None
+        } else {
+            Some(&self.lattice)
+        };
         evaluate_terminator_sccp(
             self.func,
             &self.values,
             block_addr,
-            &self.lattice,
+            lattice,
             &mut self.cfg_worklist,
         );
     }
@@ -500,6 +510,31 @@ impl Sccp<'_> {
     }
 }
 
+/// The blocks an operation with unstated effects can precede, itself included: `syscall` writes
+/// `rax` with no SSA definition, so no register read there is a constant. `O(n + e)`.
+fn after_unmodelled_effects(func: &SSAFunction) -> HashSet<u64> {
+    let mut reached = HashSet::new();
+    let mut pending = func
+        .blocks()
+        .iter()
+        .filter(|block| {
+            (block.ops().iter()).any(|op| {
+                matches!(
+                    op,
+                    SSAOp::CallOther { output: None, .. } | SSAOp::Unimplemented
+                )
+            })
+        })
+        .map(|block| block.addr)
+        .collect::<Vec<_>>();
+    while let Some(addr) = pending.pop() {
+        if reached.insert(addr) {
+            pending.extend(func.successors(addr));
+        }
+    }
+    reached
+}
+
 /// Wegman and Zadeck's sparse conditional constants over the function's
 /// ids. The lattice is a dense vector, so a value's state is one index; each
 /// value falls at most twice (Top, Const, Bottom), and each fall revisits its
@@ -515,6 +550,7 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
         lattice: IdVec::filled(func.values().len(), LatticeValue::Top),
         executable: HashSet::new(),
         block_visited: HashSet::new(),
+        unmodelled: after_unmodelled_effects(func),
         cfg_worklist: VecDeque::new(),
         ssa_worklist: VecDeque::new(),
     };
@@ -776,7 +812,11 @@ fn apply_sccp_results(
     }
 
     let mut rewrites = Vec::new();
+    let unmodelled = after_unmodelled_effects(func);
     for &addr in func.block_addrs() {
+        if unmodelled.contains(&addr) {
+            continue;
+        }
         let Some(block) = func.get_block(addr) else {
             continue;
         };
@@ -2931,6 +2971,62 @@ mod sccp_tests {
             equal.is_some_and(|a| !a.is_const()),
             "deciding a branch reads no constant into an operand"
         );
+    }
+
+    /// `mov eax, 0x15; syscall; cmp rax, -0xfff; jae`: the kernel writes `rax` with no SSA
+    /// definition, so the stale constant decides nothing.
+    #[test]
+    fn a_guard_read_after_a_user_operation_is_not_decided_from_the_register_it_may_write() {
+        let mut func = raw_func(vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(0x15, 8),
+                    },
+                    R2ILOp::CallOther {
+                        output: None,
+                        userop: 7,
+                        inputs: vec![],
+                    },
+                    R2ILOp::IntLess {
+                        dst: make_reg(0x20, 1),
+                        a: make_reg(0, 8),
+                        b: make_const(0xffff_ffff_ffff_f001, 8),
+                    },
+                    R2ILOp::CBranch {
+                        target: make_const(0x1008, 8),
+                        cond: make_reg(0x20, 1),
+                    },
+                ],
+                ..Default::default()
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                ..Default::default()
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(8, 8),
+                }],
+                ..Default::default()
+            },
+        ]);
+        let decide = OptimizationConfig {
+            sccp: SccpMode::Decide,
+            ..OptimizationConfig::default()
+        };
+        optimize_function(&mut func, &decide);
+        assert!(func.cfg().has_edge(0x1000, 0x1004));
+        assert!(func.cfg().has_edge(0x1000, 0x1008));
     }
 
     /// The definition-aware folds a lane read goes through
