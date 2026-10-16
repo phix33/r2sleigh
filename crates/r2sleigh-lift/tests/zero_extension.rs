@@ -15,7 +15,7 @@ fn a_32_bit_destination_clears_the_register_above_it() {
     let machine = Machine::x86_64();
     // (instruction, bytes, the 64-bit register written, what it holds after). LODSD loads the
     // doubleword at [RSI] into EAX (SDM Vol. 2B, LODS), so RAX holds that doubleword alone.
-    let forms: [(&str, &[u8], &str, u128); 7] = [
+    let forms: [(&str, &[u8], &str, u128); 8] = [
         ("lodsd", &[0xad], "RAX", low(4)),
         // GP-7027 writes MOVBE byte by byte; the doubleword at [RSI] reversed (SDM Vol. 2B, MOVBE).
         (
@@ -35,6 +35,13 @@ fn a_32_bit_destination_clears_the_register_above_it() {
             &[0x0f, 0xc5, 0xc0, 0x01],
             "RAX",
             0x2222,
+        ),
+        // VEX 0F3A 15 /r writes ModRM r/m (SDM Vol. 2B, PEXTRW): ECX, with XMM0's word 1.
+        (
+            "vpextrw ecx, xmm0, 1",
+            &[0xc4, 0xe3, 0x79, 0x15, 0xc1, 0x01],
+            "RCX",
+            0x4444,
         ),
         (
             "vmovd eax, xmm0",

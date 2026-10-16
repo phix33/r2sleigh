@@ -1894,12 +1894,12 @@ define pcodeop vpcmpistrm_avx ;
 }
 
 # PEXTRW 4-277 PAGE 1397 LINE 72483
-:VPEXTRW Reg32, XmmReg1, imm8 is $(VEX_NONE) & $(VEX_L128) & $(VEX_PRE_66) & $(VEX_0F3A) & $(VEX_WIG); byte=0x15; XmmReg1 & mod=3 & Reg32 & check_Reg32_dest; imm8
+:VPEXTRW Rmr32, XmmReg1, imm8 is $(VEX_NONE) & $(VEX_L128) & $(VEX_PRE_66) & $(VEX_0F3A) & $(VEX_WIG); byte=0x15; XmmReg1 & mod=3 & Rmr32 & check_Rmr32_dest; imm8
 {
 	local sel:1 = imm8 & 0x7;
 	local tmp = XmmReg1 >> (sel * 16);
-	Reg32 = zext(tmp[0,16]);
-	build check_Reg32_dest;
+	Rmr32 = zext(tmp[0,16]);
+	build check_Rmr32_dest;
 }
 
 :VPEXTRW m16, XmmReg1, imm8 is $(VEX_NONE) & $(VEX_L128) & $(VEX_PRE_66) & $(VEX_0F3A) & $(VEX_WIG); byte=0x15; XmmReg1 ... & m16; imm8
