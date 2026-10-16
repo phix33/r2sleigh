@@ -238,6 +238,23 @@ struct Tally {
     relabelled: u64,
 }
 
+/// Whether the operations write a temporary strictly inside an earlier write to one, which
+/// `whole_unique_reads` rebuilds the holder for (GP-5581, the resync's `insert_piece`).
+fn writes_inside_a_live_temporary(ops: &[R2ILOp]) -> bool {
+    let mut live: Vec<(u64, u64)> = Vec::new();
+    ops.iter()
+        .filter_map(R2ILOp::output)
+        .filter(|output| output.space == SpaceId::Unique)
+        .any(|output| {
+            let (start, end) = (output.offset, output.offset + u64::from(output.size));
+            let inside = live
+                .iter()
+                .any(|&(from, to)| from <= start && end <= to && (from, to) != (start, end));
+            live.push((start, end));
+            inside
+        })
+}
+
 fn sweep_passes(name: &str, words: &[[u8; 16]]) -> BTreeMap<&'static str, Tally> {
     let machine = r2sleigh_lift::embedded_machine(name).expect("embedded machine");
     let endian = machine.arch.memory_endianness;
@@ -432,5 +449,57 @@ fn the_gate_fails_a_pass_that_moves_a_label_or_drops_an_effect() {
     assert!(
         judged(dropped_write).differs.is_some(),
         "a dropped register write"
+    );
+}
+
+/// Each word writes a piece into a live temporary, so `whole_unique_reads` must rebuild the holder
+/// and the rebuilt instruction must compute what the input did, with every label on its op.
+fn rebuilds_holders(name: &str, words: &[&[u8]]) {
+    let machine = r2sleigh_lift::embedded_machine(name).expect("embedded machine");
+    let endian = machine.arch.memory_endianness;
+    for (window, bytes) in labelled(words).iter().zip(words) {
+        let runs = machine
+            .disasm
+            .lift_passes(window, 0x10_0000)
+            .expect("lifts");
+        let run = runs
+            .iter()
+            .find(|run| run.pass == "whole_unique_reads")
+            .expect("the pass ran");
+        assert!(
+            writes_inside_a_live_temporary(&run.before) && run.before != run.after,
+            "{name} {bytes:02x?}: no holder was rebuilt\n{:#?}",
+            run.before
+        );
+        let verdict = judge(run, endian);
+        assert!(
+            verdict.differs.is_none() && verdict.agreed > 0,
+            "{name} {bytes:02x?}: {verdict:?}\n{:#?}\n=>\n{:#?}",
+            run.before,
+            run.after
+        );
+    }
+}
+
+// MOVBE written byte by byte (GP-7027), and VPADDW and VPADDD written lane by lane (GP-6061). ARM's
+// immediate `vmov`, `vorr` and `vbic` do the same but read the local back through a `Load` from the
+// const space, which `r2il::eval` does not run, so no ARM word is judged (ROADMAP).
+#[cfg(feature = "x86")]
+#[test]
+fn x86_pieces_written_into_a_live_temporary_rebuild_their_holder() {
+    let movbe: &[&[u8]] = &[
+        &[0x0f, 0x38, 0xf0, 0x06],
+        &[0x48, 0x0f, 0x38, 0xf0, 0x06],
+        &[0xc5, 0xc1, 0xfd, 0xc4],
+        &[0xc5, 0xf1, 0xfe, 0x0e],
+    ];
+    rebuilds_holders("x86-64", movbe);
+    rebuilds_holders(
+        "x86",
+        &[
+            &[0x0f, 0x38, 0xf0, 0x06],
+            &[0xc5, 0xc1, 0xfd, 0xc4],
+            &[0xc5, 0xc9, 0xfe, 0x08],
+        ],
     );
 }

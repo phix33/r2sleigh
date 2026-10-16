@@ -90,6 +90,17 @@ structural decisions that close each gap.
   (a no-op `forward_repeated_loads` agreed with its input) fails the floor.
   This is D31's "each IR rewrite against `r2il::eval` before and after"
   applied to the lift.
+- A piece Sleigh writes into a live temporary (GP-5581: MOVBE bytes, VPADD*
+  lanes) is a `replace` of the write plus an `insert_after` that rebuilds the
+  holder, so a label naming the next op skips the rebuild. Random words reach
+  it about once in 60,000, so the gate names its words
+  (`x86_pieces_written_into_a_live_temporary_rebuild_their_holder`: each must
+  rebuild a holder and evaluate equal) and live mutants (a dropped write-back,
+  the rebuild before the write) failed it. ARM's immediate `vmov`/`vorr`/`vbic`
+  read the local back through a `Load` from the const space, which
+  `r2il::validate` rejects and `eval` does not run, so no ARM word is judged.
+  The gate skips a pass that changed nothing (identical operations evaluate
+  identically), which cut its debug time from 72 s to 3 s.
 - A label crosses an inserted op in few real instructions (a skip over a
   store of a piece of a temporary: AArch64's `stxrb`, `stxrh`), so the
   applier itself is also tested against random programs of forward branches
