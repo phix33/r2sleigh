@@ -699,20 +699,22 @@ impl SemanticObligationInventory {
         let mut private_reads = Vec::new();
 
         let direct = seeding.seed_direct_branches(graph, &mut required, &mut explicit_inputs);
-        // The instructions whose accesses are one indivisible access with no typed statement.
-        let indivisible: Vec<u64> = graph
+        // Every operation of an instruction that is one indivisible access with no typed statement.
+        let mut indivisible = crate::dense::IdSet::<InstId>::new(graph.insts.len());
+        for at in graph
             .insts
             .iter()
             .filter(|inst| matches!(inst.payload, InstPayload::Op(SSAOp::IndivisibleAccess)))
             .filter_map(|inst| graph.instruction_for_inst(inst.id))
-            .collect();
+        {
+            for id in graph.insts_for_instruction(at) {
+                indivisible.insert(id);
+            }
+        }
         for inst in graph.insts.iter().filter(|inst| !direct.contains(inst.id)) {
             match &inst.payload {
                 InstPayload::Op(SSAOp::Load { .. } | SSAOp::Store { .. })
-                    if !indivisible.is_empty()
-                        && graph
-                            .instruction_for_inst(inst.id)
-                            .is_some_and(|at| indivisible.contains(&at)) =>
+                    if indivisible.contains(inst.id) =>
                 {
                     seed_instruction(
                         inst.id,
