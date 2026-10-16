@@ -195,9 +195,8 @@ fn a_block_operation_and_a_computed_call_name_the_addresses_their_block_folds() 
     assert_eq!(text, ["lea rax, [0x1050]", "call rax"]);
 }
 
-/// `pick`: `cmp edi, 3; ja default; mov edi, edi; jmp [rdi*8 + 0x1060]` over four arms: `call one`, a read
-/// of the word at 0x1080, `lea rax, [0x1090]; ret`, and a tail jump to `one`; the default returns -1.
-/// `one` is at 0x1040.
+/// `pick`: `cmp edi, 3; ja default; mov edi, edi; jmp [rdi*8 + 0x1060]` over four arms (`call one`,
+/// `mov rax, [0x1080]`, `lea rax, [0x1090]; ret`, `jmp one`) and a default; `one` is at 0x1040.
 const ARMS: &[u8] = &{
     let mut code = [0xcc_u8; 0x98];
     let runs: [(usize, &[u8]); 10] = [

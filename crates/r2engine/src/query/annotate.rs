@@ -110,19 +110,10 @@ pub(super) fn over_run(
                 claims.push((kind, support));
             }
         }
-        // A dispatch the walk followed transfers to each of its arms, which no operation of the instruction names.
-        if let Some(body) = body {
-            let arms = body.arms_at(line.address).iter();
-            claims.extend(arms.map(|&address| {
-                (
-                    AnnotationKind::Target {
-                        address,
-                        call: false,
-                    },
-                    Basis::Solved,
-                )
-            }));
-        }
+        claims.extend(
+            body.into_iter()
+                .flat_map(|body| arms_of(body, line.address)),
+        );
         // What the bytes hold is for a reader; the reference index reads only what the lines claim.
         if answered.holdings {
             let revision = revision_at(memory, &claims);
@@ -132,20 +123,42 @@ pub(super) fn over_run(
             let folded = |storage| named.left(storage);
             claims.extend(super::proved::proved_about(answered, line.address, &folded));
         }
-        line.annotations = claims
-            .into_iter()
-            .map(|(kind, support)| Annotation {
-                operand: line
-                    .syntax
-                    .as_ref()
-                    .zip(kind.address())
-                    .and_then(|(syntax, address)| sole_operand(syntax, address)),
-                reference: referenced(memory, &kind),
-                kind,
-                support,
-            })
-            .collect();
+        line.annotations = annotated(claims, line.syntax.as_ref(), memory);
     }
+}
+
+/// The claims of one line as annotations, each with the operand that spells its address.
+fn annotated(
+    claims: Vec<(AnnotationKind, Basis)>,
+    syntax: Option<&Syntax>,
+    memory: &Memory<'_>,
+) -> Vec<Annotation> {
+    let annotate = |(kind, support): (AnnotationKind, Basis)| Annotation {
+        operand: syntax
+            .zip(kind.address())
+            .and_then(|(syntax, address)| sole_operand(syntax, address)),
+        reference: referenced(memory, &kind),
+        kind,
+        support,
+    };
+    claims.into_iter().map(annotate).collect()
+}
+
+/// A dispatch the walk followed transfers to each of its arms, which no operation of the instruction names.
+fn arms_of(
+    body: &WalkedBody<'_>,
+    instruction: u64,
+) -> impl Iterator<Item = (AnnotationKind, Basis)> {
+    let arms = body.arms_at(instruction).iter();
+    arms.map(|&address| {
+        (
+            AnnotationKind::Target {
+                address,
+                call: false,
+            },
+            Basis::Solved,
+        )
+    })
 }
 
 /// Whether a claim names an address of this program.

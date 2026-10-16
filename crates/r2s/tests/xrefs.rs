@@ -173,71 +173,84 @@ fn ax_beside_listings(binary: &str) -> (Vec<(u64, u64, String)>, Vec<Shown>) {
     (rows, shown)
 }
 
+type Rows = [(u64, u64, String)];
+
+/// Every direct call and jump `pdf` writes in a function is a row of `ax`.
+fn lines_are_rows(binary: &str, rows: &Rows, function: &Shown) {
+    for (address, text) in &function.lines {
+        // The bytes column, then the mnemonic and its operand.
+        let mut tokens = text.split_whitespace();
+        let (Some(bytes), Some(mnemonic), operand) = (tokens.next(), tokens.next(), tokens.next())
+        else {
+            continue;
+        };
+        let role = match mnemonic {
+            "call" => "CALL:--x",
+            jump if jump.starts_with('j') => "JUMP:--x",
+            _ => continue,
+        };
+        let to = operand.and_then(number).or_else(|| direct(*address, bytes));
+        let held = |to| {
+            rows.iter()
+                .any(|row| (row.0, row.1, &*row.2) == (*address, to, role))
+        };
+        assert!(to.is_none_or(held), "{binary}: {address:#x} {text}");
+    }
+}
+
+/// Every arm `afb` follows from a block is a jump `ax` has from inside it; how many arms.
+fn arms_are_rows(binary: &str, rows: &Rows, function: &Shown) -> usize {
+    let arms = function
+        .blocks
+        .iter()
+        .flat_map(|(start, end, arms)| arms.iter().map(move |arm| (*start..*end, *arm)));
+    let arms = arms.collect::<Vec<_>>();
+    for (block, arm) in &arms {
+        let held = rows
+            .iter()
+            .any(|row| block.contains(&row.0) && row.1 == *arm && row.2 == "JUMP:--x");
+        assert!(
+            held,
+            "{binary}: block {:#x} follows an arm to {arm:#x} that ax lacks",
+            block.start
+        );
+    }
+    arms.len()
+}
+
+/// Every row of `ax` from inside a function's blocks is an instruction its `pdf` lists.
+fn rows_are_listed(binary: &str, rows: &Rows, function: &Shown) {
+    let inside = |from: &u64| {
+        function
+            .blocks
+            .iter()
+            .any(|block| (block.0..block.1).contains(from))
+    };
+    for (from, to, _) in rows.iter().filter(|row| inside(&row.0)) {
+        let listed = function.lines.iter().any(|line| line.0 == *from);
+        assert!(
+            listed,
+            "{binary}: ax has {from:#x} to {to:#x}, which no pdf of its function lists"
+        );
+    }
+}
+
 #[test]
 fn ax_holds_what_every_function_shows_of_its_calls_and_jumps() {
     // One body, three views: every direct call and jump `pdf` writes and every arm `afb` follows is a row of `ax`,
     // and every row of `ax` from inside a body is an instruction that body's `pdf` lists.
-    let mut switches = 0;
+    let mut arms = 0;
     for binary in [
         "branchy_gcc_x64_O0",
         "hashes_gcc_x64_O2",
         "shapes_gcc_x64_O0",
     ] {
         let (rows, shown) = ax_beside_listings(binary);
-        let held = |from: u64, to: u64, role: &str| {
-            rows.iter()
-                .any(|row| (row.0, row.1, row.2.as_str()) == (from, to, role))
-        };
         for function in &shown {
-            for (address, text) in &function.lines {
-                // The bytes column, then the mnemonic and its operand.
-                let mut tokens = text.split_whitespace();
-                let (Some(bytes), Some(mnemonic), operand) =
-                    (tokens.next(), tokens.next(), tokens.next())
-                else {
-                    continue;
-                };
-                let role = match mnemonic {
-                    "call" => "CALL:--x",
-                    jump if jump.starts_with('j') => "JUMP:--x",
-                    _ => continue,
-                };
-                let to = operand.and_then(number).or_else(|| direct(*address, bytes));
-                if let Some(to) = to {
-                    assert!(held(*address, to, role), "{binary}: {address:#x} {text}");
-                }
-            }
-            for (start, end, arms) in &function.blocks {
-                switches += arms.len();
-                for arm in arms {
-                    let from = rows.iter().any(|row| {
-                        (*start..*end).contains(&row.0) && row.1 == *arm && row.2 == "JUMP:--x"
-                    });
-                    assert!(
-                        from,
-                        "{binary}: block {start:#x} follows an arm to {arm:#x} that ax lacks"
-                    );
-                }
-            }
-        }
-        for (from, to, _) in &rows {
-            let owners = shown
-                .iter()
-                .filter(|function| {
-                    function
-                        .blocks
-                        .iter()
-                        .any(|block| (block.0..block.1).contains(from))
-                })
-                .collect::<Vec<_>>();
-            for function in owners {
-                let listed = function.lines.iter().any(|line| line.0 == *from);
-                assert!(
-                    listed,
-                    "{binary}: ax has {from:#x} to {to:#x}, which no pdf of its function lists"
-                );
-            }
+            lines_are_rows(binary, &rows, function);
+            arms += arms_are_rows(binary, &rows, function);
+            rows_are_listed(binary, &rows, function);
         }
     }
-    assert!(switches > 0, "the corpus holds a solved dispatch");
+    assert!(arms > 0, "the corpus holds a solved dispatch");
 }
