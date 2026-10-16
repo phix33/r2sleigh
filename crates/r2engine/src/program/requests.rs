@@ -34,8 +34,8 @@ pub struct FunctionGraph {
     pub entry: u64,
     /// In address order; the entry block is the one starting at `entry`.
     pub blocks: Vec<GraphBlock>,
-    /// As for [`FunctionListing`]: present where the blocks are the plain
-    /// walk's, which follows no dispatch.
+    /// As for [`FunctionListing`]: present where the blocks are the walk's, which follows a
+    /// dispatch only where its table was read.
     pub refused: Option<AnalysisRefused>,
 }
 
@@ -463,7 +463,7 @@ impl<S: Source + 'static> OpenProgram<S> {
 
     /// One function's control-flow graph: the listing's blocks, each with its
     /// lines and its typed edges. It stands where the analysis refuses, as the
-    /// listing does, and then follows no dispatch.
+    /// listing does, and then follows a dispatch only where its table was read.
     ///
     /// O(body + lines): one walk, which the listing already makes.
     pub fn function_graph(&mut self, entry: u64) -> Result<FunctionGraph, String> {
