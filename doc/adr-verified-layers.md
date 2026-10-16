@@ -93,11 +93,16 @@ instruction's temporaries, r2ssa names them, r2dec and the low tier spell them.
 
 **D37. r2ssa states why an arity is a floor.** Owner: r2ssa (boundaries);
 r2engine reads it.
-- The cause is a typed fact: an indirect call, a call into an unresolved cycle
-  member, or a missing prototype.
+- The cause is a typed fact, one variant per branch of `recover_interface`'s
+  floor: an unresolved transfer; a supervisor entry; an argument area no exit
+  places; an argument area read past an unproven register prefix; a register
+  slot read past the prefix; or the next slot handed to a call of unproven
+  arity, split as an indirect call, a call into an unresolved cycle member or
+  a missing prototype.
 - The cycle fixpoint (#279) then needs no discovery round, and a cycle's
   results become the same fixpoint over return values (`shape_mutual_even`).
-- Gate: an engine test per cause, and the `shape_mutual_even` record equal.
+- Gate: an engine test per cause variant, and the `shape_mutual_even` record
+  equal.
 
 **D38. The cost verdict counts retired instructions.** Owner: GT.
 - Native runs count user-space instructions with `perf_event_open`
