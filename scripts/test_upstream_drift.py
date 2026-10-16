@@ -193,7 +193,7 @@ class Alarm(World):
     def test_within_budget_exits_zero_and_lists_every_pin(self) -> None:
         status, out, err = self.run_main(utc(2, 20))
         self.assertEqual((status, err), (0, ""))
-        for name in ("Ghidra base", "MIPS", "x86", "radare2-testbins", "radare2"):
+        for name in ("Ghidra base", "MIPS", "x86", "radare2-testbins", "judged radare2 release"):
             self.assertIn(name, out)
 
     def test_one_pin_over_budget_exits_one_and_names_it_beside_the_green_ones(self) -> None:
@@ -237,7 +237,7 @@ class Alarm(World):
         self.assertEqual(status, 2)
         self.assertIn("offline", err)
         self.assertIn("x86", out)
-        self.assertIn("radare2 ", out)
+        self.assertIn("judged radare2 release", out)
 
     def test_a_refuted_pin_exits_one(self) -> None:
         self.tree(pins={"Ghidra base": self.d, "MIPS": self.d, "x86": self.d}, ia="ia v1", testbins=self.t2)
@@ -267,7 +267,7 @@ class Releases(unittest.TestCase):
 
     def test_an_old_judgment_is_over_its_budget(self) -> None:
         listed = [self.release("6.2.4", 1), self.release("6.2.6", 2)]
-        got = drift.measure_release("6.2.4", listed, utc(5, 2) + datetime.timedelta(days=drift.BUDGET_DAYS["radare2"] + 1))
+        got = drift.measure_release("6.2.4", listed, utc(5, 2) + datetime.timedelta(days=drift.BUDGET_DAYS["judged-release"] + 1))
         self.assertTrue(got.failing)
 
     def test_a_judged_release_the_list_lacks_is_unmeasurable(self) -> None:

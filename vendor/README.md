@@ -173,4 +173,4 @@ file is another upstream version than its row claims. The budget is a resync, no
 |---|---|
 | ghidra | 90 |
 | testbins | 180 |
-| radare2 | 90 |
+| judged-release | 90 |

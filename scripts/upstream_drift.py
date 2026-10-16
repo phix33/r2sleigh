@@ -24,7 +24,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 
 # Days the oldest upstream change a pin lacks may wait, by pin family; `vendor/README.md` states
 # the same numbers and the tests hold them equal.
-BUDGET_DAYS = {"ghidra": 90, "testbins": 180, "radare2": 90}
+BUDGET_DAYS = {"ghidra": 90, "testbins": 180, "judged-release": 90}
 
 GHIDRA_URL = "https://github.com/NationalSecurityAgency/ghidra"
 RADARE2_RELEASES_URL = "https://api.github.com/repos/radareorg/radare2/releases?per_page=100"
@@ -192,7 +192,7 @@ def measure_release(judged: str, releases: list[dict], now: datetime.datetime) -
         raise Unmeasurable(f"radare2: the judged release {judged} is not among the {len(tags)} latest published")
     newer = published[tags.index(judged) + 1 :]
     oldest = newer[0][0] if newer else None
-    return Drift("radare2", judged, tags[-1], len(newer), oldest, age_days(oldest, now), BUDGET_DAYS["radare2"])
+    return Drift("judged radare2 release", judged, tags[-1], len(newer), oldest, age_days(oldest, now), BUDGET_DAYS["judged-release"])
 
 
 def read_table(text: str, heading: str) -> list[list[str]]:
