@@ -248,6 +248,12 @@ fn sweep_passes(name: &str, words: &[[u8; 16]]) -> BTreeMap<&'static str, Tally>
             continue;
         };
         for run in runs {
+            let tally = tallies.entry(run.pass).or_default();
+            // A pass that changed nothing leaves every run as it was.
+            if run.before == run.after {
+                continue;
+            }
+            tally.fired += 1;
             let verdict = judge(&run, endian);
             assert!(
                 verdict.differs.is_none(),
@@ -257,11 +263,9 @@ fn sweep_passes(name: &str, words: &[[u8; 16]]) -> BTreeMap<&'static str, Tally>
                 run.before,
                 run.after
             );
-            let tally = tallies.entry(run.pass).or_default();
             tally.agreed += verdict.agreed;
             tally.inconclusive += verdict.inconclusive;
-            tally.fired += u64::from(run.before != run.after);
-            if verdict.agreed > 0 && run.before != run.after {
+            if verdict.agreed > 0 {
                 tally.edited += 1;
                 tally.relabelled += u64::from(run.before.iter().any(R2ILOp::is_local_branch));
             }
