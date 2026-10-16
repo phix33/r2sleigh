@@ -12,6 +12,9 @@ const WORDS: usize = 50_000;
 const PASS_WORDS: usize = 15_000;
 /// Entry states each pass's input and output run from.
 const SEEDS: u64 = 4;
+/// The pass that gives a user operation its meaning; `r2il::eval` runs none, so an input that
+/// executes one is inconclusive and only an expansion the run skipped is compared.
+const EXPANSION: &str = "expand_user_operations";
 
 fn sweep(name: &str) {
     let machine = r2sleigh_lift::embedded_machine(name).expect("embedded machine");
@@ -198,7 +201,7 @@ fn judge(run: &PassRun, endian: Endianness) -> Verdict {
     let watched = written(run);
     let mut verdict = Verdict::default();
     // The pass that gives user operations their meaning is the one that cannot see them as values.
-    let opaque_user_operations = run.pass != "expand_user_operations";
+    let opaque_user_operations = run.pass != EXPANSION;
     for seed in 0..SEEDS {
         let entry = entry(run, seed);
         let ops = |ops: &[R2ILOp]| match opaque_user_operations {
@@ -227,6 +230,8 @@ fn judge(run: &PassRun, endian: Endianness) -> Verdict {
 struct Tally {
     agreed: u64,
     inconclusive: u64,
+    /// Lifts where the pass changed the operations, whatever the verdict.
+    fired: u64,
     /// Agreed runs where the pass changed the operations.
     edited: u64,
     /// Agreed runs where the pass changed an instruction that has a local label.
@@ -255,6 +260,7 @@ fn sweep_passes(name: &str, words: &[[u8; 16]]) -> BTreeMap<&'static str, Tally>
             let tally = tallies.entry(run.pass).or_default();
             tally.agreed += verdict.agreed;
             tally.inconclusive += verdict.inconclusive;
+            tally.fired += u64::from(run.before != run.after);
             if verdict.agreed > 0 && run.before != run.after {
                 tally.edited += 1;
                 tally.relabelled += u64::from(run.before.iter().any(R2ILOp::is_local_branch));
@@ -294,8 +300,8 @@ fn labelled(bytes: &[&[u8]]) -> Vec<[u8; 16]> {
 }
 
 /// Sweep the known instructions and the random words; where `relabelled`, some pass must have
-/// edited an instruction that carries a local label, and its output agreed.
-fn passes_preserve(name: &str, known: &[&[u8]], relabelled: bool) {
+/// edited an instruction that carries a local label, and each pass in `edits` one the input ran.
+fn passes_preserve(name: &str, known: &[&[u8]], relabelled: bool, edits: &[&str]) {
     let mut words = labelled(known);
     words.extend(random_words(name, PASS_WORDS));
     let tallies = sweep_passes(name, &words);
@@ -307,6 +313,13 @@ fn passes_preserve(name: &str, known: &[&[u8]], relabelled: bool) {
         moved > 0 || !relabelled,
         "{name}: no label moved under a pass: {tallies:?}"
     );
+    for pass in edits {
+        let edited = tallies.get(pass).map_or(0, |tally| tally.edited);
+        assert!(
+            edited > 0,
+            "{name}: {pass} edited no instruction the evaluator ran to its end: {tallies:?}"
+        );
+    }
 }
 
 // `cmpxchg [rip+d], r32` and `bsf ecx, [rip+d]` read memory inside their own local branches.
@@ -318,8 +331,13 @@ fn x86_passes_leave_each_instruction_computing_what_it_computed() {
         &[0x0f, 0xb0, 0x05, 0x39, 0x38, 0x83, 0x1b],
         &[0x0f, 0xbc, 0x0d, 0x00, 0x20, 0x00, 0x00],
     ];
-    passes_preserve("x86-64", cmpxchg, true);
-    passes_preserve("x86", cmpxchg, false);
+    let edits = [
+        "whole_unique_reads",
+        "canonicalize_memory_operands",
+        "forward_repeated_loads",
+    ];
+    passes_preserve("x86-64", cmpxchg, true, &edits);
+    passes_preserve("x86", cmpxchg, false, &edits);
 }
 
 // Advanced SIMD scalar conversions, whose temporaries are read in pieces under a local skip.
@@ -333,17 +351,27 @@ fn arm_passes_leave_each_instruction_computing_what_it_computed() {
     ];
     // `stxrb` and `stxrh`: a skip over a store of a piece of a temporary.
     let exclusive: &[&[u8]] = &[&[0x01, 0x7c, 0x02, 0x08], &[0xba, 0xd9, 0x10, 0x48]];
-    passes_preserve("aarch64", &[simd, exclusive].concat(), true);
-    passes_preserve("arm", &[], false);
-    passes_preserve("arm-thumb", &[], false);
-    passes_preserve("arm-be", &[], false);
-    passes_preserve("arm-thumb-be", &[], false);
+    // The expansion edits a run `eval` finishes only on ARM32, where a condition skips the operation;
+    // on AArch64 it is outside the floor (doc/adr-verified-layers.md).
+    let aarch64 = ["whole_unique_reads", "split_odd_register_zeroes"];
+    let thumb = ["whole_unique_reads", "canonicalize_memory_operands"];
+    passes_preserve("aarch64", &[simd, exclusive].concat(), true, &aarch64);
+    let arm = [
+        "whole_unique_reads",
+        "canonicalize_memory_operands",
+        "forward_repeated_loads",
+        EXPANSION,
+    ];
+    passes_preserve("arm", &[], false, &arm);
+    passes_preserve("arm-thumb", &[], false, &thumb);
+    passes_preserve("arm-be", &[], false, &["whole_unique_reads", EXPANSION]);
+    passes_preserve("arm-thumb-be", &[], false, &thumb);
 }
 
 #[cfg(feature = "riscv")]
 #[test]
 fn riscv_passes_leave_each_instruction_computing_what_it_computed() {
-    passes_preserve("riscv64", &[], false);
+    passes_preserve("riscv64", &[], false, &["whole_unique_reads"]);
 }
 
 /// The gate is only worth its name if a broken pass fails it: a label left behind an insertion

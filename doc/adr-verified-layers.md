@@ -33,7 +33,8 @@ structural decisions that close each gap.
 | Container (`r2image`) | bytes, sections, symbols, relocations, byte orders | `diff_r2` against radare2, DWARF | present; field relocations open (I) |
 | Decoder (Sleigh, vendored) | instruction length and text | `diff_r2 pd`; `decode_sweep` (random words per language, no fault) | present |
 | Lift semantics (specs) | each instruction's effect | the CPU oracle: AArch64 (Apple M5) and x86-64 (contabo, D35) present; ARM32 refused (D32) | present |
-| Lift passes (`translate.rs`, user-operation expansion) | a rewrite of one instruction's ops | `decode_sweep`: each pass's input and output through `r2il::eval` from the same seeded states (D34) | present |
+| Lift passes (`translate.rs`) | a rewrite of one instruction's ops | `decode_sweep`: each pass's input and output through `r2il::eval` from the same seeded states, and per language the passes that must have edited an instruction the evaluator ran (D34) | present |
+| User-operation expansion (`expand_user_operation`) | what a modelled user operation stands for | AArch64 oracle (`ext`, `tbl`, `ushl`, `rev64`, `umaxv`, `uaddlv`); `packed_extension` and `word_shuffle` against the SDM through `r2il::eval`; shape tests for `umax`/`umin` (`neon_lanes`). **Not the sweep**: `r2il::eval` runs no user operation, so only a run that skips one is compared (edited 0 on x86-64 and aarch64) | partial: a reference per operation next to the sweep (D34) |
 | `internal_control` | an instruction's local loops and skips as values and guarded accesses | `local_control_tests`: Sleigh's p-code and the lift through `r2il::eval::run` | present (x86 loops) |
 | Temporary names (`r2il::number_temporaries`, r2ssa `naming.rs`) | which value a `tmp_` name is | `stable_temporaries`: every census function's `pdd`, `pdil` and `ao` byte-identical with Sleigh's temporaries shifted or reversed (D36) | present |
 | Register effects | reads and writes per instruction | AO against radare2's `aeaj` | present (#284) |
@@ -78,9 +79,15 @@ structural decisions that close each gap.
   byte of which is mapped). The exit, every register either writes and every
   store with its value must agree. A user operation, which `r2il::eval` does
   not run, is given the same seeded value on both sides, except in the pass
-  that expands it. A pass that moves a label, drops an effect or reads the
-  wrong piece fails it (`the_gate_fails_a_pass_that_moves_a_label_or_drops_an_effect`
-  tests the comparison, and three live mutants of the passes failed it).
+  that expands it: there an input that executes one is inconclusive, so the
+  sweep compares that pass only where the run skips the operation, and edits
+  none on x86-64 or aarch64. It is outside the floor there; its semantics
+  stay with the oracles in the table above. A pass that moves a label, drops
+  an effect or reads the wrong piece fails it
+  (`the_gate_fails_a_pass_that_moves_a_label_or_drops_an_effect` tests the
+  comparison, and three live mutants of the passes failed it). Per language,
+  the passes that edit in the sweep are listed, and one that stops editing
+  (a no-op `forward_repeated_loads` agreed with its input) fails the floor.
   This is D31's "each IR rewrite against `r2il::eval` before and after"
   applied to the lift.
 - A label crosses an inserted op in few real instructions (a skip over a
