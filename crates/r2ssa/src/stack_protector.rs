@@ -379,7 +379,8 @@ fn fails_without_return(func: &SSAFunction, block: u64) -> bool {
     func.successors(block).is_empty()
         && func.get_block(block).is_some_and(|block| {
             let ops = block.ops();
-            ops.iter().any(|op| matches!(op, SSAOp::Call { .. }))
+            ops.iter()
+                .any(|op| op.call().is_some_and(|call| call.direct))
                 && !ops.iter().any(|op| matches!(op, SSAOp::Return { .. }))
         })
 }
