@@ -559,33 +559,32 @@ mod tests {
             }
             Some(value as u64)
         }
+        let encodings = [(false, 32u32), (true, 64)]
+            .into_iter()
+            .flat_map(|(sf, width)| {
+                (0..=1).flat_map(move |n| {
+                    (0..64)
+                        .flat_map(move |immr| (0..64).map(move |imms| (sf, width, n, immr, imms)))
+                })
+            });
         let mut checked = 0;
-        for (sf, width) in [(false, 32u32), (true, 64)] {
-            for n in 0..=1 {
-                for immr in 0..64 {
-                    for imms in 0..64 {
-                        if !sf && n == 1 {
-                            continue;
-                        }
-                        let Some(value) = bitmask(width, n, immr, imms) else {
-                            continue;
-                        };
-                        let halfwords: Vec<u64> = (0..width / 16)
-                            .map(|i| (value >> (16 * i)) & 0xffff)
-                            .collect();
-                        let one = |wanted: &dyn Fn(u64) -> bool| {
-                            halfwords.iter().filter(|h| wanted(**h)).count() == 1
-                        };
-                        let by_value = one(&|h| h != 0) || one(&|h| h != 0xffff);
-                        assert_eq!(
-                            move_wide_preferred(sf, n, immr, imms),
-                            by_value,
-                            "{sf} {n} {immr} {imms}"
-                        );
-                        checked += 1;
-                    }
-                }
-            }
+        for (sf, width, n, immr, imms) in encodings {
+            let Some(value) = bitmask(width, n, immr, imms).filter(|_| sf || n == 0) else {
+                continue;
+            };
+            let halfwords: Vec<u64> = (0..width / 16)
+                .map(|i| (value >> (16 * i)) & 0xffff)
+                .collect();
+            let one = |wanted: &dyn Fn(u64) -> bool| {
+                halfwords.iter().filter(|h| wanted(**h)).count() == 1
+            };
+            let by_value = one(&|h| h != 0) || one(&|h| h != 0xffff);
+            assert_eq!(
+                move_wide_preferred(sf, n, immr, imms),
+                by_value,
+                "{sf} {n} {immr} {imms}"
+            );
+            checked += 1;
         }
         assert!(checked > 5000, "{checked}");
     }
