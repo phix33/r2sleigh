@@ -1,18 +1,5 @@
-shr_8_0: wrong of
-shr_16_0: wrong of
-shr_32_0: wrong of
-shr_64_0: wrong of
-shr_32_33: wrong of
-shr_64_65: wrong of
-shr_64_cl0: wrong of
-shr_8_cl1: wrong of
-shr_32_cl1: wrong of
 cvttsd2si_64: stop Undefined
 cvttsd2si_32: stop Undefined
-shrd_32_1: wrong of
-shrd_64_1: wrong of
-shrd_32_cl1: wrong of
-shrd_64_0: wrong of
 cvttss2si_64: stop Undefined
 cvttss2si_32: stop Undefined
 vcvttsd2si_32: stop Undefined; wrong rax
