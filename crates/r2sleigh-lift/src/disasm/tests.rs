@@ -344,6 +344,21 @@ fn aarch64_listing_spells_the_preferred_alias_at_each_precondition_boundary() {
         (bitfield(0, 1, 1, 0, 31), "bfc w1, 0x1f, 0x1"),
         (bitfield(0, 1, 0, 0, 31), "bfxil w1, wzr, 0x0, 0x1"),
         (bitfield(0, 2, 2, 0, 2), "ubfiz w1, w2, 0x1e, 0x1"),
+        // UBFM and SBFM: the extract, insert, shift and lsl/lsr forms Sleigh already spells (boundary: imms + 1 == immr is lsl, imms == 31 is lsr).
+        (bitfield(0, 2, 1, 3, 2), "ubfx w1, w2, 0x1, 0x3"),
+        (bitfield(0, 0, 1, 3, 2), "sbfx w1, w2, 0x1, 0x3"),
+        (bitfield(0, 0, 2, 0, 2), "sbfiz w1, w2, 0x1e, 0x1"),
+        (bitfield(0, 2, 3, 2, 2), "lsl w1, w2, 0x1d"),
+        (bitfield(0, 2, 1, 31, 2), "lsr w1, w2, 0x1"),
+        (bitfield(0, 0, 1, 31, 2), "asr w1, w2, 0x1"),
+        // ADDS, ANDS and ORN with a zero register are CMN, TST and MVN; a live register keeps the base mnemonic.
+        (0x2b02_003f, "cmn w1, w2"),
+        (0x2b02_0021, "adds w1, w1, w2"),
+        (0x6a02_003f, "tst w1, w2"),
+        (0x6a02_0020, "ands w0, w1, w2"),
+        (0x2a22_03e1, "mvn w1, w2"),
+        (0x2a22_0021, "orn w1, w1, w2"),
+        (0x6b02_003f, "cmp w1, w2"),
         // SUBS with both Rd and Rn the zero register is CMP; NEGS needs a live Rd.
         (0xeb13_0fff, "cmp xzr, x19, lsl 0x3"),
         (0x6b01_03e1, "negs w1, w1"),
