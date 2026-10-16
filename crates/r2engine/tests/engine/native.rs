@@ -5902,10 +5902,11 @@ fn a_store_a_read_at_an_unbounded_index_may_reach_is_rendered() {
         0x0f, 0xb6, 0x44, 0x14, 0xb0, // 0x100c movzx eax, byte [rsp+rdx-0x50]
         0x01, 0xc1, // 0x1011 add ecx, eax
         0x48, 0x83, 0xc2, 0x01, // 0x1013 add rdx, 1
-        0x48, 0x83, 0xfa, 0x09, // 0x1017 cmp rdx, 9
-        0x75, 0xef, // 0x101b jne 0x100c
-        0x89, 0xc8, // 0x101d mov eax, ecx
-        0xc3, // 0x101f ret
+        0x48, 0x39,
+        0xf2, // 0x1017 cmp rdx, rsi: against 9 the constants end the loop after one pass
+        0x75, 0xf0, // 0x101a jne 0x100c
+        0x89, 0xc8, // 0x101c mov eax, ecx
+        0xc3, // 0x101e ret
     ];
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
@@ -6903,4 +6904,24 @@ fn a_load_of_bytes_a_conditional_store_writes_is_not_read_only() {
     let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
     assert!(!output.contains("0x11223344"), "{output}");
+}
+
+/// `mov eax, 0; test rax, rax; je; call rax`, a weak undefined reference the linker made 0: the
+/// guard is decided, so the call under it is no obligation (audit D13, P5).
+#[test]
+fn a_call_under_a_guard_the_constants_decide_is_no_call_to_zero() {
+    let rendered = rendered(
+        &[
+            0xb8, 0x00, 0x00, 0x00, 0x00, // 1000 mov eax, 0
+            0x48, 0x85, 0xc0, // 1005 test rax, rax
+            0x74, 0x02, // 1008 je 0x100c
+            0xff, 0xd0, // 100a call rax
+            0xc3, // 100c ret
+            0x90, 0x90, 0x90, // 100d padding
+        ],
+        "weak_guard",
+    );
+    for absent in ["fcn_0", "1U", "r2sleigh_residual", "r2dec gap"] {
+        assert!(!rendered.contains(absent), "{absent}:\n{rendered}");
+    }
 }

@@ -14,10 +14,21 @@ use crate::{
     SourceCarrierKind, SourceFunctionInterface, SourceFunctionReturn, SourceSite, SourceTypeKind,
 };
 
+/// How far sparse conditional constants reach into the function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SccpMode {
+    Off,
+    /// Decide the branches whose condition is a constant and drop what they leave unreachable;
+    /// no operand is rewritten, so provenance stays (doc/adr-structure-dominator-tree.md §6).
+    Decide,
+    /// Decide, and read every proved constant where it was read.
+    Propagate,
+}
+
 /// Configuration for SSA optimization passes.
 #[derive(Debug, Clone)]
 pub struct OptimizationConfig {
-    pub enable_sccp: bool,
+    pub sccp: SccpMode,
     pub enable_inst_combine: bool,
     pub preserve_memory_reads: bool,
 }
@@ -35,7 +46,7 @@ pub struct DecompilePrepConfig {
 impl Default for OptimizationConfig {
     fn default() -> Self {
         Self {
-            enable_sccp: true,
+            sccp: SccpMode::Propagate,
             enable_inst_combine: true,
             preserve_memory_reads: false,
         }
@@ -53,7 +64,7 @@ impl Default for DecompilePrepConfig {
 impl From<&DecompilePrepConfig> for OptimizationConfig {
     fn from(value: &DecompilePrepConfig) -> Self {
         Self {
-            enable_sccp: false,
+            sccp: SccpMode::Decide,
             enable_inst_combine: value.enable_inst_combine,
             preserve_memory_reads: true,
         }
@@ -126,16 +137,10 @@ pub(crate) fn optimize_function_with_return_and_control<C: SsaWorkControl + ?Siz
         control.poll()?;
         let mut changed = false;
 
-        if config.enable_sccp {
-            let (consts, executable_edges) = sccp_with_control(func, control)?;
+        if config.sccp != SccpMode::Off {
+            let proved = sccp_with_control(func, control)?;
             control.poll()?;
-            if apply_sccp_results(
-                func,
-                &consts,
-                &executable_edges,
-                return_carriers,
-                &mut stats,
-            ) {
+            if apply_sccp_results(func, &proved, return_carriers, config.sccp, &mut stats) {
                 changed = true;
             }
         }
@@ -744,19 +749,21 @@ fn replace_sources_with_constants(
 
 fn apply_sccp_results(
     func: &mut SSAFunction,
-    consts: &IdMap<VarId, u64>,
-    executable_edges: &HashSet<(u64, u64)>,
+    (consts, executable_edges): &SccpResult,
     return_carriers: &[CanonicalStorageId],
+    mode: SccpMode,
     stats: &mut OptimizationStats,
 ) -> bool {
     let mut changed = false;
     let mut cfg_changed = false;
 
-    let constants = replace_sources_with_constants(func, consts, return_carriers, stats);
-    if !constants.is_empty() {
-        changed = true;
+    if mode == SccpMode::Propagate {
+        let constants = replace_sources_with_constants(func, consts, return_carriers, stats);
+        if !constants.is_empty() {
+            changed = true;
+        }
+        func.apply_edits(constants);
     }
-    func.apply_edits(constants);
     stats.sccp_constants_found = consts.len();
 
     #[derive(Debug, Clone, Copy)]
@@ -786,7 +793,10 @@ fn apply_sccp_results(
 
         for (op_id, op) in block.sited() {
             if let SSAOp::CBranch { cond, target } = op
-                && let Some(value) = func.var(*cond).constant_bits()
+                && let Some(value) = func
+                    .var(*cond)
+                    .constant_bits()
+                    .or_else(|| consts.get(*cond).copied())
             {
                 let take_true = value != 0;
                 let (keep_target, dead_target) = if take_true {
@@ -2845,9 +2855,9 @@ mod sccp_tests {
             },
         ]);
 
-        let (consts, executable) = sccp(&func);
+        let proved = sccp(&func);
         let mut stats = OptimizationStats::default();
-        let changed = apply_sccp_results(&mut func, &consts, &executable, &[], &mut stats);
+        let changed = apply_sccp_results(&mut func, &proved, &[], SccpMode::Propagate, &mut stats);
         assert!(changed);
         assert!(
             func.named_block(0x1004).is_none(),
@@ -2856,6 +2866,71 @@ mod sccp_tests {
         assert!(!func.cfg().has_edge(0x1000, 0x1004));
         assert!(stats.sccp_edges_pruned > 0);
         assert!(stats.sccp_blocks_removed > 0);
+    }
+
+    /// `mov eax, 0; test rax, rax; je over; call rax`: the guard is the constant the register
+    /// holds, so the arm is gone and no operand of the guard is rewritten.
+    #[test]
+    fn a_guard_the_lattice_decides_drops_its_arm_and_keeps_every_operand() {
+        let mut func = raw_func(vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(0, 8),
+                    },
+                    R2ILOp::IntEqual {
+                        dst: make_reg(0x20, 1),
+                        a: make_reg(0, 8),
+                        b: make_const(0, 8),
+                    },
+                    R2ILOp::CBranch {
+                        target: make_const(0x1008, 8),
+                        cond: make_reg(0x20, 1),
+                    },
+                ],
+                ..Default::default()
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![
+                    R2ILOp::CallInd {
+                        target: make_reg(0, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x1008, 8),
+                    },
+                ],
+                ..Default::default()
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                ..Default::default()
+            },
+        ]);
+        let decide = OptimizationConfig {
+            sccp: SccpMode::Decide,
+            ..OptimizationConfig::default()
+        };
+        optimize_function(&mut func, &decide);
+        assert!(func.named_block(0x1004).is_none(), "the dead arm is gone");
+        assert!(!func.cfg().has_edge(0x1000, 0x1004));
+        let guard = func.named_block(0x1000).expect("the guard's block");
+        let equal = guard.ops().iter().find_map(|op| match op {
+            SSAOp::IntEqual { a, .. } => Some(a),
+            _ => None,
+        });
+        assert!(
+            equal.is_some_and(|a| !a.is_const()),
+            "deciding a branch reads no constant into an operand"
+        );
     }
 
     /// The definition-aware folds a lane read goes through
@@ -3283,7 +3358,7 @@ mod signed_flag_tests {
         optimize_function(
             &mut func,
             &OptimizationConfig {
-                enable_sccp: false,
+                sccp: SccpMode::Decide,
                 ..OptimizationConfig::default()
             },
         );
