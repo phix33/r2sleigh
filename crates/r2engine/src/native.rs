@@ -346,15 +346,10 @@ impl std::error::Error for NativeRefusal {}
 /// Before SSA, before any analysis: what the specification says the bytes
 /// mean. A defect the medium tier shows is either already here or belongs to
 /// the construction between them.
-pub fn lifted(
-    target: &NativeTarget<'_>,
-    program: &dyn Program,
-    entry: u64,
-) -> Result<String, NativeRefusal> {
-    let body = crate::body::lift_body(entry, target.disasm, program, &BTreeMap::new())
-        .map_err(NativeRefusal::Body)?;
+pub fn lifted(target: &NativeTarget<'_>, walk: &Walk) -> String {
+    let body = walk.body();
     let names = register_spellings(target.arch);
-    let mut out = format!("Entry: {entry:#x}\nBlocks: {}\n", body.blocks.len());
+    let mut out = format!("Entry: {:#x}\nBlocks: {}\n", body.entry, body.blocks.len());
     for block in &body.blocks {
         out.push_str(&format!(
             "\nBlock {:#x} ({} bytes, {} ops)\n",
@@ -378,7 +373,7 @@ pub fn lifted(
             stop.addr, stop.reason
         ));
     }
-    Ok(out)
+    out
 }
 
 /// Operations as the low tier prints them: each register by its name, each user operation by its own.
@@ -506,9 +501,25 @@ pub struct Walk {
     /// Shared with each analysis of the body; the tables stay the walk's.
     root: std::sync::Arc<Walked>,
     tables: Vec<NativePointerTable>,
+    /// Why the tables of a body that has dispatches were not read: the body is then the walk that follows none.
+    refusal: Option<NativeRefusal>,
 }
 
 impl Walk {
+    /// A body whose dispatch tables could not be read, and why.
+    fn unread(root: Walked, refusal: NativeRefusal) -> Self {
+        Self {
+            root: std::sync::Arc::new(root),
+            tables: Vec::new(),
+            refusal: Some(refusal),
+        }
+    }
+
+    /// Why this body's dispatch tables were not read, where they were not.
+    pub const fn refusal(&self) -> Option<&NativeRefusal> {
+        self.refusal.as_ref()
+    }
+
     /// The walked body, dispatches followed.
     pub fn body(&self) -> &crate::body::Body {
         &self.root.body
@@ -569,6 +580,7 @@ pub fn walk(
         return Ok(Walk {
             root: std::sync::Arc::new(root),
             tables: Vec::new(),
+            refusal: None,
         });
     }
     let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
@@ -585,16 +597,33 @@ pub fn walk(
         false => Restatement::default(),
         true => declared,
     };
-    let reads = native.dispatch_reads(&root, &imports, restatement)?;
+    // A refused read leaves the walk that follows no table, and says why: the listing and the index still read it.
+    let read = crate::isolation::isolated(|| native.dispatch_reads(&root, &imports, restatement));
+    let reads = match read {
+        Ok(Ok(reads)) => reads,
+        Ok(Err(refusal)) => return Ok(Walk::unread(root, refusal)),
+        Err(panicked) => return Ok(Walk::unread(root, panicked.into())),
+    };
     let tables = native.pointer_tables(&reads);
     if tables.is_empty() {
         let root = std::sync::Arc::new(root);
-        return Ok(Walk { root, tables });
+        return Ok(Walk {
+            root,
+            tables,
+            refusal: None,
+        });
     }
     let dispatched = tables.iter();
     let dispatched = dispatched.map(|table| (table.instruction, table.targets.clone()));
-    let root = std::sync::Arc::new(native.walk_dispatched(entry, &dispatched.collect())?);
-    Ok(Walk { root, tables })
+    let again = native.walk_dispatched(entry, &dispatched.collect());
+    match again {
+        Ok(root) => Ok(Walk {
+            root: std::sync::Arc::new(root),
+            tables,
+            refusal: None,
+        }),
+        Err(refusal) => Ok(Walk::unread(root, refusal)),
+    }
 }
 
 /// One function's analysis, before anything is rendered from it.

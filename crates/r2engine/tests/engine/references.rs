@@ -274,6 +274,28 @@ fn the_index_holds_what_every_arm_of_a_solved_dispatch_names() {
     assert!(index.coverage.is_closed(), "{:?}", index.coverage);
 }
 
+#[test]
+fn a_walk_stopped_before_it_read_its_tables_is_indexed_as_far_as_it_went() {
+    let mut program = OpenProgram::of(arms());
+    let cancellation = r2engine::EngineCancellationToken::default();
+    program.begin_request(r2engine::EngineExecutionControl::with_cancellation(
+        cancellation.clone(),
+    ));
+    cancellation.cancel();
+    let index = program.references().expect("the index builds").value;
+    // The walk that follows no table: the guard's jump, and the dispatch left unresolved.
+    assert_eq!(
+        listed(index.facts()),
+        [(BASE + 3, BASE + 0x28, Role::Jump, Basis::Decoded)]
+    );
+    assert!(index.coverage.unread.is_empty(), "{:?}", index.coverage);
+    assert_eq!(index.coverage.indirect_count(), 1);
+    // The stop was the request's, not the program's: asked again, the arms are there.
+    let again = program.references().expect("the index builds").value;
+    assert!(again.facts().len() > index.facts().len());
+    assert!(again.coverage.is_closed(), "{:?}", again.coverage);
+}
+
 /// `fstp st0; ret`: x87 writes its own address to the FPU instruction pointer, which no operand names.
 const X87: &[u8] = &[0xdd, 0xd8, 0xc3];
 
