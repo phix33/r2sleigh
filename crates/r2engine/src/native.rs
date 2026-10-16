@@ -1451,6 +1451,60 @@ struct Walked {
     callees: Vec<Callee>,
 }
 
+impl Walked {
+    /// The same walk cut to the blocks control can reach an unresolved indirect branch from.
+    ///
+    /// A value at a dispatch is built from the paths that arrive at it, so a block none of them
+    /// crosses decides no table. A kept block's edge to a cut one leaves the function, as a tail jump
+    /// does. O(blocks + edges).
+    fn reaching_unresolved(&self) -> Self {
+        let blocks = &self.body.blocks;
+        let held = |address: u64| {
+            let after = blocks.partition_point(|block| block.lifted.addr <= address);
+            after.checked_sub(1)
+        };
+        let mut preceding = vec![Vec::new(); blocks.len()];
+        for (at, block) in blocks.iter().enumerate() {
+            for (_, target) in &block.successors {
+                if let Ok(to) = blocks.binary_search_by_key(target, |block| block.lifted.addr) {
+                    preceding[to].push(at);
+                }
+            }
+        }
+        let indirect = self.body.unresolved.iter();
+        let indirect =
+            indirect.filter(|stop| stop.reason == crate::body::UnresolvedReason::IndirectBranch);
+        let mut keep = vec![false; blocks.len()];
+        let mut pending = indirect
+            .filter_map(|stop| held(stop.addr))
+            .collect::<Vec<_>>();
+        while let Some(at) = pending.pop() {
+            if !std::mem::replace(&mut keep[at], true) {
+                pending.extend(preceding[at].iter().copied());
+            }
+        }
+        if !keep.contains(&true) {
+            return self.clone();
+        }
+        let kept = (blocks.iter().zip(&keep))
+            .filter(|(_, kept)| **kept)
+            .map(|(block, _)| block.clone())
+            .collect();
+        Self {
+            name: self.name.clone(),
+            body: crate::body::Body {
+                entry: self.body.entry,
+                blocks: kept,
+                calls: self.body.calls.clone(),
+                tail_calls: self.body.tail_calls.clone(),
+                unresolved: self.body.unresolved.clone(),
+                exits: self.body.exits.clone(),
+            },
+            callees: self.callees.clone(),
+        }
+    }
+}
+
 /// One function a body calls.
 #[derive(Clone)]
 struct Callee {
@@ -1883,7 +1937,7 @@ impl Native<'_> {
         callees: &Callees,
         restatement: Restatement,
     ) -> Result<Vec<r2ssa::indirect::DispatchTableRead>, NativeRefusal> {
-        let seal = self.convention_seal(walked, callees, restatement)?;
+        let seal = self.convention_seal(&walked.reaching_unresolved(), callees, restatement)?;
         Ok(seal.dispatch_table_reads())
     }
 
