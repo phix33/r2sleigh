@@ -110,14 +110,6 @@ reason = "a fuzzed section header's type byte (0x33, 0x50, 0x89, 0xc7) names no 
 
 [[judged]]
 command = "pd"
-binaries = "*"
-r2 = '\bmov [wx]\d+, 0x[0-9a-f]+$'
-r2s = '\borr [wx]\d+, [wx]zr, 0x[0-9a-f]+$'
-verdict = "r2s-right"
-reason = "ORR with the zero register is MOV only where no single MOVZ or MOVN writes the value (Arm ARM MoveWidePreferred; llvm-mc: orr w0, wzr, #0x1, mov x9, #-274877906944); radare2 writes mov for every such ORR"
-
-[[judged]]
-command = "pd"
 binaries = "macho-trie-bad-export-info-malformed-uleb128"
 r2 = 'nop word cs:\[rax \+ rax\]$'
 r2s = 'nop dword cs:\[rax \+ rax\]$'
@@ -1089,15 +1081,6 @@ r2s = '^ldmia\w\w sp!, '
 r2 = '^pop\w\w '
 verdict = "r2-right"
 reason = "a conditional LDMIA SP! is POP<c>; the listing's ARM aliasing (r2sleigh-lift syntax `arm_alias`) only aliases the unconditional form; owner the Sleigh spelling (ROADMAP P11)"
-
-[[judged]]
-command = "aoj"
-binaries = "*"
-fields = ["decode"]
-r2s = '^b\.cc '
-r2 = '^b\.lo '
-verdict = "deliberate"
-reason = "CC and LO are one condition (C clear); Sleigh writes cc, radare2 lo"
 
 [[judged]]
 command = "aoj"
