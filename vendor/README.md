@@ -156,10 +156,10 @@ are pinned where they are used.
 |---|---|
 | Ghidra base | `918acd744d` |
 | AARCH64 | `918acd744d` |
-| ARM | `aed1cf1c` |
-| MIPS | `aed1cf1c` |
-| RISCV | `aed1cf1c` |
-| x86 | `aed1cf1c` |
+| ARM | `918acd744d` |
+| MIPS | `918acd744d` |
+| RISCV | `918acd744d` |
+| x86 | `918acd744d` |
 
 ## Drift budget
 
