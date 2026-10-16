@@ -776,7 +776,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ReferenceIndex {
     }
 }
 
-/// Read every believed body's references.
+/// Read every believed body's references, each from the walk `pdf` and `afb` read.
 fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String> {
     let survey = view.db.get::<SurveyQuery>(&());
     let survey = survey.map_err(|cycle| format!("{cycle:?}"))?;
@@ -790,26 +790,31 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
         return Ok(index.finish(coverage));
     }
     let walker = super::returns::Walking::new(view.clone(), true)?;
-    for (&entry, walked) in walked {
-        // Each body is lifted as `pdf` walks it, one at a time: discovery kept where control goes and not what it lifted.
-        let lifted = walked.clone().and_then(|thumb| {
-            let target = walker.target(thumb);
-            let body = crate::body::lift_body(entry, target.disasm, view, &BTreeMap::new());
-            body.map(|body| (thumb, body)).map_err(NativeRefusal::Body)
-        });
-        let (thumb, body) = match lifted {
-            Ok(lifted) => lifted,
+    for (&entry, thumb) in walked {
+        // The body is the one resolved through its dispatch tables, which `Walked` owns.
+        let walk = match thumb {
+            Ok(thumb) => {
+                let walking = view.db.get::<super::analysis::Walked>(&(entry, *thumb));
+                let walking = walking.map_err(|cycle| format!("{cycle:?}"))?;
+                walking.0.clone().map(|walk| (*thumb, walk))
+            }
+            Err(refusal) => Err(refusal.clone()),
+        };
+        let (thumb, walk) = match walk {
+            Ok(walk) => walk,
             Err(refusal) => {
                 coverage.unread.insert(entry, Unread::Refused(refusal));
                 continue;
             }
         };
-        if !body.unresolved.is_empty() {
-            coverage.unresolved.insert(entry, body.unresolved);
+        if !walk.body().unresolved.is_empty() {
+            coverage
+                .unresolved
+                .insert(entry, walk.body().unresolved.clone());
         }
         let machine = walker.machine(thumb).ok_or("no machine")?;
         let decoder = (walker.target(thumb), machine);
-        match claimed_by(view, decoder, body.blocks) {
+        match claimed_by(view, decoder, &walk.lifted()) {
             Ok(lines) => {
                 coverage.read.push(entry);
                 index.read(entry, lines);
@@ -826,13 +831,9 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
 fn claimed_by<S: Source + 'static>(
     view: &View<'_, S>,
     (target, machine): (&crate::native::NativeTarget<'_>, &crate::machine::Machine),
-    blocks: Vec<crate::body::BodyBlock>,
+    lifted: &[r2il::R2ILBlock],
 ) -> Result<Vec<Line>, Unread> {
-    let lifted = blocks
-        .into_iter()
-        .map(|block| block.lifted)
-        .collect::<Vec<_>>();
-    let body = WalkedBody::new(&lifted, target.arch);
+    let body = WalkedBody::new(lifted, target.arch);
     let answered = Answered {
         decoders: &Walked(machine),
         memory: Memory {
@@ -845,7 +846,7 @@ fn claimed_by<S: Source + 'static>(
         holdings: false,
         parameters: Some(view),
     };
-    let lines = listed_by_block(&answered, &lifted).value;
+    let lines = listed_by_block(&answered, lifted).value;
     // A number whose fate needed the def-use that did not build is unsettled, so the body is unread.
     if body.failed() {
         return Err(Unread::NoSsa);

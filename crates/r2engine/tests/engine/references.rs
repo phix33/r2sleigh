@@ -195,6 +195,78 @@ fn a_block_operation_and_a_computed_call_name_the_addresses_their_block_folds() 
     assert_eq!(text, ["lea rax, [0x1050]", "call rax"]);
 }
 
+/// `pick`: `cmp edi, 3; ja default; mov edi, edi; jmp [rdi*8 + 0x1060]` over four arms: `call one`, a read
+/// of the word at 0x1080, `mov eax, 30`, and a tail jump to `one`; the default returns -1. `one` is at 0x1040.
+const ARMS: &[u8] = &{
+    let mut code = [0xcc_u8; 0x88];
+    let runs: [(usize, &[u8]); 10] = [
+        (0x00, &[0x83, 0xff, 0x03, 0x77, 0x21, 0x89, 0xff]),
+        (0x07, &[0xff, 0x24, 0xfd, 0x60, 0x10, 0x00, 0x00]),
+        (0x0e, &[0xe8, 0x2d, 0x00, 0x00, 0x00, 0xc3]),
+        (
+            0x14,
+            &[0x48, 0x8b, 0x04, 0x25, 0x80, 0x10, 0x00, 0x00, 0xc3],
+        ),
+        (0x1e, &[0xb8, 0x1e, 0x00, 0x00, 0x00, 0xc3]),
+        (0x24, &[0xeb, 0x1a]),
+        (0x26, &[0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3]),
+        (0x40, &[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]),
+        (
+            0x60,
+            &[
+                0x0e, 0x10, 0, 0, 0, 0, 0, 0, // 0x1060 -> 0x100e
+                0x14, 0x10, 0, 0, 0, 0, 0, 0, // 0x1068 -> 0x1014
+                0x1e, 0x10, 0, 0, 0, 0, 0, 0, // 0x1070 -> 0x101e
+                0x24, 0x10, 0, 0, 0, 0, 0, 0, // 0x1078 -> 0x1024
+            ],
+        ),
+        (0x80, &[0x07, 0, 0, 0, 0, 0, 0, 0]), // the word the second arm reads
+    ];
+    let mut index = 0;
+    while index < runs.len() {
+        let (at, run) = runs[index];
+        let mut offset = 0;
+        while offset < run.len() {
+            code[at + offset] = run[offset];
+            offset += 1;
+        }
+        index += 1;
+    }
+    code
+};
+
+fn arms() -> Literal {
+    Literal::of_code(ARMS, &[("pick", BASE, 0x2c), ("one", BASE + 0x40, 6)])
+}
+
+#[test]
+fn the_index_holds_what_every_arm_of_a_solved_dispatch_names() {
+    // The arms are reached only through the table, so a walk that follows no table never lists them.
+    let mut program = OpenProgram::of(arms());
+    let index = program.references().expect("the index builds").value;
+    let one = BASE + 0x40;
+    assert_eq!(
+        listed(index.facts()),
+        [
+            // ja default, the guard
+            (BASE + 3, BASE + 0x26, Role::Jump, Basis::Decoded),
+            // call one, in the first arm
+            (BASE + 0xe, one, Role::Call, Basis::Decoded),
+            // mov rax, [0x1080], in the second
+            (
+                BASE + 0x14,
+                BASE + 0x80,
+                Role::Read { width: 8 },
+                Basis::Decoded
+            ),
+            // jmp one, the fourth arm's tail call
+            (BASE + 0x24, one, Role::Jump, Basis::Decoded),
+        ]
+    );
+    // The dispatch is solved, so no walk stopped at it.
+    assert!(index.coverage.is_closed(), "{:?}", index.coverage);
+}
+
 /// `left`: `test edi, edi; je tail; mov eax, 1; ret`; `tail`: `call leaf; ret`; `right`: `jmp tail`; `leaf`: `mov eax, 2; ret`.
 const SHARED: &[u8] = &[
     0x85, 0xff, // 0x1000 test edi, edi
@@ -291,6 +363,7 @@ fn the_index_is_what_each_function_listing_claims() {
         Literal::arm_thumb(),
         reading_callee(),
         declared_callee(),
+        arms(),
     ] {
         let mut program = OpenProgram::of(literal);
         let index = program.references().expect("the index builds").value;
