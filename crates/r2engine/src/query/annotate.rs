@@ -110,6 +110,19 @@ pub(super) fn over_run(
                 claims.push((kind, support));
             }
         }
+        // A dispatch the walk followed transfers to each of its arms, which no operation of the instruction names.
+        if let Some(body) = body {
+            let arms = body.arms_at(line.address).iter();
+            claims.extend(arms.map(|&address| {
+                (
+                    AnnotationKind::Target {
+                        address,
+                        call: false,
+                    },
+                    Basis::Solved,
+                )
+            }));
+        }
         // What the bytes hold is for a reader; the reference index reads only what the lines claim.
         if answered.holdings {
             let revision = revision_at(memory, &claims);

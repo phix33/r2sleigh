@@ -250,6 +250,11 @@ fn the_index_holds_what_every_arm_of_a_solved_dispatch_names() {
         [
             // ja default, the guard
             (BASE + 3, BASE + 0x26, Role::Jump, Basis::Decoded),
+            // jmp [rdi*8 + 0x1060], which reaches each arm the table holds
+            (BASE + 7, BASE + 0xe, Role::Jump, Basis::Solved),
+            (BASE + 7, BASE + 0x14, Role::Jump, Basis::Solved),
+            (BASE + 7, BASE + 0x1e, Role::Jump, Basis::Solved),
+            (BASE + 7, BASE + 0x24, Role::Jump, Basis::Solved),
             // call one, in the first arm
             (BASE + 0xe, one, Role::Call, Basis::Decoded),
             // mov rax, [0x1080], in the second

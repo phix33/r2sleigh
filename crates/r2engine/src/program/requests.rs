@@ -541,8 +541,9 @@ impl<S: Source + 'static> OpenProgram<S> {
         let key = (entry, self.view().thumb_at(entry));
         let walking = (self.db.get::<super::analysis::Walked>(&key))
             .map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
-        let lifted = walking.0.as_ref().map_err(Clone::clone)?.lifted();
-        let body = WalkedBody::new(&lifted, target.arch);
+        let walk = walking.0.as_ref().map_err(Clone::clone)?;
+        let lifted = walk.lifted();
+        let body = WalkedBody::new(&lifted, target.arch).dispatching(walk.dispatches());
         let proved = Proved::new(prepared);
         let answered = Answered {
             body: Some(&body),
@@ -814,7 +815,7 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
         }
         let machine = walker.machine(thumb).ok_or("no machine")?;
         let decoder = (walker.target(thumb), machine);
-        match claimed_by(view, decoder, &walk.lifted()) {
+        match claimed_by(view, decoder, &walk) {
             Ok(lines) => {
                 coverage.read.push(entry);
                 index.read(entry, lines);
@@ -831,9 +832,10 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
 fn claimed_by<S: Source + 'static>(
     view: &View<'_, S>,
     (target, machine): (&crate::native::NativeTarget<'_>, &crate::machine::Machine),
-    lifted: &[r2il::R2ILBlock],
+    walk: &crate::native::Walk,
 ) -> Result<Vec<Line>, Unread> {
-    let body = WalkedBody::new(lifted, target.arch);
+    let lifted = walk.lifted();
+    let body = WalkedBody::new(&lifted, target.arch).dispatching(walk.dispatches());
     let answered = Answered {
         decoders: &Walked(machine),
         memory: Memory {
@@ -846,7 +848,7 @@ fn claimed_by<S: Source + 'static>(
         holdings: false,
         parameters: Some(view),
     };
-    let lines = listed_by_block(&answered, lifted).value;
+    let lines = listed_by_block(&answered, &lifted).value;
     // A number whose fate needed the def-use that did not build is unsettled, so the body is unread.
     if body.failed() {
         return Err(Unread::NoSsa);

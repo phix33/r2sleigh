@@ -519,6 +519,11 @@ impl Walk {
         reached(&self.root.body, program)
     }
 
+    /// Each dispatch the walk followed: its instruction and the target of each table entry, in table order.
+    pub fn dispatches(&self) -> impl Iterator<Item = (u64, &[u64])> {
+        (self.tables.iter()).map(|table| (table.instruction, table.targets.as_slice()))
+    }
+
     /// The lift of each block of the body, dispatches followed.
     pub fn lifted(&self) -> Vec<r2il::R2ILBlock> {
         (self.root.body.blocks.iter())
