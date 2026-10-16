@@ -4991,6 +4991,29 @@ fn a_stack_protector_check_whose_failure_calls_through_a_slot_is_decided() {
     assert!(!output.contains("compiler-inserted"), "{output}");
 }
 
+/// `CANARY_CHECKED` with the failure path `call`, then `jmp rax`: the call may come back and the
+/// block's only exit is the jump, so no call ends it and nothing proves a protector.
+fn check_failing_through_a_call_then_a_jump(call: &[u8], name: &'static str) {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let mut bytes = CANARY_CHECKED_THROUGH_A_SLOT[..0x29].to_vec();
+    bytes.extend(call);
+    bytes.extend([0xff, 0xe0]); // jmp rax
+    let response = decompile(&machine.target(), &Fixture { bytes, name }, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("compiler-inserted"), "{output}");
+}
+
+#[test]
+fn a_check_whose_failure_calls_through_a_slot_and_then_jumps_is_not_decided() {
+    check_failing_through_a_call_then_a_jump(&[0xff, 0x15, 0x11, 0x00, 0x00, 0x00], "slot_jump");
+}
+
+#[test]
+fn a_check_whose_failure_calls_and_then_jumps_is_not_decided() {
+    check_failing_through_a_call_then_a_jump(&[0xe8, 0x0c, 0x00, 0x00, 0x00], "call_jump");
+}
+
 /// `if (edi == 0) goto done; call [slot]; done: ret`, the slot at 0x1040.
 const CALL_THROUGH_A_SLOT_BEFORE_A_JOIN: &[u8] = &[
     0x85, 0xff, // 1000 test edi, edi
@@ -6142,12 +6165,25 @@ fn a_signed_divide_of_the_most_negative_value_by_minus_one_is_not_a_c_division()
 /// Staged renders `bytes` (padded for the lifter) with every obligation accounted: no refusal and
 /// no unaccounted obligation in the proof line. The rendered text.
 fn sited_staged(arch: &str, name: &'static str, bytes: &[u8]) -> String {
+    let bytes = [bytes, &[0x90; 16]].concat();
+    sited(arch, &Fixture { bytes, name })
+}
+
+/// `sited_staged` for a program that states the function at `halts` never returns.
+fn sited_staged_halting(arch: &str, name: &'static str, bytes: &[u8], halts: u64) -> String {
+    let bytes = [bytes, &[0x90; 16]].concat();
+    sited(
+        arch,
+        &Halting {
+            fixture: Fixture { bytes, name },
+            halts,
+        },
+    )
+}
+
+fn sited(arch: &str, program: &dyn Program) -> String {
     let machine = Machine::on(arch, arch, 64, Platform::Linux);
-    let program = Fixture {
-        bytes: [bytes, &[0x90; 16]].concat(),
-        name,
-    };
-    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let response = decompile(&machine.target(), program, BASE).expect("decompile");
     let text = response.output.text().to_owned();
     assert!(!text.contains("r2sleigh refused"), "{text}");
     let proof = (text.lines())
@@ -6223,7 +6259,8 @@ const EDGE_COPY_GAP: &[u8] = &[
 
 #[test]
 fn a_phi_copy_written_as_an_edge_gap_is_that_merges_site() {
-    let text = sited_staged("x86-64", "shape_byte_indexed_buffer", EDGE_COPY_GAP);
+    // The protector's failure is `call 0x230`, which the program states never returns.
+    let text = sited_staged_halting("x86-64", "shape_byte_indexed_buffer", EDGE_COPY_GAP, 0x230);
     assert!(text.contains("ValuesNotRendered"), "{text}");
 }
 
