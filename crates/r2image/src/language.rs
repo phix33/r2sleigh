@@ -373,9 +373,8 @@ fn cpp_runtime(library: &str) -> bool {
         || library.to_ascii_lowercase().starts_with("msvcp")
 }
 
-/// The libraries the program states it needs: ELF's `DT_NEEDED`, PE's import descriptors, Mach-O's
-/// dylib commands, in the order stated and once each. At most `LIBRARIES` names: a crafted table
-/// can state millions.
+/// The libraries the program states it needs (ELF `DT_NEEDED`, PE imports, Mach-O dylibs), once
+/// each in stated order, at most `LIBRARIES`.
 pub(crate) fn libraries(file: &object::File<'_>) -> Vec<String> {
     let mut libraries = match file {
         object::File::Pe32(pe) => pe_needed(pe),

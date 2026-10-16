@@ -1,7 +1,4 @@
-//! How an image is linked and protected, read from its program headers and dynamic section.
-//!
-//! One pass over the headers and one over the dynamic entries, each bounded by the bytes the
-//! file holds (D18): `O(phnum + dynamic entries)` once at open.
+//! How an image is linked and protected: one bounded pass over its headers and dynamic section (D18).
 
 use object::elf;
 use object::read::elf::{Dyn as _, ElfFile, FileHeader, ProgramHeader as _};

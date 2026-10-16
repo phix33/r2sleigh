@@ -830,9 +830,8 @@ fn a_dispatch_table_in_memory_the_program_may_write_is_read_only_through_the_loa
     assert_eq!(relocated(4), [(table, 4, sealed)]);
 }
 
-/// An executable with a `PT_INTERP` is relocated and sealed by the interpreter before its own code
-/// runs, so a RELRO entry no record writes is the file's arm; a static image has no such other
-/// image and keeps the refusal above (ROADMAP M18).
+/// An interpreted executable is relocated by its interpreter first, so an unwritten RELRO entry is
+/// the file's arm; a static image keeps the refusal above (ROADMAP M18).
 #[test]
 fn a_sealed_table_of_an_interpreted_executable_reads_the_words_no_record_writes() {
     use r2engine::native::TableBytes;
