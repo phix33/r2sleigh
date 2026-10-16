@@ -839,7 +839,7 @@ fn riscv_atomic_bytes_retain_only_canonical_sleigh_semantics() {
     const ADDR: u64 = 0x420000;
 
     let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::RiscV64Gc)
-        .expect("trusted RV64GC disassembler");
+        .expect("trusted RV64 disassembler");
     for (index, (bytes, expected_token)) in [
         (FENCE_IORW_IORW, "fence"),
         (LR_W_A0_A1, "lr.w"),

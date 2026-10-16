@@ -312,13 +312,13 @@ impl TrustedSleighProfile {
             #[cfg(feature = "riscv")]
             Self::RiscV32Gc => (
                 sleigh_config::processor_riscv::SLA_RISCV_ILP32D,
-                sleigh_config::processor_riscv::PSPEC_RV32GC,
+                sleigh_config::processor_riscv::PSPEC_RV32,
                 "riscv32",
             ),
             #[cfg(feature = "riscv")]
             Self::RiscV64Gc => (
                 sleigh_config::processor_riscv::SLA_RISCV_LP64D,
-                sleigh_config::processor_riscv::PSPEC_RV64GC,
+                sleigh_config::processor_riscv::PSPEC_RV64,
                 "riscv64",
             ),
         }
@@ -1936,7 +1936,7 @@ fn selection(
         ),
         #[cfg(feature = "riscv")]
         "riscv64" | "riscv" | "rv64" if order.is_little() => {
-            select(riscv, "RISCV:LE:64:RV64GC", None, "riscv64", "riscv")
+            select(riscv, "RISCV:LE:64:default", None, "riscv64", "riscv")
         }
         _ => None,
     }

@@ -7,6 +7,7 @@
     <property key="useNewFunctionStackAnalysis" value="true"/>
     <property key="enableContiguousFunctionsOnly" value="false"/>
     <property key="emulateInstructionStateModifierClass" value="ghidra.program.emulation.ARMEmulateInstructionStateModifier"/>
+    <property key="useropLibs" value="arm"/>
     <property key="assemblyRating:ARM:BE:32:v7" value="PLATINUM"/>
     <property key="assemblyRating:ARM:LE:32:v7" value="PLATINUM"/>
   </properties>
@@ -42,6 +43,8 @@
   </default_symbols>
   
   <register_data>
+    <register name="TB" alias="ISAModeSwitch"/>
+
     <register name="q0" group="NEON" vector_lane_sizes="1,2,4"/> 
     <register name="q1" group="NEON" vector_lane_sizes="1,2,4"/> 
     <register name="q2" group="NEON" vector_lane_sizes="1,2,4"/> 
@@ -58,16 +61,6 @@
     <register name="q13" group="NEON" vector_lane_sizes="1,2,4"/> 
     <register name="q14" group="NEON" vector_lane_sizes="1,2,4"/> 
     <register name="q15" group="NEON" vector_lane_sizes="1,2,4"/> 
-    <!-- Sleigh's scratch: written and read within one instruction, no machine state -->
-    <register name="tmpNG" hidden="true"/>
-    <register name="tmpZR" hidden="true"/>
-    <register name="tmpCY" hidden="true"/>
-    <register name="tmpOV" hidden="true"/>
-    <register name="shift_carry" hidden="true"/>
-    <register name="mult_addr" hidden="true"/>
-    <register name="mult_dat8" hidden="true"/>
-    <register name="mult_dat16" hidden="true"/>
-    <register name="ISAModeSwitch" hidden="true"/>
   </register_data>
 
   
