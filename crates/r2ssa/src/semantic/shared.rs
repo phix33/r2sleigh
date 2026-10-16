@@ -1871,7 +1871,7 @@ pub(crate) fn evidenced_stack_roots(
             {
                 addr
             }
-            SSAOp::AtomicCAS(ref swap) if swap.space == SpaceId::Ram => swap.addr,
+            SSAOp::Atomic(ref access) if access.space == SpaceId::Ram => access.addr,
             _ => continue,
         };
         if let Some(root) = exact_root(addr) {

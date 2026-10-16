@@ -136,7 +136,10 @@ mod tests {
             .ops()
             .iter()
             .find_map(|op| match op {
-                SSAOp::IntAdd { dst, a, b } => Some((dst, a, b)),
+                // AF's nibble sum is an addition too; the instruction's own writes RAX.
+                SSAOp::IntAdd { dst, a, b } if dst.name().eq_ignore_ascii_case("rax") => {
+                    Some((dst, a, b))
+                }
                 _ => None,
             })
             .expect("Should have an IntAdd operation");

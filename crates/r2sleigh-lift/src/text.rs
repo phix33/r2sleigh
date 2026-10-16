@@ -77,24 +77,29 @@ pub fn format_op(disasm: &Disassembler, op: &R2ILOp) -> String {
                 ordering
             )
         }
-        AtomicCAS {
-            dst,
-            space,
-            addr,
-            expected,
-            replacement,
-            ordering,
-        } => {
+        Atomic(access) => {
+            let update = match &access.update {
+                r2il::AtomicUpdate::Fetch { op, operand } => {
+                    format!("Fetch {{ op: {op:?}, operand: {} }}", vn(operand))
+                }
+                r2il::AtomicUpdate::CompareExchange {
+                    expected,
+                    replacement,
+                } => format!(
+                    "CompareExchange {{ expected: {}, replacement: {} }}",
+                    vn(expected),
+                    vn(replacement)
+                ),
+            };
             format!(
-                "AtomicCAS {{ dst: {}, space: {:?}, addr: {}, expected: {}, replacement: {}, ordering: {:?} }}",
-                vn(dst),
-                space,
-                vn(addr),
-                vn(expected),
-                vn(replacement),
-                ordering
+                "Atomic {{ dst: {}, space: {:?}, addr: {}, update: {update}, ordering: {:?} }}",
+                vn(&access.dst),
+                access.space,
+                vn(&access.addr),
+                access.ordering
             )
         }
+        IndivisibleAccess => "IndivisibleAccess".to_string(),
         LoadGuarded {
             dst,
             space,

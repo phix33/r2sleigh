@@ -85,6 +85,68 @@ pub struct BlockTransfer {
     pub answer: Option<Varnode>,
 }
 
+/// What an indivisible read-modify-write computes from the value it read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum AtomicFetchOp {
+    Add,
+    /// `old - operand`.
+    Sub,
+    And,
+    Or,
+    Xor,
+    /// The operand itself, whatever was read.
+    Swap,
+    SignedMax,
+    SignedMin,
+    UnsignedMax,
+    UnsignedMin,
+}
+
+/// What an indivisible access writes back over the value it read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtomicUpdate {
+    /// `old op operand`, always written.
+    Fetch { op: AtomicFetchOp, operand: Varnode },
+    /// `replacement`, written only where the value read equals `expected`.
+    CompareExchange {
+        expected: Varnode,
+        replacement: Varnode,
+    },
+}
+
+/// One indivisible read-modify-write of `dst.size` bytes at `addr`; `dst` is the value read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtomicAccess {
+    pub dst: Varnode,
+    pub space: SpaceId,
+    pub addr: Varnode,
+    pub update: AtomicUpdate,
+    pub ordering: MemoryOrdering,
+}
+
+impl AtomicAccess {
+    /// The operands after the address: the fetch's operand, or the expected value and the replacement.
+    pub fn operands(&self) -> Vec<&Varnode> {
+        match &self.update {
+            AtomicUpdate::Fetch { operand, .. } => vec![operand],
+            AtomicUpdate::CompareExchange {
+                expected,
+                replacement,
+            } => vec![expected, replacement],
+        }
+    }
+
+    pub fn operands_mut(&mut self) -> Vec<&mut Varnode> {
+        match &mut self.update {
+            AtomicUpdate::Fetch { operand, .. } => vec![operand],
+            AtomicUpdate::CompareExchange {
+                expected,
+                replacement,
+            } => vec![expected, replacement],
+        }
+    }
+}
+
 /// The operand one operation sends control to, and how it sends it there.
 ///
 /// R2IL's statement of which operand of a branch or a call says where control
@@ -100,6 +162,19 @@ pub struct ControlTransfer<'a> {
     pub direct: bool,
     /// Whether control comes back after it, as it does from a call.
     pub call: bool,
+}
+
+/// One access an operation makes to memory, as [`R2ILOp::memory_accesses`] states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryAccess<'a> {
+    pub kind: crate::eval::AccessKind,
+    pub space: SpaceId,
+    /// The address operand: the first element's where `repeated`.
+    pub addr: &'a Varnode,
+    /// Bytes per access, or per element where `repeated`.
+    pub size: u32,
+    /// A block transfer's: its count and direction decide the extent, so it may reach anywhere in `space`.
+    pub repeated: bool,
 }
 
 /// An r2il operation representing a single semantic action.
@@ -159,15 +234,12 @@ pub enum R2ILOp {
         ordering: MemoryOrdering,
     },
 
-    /// Atomic compare and exchange: dst = CAS(*addr, expected, replacement).
-    AtomicCAS {
-        dst: Varnode,
-        space: SpaceId,
-        addr: Varnode,
-        expected: Varnode,
-        replacement: Varnode,
-        ordering: MemoryOrdering,
-    },
+    /// One indivisible read-modify-write: a fetch operation or a compare-and-exchange.
+    Atomic(Box<AtomicAccess>),
+
+    /// The instruction's memory accesses are one indivisible access the lift has no typed
+    /// statement of; eval runs them as written, and nothing may render them as plain accesses.
+    IndivisibleAccess,
 
     /// Guarded load from memory: if guard then load.
     LoadGuarded {
@@ -600,6 +672,214 @@ pub enum R2ILOp {
     },
 }
 
+/// The operations that compute a value from their operands alone. With the memory, control and
+/// state classes below it names every operation once, so a list by class is exhaustive (D41).
+macro_rules! value_operation {
+    () => {
+        R2ILOp::Copy { .. }
+            | R2ILOp::IntAdd { .. }
+            | R2ILOp::IntSub { .. }
+            | R2ILOp::IntMult { .. }
+            | R2ILOp::IntDiv { .. }
+            | R2ILOp::IntSDiv { .. }
+            | R2ILOp::IntRem { .. }
+            | R2ILOp::IntSRem { .. }
+            | R2ILOp::IntNegate { .. }
+            | R2ILOp::IntCarry { .. }
+            | R2ILOp::IntSCarry { .. }
+            | R2ILOp::IntSBorrow { .. }
+            | R2ILOp::IntAnd { .. }
+            | R2ILOp::IntOr { .. }
+            | R2ILOp::IntXor { .. }
+            | R2ILOp::IntNot { .. }
+            | R2ILOp::IntLeft { .. }
+            | R2ILOp::IntRight { .. }
+            | R2ILOp::IntSRight { .. }
+            | R2ILOp::IntEqual { .. }
+            | R2ILOp::IntNotEqual { .. }
+            | R2ILOp::IntLess { .. }
+            | R2ILOp::IntSLess { .. }
+            | R2ILOp::IntLessEqual { .. }
+            | R2ILOp::IntSLessEqual { .. }
+            | R2ILOp::IntZExt { .. }
+            | R2ILOp::IntSExt { .. }
+            | R2ILOp::BoolNot { .. }
+            | R2ILOp::BoolAnd { .. }
+            | R2ILOp::BoolOr { .. }
+            | R2ILOp::BoolXor { .. }
+            | R2ILOp::Piece { .. }
+            | R2ILOp::Subpiece { .. }
+            | R2ILOp::PopCount { .. }
+            | R2ILOp::Lzcount { .. }
+            | R2ILOp::FloatAdd { .. }
+            | R2ILOp::FloatSub { .. }
+            | R2ILOp::FloatMult { .. }
+            | R2ILOp::FloatDiv { .. }
+            | R2ILOp::FloatNeg { .. }
+            | R2ILOp::FloatAbs { .. }
+            | R2ILOp::FloatSqrt { .. }
+            | R2ILOp::FloatCeil { .. }
+            | R2ILOp::FloatFloor { .. }
+            | R2ILOp::FloatRound { .. }
+            | R2ILOp::FloatNaN { .. }
+            | R2ILOp::FloatEqual { .. }
+            | R2ILOp::FloatNotEqual { .. }
+            | R2ILOp::FloatLess { .. }
+            | R2ILOp::FloatLessEqual { .. }
+            | R2ILOp::Int2Float { .. }
+            | R2ILOp::Float2Int { .. }
+            | R2ILOp::FloatFloat { .. }
+            | R2ILOp::Trunc { .. }
+            | R2ILOp::Multiequal { .. }
+            | R2ILOp::Indirect { .. }
+            | R2ILOp::PtrAdd { .. }
+            | R2ILOp::PtrSub { .. }
+            | R2ILOp::SegmentOp { .. }
+            | R2ILOp::Cast { .. }
+            | R2ILOp::Extract { .. }
+            | R2ILOp::Insert { .. }
+            | R2ILOp::Select { .. }
+    };
+}
+
+/// The operations that read or write memory, or order its accesses.
+macro_rules! memory_operation {
+    () => {
+        R2ILOp::Load { .. }
+            | R2ILOp::Store { .. }
+            | R2ILOp::BlockTransfer(_)
+            | R2ILOp::Fence { .. }
+            | R2ILOp::ClearExclusive
+            | R2ILOp::IndivisibleAccess
+            | R2ILOp::LoadLinked { .. }
+            | R2ILOp::StoreConditional { .. }
+            | R2ILOp::Atomic(_)
+            | R2ILOp::LoadGuarded { .. }
+            | R2ILOp::StoreGuarded { .. }
+    };
+}
+
+/// The operations that decide where control goes.
+macro_rules! control_operation {
+    () => {
+        R2ILOp::Branch { .. }
+            | R2ILOp::CBranch { .. }
+            | R2ILOp::BranchInd { .. }
+            | R2ILOp::Call { .. }
+            | R2ILOp::CallInd { .. }
+            | R2ILOp::Return { .. }
+            | R2ILOp::Breakpoint
+    };
+}
+
+/// The rest: machine state, allocation, user operations, and no operation.
+macro_rules! state_operation {
+    () => {
+        R2ILOp::CallOther { .. }
+            | R2ILOp::Nop
+            | R2ILOp::Unimplemented
+            | R2ILOp::CpuId { .. }
+            | R2ILOp::New { .. }
+    };
+}
+
+/// Every operation's output, named once for [`R2ILOp::output`] and [`R2ILOp::output_mut`]: an
+/// operation added without an arm fails to compile, so phi placement never misses a definition.
+macro_rules! output_of {
+    ($op:expr, $as:ident) => {
+        match $op {
+            R2ILOp::Copy { dst, .. }
+            | R2ILOp::Load { dst, .. }
+            | R2ILOp::LoadLinked { dst, .. }
+            | R2ILOp::LoadGuarded { dst, .. }
+            | R2ILOp::IntAdd { dst, .. }
+            | R2ILOp::IntSub { dst, .. }
+            | R2ILOp::IntMult { dst, .. }
+            | R2ILOp::IntDiv { dst, .. }
+            | R2ILOp::IntSDiv { dst, .. }
+            | R2ILOp::IntRem { dst, .. }
+            | R2ILOp::IntSRem { dst, .. }
+            | R2ILOp::IntNegate { dst, .. }
+            | R2ILOp::IntCarry { dst, .. }
+            | R2ILOp::IntSCarry { dst, .. }
+            | R2ILOp::IntSBorrow { dst, .. }
+            | R2ILOp::IntAnd { dst, .. }
+            | R2ILOp::IntOr { dst, .. }
+            | R2ILOp::IntXor { dst, .. }
+            | R2ILOp::IntNot { dst, .. }
+            | R2ILOp::IntLeft { dst, .. }
+            | R2ILOp::IntRight { dst, .. }
+            | R2ILOp::IntSRight { dst, .. }
+            | R2ILOp::IntEqual { dst, .. }
+            | R2ILOp::IntNotEqual { dst, .. }
+            | R2ILOp::IntLess { dst, .. }
+            | R2ILOp::IntSLess { dst, .. }
+            | R2ILOp::IntLessEqual { dst, .. }
+            | R2ILOp::IntSLessEqual { dst, .. }
+            | R2ILOp::IntZExt { dst, .. }
+            | R2ILOp::IntSExt { dst, .. }
+            | R2ILOp::BoolNot { dst, .. }
+            | R2ILOp::BoolAnd { dst, .. }
+            | R2ILOp::BoolOr { dst, .. }
+            | R2ILOp::BoolXor { dst, .. }
+            | R2ILOp::Piece { dst, .. }
+            | R2ILOp::Subpiece { dst, .. }
+            | R2ILOp::PopCount { dst, .. }
+            | R2ILOp::Lzcount { dst, .. }
+            | R2ILOp::FloatAdd { dst, .. }
+            | R2ILOp::FloatSub { dst, .. }
+            | R2ILOp::FloatMult { dst, .. }
+            | R2ILOp::FloatDiv { dst, .. }
+            | R2ILOp::FloatNeg { dst, .. }
+            | R2ILOp::FloatAbs { dst, .. }
+            | R2ILOp::FloatSqrt { dst, .. }
+            | R2ILOp::FloatCeil { dst, .. }
+            | R2ILOp::FloatFloor { dst, .. }
+            | R2ILOp::FloatRound { dst, .. }
+            | R2ILOp::FloatNaN { dst, .. }
+            | R2ILOp::FloatEqual { dst, .. }
+            | R2ILOp::FloatNotEqual { dst, .. }
+            | R2ILOp::FloatLess { dst, .. }
+            | R2ILOp::FloatLessEqual { dst, .. }
+            | R2ILOp::Int2Float { dst, .. }
+            | R2ILOp::Float2Int { dst, .. }
+            | R2ILOp::FloatFloat { dst, .. }
+            | R2ILOp::Trunc { dst, .. }
+            | R2ILOp::CpuId { dst }
+            | R2ILOp::Multiequal { dst, .. }
+            | R2ILOp::Indirect { dst, .. }
+            | R2ILOp::PtrAdd { dst, .. }
+            | R2ILOp::PtrSub { dst, .. }
+            | R2ILOp::SegmentOp { dst, .. }
+            | R2ILOp::New { dst, .. }
+            | R2ILOp::Cast { dst, .. }
+            | R2ILOp::Extract { dst, .. }
+            | R2ILOp::Insert { dst, .. }
+            | R2ILOp::Select { dst, .. } => Some(dst),
+            R2ILOp::StoreConditional { result, .. } => result.$as(),
+            R2ILOp::CallOther { output, .. } => output.$as(),
+            R2ILOp::BlockTransfer(transfer) => transfer.answer.$as(),
+            R2ILOp::Atomic(access) => match access.$as() {
+                AtomicAccess { dst, .. } => Some(dst),
+            },
+            R2ILOp::Store { .. }
+            | R2ILOp::StoreGuarded { .. }
+            | R2ILOp::Fence { .. }
+            | R2ILOp::ClearExclusive
+            | R2ILOp::IndivisibleAccess
+            | R2ILOp::Branch { .. }
+            | R2ILOp::CBranch { .. }
+            | R2ILOp::BranchInd { .. }
+            | R2ILOp::Call { .. }
+            | R2ILOp::CallInd { .. }
+            | R2ILOp::Return { .. }
+            | R2ILOp::Nop
+            | R2ILOp::Unimplemented
+            | R2ILOp::Breakpoint => None,
+        }
+    };
+}
+
 impl R2ILOp {
     /// What this operation does with the numbers it reads.
     pub fn value_use(&self) -> ValueUse {
@@ -649,25 +929,38 @@ impl R2ILOp {
             | R2ILOp::BoolXor { .. }
             | R2ILOp::PopCount { .. }
             | R2ILOp::Lzcount { .. } => ValueUse::Tests,
-            _ => ValueUse::Consumes,
+            R2ILOp::FloatAdd { .. }
+            | R2ILOp::FloatSub { .. }
+            | R2ILOp::FloatMult { .. }
+            | R2ILOp::FloatDiv { .. }
+            | R2ILOp::FloatNeg { .. }
+            | R2ILOp::FloatAbs { .. }
+            | R2ILOp::FloatSqrt { .. }
+            | R2ILOp::FloatCeil { .. }
+            | R2ILOp::FloatFloor { .. }
+            | R2ILOp::FloatRound { .. }
+            | R2ILOp::FloatNaN { .. }
+            | R2ILOp::FloatEqual { .. }
+            | R2ILOp::FloatNotEqual { .. }
+            | R2ILOp::FloatLess { .. }
+            | R2ILOp::FloatLessEqual { .. }
+            | R2ILOp::Int2Float { .. }
+            | R2ILOp::Float2Int { .. }
+            | R2ILOp::FloatFloat { .. }
+            | R2ILOp::Trunc { .. }
+            | memory_operation!()
+            | control_operation!()
+            | state_operation!() => ValueUse::Consumes,
         }
     }
 
     /// Returns true if this operation is a control flow operation.
     pub fn is_control_flow(&self) -> bool {
-        matches!(
-            self,
-            R2ILOp::Branch { .. }
-                | R2ILOp::CBranch { .. }
-                | R2ILOp::BranchInd { .. }
-                | R2ILOp::Call { .. }
-                | R2ILOp::CallInd { .. }
-                | R2ILOp::Return { .. }
-                // A trap decides where control goes as surely as a branch
-                // does: to the exception handler, and not back. A block ends
-                // at one, and it names no successor of its own.
-                | R2ILOp::Breakpoint
-        )
+        // A trap goes to the exception handler and not back: a block ends at one, naming no successor.
+        match self {
+            control_operation!() => true,
+            memory_operation!() | state_operation!() | value_operation!() => false,
+        }
     }
 
     /// Where this operation sends control, where it names a place to send it.
@@ -681,12 +974,28 @@ impl R2ILOp {
             R2ILOp::Call { target } => (target, true, true),
             R2ILOp::BranchInd { target } => (target, false, false),
             R2ILOp::CallInd { target } => (target, false, true),
-            _ => return None,
+            R2ILOp::Return { .. }
+            | R2ILOp::Breakpoint
+            | memory_operation!()
+            | state_operation!()
+            | value_operation!() => return None,
         };
         Some(ControlTransfer {
             target,
             direct,
             call,
+        })
+    }
+
+    /// Whether control comes back after this operation's transfer, as it does from a call.
+    pub fn is_call(&self) -> bool {
+        self.transfer().is_some_and(|transfer| transfer.call)
+    }
+
+    /// A branch to an operation of the same instruction: Sleigh states its target in the constant space.
+    pub fn is_local_branch(&self) -> bool {
+        self.transfer().is_some_and(|transfer| {
+            transfer.direct && !transfer.call && transfer.target.space == SpaceId::Const
         })
     }
 
@@ -713,26 +1022,79 @@ impl R2ILOp {
         }
     }
 
+    /// Every access this operation makes to memory, in the order it makes them; a conditional or
+    /// linked access names the address it would use as surely as a plain one does.
+    pub fn memory_accesses(&self) -> impl Iterator<Item = MemoryAccess<'_>> {
+        use crate::eval::AccessKind::{Read, Write};
+        let one = |kind, space: &SpaceId, addr, size| MemoryAccess {
+            kind,
+            space: *space,
+            addr,
+            size,
+            repeated: false,
+        };
+        let accesses: [Option<MemoryAccess<'_>>; 3] = match self {
+            R2ILOp::Load { dst, space, addr }
+            | R2ILOp::LoadLinked {
+                dst, space, addr, ..
+            }
+            | R2ILOp::LoadGuarded {
+                dst, space, addr, ..
+            } => [Some(one(Read, space, addr, dst.size)), None, None],
+            R2ILOp::Store { space, addr, val }
+            | R2ILOp::StoreConditional {
+                space, addr, val, ..
+            }
+            | R2ILOp::StoreGuarded {
+                space, addr, val, ..
+            } => [Some(one(Write, space, addr, val.size)), None, None],
+            R2ILOp::Atomic(access) => {
+                let AtomicAccess {
+                    dst, space, addr, ..
+                } = access.as_ref();
+                [
+                    Some(one(Read, space, addr, dst.size)),
+                    Some(one(Write, space, addr, dst.size)),
+                    None,
+                ]
+            }
+            R2ILOp::BlockTransfer(transfer) => {
+                let kind = transfer.kind;
+                let element = |kind, addr| MemoryAccess {
+                    kind,
+                    space: transfer.space,
+                    addr,
+                    size: transfer.element_size,
+                    repeated: true,
+                };
+                [
+                    kind.source_is_address()
+                        .then(|| element(Read, &transfer.source)),
+                    kind.stop().map(|_| element(Read, &transfer.destination)),
+                    kind.writes_memory()
+                        .then(|| element(Write, &transfer.destination)),
+                ]
+            }
+            R2ILOp::Fence { .. }
+            | R2ILOp::ClearExclusive
+            | R2ILOp::IndivisibleAccess
+            | control_operation!()
+            | state_operation!()
+            | value_operation!() => [None, None, None],
+        };
+        accesses.into_iter().flatten()
+    }
+
     /// Returns true if this operation reads from memory.
     pub fn is_memory_read(&self) -> bool {
-        matches!(
-            self,
-            R2ILOp::Load { .. }
-                | R2ILOp::LoadLinked { .. }
-                | R2ILOp::LoadGuarded { .. }
-                | R2ILOp::AtomicCAS { .. }
-        ) || matches!(self, R2ILOp::BlockTransfer(transfer) if transfer.kind.reads_memory())
+        self.memory_accesses()
+            .any(|access| access.kind == crate::eval::AccessKind::Read)
     }
 
     /// Returns true if this operation writes to memory.
     pub fn is_memory_write(&self) -> bool {
-        matches!(
-            self,
-            R2ILOp::Store { .. }
-                | R2ILOp::StoreConditional { .. }
-                | R2ILOp::StoreGuarded { .. }
-                | R2ILOp::AtomicCAS { .. }
-        ) || matches!(self, R2ILOp::BlockTransfer(transfer) if transfer.kind.writes_memory())
+        self.memory_accesses()
+            .any(|access| access.kind == crate::eval::AccessKind::Write)
     }
 
     /// Returns true when this value operation may be evaluated speculatively.
@@ -764,162 +1126,14 @@ impl R2ILOp {
         )
     }
 
-    /// Returns the output varnode if this operation has one.
+    /// The output varnode, if any: the one list renaming and phi placement both read.
     pub fn output(&self) -> Option<&Varnode> {
-        match self {
-            R2ILOp::Copy { dst, .. }
-            | R2ILOp::Load { dst, .. }
-            | R2ILOp::LoadLinked { dst, .. }
-            | R2ILOp::LoadGuarded { dst, .. }
-            | R2ILOp::AtomicCAS { dst, .. }
-            | R2ILOp::IntAdd { dst, .. }
-            | R2ILOp::IntSub { dst, .. }
-            | R2ILOp::IntMult { dst, .. }
-            | R2ILOp::IntDiv { dst, .. }
-            | R2ILOp::IntSDiv { dst, .. }
-            | R2ILOp::IntRem { dst, .. }
-            | R2ILOp::IntSRem { dst, .. }
-            | R2ILOp::IntNegate { dst, .. }
-            | R2ILOp::IntCarry { dst, .. }
-            | R2ILOp::IntSCarry { dst, .. }
-            | R2ILOp::IntSBorrow { dst, .. }
-            | R2ILOp::IntAnd { dst, .. }
-            | R2ILOp::IntOr { dst, .. }
-            | R2ILOp::IntXor { dst, .. }
-            | R2ILOp::IntNot { dst, .. }
-            | R2ILOp::IntLeft { dst, .. }
-            | R2ILOp::IntRight { dst, .. }
-            | R2ILOp::IntSRight { dst, .. }
-            | R2ILOp::IntEqual { dst, .. }
-            | R2ILOp::IntNotEqual { dst, .. }
-            | R2ILOp::IntLess { dst, .. }
-            | R2ILOp::IntSLess { dst, .. }
-            | R2ILOp::IntLessEqual { dst, .. }
-            | R2ILOp::IntSLessEqual { dst, .. }
-            | R2ILOp::IntZExt { dst, .. }
-            | R2ILOp::IntSExt { dst, .. }
-            | R2ILOp::BoolNot { dst, .. }
-            | R2ILOp::BoolAnd { dst, .. }
-            | R2ILOp::BoolOr { dst, .. }
-            | R2ILOp::BoolXor { dst, .. }
-            | R2ILOp::Piece { dst, .. }
-            | R2ILOp::Subpiece { dst, .. }
-            | R2ILOp::PopCount { dst, .. }
-            | R2ILOp::Lzcount { dst, .. }
-            | R2ILOp::FloatAdd { dst, .. }
-            | R2ILOp::FloatSub { dst, .. }
-            | R2ILOp::FloatMult { dst, .. }
-            | R2ILOp::FloatDiv { dst, .. }
-            | R2ILOp::FloatNeg { dst, .. }
-            | R2ILOp::FloatAbs { dst, .. }
-            | R2ILOp::FloatSqrt { dst, .. }
-            | R2ILOp::FloatCeil { dst, .. }
-            | R2ILOp::FloatFloor { dst, .. }
-            | R2ILOp::FloatRound { dst, .. }
-            | R2ILOp::FloatNaN { dst, .. }
-            | R2ILOp::FloatEqual { dst, .. }
-            | R2ILOp::FloatNotEqual { dst, .. }
-            | R2ILOp::FloatLess { dst, .. }
-            | R2ILOp::FloatLessEqual { dst, .. }
-            | R2ILOp::Int2Float { dst, .. }
-            | R2ILOp::Float2Int { dst, .. }
-            | R2ILOp::FloatFloat { dst, .. }
-            | R2ILOp::Trunc { dst, .. }
-            | R2ILOp::CpuId { dst }
-            | R2ILOp::Multiequal { dst, .. }
-            | R2ILOp::Indirect { dst, .. }
-            | R2ILOp::PtrAdd { dst, .. }
-            | R2ILOp::PtrSub { dst, .. }
-            | R2ILOp::SegmentOp { dst, .. }
-            | R2ILOp::New { dst, .. }
-            | R2ILOp::Cast { dst, .. }
-            | R2ILOp::Extract { dst, .. }
-            | R2ILOp::Insert { dst, .. }
-            | R2ILOp::Select { dst, .. } => Some(dst),
-            R2ILOp::StoreConditional { result, .. } => result.as_ref(),
-            R2ILOp::CallOther { output, .. } => output.as_ref(),
-            R2ILOp::BlockTransfer(transfer) => transfer.answer.as_ref(),
-            _ => None,
-        }
+        output_of!(self, as_ref)
     }
 
-    /// Returns the output varnode mutably if this operation has one.
+    /// The output varnode mutably, from the same list as [`Self::output`].
     pub fn output_mut(&mut self) -> Option<&mut Varnode> {
-        match self {
-            R2ILOp::Copy { dst, .. }
-            | R2ILOp::Load { dst, .. }
-            | R2ILOp::LoadLinked { dst, .. }
-            | R2ILOp::LoadGuarded { dst, .. }
-            | R2ILOp::AtomicCAS { dst, .. }
-            | R2ILOp::IntAdd { dst, .. }
-            | R2ILOp::IntSub { dst, .. }
-            | R2ILOp::IntMult { dst, .. }
-            | R2ILOp::IntDiv { dst, .. }
-            | R2ILOp::IntSDiv { dst, .. }
-            | R2ILOp::IntRem { dst, .. }
-            | R2ILOp::IntSRem { dst, .. }
-            | R2ILOp::IntNegate { dst, .. }
-            | R2ILOp::IntCarry { dst, .. }
-            | R2ILOp::IntSCarry { dst, .. }
-            | R2ILOp::IntSBorrow { dst, .. }
-            | R2ILOp::IntAnd { dst, .. }
-            | R2ILOp::IntOr { dst, .. }
-            | R2ILOp::IntXor { dst, .. }
-            | R2ILOp::IntNot { dst, .. }
-            | R2ILOp::IntLeft { dst, .. }
-            | R2ILOp::IntRight { dst, .. }
-            | R2ILOp::IntSRight { dst, .. }
-            | R2ILOp::IntEqual { dst, .. }
-            | R2ILOp::IntNotEqual { dst, .. }
-            | R2ILOp::IntLess { dst, .. }
-            | R2ILOp::IntSLess { dst, .. }
-            | R2ILOp::IntLessEqual { dst, .. }
-            | R2ILOp::IntSLessEqual { dst, .. }
-            | R2ILOp::IntZExt { dst, .. }
-            | R2ILOp::IntSExt { dst, .. }
-            | R2ILOp::BoolNot { dst, .. }
-            | R2ILOp::BoolAnd { dst, .. }
-            | R2ILOp::BoolOr { dst, .. }
-            | R2ILOp::BoolXor { dst, .. }
-            | R2ILOp::Piece { dst, .. }
-            | R2ILOp::Subpiece { dst, .. }
-            | R2ILOp::PopCount { dst, .. }
-            | R2ILOp::Lzcount { dst, .. }
-            | R2ILOp::FloatAdd { dst, .. }
-            | R2ILOp::FloatSub { dst, .. }
-            | R2ILOp::FloatMult { dst, .. }
-            | R2ILOp::FloatDiv { dst, .. }
-            | R2ILOp::FloatNeg { dst, .. }
-            | R2ILOp::FloatAbs { dst, .. }
-            | R2ILOp::FloatSqrt { dst, .. }
-            | R2ILOp::FloatCeil { dst, .. }
-            | R2ILOp::FloatFloor { dst, .. }
-            | R2ILOp::FloatRound { dst, .. }
-            | R2ILOp::FloatNaN { dst, .. }
-            | R2ILOp::FloatEqual { dst, .. }
-            | R2ILOp::FloatNotEqual { dst, .. }
-            | R2ILOp::FloatLess { dst, .. }
-            | R2ILOp::FloatLessEqual { dst, .. }
-            | R2ILOp::Int2Float { dst, .. }
-            | R2ILOp::Float2Int { dst, .. }
-            | R2ILOp::FloatFloat { dst, .. }
-            | R2ILOp::Trunc { dst, .. }
-            | R2ILOp::CpuId { dst }
-            | R2ILOp::Multiequal { dst, .. }
-            | R2ILOp::Indirect { dst, .. }
-            | R2ILOp::PtrAdd { dst, .. }
-            | R2ILOp::PtrSub { dst, .. }
-            | R2ILOp::SegmentOp { dst, .. }
-            | R2ILOp::New { dst, .. }
-            | R2ILOp::Cast { dst, .. }
-            | R2ILOp::Extract { dst, .. }
-            | R2ILOp::Insert { dst, .. }
-            | R2ILOp::Select { dst, .. } => Some(dst),
-            R2ILOp::StoreConditional { result, .. } => result.as_mut(),
-            R2ILOp::CallOther { output, .. } => output.as_mut(),
-            R2ILOp::BlockTransfer(transfer) => transfer.answer.as_mut(),
-            _ => None,
-        }
+        output_of!(self, as_mut)
     }
 
     /// Returns the input varnodes for this operation.
@@ -938,15 +1152,12 @@ impl R2ILOp {
                 &transfer.count,
                 &transfer.direction,
             ],
-            R2ILOp::Fence { .. } | R2ILOp::ClearExclusive => vec![],
+            R2ILOp::Fence { .. } | R2ILOp::ClearExclusive | R2ILOp::IndivisibleAccess => vec![],
             R2ILOp::LoadLinked { addr, .. } => vec![addr],
             R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
-            R2ILOp::AtomicCAS {
-                addr,
-                expected,
-                replacement,
-                ..
-            } => vec![addr, expected, replacement],
+            R2ILOp::Atomic(access) => std::iter::once(&access.addr)
+                .chain(access.operands())
+                .collect(),
             R2ILOp::LoadGuarded { addr, guard, .. } => vec![addr, guard],
             R2ILOp::StoreGuarded {
                 addr, val, guard, ..
@@ -1072,15 +1283,19 @@ impl R2ILOp {
                 } = transfer.as_mut();
                 vec![destination, source, count, direction]
             }
-            R2ILOp::Fence { .. } | R2ILOp::ClearExclusive => vec![],
+            R2ILOp::Fence { .. } | R2ILOp::ClearExclusive | R2ILOp::IndivisibleAccess => vec![],
             R2ILOp::LoadLinked { addr, .. } => vec![addr],
             R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
-            R2ILOp::AtomicCAS {
-                addr,
-                expected,
-                replacement,
-                ..
-            } => vec![addr, expected, replacement],
+            R2ILOp::Atomic(access) => {
+                let AtomicAccess { addr, update, .. } = access.as_mut();
+                match update {
+                    AtomicUpdate::Fetch { operand, .. } => vec![addr, operand],
+                    AtomicUpdate::CompareExchange {
+                        expected,
+                        replacement,
+                    } => vec![addr, expected, replacement],
+                }
+            }
             R2ILOp::LoadGuarded { addr, guard, .. } => vec![addr, guard],
             R2ILOp::StoreGuarded {
                 addr, val, guard, ..
@@ -1256,20 +1471,29 @@ impl std::fmt::Display for R2ILOp {
                     space, addr, val
                 )
             }
-            R2ILOp::AtomicCAS {
-                dst,
-                space,
-                addr,
-                expected,
-                replacement,
-                ordering,
-            } => {
-                write!(
-                    f,
-                    "{} = ATOMIC_CAS [{}]{}, {}, {} ({ordering:?})",
-                    dst, space, addr, expected, replacement
-                )
+            R2ILOp::Atomic(access) => {
+                let AtomicAccess {
+                    dst,
+                    space,
+                    addr,
+                    update,
+                    ordering,
+                } = access.as_ref();
+                match update {
+                    AtomicUpdate::Fetch { op, operand } => write!(
+                        f,
+                        "{dst} = ATOMIC_{op:?} [{space}]{addr}, {operand} ({ordering:?})"
+                    ),
+                    AtomicUpdate::CompareExchange {
+                        expected,
+                        replacement,
+                    } => write!(
+                        f,
+                        "{dst} = ATOMIC_CAS [{space}]{addr}, {expected}, {replacement} ({ordering:?})"
+                    ),
+                }
             }
+            R2ILOp::IndivisibleAccess => write!(f, "INDIVISIBLE_ACCESS"),
             R2ILOp::LoadGuarded {
                 dst,
                 space,
@@ -1573,8 +1797,7 @@ pub fn predicated_transfer(ops: &[R2ILOp], next: u64) -> Option<&R2ILOp> {
 
 /// Whether these operations call only when a predicate holds, so control reaches `next` whatever the callee does.
 pub fn predicated_call(ops: &[R2ILOp], next: u64) -> bool {
-    let calls = |op: &R2ILOp| matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. });
-    predicated(ops, next).is_some_and(|guarded| guarded.iter().any(calls))
+    predicated(ops, next).is_some_and(|guarded| guarded.iter().any(R2ILOp::is_call))
 }
 
 /// The operations a predicate skips by branching to `next`.
@@ -1668,6 +1891,45 @@ impl R2ILBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A block transfer reads and writes where its kind says, at the first element of each pointer.
+    #[test]
+    fn a_block_transfer_accesses_memory_as_its_kind_states() {
+        use crate::eval::AccessKind::{Read, Write};
+        let pointer = |offset| Varnode::register(offset, 8);
+        for (kind, expected) in [
+            (BlockTransferKind::Move, vec![(Read, 8), (Write, 0)]),
+            (BlockTransferKind::Fill, vec![(Write, 0)]),
+            (BlockTransferKind::Scan(BlockStop::Equal), vec![(Read, 0)]),
+            (
+                BlockTransferKind::Compare(BlockStop::Unequal),
+                vec![(Read, 8), (Read, 0)],
+            ),
+        ] {
+            let op = R2ILOp::BlockTransfer(Box::new(BlockTransfer {
+                space: SpaceId::Ram,
+                kind,
+                destination: pointer(0),
+                source: pointer(8),
+                count: pointer(16),
+                direction: Varnode::constant(0, 1),
+                element_size: 4,
+                answer: None,
+            }));
+            let accesses = op.memory_accesses().collect::<Vec<_>>();
+            let got = (accesses.iter())
+                .map(|access| (access.kind, access.addr.offset))
+                .collect::<Vec<_>>();
+            assert_eq!(got, expected, "{kind:?}");
+            assert!(
+                accesses
+                    .iter()
+                    .all(|access| access.repeated && access.size == 4)
+            );
+            assert_eq!(op.is_memory_read(), kind.reads_memory(), "{kind:?}");
+            assert_eq!(op.is_memory_write(), kind.writes_memory(), "{kind:?}");
+        }
+    }
 
     /// A division can be undefined where its guard would have skipped it, so it is never hoisted.
     #[test]

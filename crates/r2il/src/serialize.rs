@@ -51,6 +51,9 @@ pub struct RegisterDef {
     pub size: u32,
     /// Parent register name (if this is a sub-register)
     pub parent: Option<String>,
+    /// The processor specification marks it `hidden`: Sleigh's scratch, not machine state.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 impl RegisterDef {
@@ -61,6 +64,7 @@ impl RegisterDef {
             offset,
             size,
             parent: None,
+            hidden: false,
         }
     }
 
@@ -71,6 +75,7 @@ impl RegisterDef {
             offset,
             size,
             parent: Some(parent.into()),
+            hidden: false,
         }
     }
 

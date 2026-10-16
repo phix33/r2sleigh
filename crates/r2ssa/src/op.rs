@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::var::SSAVar;
-use r2il::{MemoryOrdering, SpaceId};
+use r2il::{AtomicFetchOp, MemoryOrdering, SpaceId};
 
 /// An SSA operation representing a single semantic action with versioned variables.
 ///
@@ -38,6 +38,10 @@ pub enum SSAOp<V = SSAVar> {
     /// Clears the exclusive monitor (`r2il::R2ILOp::ClearExclusive`).
     ClearExclusive,
 
+    /// The instruction's accesses are one indivisible access with no typed statement
+    /// (`r2il::R2ILOp::IndivisibleAccess`).
+    IndivisibleAccess,
+
     /// Load-linked from memory.
     LoadLinked {
         dst: V,
@@ -55,8 +59,8 @@ pub enum SSAOp<V = SSAVar> {
         ordering: MemoryOrdering,
     },
 
-    /// Atomic compare-and-swap.
-    AtomicCAS(Box<AtomicCasOp<V>>),
+    /// One indivisible read-modify-write (`r2il::R2ILOp::Atomic`).
+    Atomic(Box<AtomicOp<V>>),
 
     /// Guarded memory load.
     LoadGuarded {
@@ -403,17 +407,23 @@ impl BlockTransferOp {
     pub const DIRECTION_INPUT: usize = 3;
 }
 
-/// A compare-and-swap on one memory cell.
+/// One indivisible read-modify-write of one memory cell, `dst` the value read (`r2il::AtomicAccess`).
 ///
-/// Held out of line for the same reason as [`SelectOp`]: four variables.
+/// Held out of line for the same reason as [`SelectOp`]: up to four variables.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AtomicCasOp<V = SSAVar> {
+pub struct AtomicOp<V = SSAVar> {
     pub dst: V,
     pub space: SpaceId,
     pub addr: V,
-    pub expected: V,
-    pub replacement: V,
+    pub update: AtomicUpdateOp<V>,
     pub ordering: MemoryOrdering,
+}
+
+/// What an [`AtomicOp`] writes back (`r2il::AtomicUpdate`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtomicUpdateOp<V = SSAVar> {
+    Fetch { op: AtomicFetchOp, operand: V },
+    CompareExchange { expected: V, replacement: V },
 }
 
 /// A field written into a value at a position.
@@ -457,16 +467,76 @@ impl<V> BlockTransferOp<V> {
     }
 }
 
-impl<V> AtomicCasOp<V> {
+impl<V> AtomicOp<V> {
+    /// `access` over SSA operands, `name(varnode, written)`: every read named before the value read.
+    pub fn of(
+        access: &r2il::AtomicAccess,
+        mut name: impl FnMut(&r2il::Varnode, bool) -> V,
+    ) -> Self {
+        let addr = name(&access.addr, false);
+        let update = match &access.update {
+            r2il::AtomicUpdate::Fetch { op, operand } => AtomicUpdateOp::Fetch {
+                op: *op,
+                operand: name(operand, false),
+            },
+            r2il::AtomicUpdate::CompareExchange {
+                expected,
+                replacement,
+            } => AtomicUpdateOp::CompareExchange {
+                expected: name(expected, false),
+                replacement: name(replacement, false),
+            },
+        };
+        AtomicOp {
+            dst: name(&access.dst, true),
+            space: access.space,
+            addr,
+            update,
+            ordering: access.ordering,
+        }
+    }
+
     /// The same operation over other operands; see [`SSAOp::map`].
-    pub fn map<W>(&self, f: &mut impl FnMut(&V) -> W) -> AtomicCasOp<W> {
-        AtomicCasOp {
+    pub fn map<W>(&self, f: &mut impl FnMut(&V) -> W) -> AtomicOp<W> {
+        let addr = f(&self.addr);
+        let update = match &self.update {
+            AtomicUpdateOp::Fetch { op, operand } => AtomicUpdateOp::Fetch {
+                op: *op,
+                operand: f(operand),
+            },
+            AtomicUpdateOp::CompareExchange {
+                expected,
+                replacement,
+            } => AtomicUpdateOp::CompareExchange {
+                expected: f(expected),
+                replacement: f(replacement),
+            },
+        };
+        AtomicOp {
             dst: f(&self.dst),
             space: self.space,
-            addr: f(&self.addr),
-            expected: f(&self.expected),
-            replacement: f(&self.replacement),
+            addr,
+            update,
             ordering: self.ordering,
+        }
+    }
+
+    /// The operands after the address: the fetch's operand, or the expected value and the replacement.
+    pub fn operands(&self) -> Vec<&V> {
+        match &self.update {
+            AtomicUpdateOp::Fetch { operand, .. } => vec![operand],
+            AtomicUpdateOp::CompareExchange {
+                expected,
+                replacement,
+            } => vec![expected, replacement],
+        }
+    }
+
+    /// The operand whose value may reach memory: a fetch's operand, or the replacement.
+    pub fn stored(&self) -> &V {
+        match &self.update {
+            AtomicUpdateOp::Fetch { operand, .. } => operand,
+            AtomicUpdateOp::CompareExchange { replacement, .. } => replacement,
         }
     }
 }
@@ -564,6 +634,7 @@ impl<V> SSAOp<V> {
                 ordering: *ordering,
             },
             ClearExclusive => ClearExclusive,
+            IndivisibleAccess => IndivisibleAccess,
             LoadLinked {
                 dst,
                 space,
@@ -588,7 +659,7 @@ impl<V> SSAOp<V> {
                 val: f(val),
                 ordering: *ordering,
             },
-            AtomicCAS(op) => AtomicCAS(Box::new(op.map(f))),
+            Atomic(op) => Atomic(Box::new(op.map(f))),
             LoadGuarded {
                 dst,
                 space,
@@ -1025,7 +1096,7 @@ impl<V> SSAOp<V> {
             | Self::StoreConditional { space, .. }
             | Self::LoadGuarded { space, .. }
             | Self::StoreGuarded { space, .. } => Some(*space),
-            Self::AtomicCAS(swap) => Some(swap.space),
+            Self::Atomic(access) => Some(access.space),
             Self::BlockTransfer(transfer) => Some(transfer.space),
             _ => None,
         }
@@ -1103,7 +1174,7 @@ impl<V> SSAOp<V> {
             | CallDefine { dst }
             | CallRestore { dst, .. } => Some(dst),
 
-            AtomicCAS(swap) => Some(&swap.dst),
+            Atomic(access) => Some(&access.dst),
             Insert(insert) => Some(&insert.dst),
             Select(select) => Some(&select.dst),
 
@@ -1113,6 +1184,7 @@ impl<V> SSAOp<V> {
             Store { .. }
             | Fence { .. }
             | ClearExclusive
+            | IndivisibleAccess
             | StoreGuarded { .. }
             | CallUse { .. }
             | Branch { .. }
@@ -1178,10 +1250,11 @@ impl<V> SSAOp<V> {
                 f(direction);
             }
 
-            AtomicCAS(swap) => {
-                f(&swap.addr);
-                f(&swap.expected);
-                f(&swap.replacement);
+            Atomic(access) => {
+                f(&access.addr);
+                for operand in access.operands() {
+                    f(operand);
+                }
             }
 
             LoadGuarded { addr, guard, .. } => {
@@ -1291,6 +1364,7 @@ impl<V> SSAOp<V> {
 
             Fence { .. }
             | ClearExclusive
+            | IndivisibleAccess
             | Nop
             | Unimplemented
             | Breakpoint
@@ -1379,7 +1453,7 @@ impl<V> SSAOp<V> {
             SSAOp::Load { .. }
                 | SSAOp::LoadLinked { .. }
                 | SSAOp::LoadGuarded { .. }
-                | SSAOp::AtomicCAS { .. }
+                | SSAOp::Atomic(_)
         ) || matches!(self, SSAOp::BlockTransfer(transfer) if transfer.kind.reads_memory())
     }
 
@@ -1390,7 +1464,7 @@ impl<V> SSAOp<V> {
             SSAOp::Store { .. }
                 | SSAOp::StoreConditional { .. }
                 | SSAOp::StoreGuarded { .. }
-                | SSAOp::AtomicCAS { .. }
+                | SSAOp::Atomic(_)
         ) || matches!(self, SSAOp::BlockTransfer(transfer) if transfer.kind.writes_memory())
     }
 
@@ -1408,6 +1482,7 @@ impl<V> SSAOp<V> {
             self,
             SSAOp::Fence { .. }
                 | SSAOp::ClearExclusive
+                | SSAOp::IndivisibleAccess
                 | SSAOp::LoadLinked { .. }
                 | SSAOp::LoadGuarded { .. }
                 | SSAOp::BlockTransfer(_)
@@ -1467,6 +1542,7 @@ impl<V: std::fmt::Display> std::fmt::Display for SSAOp<V> {
             }
             SSAOp::Fence { ordering } => write!(f, "FENCE({:?})", ordering),
             SSAOp::ClearExclusive => write!(f, "CLEAR_EXCLUSIVE"),
+            SSAOp::IndivisibleAccess => write!(f, "INDIVISIBLE_ACCESS"),
             SSAOp::LoadLinked {
                 dst,
                 space,
@@ -1493,11 +1569,28 @@ impl<V: std::fmt::Display> std::fmt::Display for SSAOp<V> {
                     ordering, space, addr, val
                 )
             }
-            SSAOp::AtomicCAS(swap) => write!(
-                f,
-                "{} = ATOMIC_CAS({:?}) [{}]{}, {}, {}",
-                swap.dst, swap.ordering, swap.space, swap.addr, swap.expected, swap.replacement
-            ),
+            SSAOp::Atomic(access) => {
+                let AtomicOp {
+                    dst,
+                    space,
+                    addr,
+                    ordering,
+                    ..
+                } = access.as_ref();
+                match &access.update {
+                    AtomicUpdateOp::Fetch { op, operand } => write!(
+                        f,
+                        "{dst} = ATOMIC_{op:?}({ordering:?}) [{space}]{addr}, {operand}"
+                    ),
+                    AtomicUpdateOp::CompareExchange {
+                        expected,
+                        replacement,
+                    } => write!(
+                        f,
+                        "{dst} = ATOMIC_CAS({ordering:?}) [{space}]{addr}, {expected}, {replacement}"
+                    ),
+                }
+            }
             SSAOp::LoadGuarded {
                 dst,
                 space,

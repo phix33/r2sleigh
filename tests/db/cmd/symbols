@@ -1,0 +1,19 @@
+# Symbols as the container states them.
+
+# An STT_FUNC whose SHN_ABS value lies in a fixed-address image's code is a function there: listed at
+# its file offset, and discovery starts it, so `_start` ends where it begins (radare2 lists both).
+NAME=absolute function in code
+FILE=tests/fixtures/abs_func_mapped
+CMDS=is; aa; afl
+EXPECT=<<EOF
+nth paddr      vaddr      bind   type   size lib name
+------------------------------------------------------------
+1   0x00001000 0x00401000 GLOBAL FUNC   9        _start
+2   ---------- 0x00402000 GLOBAL NOTYPE 0        __bss_start
+3   ---------- 0x00402000 GLOBAL NOTYPE 0        _edata
+4   ---------- 0x00402000 GLOBAL NOTYPE 0        _end
+5   0x00001010 0x00401010 GLOBAL FUNC   4        absfn
+0x00401000    1     16 sym._start
+0x00401010    1      4 sym.absfn
+EOF
+RUN

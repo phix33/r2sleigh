@@ -29,7 +29,7 @@ fn and_of_one_value_reads_two_occurrences_of_one_leaf() {
     ]);
     let projection = projection(&artifact);
     let roots = canonicalize(&artifact, &projection).expect("canonical roots");
-    let and_value = value_named(&artifact, "tmp:100_1");
+    let and_value = value_named(&artifact, "tmp:1000:100_1");
     let imported = roots.import().value(and_value).expect("the and imports");
     let TermKind::Bitwise { left, right, .. } = roots.arena().term(imported.term).kind else {
         panic!(
@@ -95,7 +95,7 @@ fn copy_is_elided_and_its_single_use_source_expanded() {
     ]);
     let projection = projection(&artifact);
     let roots = canonicalize(&artifact, &projection).expect("canonical roots");
-    let and_value = value_named(&artifact, "tmp:100_1");
+    let and_value = value_named(&artifact, "tmp:1000:100_1");
     let and = roots.value(and_value).expect("and");
     let rax = roots.value(value_named(&artifact, "RAX_1")).expect("rax");
     assert_eq!(
@@ -147,10 +147,10 @@ fn a_value_read_twice_stays_a_leaf_unless_duplicable() {
     let projection = projection(&artifact);
     let roots = canonicalize(&artifact, &projection).expect("canonical roots");
     let sum = roots
-        .value(value_named(&artifact, "tmp:100_1"))
+        .value(value_named(&artifact, "tmp:1000:100_1"))
         .expect("sum");
     let product = roots
-        .value(value_named(&artifact, "tmp:200_1"))
+        .value(value_named(&artifact, "tmp:1000:200_1"))
         .expect("product");
     let TermKind::Arithmetic { left, right, .. } = roots.arena().term(product.canonical).kind
     else {
@@ -162,7 +162,7 @@ fn a_value_read_twice_stays_a_leaf_unless_duplicable() {
     assert_eq!(left, sum.canonical);
     assert_eq!(sum.multiplicity, Multiplicity::Any);
     let sum_producer_entity = projection
-        .entity_for_output(artifact.graph(), value_named(&artifact, "tmp:100_1"))
+        .entity_for_output(artifact.graph(), value_named(&artifact, "tmp:1000:100_1"))
         .expect("entity");
     let sum_producer = artifact
         .obligations()
@@ -198,7 +198,7 @@ fn a_constant_operand_is_a_literal_and_a_division_is_opaque() {
     let projection = projection(&artifact);
     let roots = canonicalize(&artifact, &projection).expect("canonical roots");
     let sum = roots
-        .value(value_named(&artifact, "tmp:100_1"))
+        .value(value_named(&artifact, "tmp:1000:100_1"))
         .expect("sum");
     let TermKind::Arithmetic { right, .. } = roots.arena().term(sum.canonical).kind else {
         panic!("expected arithmetic");
@@ -209,7 +209,7 @@ fn a_constant_operand_is_a_literal_and_a_division_is_opaque() {
     assert_eq!(bits.bits(), 5);
     assert_eq!(bits.width_bits(), 64);
     let quotient = roots
-        .value(value_named(&artifact, "tmp:200_1"))
+        .value(value_named(&artifact, "tmp:1000:200_1"))
         .expect("quotient");
     assert!(matches!(
         roots.arena().term(quotient.canonical).kind,

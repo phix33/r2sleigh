@@ -923,7 +923,7 @@ mod tests {
             .graph()
             .values
             .iter()
-            .find(|value| value.var.name().starts_with("tmp:50"))
+            .find(|value| value.var.name().starts_with("tmp:1000:50"))
             .expect("address value");
         assert!(
             artifact
@@ -972,13 +972,13 @@ mod tests {
         // The address x0 + 0x38 is directly parameter-relative, as before.
         let first_address = artifact
             .addresses()
-            .parameter_expression(value("tmp:10"))
+            .parameter_expression(value("tmp:1000:10"))
             .expect("parameter expression");
         assert_eq!((first_address.parameter, first_address.offset), (0, 0x38));
         assert!(
             artifact
                 .addresses()
-                .pointee_expression(value("tmp:10"))
+                .pointee_expression(value("tmp:1000:10"))
                 .is_none()
         );
         // The value loaded there is a pointer into a pointee object, and is
@@ -987,12 +987,12 @@ mod tests {
         assert!(
             artifact
                 .addresses()
-                .parameter_expression(value("tmp:20"))
+                .parameter_expression(value("tmp:1000:20"))
                 .is_none()
         );
         let loaded = artifact
             .addresses()
-            .pointee_expression(value("tmp:20"))
+            .pointee_expression(value("tmp:1000:20"))
             .expect("pointee expression for the loaded pointer");
         assert_eq!(loaded.root, 0);
         assert_eq!(
@@ -1006,14 +1006,14 @@ mod tests {
         // Arithmetic on it stays inside the same object.
         let inner = artifact
             .addresses()
-            .pointee_expression(value("tmp:30"))
+            .pointee_expression(value("tmp:1000:30"))
             .expect("offset pointee expression");
         assert_eq!(inner.path, loaded.path);
         assert_eq!(inner.offset, 0x10);
         // And a second load is one step further along the chain.
         let second = artifact
             .addresses()
-            .pointee_expression(value("tmp:40"))
+            .pointee_expression(value("tmp:1000:40"))
             .expect("second-level pointee expression");
         assert_eq!(second.path.len(), 2);
         assert_eq!(
@@ -1026,7 +1026,7 @@ mod tests {
         // The object model names the chain.
         let object = artifact
             .objects()
-            .object_for_value(value("tmp:30"), SpaceId::Ram)
+            .object_for_value(value("tmp:1000:30"), SpaceId::Ram)
             .expect("pointee object");
         assert_eq!(
             artifact.objects().access_path(object).as_deref(),
@@ -1115,12 +1115,12 @@ mod tests {
         assert_eq!(loaded_values.len(), 2);
         let crossed = loaded_values
             .iter()
-            .find(|(name, _)| name.starts_with("tmp:20"))
+            .find(|(name, _)| name.starts_with("tmp:1100:20"))
             .expect("cross-space reload")
             .1;
         let exact = loaded_values
             .iter()
-            .find(|(name, _)| name.starts_with("tmp:28"))
+            .find(|(name, _)| name.starts_with("tmp:1100:28"))
             .expect("same-space reload")
             .1;
         assert!(artifact.addresses().parameter_expression(crossed).is_none());
@@ -1193,13 +1193,13 @@ mod tests {
         assert!(
             artifact
                 .addresses()
-                .parameter_expression(loaded("tmp:20"))
+                .parameter_expression(loaded("tmp:1100:20"))
                 .is_none()
         );
         assert_eq!(
             artifact
                 .addresses()
-                .parameter_expression(loaded("tmp:28"))
+                .parameter_expression(loaded("tmp:1100:28"))
                 .map(|expression| expression.parameter),
             Some(0)
         );
@@ -1295,8 +1295,8 @@ mod tests {
                 .parameter_expression(value_named(&artifact, name))
                 .map(|expression| (expression.parameter, expression.offset))
         };
-        assert_eq!(expression("tmp:10"), None);
-        assert_eq!(expression("tmp:18"), Some((1, 0)));
+        assert_eq!(expression("tmp:1000:10"), None);
+        assert_eq!(expression("tmp:1000:18"), Some((1, 0)));
     }
 
     /// `x0 + 4 * (uint64_t)(uint32_t)(w1 + 1)` is not `x0 + 4 * w1 + 4`: the
@@ -1337,14 +1337,14 @@ mod tests {
         .expect("artifact");
         let address = artifact
             .addresses()
-            .parameter_expression(value_named(&artifact, "tmp:28"))
+            .parameter_expression(value_named(&artifact, "tmp:1000:28"))
             .expect("x0 plus an index");
         assert_eq!(address.parameter, 0);
         assert_eq!(address.offset, 0, "{address:?}");
         assert_eq!(
             address.terms,
             vec![crate::AffineAddressTerm {
-                value: value_named(&artifact, "tmp:10"),
+                value: value_named(&artifact, "tmp:1000:10"),
                 coefficient: 4,
             }]
         );
@@ -1382,12 +1382,12 @@ mod tests {
         .expect("artifact");
         let address = artifact
             .addresses()
-            .parameter_expression(value_named(&artifact, "tmp:20"))
+            .parameter_expression(value_named(&artifact, "tmp:1000:20"))
             .expect("x0 plus an index");
         assert_eq!(
             address.terms,
             vec![crate::AffineAddressTerm {
-                value: value_named(&artifact, "tmp:18"),
+                value: value_named(&artifact, "tmp:1000:18"),
                 coefficient: 1,
             }]
         );
@@ -1407,7 +1407,7 @@ mod tests {
             .graph()
             .values
             .iter()
-            .find(|value| value.var.name().starts_with("tmp:10"))
+            .find(|value| value.var.name().starts_with("tmp:1000:10"))
             .expect("sum");
         assert!(artifact.addresses().parameter_expression(sum.id).is_none());
     }
@@ -1491,7 +1491,7 @@ mod tests {
             .graph()
             .values
             .iter()
-            .find(|value| value.var.name().starts_with("tmp:90"))
+            .find(|value| value.var.name().starts_with("tmp:1000:90"))
             .expect("field address value");
         assert!(
             artifact
@@ -1547,7 +1547,7 @@ mod tests {
             .values
             .iter()
             .find(|value| {
-                value.var.name() == "tmp:10"
+                value.var.name() == "tmp:1004:10"
                     && artifact.graph().def_inst(value.id).is_some_and(|inst| {
                         matches!(
                             artifact.graph().inst(inst).map(|inst| &inst.payload),

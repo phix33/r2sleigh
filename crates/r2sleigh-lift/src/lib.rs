@@ -30,6 +30,7 @@ pub mod flow;
 mod internal_control;
 pub mod profile;
 pub mod sleigh;
+mod temporary_move;
 pub mod text;
 pub mod translate;
 
@@ -38,13 +39,14 @@ use thiserror::Error;
 pub use context::LiftContext;
 pub use disasm::syntax::{NumberSpan, Span, Syntax};
 pub use disasm::{
-    Continuation, Decoded, Disassembler, GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION,
-    GenuineInstructionSpan, GenuineLiftAuthority, GenuineLiftedBlock, GenuineLiftedFunction,
-    GenuineLiftedFunctionAuthority, TrustedLiftedFunction, TrustedSleighProfile,
+    ByteOrder, EmbeddedMachine, embedded_arch_and_disassembler, embedded_machine,
+    embedded_program_machine, embedded_thumb_machine, lifted_register_storage,
 };
 pub use disasm::{
-    EmbeddedMachine, embedded_arch_and_disassembler, embedded_machine, embedded_thumb_machine,
-    embedded_windows_machine, lifted_register_storage,
+    Continuation, Decoded, Disassembler, GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION,
+    GenuineInstructionSpan, GenuineLiftAuthority, GenuineLiftedBlock, GenuineLiftedFunction,
+    GenuineLiftedFunctionAuthority, Lifted, TargetContext, TrustedLiftedFunction,
+    TrustedSleighProfile,
 };
 use r2il::ArchSpec;
 use r2il::Endianness;

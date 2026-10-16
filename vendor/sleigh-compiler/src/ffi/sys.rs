@@ -34,7 +34,6 @@ mod bridge {
             allNopWarning: bool,
             deadTempWarning: bool,
             enforceLocalKeyWord: bool,
-            largeTemporaryWarning: bool,
             caseSensitiveRegisterNames: bool,
             debugOutput: bool,
         );

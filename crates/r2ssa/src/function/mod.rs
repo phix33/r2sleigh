@@ -470,6 +470,83 @@ pub struct TrustedSsaArtifact {
     arch: crate::Arch,
 }
 
+/// A trusted lift built, recovered and sealed, its facts not yet collected: what a preparation
+/// reads before it pays for the fact pass (doc/adr-resolved-bodies.md, "Summaries").
+pub struct TrustedSeal {
+    sealed: Sealed,
+    machine_context: SourceMachineContext,
+    finish: Finish,
+    source_block_count: usize,
+    arch: crate::Arch,
+    /// The heap live as the seal began, which the preparation's trace measures from.
+    entry_bytes: Option<usize>,
+}
+
+impl TrustedSeal {
+    /// The context the function is sealed in: its interface, recovered or stated, and its owners.
+    pub const fn machine_context(&self) -> &SourceMachineContext {
+        &self.machine_context
+    }
+
+    /// Every constant a sealed value folds to with what preparation admitted, in value order.
+    pub fn folded_values(&self) -> impl Iterator<Item = u64> + '_ {
+        let folded = self.sealed.folded().prepared.iter();
+        folded.filter_map(|(_, value)| *value)
+    }
+
+    /// The constant one value folds to with what preparation admitted.
+    pub fn folded_value(&self, value: crate::graph::ValueId) -> Option<u64> {
+        self.sealed.folded().prepared.get(value).copied().flatten()
+    }
+
+    /// The sealed graph, which owns each operation.
+    pub fn graph(&self) -> &crate::graph::SsaGraph {
+        self.sealed.graph()
+    }
+
+    /// Where each dispatch reads its table: the values the artifact's facts would solve from it.
+    pub fn dispatch_table_reads(&self) -> Vec<crate::indirect::DispatchTableRead> {
+        let sealed = &self.sealed;
+        let (function, graph) = (sealed.function(), sealed.graph());
+        crate::indirect::prepared_dispatch_table_reads(
+            function,
+            graph,
+            sealed.decompile_prep_facts(),
+        )
+    }
+
+    /// The value a storage holds immediately before one operation, as a call's arguments read it.
+    pub fn value_reaching(
+        &self,
+        op: crate::OpId,
+        storage: r2source::CanonicalStorageId,
+    ) -> Option<crate::graph::ValueId> {
+        crate::semantic::value_reaching(&self.sealed, &self.machine_context, op, storage)
+    }
+
+    /// The artifact: the sealed function's facts collected.
+    pub fn collect<C: SsaWorkControl + ?Sized>(
+        self,
+        control: &C,
+    ) -> Result<TrustedSsaArtifact, SsaPrepareError> {
+        let Self {
+            sealed,
+            machine_context,
+            finish,
+            source_block_count,
+            arch,
+            entry_bytes,
+        } = self;
+        let artifact =
+            SsaArtifact::collect_sealed(sealed, machine_context, finish, control, entry_bytes)?;
+        Ok(TrustedSsaArtifact {
+            artifact: Arc::new(artifact),
+            source_block_count,
+            arch,
+        })
+    }
+}
+
 /// Whether construction recovers an interface the source does not state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Recovery {
@@ -648,6 +725,23 @@ impl SsaArtifact {
         control.poll()?;
         let prepare_entry_bytes = r2il::allocation::live_bytes();
         let sealed = prepared.seal(&machine_context).map_err(integrity_refusal)?;
+        Self::collect_sealed(
+            sealed,
+            machine_context,
+            finish,
+            control,
+            prepare_entry_bytes,
+        )
+    }
+
+    /// Collect a sealed function's facts into the artifact.
+    fn collect_sealed<C: SsaWorkControl + ?Sized>(
+        sealed: Sealed,
+        machine_context: SourceMachineContext,
+        finish: Finish,
+        control: &C,
+        prepare_entry_bytes: Option<usize>,
+    ) -> Result<Self, SsaPrepareError> {
         let mut artifact =
             sealed.into_artifact(machine_context, finish, control, prepare_entry_bytes)?;
         artifact.seal_body_proven_interface();
@@ -2275,52 +2369,73 @@ impl TrustedSsaArtifact {
         evidence: &CalleeEvidence,
         premises: &BTreeSet<r2source::Premise>,
     ) -> Result<Self, SsaPrepareError> {
+        Self::seal_with_callee_interfaces(lifted, arch, control, evidence, premises)?
+            .collect(control)
+    }
+
+    /// Build, recover and seal as `prepare_with_callee_interfaces` does, and stop before the facts
+    /// are collected: a reader of the seal alone pays for no fact pass.
+    pub fn seal_with_callee_interfaces<C: SsaWorkControl + ?Sized>(
+        lifted: TrustedLiftedFunction,
+        arch: Option<&crate::Arch>,
+        control: &C,
+        evidence: &CalleeEvidence,
+        premises: &BTreeSet<r2source::Premise>,
+    ) -> Result<TrustedSeal, SsaPrepareError> {
+        Self::sealed(
+            lifted,
+            arch,
+            control,
+            (evidence, premises),
+            Recovery::Recover,
+        )
+    }
+
+    /// Build against the convention alone and seal, recovering nothing: for a reader of values
+    /// inside the body, such as a dispatch's table or a call's argument, which no interface decides.
+    pub fn seal_against_convention<C: SsaWorkControl + ?Sized>(
+        lifted: TrustedLiftedFunction,
+        arch: Option<&crate::Arch>,
+        control: &C,
+        evidence: &CalleeEvidence,
+        premises: &BTreeSet<r2source::Premise>,
+    ) -> Result<TrustedSeal, SsaPrepareError> {
+        Self::sealed(
+            lifted,
+            arch,
+            control,
+            (evidence, premises),
+            Recovery::Convention,
+        )
+    }
+
+    /// The trusted lift built under `recovery` and sealed, its facts not yet collected.
+    fn sealed<C: SsaWorkControl + ?Sized>(
+        lifted: TrustedLiftedFunction,
+        arch: Option<&crate::Arch>,
+        control: &C,
+        (evidence, premises): (&CalleeEvidence, &BTreeSet<r2source::Premise>),
+        recovery: Recovery,
+    ) -> Result<TrustedSeal, SsaPrepareError> {
         let Constructed {
             function,
             machine_context,
             finish,
             source_block_count,
             arch,
-        } = Self::construct(lifted, arch, control, evidence, premises, Recovery::Recover)?;
-        let artifact = SsaArtifact::seal_finished(function, machine_context, finish, control)?;
-        Ok(Self {
-            artifact: Arc::new(artifact),
+        } = Self::construct(lifted, arch, control, evidence, premises, recovery)?;
+        control.poll()?;
+        let entry_bytes = r2il::allocation::live_bytes();
+        let sealed = function.seal(&machine_context).map_err(integrity_refusal)?;
+        control.poll()?;
+        Ok(TrustedSeal {
+            sealed,
+            machine_context,
+            finish,
             source_block_count,
             arch,
+            entry_bytes,
         })
-    }
-
-    /// Where each dispatch reads its table, off the sealed function before any fact is collected:
-    /// the values are those the artifact's facts would solve from the same function.
-    pub fn dispatch_table_reads_with_callee_interfaces<C: SsaWorkControl + ?Sized>(
-        lifted: TrustedLiftedFunction,
-        arch: Option<&crate::Arch>,
-        control: &C,
-        evidence: &CalleeEvidence,
-        premises: &BTreeSet<r2source::Premise>,
-    ) -> Result<Vec<crate::indirect::DispatchTableRead>, SsaPrepareError> {
-        // A table's bounds are its guards and the constants the seal states, which no interface
-        // decides: the convention's build is sealed, and nothing is recovered.
-        let constructed = Self::construct(
-            lifted,
-            arch,
-            control,
-            evidence,
-            premises,
-            Recovery::Convention,
-        )?;
-        control.poll()?;
-        let sealed = (constructed.function)
-            .seal(&constructed.machine_context)
-            .map_err(integrity_refusal)?;
-        control.poll()?;
-        let reads = crate::indirect::prepared_dispatch_table_reads(
-            sealed.function(),
-            sealed.graph(),
-            sealed.decompile_prep_facts(),
-        );
-        control.poll()?;
-        Ok(reads)
     }
 
     /// The function built against its interface, stated or recovered, and the context it is sealed in.
@@ -3700,7 +3815,7 @@ fn decompile_call_boundary_config(
     let calls = blocks
         .iter()
         .flat_map(|block| &block.ops)
-        .any(|op| matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. }));
+        .any(R2ILOp::is_call);
     if calls && machine_context.call_effect().is_none() {
         r2il::refusal_evidence!(
             "call-effect",

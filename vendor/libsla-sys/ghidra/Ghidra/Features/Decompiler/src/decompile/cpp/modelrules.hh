@@ -23,13 +23,22 @@
 
 namespace ghidra {
 
+class ProtoModel;
 class ParameterPieces;
 class ParamListStandard;
 class ParamEntry;
 class ParamActive;
 
 extern AttributeId ATTRIB_SIZES;	///< Marshaling attribute "sizes"
-
+extern AttributeId ATTRIB_BACKFILL;	///< Marshaling attribute "backfill"
+extern AttributeId ATTRIB_MAX_PRIMITIVES; ///< Marshaling attribute "maxprimitives"
+extern AttributeId ATTRIB_REVERSESIGNIF; ///< Marshaling attribute "reversesignif"
+extern AttributeId ATTRIB_MATCHSIZE; ///< Marshaling attribute "matchsize"
+extern AttributeId ATTRIB_AFTER_BYTES; ///< Marshaling attribute "afterbytes"
+extern AttributeId ATTRIB_AFTER_STORAGE; ///< Marshaling attribute "afterstorage"
+extern AttributeId ATTRIB_FILL_ALTERNATE; ///< Marshaling attribute "fillalternate"
+extern AttributeId ATTRIB_MINELEMENTS;	///< Marshaling attribute "minelements"
+extern AttributeId ATTRIB_MAXELEMENTS;	///< Marshaling attribute "maxelements"
 extern ElementId ELEM_DATATYPE;		///< Marshaling element \<datatype>
 extern ElementId ELEM_CONSUME;		///< Marshaling element \<consume>
 extern ElementId ELEM_CONSUME_EXTRA;	///< Marshaling element \<consume_extra>
@@ -43,6 +52,7 @@ extern ElementId ELEM_HIDDEN_RETURN;	///< Marshaling element \<hidden_return>
 extern ElementId ELEM_JOIN_PER_PRIMITIVE;	///< Marshaling element \<join_per_primitive>
 extern ElementId ELEM_JOIN_DUAL_CLASS;	///< Marshaling element \<join_dual_class>
 extern ElementId ELEM_EXTRA_STACK;	///< Marshaling element \<extra_stack>
+extern ElementId ELEM_CONSUME_REMAINING; ///< Marshaling element \<consume_remaining>
 
 /// \brief Class for extracting primitive elements of a data-type
 ///
@@ -54,7 +64,8 @@ class PrimitiveExtractor {
     unaligned = 2,			///< At least one primitive is not properly aligned
     extra_space = 4,			///< Data-type contains empty space not attributable to alignment padding
     invalid = 8,			///< Data-type exceeded maximum or contained illegal elements
-    union_invalid = 16			///< Unions are treated as an illegal element
+    union_invalid = 16,			///< Unions are treated as an illegal element
+    array_primitive = 32		///< Arrays are treated as primitive
   };
 public:
   /// \brief A primitive data-type and its offset within the containing data-type
@@ -70,9 +81,9 @@ private:
   int4 checkOverlap(vector<Primitive> &res,vector<Primitive> &small,int4 point,Primitive &big);
   bool commonRefinement(vector<Primitive> &first,vector<Primitive> &second);
   bool handleUnion(TypeUnion *dt,int4 max,int4 offset);		///< Add primitives representing a union data-type
-  bool extract(Datatype *dt,int4 max,int4 offset);	///< Extract list of primitives from given data-type
+  bool extract(Datatype *dt,int4 max,int4 offset,int4 depth);	///< Extract list of primitives from given data-type
 public:
-  PrimitiveExtractor(Datatype *dt,bool unionIllegal,int4 offset,int4 max);	///< Constructor
+  PrimitiveExtractor(Datatype *dt,bool unionIllegal,bool arrayPrimitive,int4 offset,int4 max);	///< Constructor
   int4 size(void) const { return primitives.size(); }	///< Return the number of primitives extracted
   const Primitive &get(int4 i) const { return primitives[i]; }	///< Get a particular primitive
   bool isValid(void) const { return (flags & invalid) == 0; }	///< Return \b true if primitives were successfully extracted
@@ -143,6 +154,21 @@ public:
   virtual bool filter(Datatype *dt) const;
 };
 
+/// \brief Filter on an array data-type
+///
+/// Filters on TYPE_ARRAY specifically.  Additional filtering on size and number of elements can be configured.
+class ArrayFilter : public SizeRestrictedFilter {
+  int4 minElements;	///< Minimum number of elements in the array
+  int4 maxElements;	///< Maximum number of elements
+public:
+  ArrayFilter(void) { minElements = 0; maxElements = 0; }	///< Constructor for use with decode()
+  ArrayFilter(int4 min,int4 max,int4 minEl,int4 maxEl);	///< Constructor
+  ArrayFilter(const ArrayFilter &op2);	///< Copy constructor
+  virtual DatatypeFilter *clone(void) const { return new ArrayFilter(*this); }
+  virtual bool filter(Datatype *dt) const;
+  virtual void decode(Decoder &decoder);
+};
+
 /// \brief Filter on a homogeneous aggregate data-type
 ///
 /// All primitive data-types must be the same.
@@ -151,10 +177,11 @@ class HomogeneousAggregate : public SizeRestrictedFilter {
   int4 maxPrimitives;			///< Maximum number of primitives in the aggregate
 public:
   HomogeneousAggregate(type_metatype meta);	///< Constructor for use with decode()
-  HomogeneousAggregate(type_metatype meta,int4 maxPrim,int4 min,int4 max);	///< Constructor
+  HomogeneousAggregate(type_metatype meta,int4 maxPrim,int4 minSize,int4 maxSize);	///< Constructor
   HomogeneousAggregate(const HomogeneousAggregate &op2);	///< Copy constructor
   virtual DatatypeFilter *clone(void) const { return new HomogeneousAggregate(*this); }
   virtual bool filter(Datatype *dt) const;
+  virtual void decode(Decoder &decoder);
 };
 
 /// \brief A filter on some aspect of a specific function prototype
@@ -309,7 +336,9 @@ public:
   /// \param decoder is the given stream decoder
   virtual void decode(Decoder &decoder)=0;
   static AssignAction *decodeAction(Decoder &decoder,const ParamListStandard *res);
+  static AssignAction *decodePrecondition(Decoder &decoder, const ParamListStandard *res);
   static AssignAction *decodeSideeffect(Decoder &decoder,const ParamListStandard *res);
+  static void justifyPieces(vector<VarnodeData> &pieces,int4 offset,bool isBigEndian,bool consumeMostSig,bool justifyRight);
 };
 
 /// \brief Action assigning a parameter Address from the next available stack location
@@ -346,18 +375,24 @@ public:
 /// Consumption can spill over onto the stack if desired.
 class MultiSlotAssign : public AssignAction {
   type_class resourceType;		///< Resource list from which to consume
+  bool isBigEndian;			///< True for big endian architectures
   bool consumeFromStack;		///< True if resources should be consumed from the stack
   bool consumeMostSig;			///< True if resources are consumed starting with most significant bytes
   bool enforceAlignment;		///< True if register resources are discarded to match alignment
   bool justifyRight;			///< True if initial bytes are padding for odd data-type sizes
+  bool adjacentEntries;			///< True if an assignment should only consume adjacent entries in the list
+  bool allowBackfill;			///< True if entries skipped for alignment can be reused for later params
   vector<const ParamEntry *> tiles;	///< List of registers that can be joined
   const ParamEntry *stackEntry;		///< The stack resource
+  bool checkFit(int4 iter,int4 sizeLeft,int4 align,int4 resourcesConsumed,vector<int4> &tmpStatus) const;
   void initializeEntries(void);		///< Cache specific ParamEntry needed by the action
 public:
   MultiSlotAssign(const ParamListStandard *res);	///< Constructor for use with decode
-  MultiSlotAssign(type_class store,bool stack,bool mostSig,bool align,bool justRight,const ParamListStandard *res);	///< Constructor
+  MultiSlotAssign(type_class store,bool stack,bool mostSig,bool align,bool justRight,bool backfill,
+		  const ParamListStandard *res);	///< Constructor
   virtual AssignAction *clone(const ParamListStandard *newResource) const {
-    return new MultiSlotAssign(resourceType,consumeFromStack,consumeMostSig,enforceAlignment,justifyRight,newResource); }
+    return new MultiSlotAssign(resourceType,consumeFromStack,consumeMostSig,enforceAlignment,justifyRight,allowBackfill,
+			       newResource); }
   virtual uint4 assignAddress(Datatype *dt,const PrototypePieces &proto,int4 pos,TypeFactory &tlist,
 			      vector<int4> &status,ParameterPieces &res) const;
   virtual bool fillinOutputMap(ParamActive *active) const;
@@ -367,16 +402,22 @@ public:
 /// \brief Consume a register per primitive member of an aggregate data-type
 ///
 /// The data-type is split up into its underlying primitive elements, and each one
-/// is assigned a register from the specific resource list.  There must be no padding between
-/// elements.  No packing of elements into a single register occurs.
+/// is assigned storage as if it were a separate parameter, or alternately assigned a
+/// register from a specific resource list. The storage elements are returned together
+/// as a single Address in \e join space.  Constant zeroes are used as placeholders for any
+/// padding between elements.  No packing of elements into a single register occurs.
 class MultiMemberAssign : public AssignAction {
-  type_class resourceType;		///< Resource list from which to consume
+  type_class resourceType;		///< Resource list from which to consume (if not recursive)
+  bool isRecursive;			///< \b true if primitives are assigned recursively
   bool consumeFromStack;		///< True if resources should be consumed from the stack
   bool consumeMostSig;			///< True if resources are consumed starting with most significant bytes
+  const ParamEntry *stackEntry;		///< Parameter Entry corresponding to the stack
+  AddrSpace *constSpace;		///< Address space used for padding
+  bool addPadding(vector<VarnodeData> &pieces,int4 pad) const;	///< Add a padding element to the set of pieces
 public:
-  MultiMemberAssign(type_class store,bool stack,bool mostSig,const ParamListStandard *res);	///< Constructor
+  MultiMemberAssign(type_class store,bool recurse,bool stack,bool mostSig,const ParamListStandard *res);	///< Constructor
   virtual AssignAction *clone(const ParamListStandard *newResource) const {
-    return new MultiMemberAssign(resourceType,consumeFromStack,consumeMostSig,newResource); }
+    return new MultiMemberAssign(resourceType,isRecursive,consumeFromStack,consumeMostSig,newResource); }
   virtual uint4 assignAddress(Datatype *dt,const PrototypePieces &proto,int4 pos,TypeFactory &tlist,
 			      vector<int4> &status,ParameterPieces &res) const;
   virtual bool fillinOutputMap(ParamActive *active) const;
@@ -390,20 +431,25 @@ public:
 class MultiSlotDualAssign : public AssignAction {
   type_class baseType;			///< Resource list from which to consume general tiles
   type_class altType;			///< Resource list from which to consume alternate tiles
+  bool isBigEndian;			///< True for big endian architectures
+  bool consumeFromStack;        	///< True if resources should be consumed from the stack
   bool consumeMostSig;			///< True if resources are consumed starting with most significant bytes
   bool justifyRight;			///< True if initial bytes are padding for odd data-type sizes
+  bool fillAlternate;             	///< True if a single primitive needs to fill an alternate tile
   int4 tileSize;			///< Number of bytes in a tile
   vector<const ParamEntry *> baseTiles;	///< General registers to be joined
   vector<const ParamEntry *> altTiles;	///< Alternate registers to be joined
+  const ParamEntry *stackEntry;		///< The stack resource
   void initializeEntries(void);		///< Cache specific ParamEntry needed by the action
   int4 getFirstUnused(int4 iter,const vector<const ParamEntry *> &tiles,vector<int4> &status) const;
   int4 getTileClass(const PrimitiveExtractor &primitives,int4 off,int4 &index) const;
 public:
   MultiSlotDualAssign(const ParamListStandard *res);		///< Constructor for use with decode
-  MultiSlotDualAssign(type_class baseStore,type_class altStore,bool mostSig,bool justRight,
-		      const ParamListStandard *res);	///< Constructor
+  MultiSlotDualAssign(type_class baseStore,type_class altStore,bool stack,bool mostSig,
+              bool justRight,bool fillAlt,const ParamListStandard *res);	///< Constructor
   virtual AssignAction *clone(const ParamListStandard *newResource) const {
-    return new MultiSlotDualAssign(baseType,altType,consumeMostSig,justifyRight,newResource); }
+    return new MultiSlotDualAssign(baseType,altType,consumeFromStack,consumeMostSig,justifyRight,
+              fillAlternate,newResource); }
   virtual uint4 assignAddress(Datatype *dt,const PrototypePieces &proto,int4 pos,TypeFactory &tlist,
 			      vector<int4> &status,ParameterPieces &res) const;
   virtual bool fillinOutputMap(ParamActive *active) const;
@@ -478,15 +524,37 @@ public:
 /// stack resources as if the parameter were allocated to the stack.  If the current parameter was
 /// already assigned a stack address, no additional action is taken.
 class ExtraStack : public AssignAction {
+  int4 afterBytes; ///< Activate side effect after given number of bytes consumed
+  type_class afterStorage; ///< Activate side effect after given amount of this storage consumed
   const ParamEntry *stackEntry;	///< Parameter Entry corresponding to the stack
   void initializeEntry(void);	///< Find stack entry in resource list
 public:
-  ExtraStack(const ParamListStandard *res,int4 val);	///< Constructor for use with decode
-  ExtraStack(const ParamListStandard *res);	///< Constructor
+  ExtraStack(const ParamListStandard *res);	///< Constructor for use with decode
+  ExtraStack(type_class storage,int4 offset,const ParamListStandard *res);	///< Constructor
   virtual AssignAction *clone(const ParamListStandard *newResource) const {
-    return new ExtraStack(newResource); }
+    return new ExtraStack(afterStorage,afterBytes,newResource); }
   virtual uint4 assignAddress(Datatype *dt,const PrototypePieces &proto,int4 pos,TypeFactory &tlist,
 			      vector<int4> &status,ParameterPieces &res) const;
+  virtual void decode(Decoder &decoder);
+};
+
+/// \brief Consume all the remaining registers from a given resource list
+/// 
+/// This action is a side-effect and doesn't assign an address for the current parameter.
+/// The resource list, resourceType, is specified. If the side-effect is triggered, all register
+/// resources from this list are consumed, until no registers remain. If all registers are already
+/// consumed, no action is taken.
+class ConsumeRemaining : public AssignAction {
+  type_class resourceType; ///< The other resource list to consume from
+  vector<const ParamEntry *> tiles; ///< List of registers that can be consumed
+  void initializeEntries(void); ///< Cache specific ParamEntry needed by the action
+public:
+  ConsumeRemaining(const ParamListStandard *res); ///< Constructor for use with decode
+  ConsumeRemaining(type_class store, const ParamListStandard *res); ///< Constructor
+  virtual AssignAction *clone(const ParamListStandard *newResource) const {
+	return new ConsumeRemaining(resourceType,newResource); }
+  virtual uint4 assignAddress(Datatype *dt,const PrototypePieces &proto,int4 pos,TypeFactory &tlist,
+                  vector<int4> &status,ParameterPieces &res) const;
   virtual void decode(Decoder &decoder);
 };
 
@@ -500,6 +568,7 @@ class ModelRule {
   DatatypeFilter *filter;		///< Which data-types \b this rule applies to
   QualifierFilter *qualifier;		///< Additional qualifiers for when the rule should apply (if non-null)
   AssignAction *assign;			///< How the Address should be assigned
+  vector<AssignAction *> preconditions; ///< Extra actions that happen before assignment, discarded on failure
   vector<AssignAction *> sideeffects;	///< Extra actions that happen on success
 public:
   ModelRule(void) {
@@ -512,6 +581,84 @@ public:
   bool fillinOutputMap(ParamActive *active) const;	///< Test and mark the trial(s) that can be valid return value
   bool canAffectFillinOutput(void) const;		///< Return \b true if fillinOutputMap is active for \b this rule
   void decode(Decoder &decoder,const ParamListStandard *res);		///< Decode \b this rule from stream
+};
+
+/// \brief An action that happens during parameter allocation
+///
+/// It sees resource usage for both input and output parameters and can make changes.
+/// It can act either right after output parameter assignment or after input parameter assignment.
+class SharedAction {
+protected:
+  const ProtoModel *model;		///< The model owning/performing \b this action
+public:
+  SharedAction(const ProtoModel *m) { model = m; }	///< Constructor
+  virtual ~SharedAction(void) {}	///< Destructor
+
+  /// \brief Implement resource sharing between the input and output parameter assignments
+  ///
+  /// Called once before input parameters have been assigned (after output assignment).
+  /// \param proto is the list of data-types
+  /// \param tlist is the data-type factory
+  /// \param params is the current set of allocated parameters
+  /// \param inputStatus is the consume status for this (input resources)
+  /// \param outputStatus is the consume status for output resources
+  virtual void applyBefore(const PrototypePieces &proto,TypeFactory &tlist,vector<ParameterPieces> &params,
+			   vector<int4> &inputStatus,vector<int4> &outputStatus) const=0;
+
+  /// \brief Implement resource sharing after input and output parameter assignments
+  ///
+  /// Called once after both input and output parameters have been assigned.
+  /// \param proto is the list of data-types
+  /// \param tlist is the data-type factory
+  /// \param params is the current set of allocated parameters
+  /// \param inputStatus is the consume status for this (input resources)
+  /// \param outputStatus is the consume status for output resources
+  virtual void applyAfter(const PrototypePieces &proto,TypeFactory &tlist,vector<ParameterPieces> &params,
+			  vector<int4> &inputStatus,vector<int4> &outputStatus) const=0;
+
+  /// \brief Clone \b this action onto a new prototype model
+  ///
+  /// \param newModel is the new model
+  /// \return the cloned action
+  virtual SharedAction *clone(ProtoModel *newModel) const=0;
+
+  /// \brief Decode the action from a stream
+  ///
+  /// \param decoder is the stream
+  virtual void decode(Decoder &decoder)=0;
+};
+
+/// \brief Action that allocates a pointer, required for the output, from the input resources.
+class HiddenReturnAction : public SharedAction {
+  const ParamListStandard *inputResource;	///< Input parameter resources
+public:
+  HiddenReturnAction(const ProtoModel *m);	///< Constructor
+
+  virtual void applyBefore(const PrototypePieces &proto,TypeFactory &tlist,vector<ParameterPieces> &params,
+			   vector<int4> &inputStatus,vector<int4> &outputStatus) const;
+  virtual void applyAfter(const PrototypePieces &proto,TypeFactory &tlist,vector<ParameterPieces> &params,
+			  vector<int4> &inputStatus,vector<int4> &outputStatus) const;
+  virtual SharedAction *clone(ProtoModel *newModel) const;
+  virtual void decode(Decoder &decoder) {}
+};
+
+/// \brief Parameter assignment action that lets input and output parameters share stack space
+///
+/// Any input stack allocations can happen either before or after any output stack allocation.
+/// The action can optionally add an extra stack alignment between the first allocations and second allocations.
+class ShareStackAction : public SharedAction {
+  const ParamEntry *inputStackEntry;	///< Stack resource for input parameters
+  const ParamEntry *outputStackEntry;	///< Stack resource for output parameters
+  bool inputFirst;			///< \b true if input stack populated before output stack
+  int4 extraAlign;			///< Extra alignment added between first stack allocations and second
+public:
+  ShareStackAction(const ProtoModel *m);	///< Constructor
+  virtual void applyBefore(const PrototypePieces &proto,TypeFactory &tlist,vector<ParameterPieces> &params,
+			   vector<int4> &inputStatus,vector<int4> &outputStatus) const;
+  virtual void applyAfter(const PrototypePieces &proto,TypeFactory &tlist,vector<ParameterPieces> &params,
+			  vector<int4> &inputStatus,vector<int4> &outputStatus) const;
+  virtual SharedAction *clone(ProtoModel *newModel) const;
+  virtual void decode(Decoder &decoder);
 };
 
 /// If the assign action could produce the trials as return value storage, return \b true

@@ -2128,6 +2128,15 @@ rustc_lint::declare_lint!(
     "a computed program fact lives only in the query database"
 );
 
+rustc_lint::declare_lint!(
+    /// A `match` on `R2ILOp` outside r2il that names two or more operations, answers a `bool` or
+    /// varnodes, and lets a wildcard drop the rest restates an op property r2il owns (ROADMAP D41).
+    /// phi.rs's copy of `output()` dropped `Select` that way (#287). A wildcard that asks r2il passes.
+    pub R2IL_OP_PROPERTY_OUTSIDE_R2IL,
+    Deny,
+    "a property of an R2ILOp has one owner in r2il, stated as an exhaustive list"
+);
+
 rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     DISPLAY_NAMES_OUTSIDE_RENDERING,
     STRING_PREFIX_SEMANTIC_CLASSIFICATION,
@@ -2205,7 +2214,8 @@ rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     R2TYPES_FUNCTION_FACTS_FIELD_OWNERSHIP,
     FACTS_METHOD_SHAPED_LIKE_A_RENDERING_DECISION,
     R2DEC_OBSERVED_LITERAL_CONSTRUCTION,
-    ENTITY_KEYED_MAP
+    ENTITY_KEYED_MAP,
+    R2IL_OP_PROPERTY_OUTSIDE_R2IL
 ]);
 
 #[unsafe(no_mangle)]
@@ -2291,6 +2301,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         R2DEC_OBSERVED_LITERAL_CONSTRUCTION,
         ENTITY_KEYED_MAP,
         CACHE_OUTSIDE_QUERY_DATABASE,
+        R2IL_OP_PROPERTY_OUTSIDE_R2IL,
     ]);
     lint_store.register_late_lint_pass(Box::new(|_| Box::new(R2sleighLintPass)));
 }
@@ -3199,6 +3210,17 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
     }
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+        if let Some(answer) = r2il_op_property_match(cx, expr) {
+            span_lint(
+                cx,
+                R2IL_OP_PROPERTY_OUTSIDE_R2IL,
+                expr.span.source_callsite(),
+                format!(
+                    "this `match` on `R2ILOp` answers `{answer}` and its wildcard drops every other operation; read the property from r2il or add it there as an exhaustive list"
+                ),
+            );
+        }
+
         if let ExprKind::Struct(qpath, ..) = expr.kind
             && constructs_observation_node(cx, qpath, expr.hir_id)
             && !is_r2dec_ast_span(cx, expr.span)
@@ -5633,6 +5655,107 @@ fn is_r2types_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
 fn is_canonical_ssa_var_classifier(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     let filename = cx.sess().source_map().span_to_filename(expr.span);
     format!("{filename:?}").contains("crates/r2ssa/src/var.rs")
+}
+
+/// What a `match` on `R2ILOp` outside r2il answers, when it restates an op property (D41).
+fn r2il_op_property_match<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> Option<String> {
+    let ExprKind::Match(scrutinee, arms, _) = expr.kind else {
+        return None;
+    };
+    let site = expr.span.source_callsite();
+    let filename = format!("{:?}", cx.sess().source_map().span_to_filename(site));
+    if !filename.contains("crates/") || filename.contains("crates/r2il/") {
+        return None;
+    }
+    let typeck = cx.typeck_results();
+    if !is_r2il_op(cx, typeck.expr_ty(scrutinee)) {
+        return None;
+    }
+    let answer = typeck.expr_ty(expr);
+    if !answers_an_op_property(cx, answer) || clippy_utils::is_in_test(cx.tcx, expr.hir_id) {
+        return None;
+    }
+    // One operation named is "is it this one", not a class of them.
+    let mut named = arms
+        .iter()
+        .flat_map(|arm| named_r2il_variants(cx, arm.pat))
+        .collect::<Vec<_>>();
+    named.sort_unstable_by_key(|variant| variant.index);
+    named.dedup();
+    let drops = arms
+        .iter()
+        .any(|arm| is_catch_all(arm) && !asks_r2il(cx, arm.body));
+    (named.len() >= 2 && drops).then(|| answer.to_string())
+}
+
+fn is_r2il_op(cx: &LateContext<'_>, ty: rustc_middle::ty::Ty<'_>) -> bool {
+    matches!(ty.peel_refs().kind(), rustc_middle::ty::Adt(op, _) if cx.tcx.item_name(op.did()).as_str() == "R2ILOp")
+}
+
+/// `bool`, or an `Option`, `Vec`, slice or array of varnodes or references to them.
+fn answers_an_op_property(cx: &LateContext<'_>, ty: rustc_middle::ty::Ty<'_>) -> bool {
+    use rustc_middle::ty::{Adt, Array, Bool, Slice};
+    let is_varnode = |ty: rustc_middle::ty::Ty<'_>| matches!(ty.peel_refs().kind(), Adt(varnode, _) if cx.tcx.item_name(varnode.did()).as_str() == "Varnode");
+    match ty.peel_refs().kind() {
+        Bool => true,
+        Slice(element) | Array(element, _) => is_varnode(*element),
+        Adt(holder, args) => {
+            matches!(cx.tcx.item_name(holder.did()).as_str(), "Option" | "Vec")
+                && args.types().next().is_some_and(is_varnode)
+        }
+        _ => false,
+    }
+}
+
+/// The `R2ILOp` variants a pattern names, at any depth.
+fn named_r2il_variants(
+    cx: &LateContext<'_>,
+    pat: &rustc_hir::Pat<'_>,
+) -> Vec<rustc_span::def_id::DefId> {
+    use rustc_hir::def::{CtorOf, DefKind, Res};
+    let mut named = Vec::new();
+    pat.walk_always(|pat| {
+        let qpath = match &pat.kind {
+            rustc_hir::PatKind::Struct(qpath, ..) | rustc_hir::PatKind::TupleStruct(qpath, ..) => {
+                qpath
+            }
+            rustc_hir::PatKind::Expr(rustc_hir::PatExpr {
+                kind: rustc_hir::PatExprKind::Path(qpath),
+                ..
+            }) => qpath,
+            _ => return,
+        };
+        let variant = match cx.qpath_res(qpath, pat.hir_id) {
+            Res::Def(DefKind::Variant, variant) => variant,
+            Res::Def(DefKind::Ctor(CtorOf::Variant, _), ctor) => cx.tcx.parent(ctor),
+            _ => return,
+        };
+        if cx.tcx.item_name(cx.tcx.parent(variant)).as_str() == "R2ILOp" {
+            named.push(variant);
+        }
+    });
+    named
+}
+
+/// An unguarded `_` or bare binding: the arm every operation not named above falls into.
+fn is_catch_all(arm: &rustc_hir::Arm<'_>) -> bool {
+    arm.guard.is_none()
+        && matches!(
+            arm.pat.kind,
+            rustc_hir::PatKind::Wild | rustc_hir::PatKind::Binding(_, _, _, None)
+        )
+}
+
+/// Whether an arm defers to r2il: it calls a method on an `R2ILOp`.
+fn asks_r2il<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Expr<'tcx>) -> bool {
+    let typeck = cx.typeck_results();
+    clippy_utils::visitors::for_each_expr(cx.tcx, body, |expr| match expr.kind {
+        ExprKind::MethodCall(_, receiver, ..) if is_r2il_op(cx, typeck.expr_ty(receiver)) => {
+            std::ops::ControlFlow::Break(())
+        }
+        _ => std::ops::ControlFlow::Continue(()),
+    })
+    .is_some()
 }
 
 #[test]

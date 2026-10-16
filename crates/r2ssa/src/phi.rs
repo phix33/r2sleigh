@@ -10,7 +10,7 @@ use crate::control::{SsaExecutionStopReason, SsaWorkControl};
 use crate::domtree::DomTree;
 use crate::function::{RegisterFamilyInfo, RegisterFamilySlot};
 use crate::naming::{RegisterNameMap, varnode_to_name};
-use crate::var::{CanonicalStorageId, SSAVar};
+use crate::var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar};
 
 /// Exact identity used by phi placement and SSA renaming.
 ///
@@ -35,9 +35,14 @@ impl RenameIdentity {
         }
     }
 
-    pub fn from_varnode(varnode: &r2il::Varnode, reg_names: Option<&RegisterNameMap>) -> Self {
+    /// `instruction` reads or writes the varnode; a temporary is that instruction's own.
+    pub fn from_varnode(
+        varnode: &r2il::Varnode,
+        reg_names: Option<&RegisterNameMap>,
+        instruction: u64,
+    ) -> Self {
         Self::new(
-            varnode_to_name(varnode, reg_names),
+            varnode_to_name(varnode, reg_names, instruction),
             CanonicalStorageId::from_varnode(varnode),
         )
     }
@@ -49,10 +54,11 @@ impl RenameIdentity {
         varnode: &r2il::Varnode,
         reg_names: Option<&RegisterNameMap>,
         families: Option<&RegisterFamilyInfo>,
+        instruction: u64,
     ) -> Self {
         match register_root_slot(varnode, families) {
             Some(root) => Self::for_root_slot(root, reg_names),
-            None => Self::from_varnode(varnode, reg_names),
+            None => Self::from_varnode(varnode, reg_names, instruction),
         }
     }
 
@@ -67,7 +73,7 @@ impl RenameIdentity {
             offset: root.offset,
             size: root.width,
         };
-        Self::from_varnode(&varnode, reg_names)
+        Self::from_varnode(&varnode, reg_names, NO_TEMPORARY)
     }
 
     pub fn synthetic(name: impl Into<String>, size: u32) -> Self {
@@ -77,6 +83,14 @@ impl RenameIdentity {
     pub fn as_var(&self, version: u32, disambiguator: u32) -> SSAVar {
         SSAVar::new(&self.name, version, self.size).with_rename_disambiguator(disambiguator)
     }
+}
+
+/// The instruction a varnode that cannot be a temporary is read at: none is asked.
+const NO_TEMPORARY: u64 = 0;
+
+/// A temporary belongs to one instruction, which lies in one block, so no merge carries one.
+fn is_temporary(identity: &RenameIdentity) -> bool {
+    identity.storage.space == CanonicalStorageSpace::Unique
 }
 
 pub type DefinitionSitesByIdentity = BTreeMap<RenameIdentity, BTreeSet<u64>>;
@@ -120,6 +134,9 @@ impl PhiPlacement {
 
         for (identity, def_blocks) in defs {
             control.poll()?;
+            if is_temporary(identity) {
+                continue;
+            }
             let mut def_list: Vec<u64> = def_blocks.iter().copied().collect();
             def_list.sort_unstable();
             let mut phi_blocks: Vec<u64> = domtree
@@ -201,17 +218,20 @@ pub fn collect_defs_from_cfg_with_names_storage_and_control<C: SsaWorkControl + 
         let Some(block) = cfg.get_block(addr) else {
             continue;
         };
-        for op in &block.ops {
+        for (index, op) in block.ops.iter().enumerate() {
             control.poll()?;
+            let instruction = block.op_instruction_addr(index).unwrap_or(block.addr);
             for varnode in op.inputs() {
                 if !matches!(varnode.space, r2il::SpaceId::Const) {
-                    let identity = RenameIdentity::for_varnode(varnode, reg_names, families);
+                    let identity =
+                        RenameIdentity::for_varnode(varnode, reg_names, families, instruction);
                     defs.entry(identity.clone()).or_default();
                     storage_by_identity.insert(identity.clone(), identity.storage);
                 }
             }
-            if let Some(varnode) = get_op_output_varnode(op) {
-                let identity = RenameIdentity::for_varnode(varnode, reg_names, families);
+            if let Some(varnode) = op.output() {
+                let identity =
+                    RenameIdentity::for_varnode(varnode, reg_names, families, instruction);
                 defs.entry(identity.clone()).or_default().insert(block.addr);
                 storage_by_identity.insert(identity.clone(), identity.storage);
             }
@@ -233,7 +253,7 @@ pub(crate) fn clobber_identity(
         offset: storage.offset,
         size: storage.size,
     };
-    RenameIdentity::for_varnode(&varnode, reg_names, families)
+    RenameIdentity::for_varnode(&varnode, reg_names, families, NO_TEMPORARY)
 }
 
 /// The clobbers a call makes that this body can observe: those of a register it defines.
@@ -334,7 +354,7 @@ pub fn add_call_boundary_def_sites(
             continue;
         };
         for op in &block.ops {
-            if !matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. }) {
+            if !op.is_call() {
                 continue;
             }
             let callee = call_boundaries.callee_boundary(op);
@@ -415,7 +435,11 @@ pub fn live_in_by_block(
             continue;
         };
         present.push(true);
-        let rows = block.ops.iter().map(|op| numbering.effect(op)).collect();
+        let rows = (block.ops.iter().enumerate())
+            .map(|(index, op)| {
+                numbering.effect(op, block.op_instruction_addr(index).unwrap_or(block.addr))
+            })
+            .collect();
         effects.push(rows);
     }
     // A call or a return reads or writes the whole of each register the
@@ -581,9 +605,13 @@ impl IdentityNumbers<'_> {
 
     /// The bits of the bytes `varnode` covers in the identity it is renamed
     /// as: a lane's own bytes of its root, or the whole of anything else.
-    fn bytes(&mut self, varnode: &r2il::Varnode) -> std::ops::Range<u32> {
-        let identity =
-            RenameIdentity::for_varnode(varnode, self.naming.reg_names, self.naming.families);
+    fn bytes(&mut self, varnode: &r2il::Varnode, instruction: u64) -> std::ops::Range<u32> {
+        let identity = RenameIdentity::for_varnode(
+            varnode,
+            self.naming.reg_names,
+            self.naming.families,
+            instruction,
+        );
         let root = identity.storage;
         let number = self.number_identity(identity);
         let whole = self.bases[number as usize].clone();
@@ -608,17 +636,24 @@ impl IdentityNumbers<'_> {
     }
 
     /// What one operation reads and defines, as renaming writes it.
-    fn effect(&mut self, op: &r2il::R2ILOp) -> LivenessOpEffect {
-        let kill = get_op_output_varnode(op).map(|varnode| self.bytes(varnode));
+    /// A temporary is never live where a block begins (`is_temporary`), so it has no bits.
+    fn effect(&mut self, op: &r2il::R2ILOp, instruction: u64) -> LivenessOpEffect {
+        let tracked = |varnode: &&r2il::Varnode| {
+            !matches!(varnode.space, r2il::SpaceId::Const | r2il::SpaceId::Unique)
+        };
+        let kill = op
+            .output()
+            .filter(tracked)
+            .map(|varnode| self.bytes(varnode, instruction));
         let reads = op
             .inputs()
             .into_iter()
-            .filter(|varnode| !matches!(varnode.space, r2il::SpaceId::Const))
-            .map(|varnode| self.bytes(varnode))
+            .filter(tracked)
+            .map(|varnode| self.bytes(varnode, instruction))
             .collect();
         LivenessOpEffect {
             boundary: match op {
-                r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. } => LivenessBoundary::Call,
+                _ if op.is_call() => LivenessBoundary::Call,
                 r2il::R2ILOp::Return { .. } => LivenessBoundary::Return,
                 _ => LivenessBoundary::None,
             },
@@ -660,79 +695,165 @@ enum LivenessBoundary {
     Return,
 }
 
-fn get_op_output_varnode(op: &r2il::R2ILOp) -> Option<&r2il::Varnode> {
-    use r2il::R2ILOp::*;
+#[cfg(test)]
+mod tests {
+    use r2il::{MemoryOrdering, R2ILBlock, R2ILOp, SpaceId, Varnode};
 
-    match op {
-        Copy { dst, .. }
-        | Load { dst, .. }
-        | IntAdd { dst, .. }
-        | IntSub { dst, .. }
-        | IntMult { dst, .. }
-        | IntDiv { dst, .. }
-        | IntSDiv { dst, .. }
-        | IntRem { dst, .. }
-        | IntSRem { dst, .. }
-        | IntNegate { dst, .. }
-        | IntCarry { dst, .. }
-        | IntSCarry { dst, .. }
-        | IntSBorrow { dst, .. }
-        | IntAnd { dst, .. }
-        | IntOr { dst, .. }
-        | IntXor { dst, .. }
-        | IntNot { dst, .. }
-        | IntLeft { dst, .. }
-        | IntRight { dst, .. }
-        | IntSRight { dst, .. }
-        | IntEqual { dst, .. }
-        | IntNotEqual { dst, .. }
-        | IntLess { dst, .. }
-        | IntSLess { dst, .. }
-        | IntLessEqual { dst, .. }
-        | IntSLessEqual { dst, .. }
-        | IntZExt { dst, .. }
-        | IntSExt { dst, .. }
-        | BoolNot { dst, .. }
-        | BoolAnd { dst, .. }
-        | BoolOr { dst, .. }
-        | BoolXor { dst, .. }
-        | Piece { dst, .. }
-        | Subpiece { dst, .. }
-        | PopCount { dst, .. }
-        | Lzcount { dst, .. }
-        | FloatAdd { dst, .. }
-        | FloatSub { dst, .. }
-        | FloatMult { dst, .. }
-        | FloatDiv { dst, .. }
-        | FloatNeg { dst, .. }
-        | FloatAbs { dst, .. }
-        | FloatSqrt { dst, .. }
-        | FloatCeil { dst, .. }
-        | FloatFloor { dst, .. }
-        | FloatRound { dst, .. }
-        | FloatNaN { dst, .. }
-        | FloatEqual { dst, .. }
-        | FloatNotEqual { dst, .. }
-        | FloatLess { dst, .. }
-        | FloatLessEqual { dst, .. }
-        | Int2Float { dst, .. }
-        | Float2Int { dst, .. }
-        | FloatFloat { dst, .. }
-        | Trunc { dst, .. }
-        | CpuId { dst }
-        | Multiequal { dst, .. }
-        | Indirect { dst, .. }
-        | PtrAdd { dst, .. }
-        | PtrSub { dst, .. }
-        | SegmentOp { dst, .. }
-        | New { dst, .. }
-        | Cast { dst, .. }
-        | Extract { dst, .. }
-        | Insert { dst, .. } => Some(dst),
-        CallOther { output, .. } => output.as_ref(),
-        _ => None,
+    fn varnode(space: SpaceId, offset: u64, size: u32) -> Varnode {
+        Varnode {
+            space,
+            offset,
+            size,
+        }
+    }
+
+    /// Each operation that writes a register without an arithmetic opcode: the
+    /// loop below defines `r0` only through it.
+    fn conditional_writers() -> Vec<(&'static str, R2ILOp)> {
+        let r0 = || varnode(SpaceId::Register, 0, 8);
+        let r8 = || varnode(SpaceId::Register, 8, 8);
+        let flag = || varnode(SpaceId::Unique, 0x100, 1);
+        let ordering = MemoryOrdering::Relaxed;
+        vec![
+            (
+                "select",
+                R2ILOp::Select {
+                    dst: r0(),
+                    cond: flag(),
+                    if_true: r0(),
+                    if_false: r8(),
+                },
+            ),
+            (
+                "load linked",
+                R2ILOp::LoadLinked {
+                    dst: r0(),
+                    space: SpaceId::Ram,
+                    addr: r8(),
+                    ordering,
+                },
+            ),
+            (
+                "guarded load",
+                R2ILOp::LoadGuarded {
+                    dst: r0(),
+                    space: SpaceId::Ram,
+                    addr: r8(),
+                    guard: flag(),
+                    ordering,
+                },
+            ),
+            (
+                "store conditional",
+                R2ILOp::StoreConditional {
+                    result: Some(r0()),
+                    space: SpaceId::Ram,
+                    addr: r8(),
+                    val: r8(),
+                    ordering,
+                },
+            ),
+            (
+                "compare and swap",
+                R2ILOp::Atomic(Box::new(r2il::AtomicAccess {
+                    dst: r0(),
+                    space: SpaceId::Ram,
+                    addr: r8(),
+                    update: r2il::AtomicUpdate::CompareExchange {
+                        expected: r0(),
+                        replacement: r8(),
+                    },
+                    ordering,
+                })),
+            ),
+            (
+                "atomic fetch",
+                R2ILOp::Atomic(Box::new(r2il::AtomicAccess {
+                    dst: r0(),
+                    space: SpaceId::Ram,
+                    addr: r8(),
+                    update: r2il::AtomicUpdate::Fetch {
+                        op: r2il::AtomicFetchOp::Add,
+                        operand: r8(),
+                    },
+                    ordering,
+                })),
+            ),
+        ]
+    }
+
+    /// A register a loop reads on entry and writes only through a conditional
+    /// write merges at the header: the back edge carries the written value.
+    #[test]
+    fn a_register_only_a_conditional_write_defines_merges_at_the_loop_header() {
+        for (name, writer) in conditional_writers() {
+            let r0 = || varnode(SpaceId::Register, 0, 8);
+            let flag = || varnode(SpaceId::Unique, 0x100, 1);
+            let blocks = vec![
+                R2ILBlock {
+                    addr: 0x1000,
+                    size: 4,
+                    ops: vec![R2ILOp::Copy {
+                        dst: r0(),
+                        src: varnode(SpaceId::Const, 0, 8),
+                    }],
+                    ..Default::default()
+                },
+                R2ILBlock {
+                    addr: 0x1004,
+                    size: 8,
+                    ops: vec![
+                        R2ILOp::IntEqual {
+                            dst: flag(),
+                            a: r0(),
+                            b: varnode(SpaceId::Const, 7, 8),
+                        },
+                        writer,
+                        R2ILOp::CBranch {
+                            target: varnode(SpaceId::Ram, 0x1004, 8),
+                            cond: flag(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                R2ILBlock {
+                    addr: 0x100c,
+                    size: 4,
+                    ops: vec![R2ILOp::Return {
+                        target: varnode(SpaceId::Const, 0, 8),
+                    }],
+                    ..Default::default()
+                },
+            ];
+            let function =
+                crate::function::SSAFunction::from_blocks_raw(&blocks, None).expect("raw SSA");
+            let header = function.named_block(0x1004).expect("loop header");
+            let merged = header
+                .phis()
+                .iter()
+                .find(|phi| phi.dst.name() == r0_name(&function));
+            let phi =
+                merged.unwrap_or_else(|| panic!("{name}: no merge of r0:\n{}", function.dump()));
+            let defined = header
+                .ops()
+                .iter()
+                .find_map(|op| op.dst().filter(|dst| dst.name() == phi.dst.name()).cloned());
+            let carried = phi
+                .sources
+                .iter()
+                .find(|(pred, _)| *pred == 0x1004)
+                .map(|(_, var)| var.clone());
+            assert_eq!(
+                carried,
+                defined,
+                "{name}: the back edge carries the write:\n{}",
+                function.dump()
+            );
+        }
+    }
+
+    fn r0_name(function: &crate::function::SSAFunction) -> String {
+        let entry = function.named_block(0x1000).expect("entry");
+        entry.ops()[0].dst().expect("r0 written").name().to_owned()
     }
 }
-
-#[cfg(test)]
-mod tests {}

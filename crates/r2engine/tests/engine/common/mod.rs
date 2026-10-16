@@ -482,6 +482,7 @@ impl Literal {
                     name: "x86-64".to_owned(),
                     bits: 64,
                     endian: Endian::Little,
+                    instructions: None,
                 },
                 segments: vec![code_segment(BASE, CODE.len() as u64)],
                 sections: vec![Section {
@@ -559,6 +560,7 @@ impl Literal {
             name: "aarch64".to_owned(),
             bits: 64,
             endian: Endian::Little,
+            instructions: None,
         };
         self
     }
@@ -569,6 +571,7 @@ impl Literal {
             name: "arm".to_owned(),
             bits: 32,
             endian: Endian::Little,
+            instructions: None,
         };
         self
     }

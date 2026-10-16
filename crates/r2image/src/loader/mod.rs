@@ -9,7 +9,7 @@ use r2abi::statement::{Encoding, ImportStub, LoaderWrite, Relocation, WriteKind}
 mod elf;
 mod macho;
 
-pub(crate) use elf::{binding, hooks};
+pub(crate) use elf::{binding, common, hooks};
 
 /// What the loader applies to one image.
 pub(crate) struct Loaded {

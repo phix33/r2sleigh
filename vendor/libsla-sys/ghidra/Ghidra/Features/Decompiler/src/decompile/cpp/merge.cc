@@ -416,7 +416,7 @@ PcodeOp *Merge::allocateCopyTrim(Varnode *inVn,const Address &addr,PcodeOp *trim
   Datatype *ct = inVn->getType();
   if (ct->needsResolution()) {		// If the data-type needs resolution
     if (inVn->isWritten()) {
-      int4 fieldNum = data.inheritResolution(ct, copyOp, -1, inVn->getDef(), -1);
+      int4 fieldNum = data.inheritUnionField(ct, copyOp, -1, inVn->getDef(), -1);
       data.forceFacingType(ct, fieldNum, copyOp, 0);
     }
     else {
@@ -669,7 +669,7 @@ void Merge::trimOpOutput(PcodeOp *op)
   copyop = data.newOp(1,op->getAddr());
   data.opSetOpcode(copyop,CPUI_COPY);
   if (ct->needsResolution()) {
-    int4 fieldNum = data.inheritResolution(ct, copyop, -1, op, -1);
+    int4 fieldNum = data.inheritUnionField(ct, copyop, -1, op, -1);
     data.forceFacingType(ct, fieldNum, copyop, 0);
     if (ct->getMetatype() == TYPE_PARTIALUNION)
       ct = vn->getTypeDefFacing();
@@ -871,7 +871,7 @@ void Merge::mergeIndirect(PcodeOp *indop)
   PcodeOp *newop = allocateCopyTrim(invn0, indop->getAddr(), indop);
   SymbolEntry *entry = outvn->getSymbolEntry();
   if (entry != (SymbolEntry *)0 && entry->getSymbol()->getType()->needsResolution()) {
-    data.inheritResolution(entry->getSymbol()->getType(), newop, -1, indop, -1);
+    data.inheritUnionField(entry->getSymbol()->getType(), newop, -1, indop, -1);
   }
   data.opSetInput(indop,newop->getOut(),0);
   data.opInsertBefore(newop,indop);
@@ -1539,6 +1539,39 @@ void Merge::markInternalCopies(void)
 #ifdef MERGEMULTI_DEBUG
   verifyHighCovers();
 #endif
+}
+
+/// \brief Mark COPYs to \e join space padding
+///
+/// Search for any COPY of #0 to a Varnode with an address marked a pure padding
+/// and mark the COPY as \e non-printing.
+void Merge::markPurePaddingCopies(void)
+
+{
+  AddrSpaceManager *glb = data.getArch();
+  set<JoinRecord *,JoinRecordCompare>::const_iterator iter = glb->beginJoinPadding();
+  while(iter != glb->endJoin()) {
+    JoinRecord *joinRec = *iter;
+    if (!joinRec->isPurePadding()) break;
+    ++iter;
+    Address addr = joinRec->getUnified().getAddr();
+    int4 size = joinRec->getUnified().size;
+    VarnodeLocSet::const_iterator viter = data.beginLoc(size,addr);
+    VarnodeLocSet::const_iterator venditer = data.endLoc(size,addr);
+    while(viter != venditer) {
+      Varnode *vn = *viter;
+      ++viter;
+      if (vn->isWritten()) {
+	PcodeOp *copy = vn->getDef();
+	if (copy->code() == CPUI_COPY) {
+	  Varnode *cvn = copy->getIn(0);
+	  if (cvn->isConstant() && cvn->getOffset() == 0) {
+	    data.opMarkNonPrinting(copy);
+	  }
+	}
+      }
+    }
+  }
 }
 
 /// \brief Register an unmapped CONCAT stack with the merge process

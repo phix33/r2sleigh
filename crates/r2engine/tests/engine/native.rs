@@ -727,6 +727,85 @@ fn a_staged_call_passes_a_proven_string_as_a_literal() {
     assert!(text.contains("0x2010"), "{text}");
 }
 
+/// `strlen(0x2008)` on AArch64, the address formed from a page and an offset; `strlen` at 0x1018.
+const STRLEN_PAGED: &[u8] = &[
+    0xfd, 0x7b, 0xbf, 0xa9, // 0x1000 stp x29, x30, [sp, -16]!
+    0x00, 0x00, 0x00, 0xb0, // 0x1004 adrp x0, 0x2000
+    0x00, 0x20, 0x00, 0x91, // 0x1008 add x0, x0, 8
+    0x03, 0x00, 0x00, 0x94, // 0x100c bl 0x1018
+    0xfd, 0x7b, 0xc1, 0xa8, // 0x1010 ldp x29, x30, [sp], 16
+    0xc0, 0x03, 0x5f, 0xd6, // 0x1014 ret
+    0xc0, 0x03, 0x5f, 0xd6, // 0x1018 strlen: ret
+];
+/// "ok" at 0x2008, in static data.
+const PAGED_TEXT: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, b'o', b'k', 0, 0, 0, 0, 0, 0];
+
+/// `STRLEN_PAGED` as code and `PAGED_TEXT` as read-only static data at `TEXTS`.
+struct PagedText;
+
+impl r2engine::body::Program for PagedText {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let region = self.region(vaddr)?;
+        let bytes: &[u8] = match region.execute {
+            true => STRLEN_PAGED,
+            false => &PAGED_TEXT,
+        };
+        let rest = bytes.get(usize::try_from(vaddr - region.start).ok()?..)?;
+        Some(rest[..rest.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        let end = TEXTS + PAGED_TEXT.len() as u64;
+        code_region(STRLEN_PAGED.len(), vaddr).or_else(|| {
+            (TEXTS..end)
+                .contains(&vaddr)
+                .then_some(r2engine::body::Region {
+                    start: TEXTS,
+                    end,
+                    file_end: end,
+                    execute: false,
+                    write: false,
+                })
+        })
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        matches!(vaddr, BASE | 0x1018)
+    }
+}
+
+impl Program for PagedText {
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        (TEXTS..TEXTS + PAGED_TEXT.len() as u64).contains(&vaddr)
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.import_at(vaddr)
+            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == 0x1018).then(|| "strlen".to_owned())
+    }
+}
+
+/// Text an AArch64 body points at only once its page and offset fold is captured on a second
+/// preparation, the first sealed and never collected: the call still passes it as a literal.
+#[test]
+fn an_aarch64_page_and_offset_pass_the_text_they_fold_to() {
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let target = machine.target();
+    let response = decompile(&target, &PagedText, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("strlen(\"ok\")"), "{text}");
+    assert!(!text.contains("0x2008"), "{text}");
+}
+
 /// `half(0x2000)`, `half` a local body reading the 16-bit word at `[rdi + 2]`; at 0x2000 the
 /// words 9, 8, which also read as the text "\t".
 const HALF_AT_TEXT: &[u8] = &[
@@ -1581,6 +1660,82 @@ fn an_aarch64_exclusive_loop_returns_the_value_it_loaded() {
             assert!(!output.contains(absent), "{ordered}: {absent}: {output}");
         }
     }
+}
+
+/// An atomic read-modify-write renders as its builtin's helper at the machine's ordering (AArch64's
+/// marks, x86's seq_cst LOCK), its value read assigned, never as a plain load and store.
+#[test]
+fn an_atomic_read_modify_write_renders_as_its_builtin_at_the_stated_ordering() {
+    let aarch64 = Machine::new("aarch64", "aarch64", 64);
+    let x86 = Machine::new("x86-64", "x86-64", 64);
+    let ret = [0xc0, 0x03, 0x5f, 0xd6];
+    for (machine, bytes, call) in [
+        // ldadd w1, w0, [x0]
+        (
+            &aarch64,
+            [&[0x00, 0x00, 0x21, 0xb8][..], &ret].concat(),
+            "r2sleigh_atomic_fetch_add_u32_relaxed((void*)(uint64_t)arg0, (uint32_t)arg1)",
+        ),
+        // ldaddal x1, x0, [x0]
+        (
+            &aarch64,
+            [&[0x00, 0x00, 0xe1, 0xf8][..], &ret].concat(),
+            "r2sleigh_atomic_fetch_add_u64_acq_rel((void*)(uint64_t)arg0, (uint64_t)arg1)",
+        ),
+        // casal w1, w2, [x0]
+        (
+            &aarch64,
+            [
+                &[0x02, 0xfc, 0xe1, 0x88][..],
+                &[0xe0, 0x03, 0x01, 0x2a],
+                &ret,
+            ]
+            .concat(),
+            "r2sleigh_atomic_compare_exchange_u32_acq_rel((void*)(uint64_t)arg0, (uint32_t)arg1, (uint32_t)arg2)",
+        ),
+        // mov eax, esi; lock xadd [rdi], eax; ret
+        (
+            &x86,
+            vec![0x89, 0xf0, 0xf0, 0x0f, 0xc1, 0x07, 0xc3],
+            "r2sleigh_atomic_fetch_add_u32_seq_cst((void*)(uint64_t)arg0, (uint32_t)arg1)",
+        ),
+    ] {
+        let program = Fixture {
+            bytes,
+            name: "fetch_add",
+        };
+        let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+        let output = response.output.text();
+        assert!(output.contains(call), "{call}: {output}");
+        for absent in [
+            "r2sleigh_load",
+            "r2sleigh_store",
+            "r2sleigh_residual",
+            "r2dec gap",
+        ] {
+            assert!(!output.contains(absent), "{call}: {absent}: {output}");
+        }
+    }
+}
+
+/// `casp` of X registers writes two cells, which no builtin's helper states: each of its accesses
+/// is a gap, and no plain store of either cell is printed.
+#[test]
+fn an_atomic_access_with_no_typed_statement_prints_no_plain_store() {
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let program = Fixture {
+        // casp x0, x1, x2, x3, [x9]; ret
+        bytes: vec![0x22, 0x7d, 0x20, 0x48, 0xc0, 0x03, 0x5f, 0xd6],
+        name: "casp",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(
+        output.contains("r2dec gap: EffectNotRendered at 0x1000:0"),
+        "{output}"
+    );
+    assert!(!output.contains("r2sleigh_store"), "{output}");
+    assert!(!output.contains("r2sleigh_atomic"), "{output}");
 }
 
 /// `dmb` is a user operation with no output, and p-code says it writes nothing else: the value
@@ -6317,4 +6472,165 @@ fn a_parameter_read_once_or_by_index_lays_out_no_structure() {
             .output;
         assert!(!output.text().contains("struct fcn_"), "{name}:\n{output}");
     }
+}
+
+/// Whether the `RAX` a block of the prepared tier begins with merges its ways in.
+fn merges_rax_at(dump: &str, block: u64) -> bool {
+    let header = format!("Block {block:#x}:");
+    dump.split("\n\n")
+        .find(|section| section.trim_start().starts_with(&header))
+        .is_some_and(|section| {
+            section
+                .lines()
+                .any(|line| line.trim_start().starts_with("RAX_") && line.contains("= phi("))
+        })
+}
+
+/// Whether a `rax` the C assigns before its loop is assigned again inside it: the value the
+/// back edge carries, rather than the one the loop was entered with on every pass.
+fn loop_carries_rax(output: &str) -> bool {
+    let Some((before, inside)) = output.split_once("for (; ; ) {") else {
+        return false;
+    };
+    let assigned = |text: &str| {
+        text.lines()
+            .filter_map(|line| line.trim_start().split_once(" = ").map(|(name, _)| name))
+            .filter(|name| name.starts_with("rax_"))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+    };
+    !assigned(before).is_disjoint(&assigned(inside))
+}
+
+/// A loop that writes its accumulator only by `cmpxchg`'s or `cmovcc`'s `SELECT` carries it to its
+/// header: a retry compares against what the failed compare loaded, which equivalence never runs.
+#[test]
+fn a_loop_carries_a_register_only_a_conditional_write_defines() {
+    for (name, header, bytes) in [
+        (
+            "cmpxchg32",
+            0x1002,
+            &[
+                0x8b, 0x07, // 1000 mov eax, [rdi]
+                0x89, 0xc1, // 1002 mov ecx, eax
+                0x09, 0xf1, // 1004 or ecx, esi
+                0x0f, 0xb1, 0x0f, // 1006 cmpxchg [rdi], ecx
+                0x75, 0xf7, // 1009 jne 0x1002
+                0xc3, // 100b ret
+            ][..],
+        ),
+        (
+            "cmpxchg64",
+            0x1003,
+            &[
+                0x48, 0x8b, 0x07, // 1000 mov rax, [rdi]
+                0x48, 0x89, 0xc1, // 1003 mov rcx, rax
+                0x48, 0x09, 0xf1, // 1006 or rcx, rsi
+                0x48, 0x0f, 0xb1, 0x0f, // 1009 cmpxchg [rdi], rcx
+                0x75, 0xf4, // 100d jne 0x1003
+                0xc3, // 100f ret
+            ][..],
+        ),
+        (
+            "cmpxchg16",
+            0x1003,
+            &[
+                0x66, 0x8b, 0x07, // 1000 mov ax, [rdi]
+                0x89, 0xc1, // 1003 mov ecx, eax
+                0x09, 0xf1, // 1005 or ecx, esi
+                0x66, 0x0f, 0xb1, 0x0f, // 1007 cmpxchg [rdi], cx
+                0x75, 0xf6, // 100b jne 0x1003
+                0xc3, // 100d ret
+            ][..],
+        ),
+        (
+            "cmov64",
+            0x1002,
+            &[
+                0x31, 0xc0, // 1000 xor eax, eax
+                0x48, 0x8b, 0x17, // 1002 mov rdx, [rdi]
+                0x48, 0x39, 0xc2, // 1005 cmp rdx, rax
+                0x48, 0x0f, 0x4f, 0xc2, // 1008 cmovg rax, rdx
+                0x48, 0x83, 0xc7, 0x08, // 100c add rdi, 8
+                0xff, 0xce, // 1010 dec esi
+                0x75, 0xee, // 1012 jne 0x1002
+                0xc3, // 1014 ret
+            ][..],
+        ),
+        (
+            "cmov16",
+            0x1002,
+            &[
+                0x31, 0xc0, // 1000 xor eax, eax
+                0x66, 0x8b, 0x17, // 1002 mov dx, [rdi]
+                0x66, 0x39, 0xc2, // 1005 cmp dx, ax
+                0x66, 0x0f, 0x4f, 0xc2, // 1008 cmovg ax, dx
+                0x48, 0x83, 0xc7, 0x02, // 100c add rdi, 2
+                0xff, 0xce, // 1010 dec esi
+                0x75, 0xee, // 1012 jne 0x1002
+                0xc3, // 1014 ret
+            ][..],
+        ),
+    ] {
+        let machine = Machine::new("x86-64", "x86-64", 64);
+        let target = machine.target();
+        let program = Fixture {
+            bytes: bytes.to_vec(),
+            name,
+        };
+        let artifact = r2engine::native::prepared(&target, &program, BASE).expect("prepared");
+        let dump = artifact.artifact().dump();
+        assert!(merges_rax_at(&dump, header), "{name}: {dump}");
+        let response = decompile(&target, &program, BASE).expect("decompile");
+        let output = response.output.text();
+        assert!(loop_carries_rax(output), "{name}: {output}");
+    }
+}
+
+/// `xor eax, eax; test rsi, rsi; je ret; cmpxchg [rdi], edx; ret`: the return reads `rax` merged
+/// from the skipped arm and the compare's, rather than refusing the function as unsupported.
+#[test]
+fn a_conditional_write_on_one_arm_merges_where_the_arms_join() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: vec![
+            0x31, 0xc0, // 1000 xor eax, eax
+            0x48, 0x85, 0xf6, // 1002 test rsi, rsi
+            0x74, 0x03, // 1005 je 0x100a
+            0x0f, 0xb1, 0x17, // 1007 cmpxchg [rdi], edx
+            0xc3, // 100a ret
+        ],
+        name: "exchange_if",
+    };
+    let artifact = r2engine::native::prepared(&target, &program, BASE).expect("prepared");
+    let dump = artifact.artifact().dump();
+    assert!(merges_rax_at(&dump, 0x100a), "{dump}");
+    let output = decompile(&target, &program, BASE)
+        .expect("decompile")
+        .output;
+    let text = output.text();
+    for absent in ["UnsupportedInstruction", "r2sleigh_residual_u64"] {
+        assert!(!text.contains(absent), "{absent}: {text}");
+    }
+}
+
+/// `cmpxchg [rip+7], ecx; mov eax, [rip+1]; ret` over the four bytes at 0x100e: the compare may write
+/// them, so the load reads memory rather than the constant the container holds there (P5).
+#[test]
+fn a_load_of_bytes_a_conditional_store_writes_is_not_read_only() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: vec![
+            0x0f, 0xb1, 0x0d, 0x07, 0x00, 0x00, 0x00, // 1000 cmpxchg [rip+7], ecx
+            0x8b, 0x05, 0x01, 0x00, 0x00, 0x00, // 1007 mov eax, [rip+1]
+            0xc3, // 100d ret
+            0x44, 0x33, 0x22, 0x11, // 100e the bytes
+        ],
+        name: "exchange_then_load",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(!output.contains("0x11223344"), "{output}");
 }

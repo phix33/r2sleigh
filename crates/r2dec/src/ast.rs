@@ -1568,6 +1568,7 @@ impl CallRefusal {
                 B::SlotSkipped { .. } => "slot-skipped",
                 B::ResultPassedOn { .. } => "result-passed-on",
                 B::CountFromRegisters => "count-from-registers",
+                B::CountRegisterSet => "count-register-set",
                 B::ImportUnstated(r2ssa::UnstatedImport::Undeclared) => "import-undeclared",
                 B::ImportUnstated(r2ssa::UnstatedImport::Unplaced) => "import-unplaced",
             },
@@ -1636,6 +1637,9 @@ impl std::fmt::Display for CallRefusal {
                     );
                 }
                 B::CountFromRegisters => "no arity is stated, only the registers written before it",
+                B::CountRegisterSet => {
+                    "it is handed a vector count: variadic or unprototyped, its argument count unproven"
+                }
                 B::ImportUnstated(r2ssa::UnstatedImport::Undeclared) => {
                     "the import has no declaration to state its arguments"
                 }
@@ -1938,6 +1942,8 @@ pub struct CFunction {
     /// asserts the function takes no arguments; a function whose interface is
     /// unknown must not make that claim.
     pub params_known: bool,
+    /// Whether arguments continue past `params`: a variadic tail the interface states.
+    pub variadic: bool,
     /// The functions this one calls, in the order their names sort.
     ///
     /// C requires a declaration before a call, and a decompiled function that
@@ -2202,6 +2208,7 @@ impl CFunction {
             locals: Vec::new(),
             body: Vec::new(),
             params_known: true,
+            variadic: false,
             declaration_only: None,
         }
     }

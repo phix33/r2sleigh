@@ -296,9 +296,8 @@ impl BasicBlock {
                 R2ILOp::Return { .. } => {
                     return BlockTerminator::Return;
                 }
-                // A trap goes to the handler and not back, which is the answer
-                // `R2ILOp::ends_block` already gives; continuing past it named
-                // an edge the machine derivation refused to agree with.
+                // A trap goes to the handler and not back, as `R2ILOp::is_control_flow` states;
+                // continuing past it named an edge the machine derivation refused to agree with.
                 R2ILOp::Breakpoint => {
                     return BlockTerminator::None;
                 }
@@ -356,22 +355,14 @@ impl BasicBlock {
 }
 
 fn op_direct_control_target(op: &R2ILOp) -> Option<u64> {
-    match op {
-        R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. } => {
-            BasicBlock::extract_const_addr(target)
-        }
-        _ => None,
-    }
+    op.transfer()
+        .filter(|transfer| transfer.direct && !transfer.call)
+        .and_then(|transfer| BasicBlock::extract_const_addr(transfer.target))
 }
 
+/// Whether control may not reach the next instruction: a transfer that does not come back, or a trap.
 fn op_terminates_basic_block(op: &R2ILOp) -> bool {
-    matches!(
-        op,
-        R2ILOp::Branch { .. }
-            | R2ILOp::CBranch { .. }
-            | R2ILOp::BranchInd { .. }
-            | R2ILOp::Return { .. }
-    )
+    op.is_control_flow() && !op.is_call()
 }
 
 fn split_internal_control_flow_targets(block: &R2ILBlock) -> Vec<R2ILBlock> {
@@ -1044,6 +1035,30 @@ mod tests {
             offset: addr,
             size,
         }
+    }
+
+    /// A trap ends its block: the instruction after it starts another, which nothing reaches from it.
+    #[test]
+    fn a_trap_inside_a_block_ends_it() {
+        let mut block = R2ILBlock::new(0x1000, 8);
+        block.push_from(R2ILOp::Breakpoint, 0x1000);
+        block.push_from(R2ILOp::Nop, 0x1004);
+        block.push_from(
+            R2ILOp::Return {
+                target: make_const(0, 8),
+            },
+            0x1004,
+        );
+
+        let cfg = CFG::from_blocks(&[block]).expect("cfg");
+
+        let trap = cfg.get_block(0x1000).expect("trap block");
+        assert_eq!(trap.terminator, BlockTerminator::None);
+        assert!(cfg.successors(0x1000).is_empty());
+        let after = cfg
+            .get_block(0x1004)
+            .expect("the instruction after the trap");
+        assert_eq!(after.terminator, BlockTerminator::Return);
     }
 
     #[test]

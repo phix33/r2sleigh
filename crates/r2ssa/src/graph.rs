@@ -915,6 +915,22 @@ impl SsaGraph {
         }
     }
 
+    /// The `CallUse` reads minted just before the call spelled at `(block_addr, ordinal)`, found from
+    /// its position: O(reads), where `call_boundary_reads` searches the block for the call.
+    pub(crate) fn boundary_reads_spelled_at(&self, block_addr: u64, ordinal: usize) -> &[InstId] {
+        let Some(block) = self
+            .block_id_for_addr(block_addr)
+            .and_then(|id| self.block(id))
+        else {
+            return &[];
+        };
+        let end = (self.phi_count(block) + ordinal).min(block.insts.len());
+        let start = (block.insts[..end].iter().rev())
+            .take_while(|inst| matches!(self.op(**inst), Some(SSAOp::CallUse { .. })))
+            .count();
+        &block.insts[end - start..end]
+    }
+
     /// The `CallUse` reads construction minted just before `call`: the carriers it may read.
     pub fn call_boundary_reads(&self, call: InstId) -> Vec<InstId> {
         let Some(block) = self.inst(call).and_then(|inst| self.block(inst.block)) else {

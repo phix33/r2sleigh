@@ -671,11 +671,11 @@ pub fn validate_op(op: &R2ILOp, op_index: usize) -> Result<(), ValidationError> 
                 "store-conditional space must not be const",
             ));
         }
-        R2ILOp::AtomicCAS { space, .. } if *space == SpaceId::Const => {
+        R2ILOp::Atomic(access) if access.space == SpaceId::Const => {
             issues.push(ValidationIssue::new(
-                "op.atomic_cas.space_const",
+                "op.atomic.space_const",
                 format!("block.ops[{op_index}].space"),
-                "atomic CAS space must not be const",
+                "atomic access space must not be const",
             ));
         }
         R2ILOp::LoadGuarded { space, .. } if *space == SpaceId::Const => {
@@ -1186,37 +1186,26 @@ pub fn validate_op_semantic(
                 "op.store_conditional.permission",
             );
         }
-        R2ILOp::AtomicCAS {
-            dst,
-            space,
-            addr,
-            expected,
-            replacement,
-            ..
-        } => {
-            check_size_eq(
-                &mut issues,
-                "op.atomic_cas.width",
-                op_index,
-                "dst.size",
-                dst.size,
-                "expected.size",
-                expected.size,
-            );
-            check_size_eq(
-                &mut issues,
-                "op.atomic_cas.width",
-                op_index,
-                "dst.size",
-                dst.size,
-                "replacement.size",
-                replacement.size,
-            );
+        R2ILOp::Atomic(access) => {
+            let crate::AtomicAccess {
+                dst, space, addr, ..
+            } = access.as_ref();
+            for operand in access.operands() {
+                check_size_eq(
+                    &mut issues,
+                    "op.atomic.width",
+                    op_index,
+                    "dst.size",
+                    dst.size,
+                    "operand.size",
+                    operand.size,
+                );
+            }
             let arch_expected = effective_arch_address_size(arch);
             let expected_addr = addr_space_size(*space, arch);
             check_size_addr_width(
                 &mut issues,
-                "op.atomic_cas.addr_width_mismatch",
+                "op.atomic.addr_width_mismatch",
                 op_index,
                 "addr.size",
                 addr.size,
@@ -1232,8 +1221,8 @@ pub fn validate_op_semantic(
                 dst.size,
                 true,
                 true,
-                "op.atomic_cas.range",
-                "op.atomic_cas.permission",
+                "op.atomic.range",
+                "op.atomic.permission",
             );
         }
         R2ILOp::LoadGuarded {
@@ -2686,14 +2675,16 @@ mod tests {
     fn memory_semantic_guard_and_width_checks_fail() {
         let arch = valid_archspec();
         let mut block = R2ILBlock::new(0x1000, 1);
-        block.push(R2ILOp::AtomicCAS {
+        block.push(R2ILOp::Atomic(Box::new(crate::AtomicAccess {
             dst: Varnode::register(0, 8),
             space: SpaceId::Ram,
             addr: Varnode::register(8, 4),
-            expected: Varnode::register(16, 4),
-            replacement: Varnode::register(24, 8),
+            update: crate::AtomicUpdate::CompareExchange {
+                expected: Varnode::register(16, 4),
+                replacement: Varnode::register(24, 8),
+            },
             ordering: crate::MemoryOrdering::Relaxed,
-        });
+        })));
         block.push(R2ILOp::LoadGuarded {
             dst: Varnode::register(0, 8),
             space: SpaceId::Ram,
@@ -2702,11 +2693,11 @@ mod tests {
             ordering: crate::MemoryOrdering::Relaxed,
         });
         let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
-        assert!(err.issues.iter().any(|i| i.code == "op.atomic_cas.width"));
+        assert!(err.issues.iter().any(|i| i.code == "op.atomic.width"));
         assert!(
             err.issues
                 .iter()
-                .any(|i| i.code == "op.atomic_cas.addr_width_mismatch")
+                .any(|i| i.code == "op.atomic.addr_width_mismatch")
         );
         assert!(
             err.issues

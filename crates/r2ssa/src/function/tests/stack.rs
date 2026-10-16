@@ -705,7 +705,7 @@ fn prepared_stack_reload_refuses_display_named_param_home() {
 
     let extended_value = prepared
         .graph()
-        .value_id_for_var(&SSAVar::new("tmp:1830", 1, 8))
+        .value_id_for_var(&SSAVar::new("tmp:1820:1830", 1, 8))
         .expect("extended index value");
     assert!(
         prepared

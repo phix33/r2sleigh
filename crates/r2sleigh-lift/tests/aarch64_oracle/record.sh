@@ -5,7 +5,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 case "$(uname -s)" in Darwin) prefix=_ ;; *) prefix= ;; esac
-cp "$here/cases.txt" "$here/gen.py" "$here/driver.c" "$work/"
+cp "$here/cases.txt" "$here/gen.py" "$here/driver.c" "$here/../oracle_common/stream.h" "$work/"
 cd "$work"
 python3 gen.py "$prefix"
 cc -O1 -c cases.S -o cases.o

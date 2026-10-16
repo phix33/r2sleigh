@@ -12,6 +12,7 @@ use r2ssa::{
     SemanticObligationKind, SsaArtifact, SsaGraph, StructuredAccessId, ValueId,
 };
 
+mod atomic;
 mod transfer;
 
 use super::RenderInput;
@@ -384,6 +385,12 @@ impl Demand<'_> {
             SSAOp::BlockTransfer(transfer) => {
                 for value in [transfer.destination, transfer.source, transfer.count] {
                     self.operand(value, inst.id);
+                }
+            }
+            SSAOp::Atomic(access) => {
+                self.operand(access.addr, inst.id);
+                for value in access.operands() {
+                    self.operand(*value, inst.id);
                 }
             }
             // A tail transfer reads its arguments, and its target where it goes through one.
@@ -1146,20 +1153,32 @@ impl<'a> Values<'a> {
             .values
             .get(value.0 as usize)?
             .canonical_storage);
-        let slots = self.artifact.machine_context().convention_slots();
-        let argument = storage.zip(slots).is_some_and(|(storage, slots)| {
+        let context = self.artifact.machine_context();
+        let slots = context.convention_slots();
+        let position = storage.zip(slots).and_then(|(storage, slots)| {
             (slots.argument_slots().iter())
-                .any(|slot| slot.space == storage.space && slot.offset == storage.offset)
+                .position(|slot| slot.space == storage.space && slot.offset == storage.offset)
         });
-        let (cause, residual) = match argument {
-            true => (
-                super::proof::UnassignedCause::UnadmittedArgument,
-                crate::prelude::ResidualCause::UnadmittedArgument,
-            ),
-            false => (
-                super::proof::UnassignedCause::Held,
-                crate::prelude::ResidualCause::HeldFromEntry,
-            ),
+        // A variadic body's tail: an argument slot past its parameters, or the vector count.
+        let tail = context.function_interface().is_some_and(|interface| {
+            interface.is_variadic()
+                && (position.is_some_and(|slot| slot >= interface.parameters().len())
+                    || storage
+                        .zip(slots.and_then(r2ssa::SourceConventionSlots::variadic_count_register))
+                        .is_some_and(|(storage, count)| {
+                            storage.space == count.space
+                                && storage.offset < count.offset + u64::from(count.size)
+                                && count.offset < storage.offset + u64::from(storage.size)
+                        }))
+        });
+        let residual = match position {
+            Some(_) => crate::prelude::ResidualCause::UnadmittedArgument,
+            None => crate::prelude::ResidualCause::HeldFromEntry,
+        };
+        let cause = match (tail, position) {
+            (true, _) => super::proof::UnassignedCause::VariadicTail,
+            (false, Some(_)) => super::proof::UnassignedCause::UnadmittedArgument,
+            (false, None) => super::proof::UnassignedCause::Held,
         };
         let read = crate::prelude::residual(&terms::c_type(ty)?, residual)?;
         self.unassigned_read(value, cause, ty);
@@ -1272,7 +1291,10 @@ impl<'a> Values<'a> {
                 {
                     Ok(Vec::new())
                 }
-                Some(SemanticInstructionState::LiveObligation) if reads_beside_effect(op) => {
+                Some(SemanticInstructionState::LiveObligation)
+                    if reads_beside_effect(op)
+                        || (matches!(op, SSAOp::Load { .. }) && self.owes_atomicity(inst.id)) =>
+                {
                     self.effect_gap(&mut out, (addr, at), inst.id);
                     self.value(inst.id, inst.output)
                 }
@@ -1379,10 +1401,16 @@ impl<'a> Values<'a> {
             | SSAOp::Switch { .. }
             | SSAOp::Return { .. }
             | SSAOp::BranchInd { .. } => Ok(Vec::new()),
+            // A store inside an access no typed statement holds is no plain C store.
+            SSAOp::Store { .. } if self.owes_atomicity(inst) => Err(Gap::Effect),
             SSAOp::Store { addr, val, .. } => self
                 .store(inst, *addr, *val)
                 .map(|stmt| vec![stmt])
                 .ok_or(Gap::Store),
+            SSAOp::Atomic(access) => self
+                .atomic(inst, access, output)
+                .map(|stmt| vec![stmt])
+                .ok_or(Gap::Effect),
             SSAOp::Call { .. } | SSAOp::CallInd { .. } => self.call(inst).map_err(Gap::Call),
             SSAOp::BlockTransfer(transfer) => self
                 .block_transfer(inst, transfer)
@@ -2656,7 +2684,8 @@ fn writes_value(op: &SSAOp<ValueId>) -> bool {
             | SSAOp::LoadGuarded { .. }
             | SSAOp::StoreConditional { .. }
             | SSAOp::StoreGuarded { .. }
-            | SSAOp::AtomicCAS(_)
+            | SSAOp::Atomic(_)
+            | SSAOp::IndivisibleAccess
             | SSAOp::BlockTransfer(_)
             | SSAOp::Breakpoint
             | SSAOp::Unimplemented

@@ -41,5 +41,11 @@ path = "tests/golden.rs"
 harness = false
 required-features = ["sleigh"]
 
+[[test]]
+name = "stable_temporaries"
+path = "tests/stable_temporaries.rs"
+harness = false
+required-features = ["sleigh"]
+
 [lints]
 workspace = true

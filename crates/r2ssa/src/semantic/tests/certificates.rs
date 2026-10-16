@@ -421,7 +421,8 @@ fn frame_round_trip_certifies_through_a_merge_no_observation_depends_on() {
 #[test]
 fn stack_geometry_certificate_closes_equal_root_merge_phi() {
     let sp = Varnode::register(32, 8);
-    let address = Varnode::unique(0x60c0, 8);
+    // A register: a temporary is its instruction's own and reaches no merge.
+    let address = Varnode::register(0x38, 8);
     let mut entry = R2ILBlock::new(0x60c0, 4);
     entry.push(R2ILOp::CBranch {
         target: Varnode::ram(0x60c8, 8),
@@ -653,6 +654,7 @@ fn framed_artifact_growing(
         b: Varnode::constant(32, 8),
     });
     body(&mut block, &sp);
+    let body_end = block.ops.len();
     block.push(R2ILOp::IntAdd {
         dst: sp.clone(),
         a: sp,
@@ -661,8 +663,14 @@ fn framed_artifact_growing(
     block.push(R2ILOp::Return {
         target: Varnode::register(16, 8),
     });
+    // The body is one instruction, as the temporaries it passes between its operations require.
     for index in 0..block.ops.len() {
-        block.stamp_instruction(index, 0x7000 + index as u64);
+        let instruction = match index {
+            0 => 0x7000,
+            _ if index < body_end => 0x7004,
+            _ => 0x7008 + 4 * (index - body_end) as u64,
+        };
+        block.stamp_instruction(index, instruction);
     }
     let roles =
         SourceMachineRoles::new(Some(register_storage(16, 8)), Some(register_storage(32, 8)))

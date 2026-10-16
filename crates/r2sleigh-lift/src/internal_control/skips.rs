@@ -218,6 +218,14 @@ fn predicable(op: &R2ILOp) -> bool {
     op.is_speculatable_value() || is_access(op) || op.is_integer_division()
 }
 
+/// The plain accesses `Predicated::op` rewrites into their guarded forms; an exclusive or atomic one has none.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        r2il_op_property_outside_r2il,
+        reason = "the accesses this pass can guard, not every memory access"
+    )
+)]
 fn is_access(op: &R2ILOp) -> bool {
     matches!(
         op,
@@ -557,22 +565,23 @@ impl Predicated<'_> {
         Some(copy)
     }
 
-    /// Where the block does not run a division's quotient is discarded, so it divides by one there
-    /// and cannot trap ahead of the test that guarded it (audit W22).
-    fn guard_divisor(&mut self, op: &mut R2ILOp, meta: &Meta) -> Option<()> {
-        let (R2ILOp::IntDiv { b: divisor, .. }
-        | R2ILOp::IntSDiv { b: divisor, .. }
-        | R2ILOp::IntRem { b: divisor, .. }
-        | R2ILOp::IntSRem { b: divisor, .. }) = op
-        else {
-            return Some(());
+    /// Where the block does not run, a division's quotient or a conversion's integer is discarded,
+    /// so it divides by one or converts zero there and cannot stop ahead of its guard (audit W22).
+    fn guard_operand(&mut self, op: &mut R2ILOp, meta: &Meta) -> Option<()> {
+        let (operand, harmless) = match op {
+            R2ILOp::IntDiv { b, .. }
+            | R2ILOp::IntSDiv { b, .. }
+            | R2ILOp::IntRem { b, .. }
+            | R2ILOp::IntSRem { b, .. } => (b, 1),
+            R2ILOp::Trunc { src, .. } | R2ILOp::Float2Int { src, .. } => (src, 0),
+            _ => return Some(()),
         };
         let (cond, holds) = self.cond.clone()?;
-        let safe = self.allocator.allocate(divisor.size)?;
-        let one = Varnode::constant(1, divisor.size);
+        let safe = self.allocator.allocate(operand.size)?;
+        let harmless = Varnode::constant(harmless, operand.size);
         let (if_true, if_false) = match holds {
-            true => (divisor.clone(), one),
-            false => (one, divisor.clone()),
+            true => (operand.clone(), harmless),
+            false => (harmless, operand.clone()),
         };
         self.emitted.push((
             R2ILOp::Select {
@@ -583,7 +592,7 @@ impl Predicated<'_> {
             },
             meta.clone(),
         ));
-        *divisor = safe;
+        *operand = safe;
         Some(())
     }
 
@@ -594,7 +603,7 @@ impl Predicated<'_> {
                 *input = candidate.clone();
             }
         }
-        self.guard_divisor(&mut op, meta)?;
+        self.guard_operand(&mut op, meta)?;
         let guard = match is_access(&op) {
             true => self.value(meta)??,
             false => Varnode::constant(1, 1),
@@ -952,6 +961,36 @@ mod tests {
             );
             assert_eq!(divided_by(&ops, 0), 0, "{ops:?}");
             assert_eq!(divided_by(&ops, 2), if division { 3 } else { 1 }, "{ops:?}");
+        }
+    }
+
+    /// The saturating `fcvt*u` shape, `q = 0; if (big) goto E; q = trunc(y); E: x = q`: a `y` past
+    /// the range leaves nought and is never converted, where the hoisted `trunc` stopped eval.
+    #[test]
+    fn a_conversion_skipped_out_of_range_never_converts_it() {
+        let integer = Varnode::unique(0x108, 8);
+        let ops = normalized(vec![
+            set(&integer, 0),
+            skip(Some(&A), 2),
+            R2ILOp::Trunc {
+                dst: integer.clone(),
+                src: Y.clone(),
+            },
+            R2ILOp::Copy {
+                dst: X.clone(),
+                src: integer.clone(),
+            },
+        ]);
+        for (value, past, converted) in [(1e300, 1, 0), (2.5, 0, 2)] {
+            let mut state = State::new(Endianness::Little, |_| None, 1 << 10).expect("state");
+            state
+                .set_register(Y.offset, 8, f64::to_bits(value).into())
+                .expect("y");
+            state.set_register(A.offset, 1, past).expect("big");
+            for op in &ops {
+                assert_eq!(step(op, &mut state), Flow::Next, "{op:?}");
+            }
+            assert_eq!(state.register(X.offset, 8), Some(converted), "{ops:?}");
         }
     }
 

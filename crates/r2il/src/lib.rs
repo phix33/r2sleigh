@@ -28,6 +28,7 @@
 //! ```
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 
+pub mod access;
 pub mod allocation;
 pub mod endianness;
 pub mod eval;
@@ -38,10 +39,12 @@ pub mod refusal_evidence;
 pub mod regname;
 pub mod serialize;
 pub mod space;
+pub mod temporary;
 pub mod validate;
 pub mod varnode;
 
 // Re-export main types at crate root
+pub use access::{RegisterAccesses, join_tiles, register_accesses};
 pub use endianness::Endianness;
 pub use memory::{AtomicKind, MemoryOrdering, MemoryPermissions, MemoryRange};
 pub use metadata::{
@@ -49,9 +52,9 @@ pub use metadata::{
     ScalarKind, StorageClass,
 };
 pub use opcode::{
-    BlockStop, BlockTransfer, BlockTransferKind, ControlTransfer, R2ILBlock, R2ILOp, SwitchCase,
-    SwitchInfo, ValueUse, guarded_transfer, predicated_call, predicated_transfer, return_addresses,
-    returns_to,
+    AtomicAccess, AtomicFetchOp, AtomicUpdate, BlockStop, BlockTransfer, BlockTransferKind,
+    ControlTransfer, MemoryAccess, R2ILBlock, R2ILOp, SwitchCase, SwitchInfo, ValueUse,
+    guarded_transfer, predicated_call, predicated_transfer, return_addresses, returns_to,
 };
 pub use regname::select_register_name;
 pub use serialize::{
@@ -59,6 +62,7 @@ pub use serialize::{
     RegisterProjectionQuery, RegisterProjectionRefusal, RegisterStorage, TrackedRegisterValue,
 };
 pub use space::{AddressSpace, SpaceId};
+pub use temporary::number_temporaries;
 pub use validate::{
     ValidationError, ValidationIssue, effective_arch_address_size, validate_archspec,
     validate_block, validate_block_full, validate_block_semantic, validate_op,

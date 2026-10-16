@@ -287,8 +287,8 @@ impl SourceAbiParameterSpec {
     }
 }
 
-/// How many arguments a function takes, as its body proves it (ROADMAP P7): exactly its
-/// parameters, or at least them where a slot past them may be read or handed on.
+/// How many fixed arguments a function takes (ROADMAP P7): exactly its parameters, or at least them
+/// where a slot past them may be read or handed on; each call counts a variadic tail (`is_variadic`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum SourceArity {
     Exact(usize),
@@ -850,11 +850,8 @@ pub struct SourceFunctionInterface {
     /// property of the function, unlike the per-callsite count rule a
     /// literal decides.
     format_parameter: Option<crate::confidence::Fact<u32>>,
-    /// Whether the declaration says arguments continue past the fixed ones.
-    ///
-    /// A fact of the callee's contract: a caller of a variadic function hands
-    /// it a tail the fixed parameters do not describe, and only a proven count
-    /// (a literal format string's conversions) says how long that tail is.
+    /// Whether arguments continue past the fixed ones, as a declaration or a body's register save
+    /// area states; only a proven count (a literal format's conversions) says how many a call passes.
     variadic: bool,
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
@@ -1541,10 +1538,29 @@ impl SourceFunctionInterface {
         Ok(self)
     }
 
+    /// Record that arguments continue past the parameters, as a body's register save area proves.
+    #[must_use]
+    pub const fn with_variadic_tail(mut self) -> Self {
+        self.variadic = true;
+        self
+    }
+
     /// Record that the parameters are a floor: a slot past them may be read or handed on.
     #[must_use]
     pub const fn with_arity_floor(mut self) -> Self {
         self.arity_floor = true;
+        self
+    }
+
+    /// What a cycle's least fixpoint assumes of a member: these parameters, exactly or as a floor,
+    /// and no result (doc/adr-resolved-bodies.md, "Arity").
+    #[must_use]
+    pub fn assumed_arity(mut self, floor: bool) -> Self {
+        self.arity_floor = floor;
+        self.return_kind = SourceFunctionReturn::Unproven;
+        self.return_logical_value = None;
+        self.result_carriers = None;
+        self.body_proven_return_address = false;
         self
     }
 
@@ -1568,7 +1584,7 @@ impl SourceFunctionInterface {
         self.result_carriers
     }
 
-    /// Whether the declaration says arguments continue past the fixed ones.
+    /// Whether arguments continue past the fixed ones, which `arity` does not count.
     pub const fn is_variadic(&self) -> bool {
         self.variadic
     }
@@ -3807,8 +3823,22 @@ pub struct SourceConventionSlots {
     /// Every variadic argument travels on the stack from the first slot,
     /// whatever registers the fixed prefix leaves free: Apple's arm64 ABI.
     variadic_tail_on_stack: bool,
+    /// Which bound of the variadic register save area a `va_list` holds, where the convention has one.
+    register_save_area: Option<SourceSaveAreaAnchor>,
+    /// Where a call hands a variadic or unprototyped callee its count of vector arguments: SysV's `al`.
+    variadic_count_register: Option<CanonicalStorageId>,
     /// The entry stack pointer's residue modulo an alignment, where the convention states one.
     entry_stack: Option<SourceEntryStack>,
+}
+
+/// The bound of the general register save area a variadic prologue fills, argument register `i` at
+/// area + slot width * i, that its `va_list` holds (doc/adr-resolved-bodies.md, "Variadic tail").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum SourceSaveAreaAnchor {
+    /// Its start: System V AMD64's `reg_save_area`.
+    Base,
+    /// The byte past its end: AAPCS64's `__gr_top`.
+    End,
 }
 
 /// `sp % alignment == residue` at a function's first instruction, as the convention states it.
@@ -3951,6 +3981,28 @@ impl SourceConventionSlots {
         self
     }
 
+    /// Which bound of the variadic register save area a `va_list` holds, where the convention has one.
+    pub const fn register_save_area(&self) -> Option<SourceSaveAreaAnchor> {
+        self.register_save_area
+    }
+
+    #[must_use]
+    pub const fn with_register_save_area(mut self, anchor: Option<SourceSaveAreaAnchor>) -> Self {
+        self.register_save_area = anchor;
+        self
+    }
+
+    /// Where a call hands a variadic or unprototyped callee its count of vector arguments.
+    pub const fn variadic_count_register(&self) -> Option<CanonicalStorageId> {
+        self.variadic_count_register
+    }
+
+    #[must_use]
+    pub fn with_variadic_count_register(mut self, register: Option<CanonicalStorageId>) -> Self {
+        self.variadic_count_register = register.filter(|storage| valid_register_storage(*storage));
+        self
+    }
+
     pub fn with_entry_stack(mut self, entry_stack: Option<SourceEntryStack>) -> Self {
         self.entry_stack = entry_stack.filter(|stack| stack.residue < stack.alignment);
         self
@@ -3995,6 +4047,8 @@ impl SourceConventionSlots {
             second_result_slot: None,
             stack_arguments: None,
             variadic_tail_on_stack: false,
+            register_save_area: None,
+            variadic_count_register: None,
             entry_stack: None,
         })
     }

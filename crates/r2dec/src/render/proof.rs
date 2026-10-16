@@ -202,6 +202,8 @@ pub(crate) enum UnassignedCause {
     Held,
     /// Delivered in an argument slot no recovered parameter admits.
     UnadmittedArgument,
+    /// A variadic body's tail register, or the vector count handed with it (`al`).
+    VariadicTail,
     /// Declared and never assigned, with no value from entry behind it: a
     /// result a call left in a register nothing claimed, for one.
     Unassigned,
@@ -229,6 +231,11 @@ fn note_unassigned_reads(detail: &mut String, unassigned: &[UnassignedRead]) {
             UnassignedCause::UnadmittedArgument,
             "argument slot read with no parameter",
             "argument slots read with no parameter",
+        ),
+        (
+            UnassignedCause::VariadicTail,
+            "variadic tail register",
+            "variadic tail registers",
         ),
         (
             UnassignedCause::Unassigned,

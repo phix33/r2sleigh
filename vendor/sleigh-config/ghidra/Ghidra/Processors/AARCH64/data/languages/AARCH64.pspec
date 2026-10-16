@@ -96,6 +96,45 @@
     <register name="q29" vector_lane_sizes="1,2,4,8"/> 
     <register name="q30" vector_lane_sizes="1,2,4,8"/> 
     <register name="q31" vector_lane_sizes="1,2,4,8"/> 
+    <!-- Sleigh's scratch: written and read within one instruction, no machine state -->
+    <register name="shift_carry" hidden="true"/>
+    <register name="tmpCY" hidden="true"/>
+    <register name="tmpOV" hidden="true"/>
+    <register name="tmpNG" hidden="true"/>
+    <register name="tmpZR" hidden="true"/>
+    <register name="glob_mask32" hidden="true"/>
+    <register name="glob_mask64" hidden="true"/>
+    <register name="VecMemAddr" hidden="true"/>
+    <register name="VectorSelem" hidden="true"/>
+    <register name="VecRegAddr" hidden="true"/>
+    <register name="tmp_ldWn" hidden="true"/>
+    <register name="tmp_ldXn" hidden="true"/>
+    <register name="tmp_stWn" hidden="true"/>
+    <register name="tmp_stXn" hidden="true"/>
+    <register name="TMPZ1" hidden="true"/>
+    <register name="TMPZ2" hidden="true"/>
+    <register name="TMPZ3" hidden="true"/>
+    <register name="TMPZ4" hidden="true"/>
+    <register name="TMPZ5" hidden="true"/>
+    <register name="TMPZ6" hidden="true"/>
+    <register name="TMPQ1" hidden="true"/>
+    <register name="TMPQ2" hidden="true"/>
+    <register name="TMPQ3" hidden="true"/>
+    <register name="TMPQ4" hidden="true"/>
+    <register name="TMPQ5" hidden="true"/>
+    <register name="TMPQ6" hidden="true"/>
+    <register name="TMPD1" hidden="true"/>
+    <register name="TMPD2" hidden="true"/>
+    <register name="TMPD3" hidden="true"/>
+    <register name="TMPD4" hidden="true"/>
+    <register name="TMPD5" hidden="true"/>
+    <register name="TMPD6" hidden="true"/>
+    <register name="TMPS1" hidden="true"/>
+    <register name="TMPS2" hidden="true"/>
+    <register name="TMPS3" hidden="true"/>
+    <register name="TMPS4" hidden="true"/>
+    <register name="TMPS5" hidden="true"/>
+    <register name="TMPS6" hidden="true"/>
   </register_data>
 
 </processor_spec>

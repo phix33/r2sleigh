@@ -10,6 +10,7 @@
 //! one that cannot turns itself and all it guards into `Unimplemented`, so
 //! downstream consumers refuse instead of inventing a CFG.
 
+mod atomic;
 mod scan;
 mod skips;
 mod unroll;
@@ -24,6 +25,7 @@ use r2il::{
 pub(crate) fn normalize_instruction_local_control(
     block: &mut R2ILBlock,
     names: &dyn Fn(u32) -> Option<String>,
+    register_big_endian: bool,
 ) {
     // A repeated string instruction's p-code is a loop, and the loop is how the
     // specification writes a block operation. Recognising it first is what
@@ -38,12 +40,16 @@ pub(crate) fn normalize_instruction_local_control(
     // skips over a store, which is not a value operation and cannot be
     // speculated past. The whole sequence is one linked load or one
     // conditional store, and the vocabulary already has both.
-    rewrite_exclusive_access(block, names);
+    let bracket = rewrite_atomic_idioms(block, names);
     // Any other loop is either decided by constants, and runs as many passes
     // as they say, or is a bit scan, and computes a count. A loop that is
     // neither is left for the guard below.
     resolve_local_loops(block);
     skips::normalize(block);
+    // A bracketed access is typed once its compare-and-exchange's skip is a guarded store.
+    if let Some(bracket) = bracket {
+        atomic::type_bracket(block, bracket, names, register_big_endian);
+    }
 }
 
 /// Replace an instruction's local loop with what it computes, where that is
@@ -680,9 +686,12 @@ impl InstructionTempAllocator {
     }
 }
 
-/// Rewrite the exclusive-access idioms, a monitor mark before a load and a
-/// monitor test skipping a store, into `LoadLinked` and `StoreConditional`.
-fn rewrite_exclusive_access(block: &mut R2ILBlock, names: &dyn Fn(u32) -> Option<String>) {
+/// The exclusive-access idioms as `LoadLinked` and `StoreConditional`, and the
+/// atomic bracket the walk meets, which is typed after `skips`.
+fn rewrite_atomic_idioms(
+    block: &mut R2ILBlock,
+    names: &dyn Fn(u32) -> Option<String>,
+) -> Option<atomic::Bracket> {
     fn user_op(
         block: &R2ILBlock,
         index: usize,
@@ -699,12 +708,14 @@ fn rewrite_exclusive_access(block: &mut R2ILBlock, names: &dyn Fn(u32) -> Option
         Some((names(*userop)?, output.clone(), inputs.clone()))
     }
     let mut rewrote = false;
+    let mut bracket = None;
     let mut at = 0;
     while at < block.ops.len() {
         let Some((name, output, inputs)) = user_op(block, at, names) else {
             at += 1;
             continue;
         };
+        bracket = bracket.or(atomic::Bracket::opening(&name));
         let rewritten = match name.as_str() {
             "ExclusiveAccess" | "SetExclusiveMonitors" => linked_load(block, at, &inputs),
             "hasExclusiveAccess" => conditional_store(block, at, output.as_ref(), &inputs),
@@ -723,6 +734,7 @@ fn rewrite_exclusive_access(block: &mut R2ILBlock, names: &dyn Fn(u32) -> Option
     if rewrote {
         absorb_ordering(block);
     }
+    bracket
 }
 
 /// An exclusive's acquire fence after its linked load, or release fence before its conditional
@@ -1032,7 +1044,7 @@ mod tests {
             },
         ];
 
-        normalize_instruction_local_control(&mut block, &|_| None);
+        normalize_instruction_local_control(&mut block, &|_| None, false);
 
         assert!(
             !block
@@ -1080,7 +1092,7 @@ mod tests {
             },
         ];
 
-        normalize_instruction_local_control(&mut block, &|_| None);
+        normalize_instruction_local_control(&mut block, &|_| None, false);
 
         let R2ILOp::BoolNot { dst: guard, src } = block.ops.first().expect("the guard") else {
             panic!("{:?}", block.ops);
@@ -1137,7 +1149,7 @@ mod tests {
             },
         ];
 
-        normalize_instruction_local_control(&mut block, &|_| None);
+        normalize_instruction_local_control(&mut block, &|_| None, false);
 
         let R2ILOp::BoolNot { dst: guard, src } = block.ops.first().expect("the guard") else {
             panic!("{:?}", block.ops);
@@ -1182,7 +1194,7 @@ mod tests {
             },
         ];
 
-        normalize_instruction_local_control(&mut block, &|_| None);
+        normalize_instruction_local_control(&mut block, &|_| None, false);
 
         assert!(
             !block
@@ -1221,7 +1233,7 @@ mod tests {
         let mut block = R2ILBlock::new(0x1000, 4);
         block.ops = vec![branch.clone()];
 
-        normalize_instruction_local_control(&mut block, &|_| None);
+        normalize_instruction_local_control(&mut block, &|_| None, false);
 
         assert_eq!(block.ops, vec![branch]);
     }
@@ -1289,7 +1301,7 @@ mod tests {
     fn a_descending_scan_from_the_top_bit_becomes_its_count() {
         let mut block = descending_scan(63, 1);
 
-        normalize_instruction_local_control(&mut block, &|_| None);
+        normalize_instruction_local_control(&mut block, &|_| None, false);
 
         assert!(
             block
@@ -1317,7 +1329,7 @@ mod tests {
         for (start, step) in [(62, 1), (64, 1), (63, 2)] {
             let mut block = descending_scan(start, step);
 
-            normalize_instruction_local_control(&mut block, &|_| None);
+            normalize_instruction_local_control(&mut block, &|_| None, false);
 
             assert!(
                 block
@@ -1370,7 +1382,7 @@ mod tests {
             },
         ];
 
-        normalize_instruction_local_control(&mut block, &|_| None);
+        normalize_instruction_local_control(&mut block, &|_| None, false);
 
         assert_eq!(block.ops.len(), 5, "{:?}", block.ops);
         assert!(
@@ -1413,7 +1425,7 @@ mod tests {
             },
         ];
 
-        normalize_instruction_local_control(&mut block, &|_| None);
+        normalize_instruction_local_control(&mut block, &|_| None, false);
 
         let additions = block
             .ops

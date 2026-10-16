@@ -565,7 +565,7 @@ fn carries(inst: &crate::graph::GraphInst, input: usize, placed: bool) -> Carry 
         SSAOp::Store { .. }
         | SSAOp::StoreConditional { .. }
         | SSAOp::StoreGuarded { .. }
-        | SSAOp::AtomicCAS(_) => {
+        | SSAOp::Atomic(_) => {
             if input == 0 {
                 access()
             } else {

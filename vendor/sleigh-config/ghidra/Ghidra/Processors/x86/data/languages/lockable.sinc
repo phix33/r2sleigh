@@ -643,7 +643,7 @@
 }
 @endif
 
-:CMPXCHG8B^lockx  m64        is vexMode=0 & lockx & unlock & byte=0xf; byte=0xc7; ( mod != 0b11 & reg_opcode=1 ) ... & m64 
+:CMPXCHG8B^lockx  m64        is vexMode=0 & lockx & unlock & byte=0xf; byte=0xc7; ( mod != 0b11 & reg_opcode=1 & check_EAX_dest & check_EDX_dest ) ... & m64 
 {
     build lockx;
     local dest = m64;
@@ -651,6 +651,8 @@
     if (ZF == 1) goto <equal>;
     EDX = dest(4);
     EAX = dest:4;
+    build check_EAX_dest;
+    build check_EDX_dest;
     goto <done>;
 <equal>
     m64 = (zext(ECX) << 32) | zext(EBX);
@@ -678,7 +680,7 @@
 {
     build lockx;
     build m8;
-    OF = sborrow(m8,1);
+    decflags(m8);
     m8 =  m8 - 1;
     resultflags(m8);
     build unlock; 
@@ -688,7 +690,7 @@
 {
     build lockx;
     build m16;
-    OF = sborrow(m16,1);
+    decflags(m16);
     m16 = m16 - 1;
     resultflags(m16);
     build unlock; 
@@ -698,7 +700,7 @@
 {
     build lockx;
     build m32;
-    OF = sborrow(m32,1);
+    decflags(m32);
     m32 = m32 - 1;
     resultflags(m32);
     build unlock; 
@@ -709,7 +711,7 @@
 {
     build lockx;
     build m64;
-    OF = sborrow(m64,1);
+    decflags(m64);
     m64 = m64 - 1;
     resultflags(m64);
     build unlock; 
@@ -720,7 +722,7 @@
 {
     build lockx;
     build m8;
-    OF = scarry(m8,1);
+    incflags(m8);
     m8 =  m8 + 1;
     resultflags( m8);
     build unlock; 
@@ -730,7 +732,7 @@
 {
     build lockx;
     build m16;
-    OF = scarry(m16,1);
+    incflags(m16);
     m16 = m16 + 1;
     resultflags(m16);
     build unlock; 
@@ -740,7 +742,7 @@
 {
     build lockx;
     build m32;
-    OF = scarry(m32,1);
+    incflags(m32);
     m32 = m32 + 1;
     resultflags(m32);
     build unlock; 
@@ -751,7 +753,7 @@
 {
     build lockx;
     build m64;
-    OF = scarry(m64,1);
+    incflags(m64);
     m64 = m64 + 1;
     resultflags(m64);
     build unlock; 
@@ -1196,13 +1198,14 @@
     build unlock; 
 }
 
-:XADD^lockx m32,Reg32	is vexMode=0 & lockx & unlock & opsize=1 & byte=0x0F; byte=0xC1; m32 & Reg32 ... 
+:XADD^lockx m32,Reg32	is vexMode=0 & lockx & unlock & opsize=1 & byte=0x0F; byte=0xC1; (check_Reg32_dest & Reg32) ... & m32
 {
     build lockx;
     build m32;
     addflags(m32,Reg32);
     local tmp = m32 + Reg32;
     Reg32 = m32;
+    build check_Reg32_dest;
     m32 = tmp;
     resultflags(tmp);
     build unlock; 

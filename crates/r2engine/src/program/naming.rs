@@ -61,6 +61,8 @@ pub fn of(source: &impl Source) -> NameDb {
             Name {
                 text: symbol.name.clone(),
                 namespace: match symbol.kind {
+                    // A directory's entry is a symbol, whatever it names (radare2's `sym.`).
+                    _ if symbol.origin.directory.is_some() => Namespace::Symbol,
                     SymbolKind::Section => Namespace::Section,
                     SymbolKind::Function => Namespace::Symbol,
                     SymbolKind::Data => Namespace::Object,
@@ -474,15 +476,12 @@ fn section_stubs(
         {
             return None;
         }
-        let leaves = lifted
-            .ops
-            .iter()
-            .any(|op| matches!(op, R2ILOp::Branch { .. } | R2ILOp::BranchInd { .. }));
         let indirect = lifted
             .ops
             .iter()
             .any(|op| matches!(op, R2ILOp::BranchInd { .. }));
         let direct = (lifted.ops.iter()).any(|op| matches!(op, R2ILOp::Branch { .. }));
+        let leaves = indirect || direct;
         let section_range = section.vaddr..end;
         entered.extend(lifted.ops.iter().filter_map(|op| match op {
             R2ILOp::Branch { target }
@@ -563,6 +562,13 @@ fn section_stubs(
 /// nowhere the straight line does not already go: it is how ARM makes one
 /// instruction's effect conditional, and the literal word after ARM's PLT0
 /// decodes as one.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        r2il_op_property_outside_r2il,
+        reason = "a stub's shape, not an op property: its own jump through a slot chooses nothing"
+    )
+)]
 fn chooses(ops: &[R2ILOp], section: std::ops::Range<u64>, next: u64) -> bool {
     let stays = |target: &r2il::Varnode| {
         target.space == r2il::SpaceId::Ram && section.contains(&target.offset)
@@ -630,7 +636,7 @@ const fn gcd(a: u64, b: u64) -> u64 {
 /// Where a stub begins: the longest tail of its run that only feeds the transfer or does nothing.
 ///
 /// A stub's work before its transfer is computing where it goes. An instruction
-/// that stores, or writes what the transfer never reads, is not part of that:
+/// that writes memory, or writes what the transfer never reads, is not part of that:
 /// on x86 the zero pad after PLT0 decodes as `add byte [eax], al`. One that
 /// writes nothing stays, so a landing pad at the stub's head is its own.
 ///
@@ -664,7 +670,7 @@ fn stub_start(run: &r2il::R2ILBlock, starts: &[(u64, usize)], align: u64) -> u64
         .collect();
     for (index, (pc, ops)) in instructions.iter().enumerate().rev() {
         let transfer = index + 1 == instructions.len();
-        let stores = ops.iter().any(|op| matches!(op, R2ILOp::Store { .. }));
+        let stores = ops.iter().any(R2ILOp::is_memory_write);
         let stray = ops
             .iter()
             .filter_map(R2ILOp::output)
@@ -745,6 +751,30 @@ mod tests {
             )]),
         );
         db
+    }
+
+    /// A guarded store before the transfer writes memory and nothing the transfer reads, so it is not the stub's.
+    #[test]
+    fn a_stub_starts_after_any_instruction_that_writes_memory() {
+        let register = |offset| r2il::Varnode::register(offset, 4);
+        let mut run = fresh_run(0x3400);
+        run.push_from(
+            R2ILOp::StoreGuarded {
+                space: r2il::SpaceId::Ram,
+                addr: register(0),
+                val: register(4),
+                guard: register(8),
+                ordering: r2il::MemoryOrdering::Relaxed,
+            },
+            0x3400,
+        );
+        run.push_from(
+            R2ILOp::BranchInd {
+                target: register(12),
+            },
+            0x3404,
+        );
+        assert_eq!(stub_start(&run, &[(0x3400, 0), (0x3404, 1)], 1), 0x3404);
     }
 
     /// libz's `.plt.sec`: stubs whose slots bind to symbols libz defines name no import, and leave gaps.

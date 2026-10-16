@@ -14,7 +14,7 @@ use object::read::elf::{
     Dyn as _, ElfFile, FileHeader, ProgramHeader as _, Rel as _, Rela as _, SectionHeader as _,
     Sym as _,
 };
-use object::{Object, elf};
+use object::{Object, ObjectSymbol as _, elf};
 
 use r2abi::statement::{
     Applies, Binding, Encoding, EntryKind, ImportStub, LoaderWrite, Record, Relocation,
@@ -863,12 +863,11 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
         let value: u64 = symbol.st_value(endian).into();
         let bound = if symbol.is_undefined(endian) {
             Bound::Import(symbols, index)
+        } else if let Some(address) = (placing.common)(index) {
+            // A common symbol, allocated as the static linker would, at the size and alignment it states.
+            Bound::At { address, weak }
         } else if symbol.is_common(endian) {
-            // The reader allocates it as the static linker would, at the size and alignment it states.
-            match (placing.common)(index) {
-                Some(address) => Bound::At { address, weak },
-                None => Bound::Unplaced,
-            }
+            Bound::Unplaced
         } else if symbol.is_absolute(endian) {
             Bound::At {
                 address: value,
@@ -1010,6 +1009,28 @@ fn visibility(visibility: elf::SymbolVisibility) -> Visibility {
         elf::STV_HIDDEN => Visibility::Hidden,
         elf::STV_PROTECTED => Visibility::Protected,
         _ => Visibility::Default,
+    }
+}
+
+/// The x86-64 psABI's large common symbol (`.largecomm`), which `object` reads as no section.
+const SHN_X86_64_LCOMMON: elf::SymbolSection = elf::SymbolSection(0xff02);
+
+/// Whether an object's symbol is common, its value an alignment: `SHN_COMMON`, or x86-64's large common.
+pub(crate) fn common(file: &object::File<'_>, symbol: &object::read::Symbol<'_, '_>) -> bool {
+    fn large<'data, E: FileHeader, R: object::ReadRef<'data>>(
+        file: &ElfFile<'data, E, R>,
+        index: object::SymbolIndex,
+    ) -> bool {
+        let endian = file.endian();
+        file.elf_header().e_machine(endian) == elf::EM_X86_64
+            && (file.elf_symbol_table().symbol(index))
+                .is_ok_and(|symbol| symbol.st_shndx(endian) == SHN_X86_64_LCOMMON)
+    }
+    match (symbol.section(), file) {
+        (object::SymbolSection::Common, _) => true,
+        (object::SymbolSection::Unknown, object::File::Elf32(elf)) => large(elf, symbol.index()),
+        (object::SymbolSection::Unknown, object::File::Elf64(elf)) => large(elf, symbol.index()),
+        _ => false,
     }
 }
 

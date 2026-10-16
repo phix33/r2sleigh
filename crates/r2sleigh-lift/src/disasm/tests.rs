@@ -155,6 +155,26 @@ fn aarch64_casp_compares_and_stores_its_first_register_at_the_address() {
     assert_eq!(stored, vec![x(2), x(3)], "{:?}", raw.ops);
 }
 
+/// Scalar fixed-point `fcvtzu` reads its fraction bits at its element size, as `fcvtzs` does.
+#[cfg(feature = "arm")]
+#[test]
+fn aarch64_fcvtzu_fixed_point_reads_fbits_at_its_element_size() {
+    let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::Aarch64Le)
+        .expect("trusted AArch64 specification");
+    // fcvtzu d0, d1, #8; fcvtzu h0, h1, #8; fcvtzu s0, s1, #8 (immh:immb 120, 24, 56).
+    let text = |word: u32| {
+        let bytes = padded_instruction(word.to_le_bytes());
+        disassembler
+            .disasm_native(&bytes, 0x1000)
+            .expect("decode")
+            .0
+    };
+    let single = text(0x7f38_fc20);
+    assert!(single.ends_with("#0x8"), "{single}");
+    assert_eq!(text(0x7f78_fc20), single.replace('s', "d"));
+    assert_eq!(text(0x7f18_fc20), single.replace('s', "h"));
+}
+
 #[cfg(feature = "arm")]
 #[test]
 fn aarch64_w_register_write_explicitly_zero_extends_its_declared_carrier() {
@@ -411,13 +431,21 @@ fn trusted_arm32_tuples_select_the_instruction_set_the_symbol_named() {
         TrustedSleighProfile::from_tuple("arm", "thumb", 32, SourceEndianness::Little).unwrap(),
         TrustedSleighProfile::ArmThumbLe
     );
+    // BE32; a BE8 lift reads the little-endian language, so its tuple is little-endian.
+    assert_eq!(
+        TrustedSleighProfile::from_tuple("arm", "arm", 32, SourceEndianness::Big).unwrap(),
+        TrustedSleighProfile::ArmCortexBe
+    );
+    assert_eq!(
+        TrustedSleighProfile::from_tuple("arm", "thumb", 32, SourceEndianness::Big).unwrap(),
+        TrustedSleighProfile::ArmThumbBe
+    );
 }
 
 #[test]
 #[cfg(feature = "arm")]
 fn trusted_arm64_radare_tuple_refuses_unverified_neighbors() {
     for (arch_id, cpu_id, bits, endianness) in [
-        ("arm", "arm", 32, SourceEndianness::Big),
         ("arm", "arm", 64, SourceEndianness::Big),
         ("aarch64", "arm", 64, SourceEndianness::Little),
         ("arm", "arm64", 64, SourceEndianness::Little),
@@ -1271,6 +1299,7 @@ fn analysis_pcode_is_invalid_at_the_machine_lift_boundary() {
         libsla::AnalysisOp::Cast,
         libsla::AnalysisOp::Insert,
         libsla::AnalysisOp::Extract,
+        libsla::AnalysisOp::SignedExtract,
         libsla::AnalysisOp::SegmentOp,
     ] {
         let instruction = PcodeInstruction {
@@ -1437,7 +1466,7 @@ fn fixed_value_pcode_uses_the_typed_sleigh_translation() {
 #[cfg(feature = "arm")]
 #[test]
 fn a_windows_aarch64_machine_carries_the_windows_compiler_specification() {
-    let windows = embedded_windows_machine("aarch64").expect("v8A");
+    let windows = embedded_program_machine("aarch64", ByteOrder::LITTLE, true).expect("v8A");
     assert_eq!(
         windows.compiler_spec_of("windows"),
         Some(sleigh_config::processor_aarch64::CSPEC_AARCH64_WIN)
@@ -1457,4 +1486,21 @@ fn an_embedded_machine_shares_the_trusted_profile_s_parse() {
     let trusted =
         Disassembler::shared_trusted_profile(TrustedSleighProfile::X86_64).expect("trusted");
     assert!(machine.disasm.shares_loaded_specification(&trusted));
+}
+
+/// The x86-64 processor spec marks Ghidra's SIMD scratch `hidden`; machine registers stay unmarked.
+#[cfg(feature = "x86")]
+#[test]
+fn the_processor_spec_marks_hidden_registers() {
+    let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::X86_64)
+        .expect("trusted x86-64 specification");
+    let arch = disassembler.arch_spec();
+    let hidden = |name: &str| arch.get_register(name).expect(name).hidden;
+    assert!(hidden("xmmTmp1") && hidden("xmmTmp2_Qa"));
+    assert!(!hidden("RAX") && !hidden("AF"));
+    let scratch = register_varnode(declared_register_storage(arch, "xmmTmp1"));
+    assert!(disassembler.hides_register(&scratch));
+    assert!(
+        !disassembler.hides_register(&register_varnode(declared_register_storage(arch, "RAX")))
+    );
 }

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::abi::AbiProfile;
 use crate::function::SsaArtifact;
 use crate::graph::{InstPayload, UseSite, ValueId};
-use crate::op::SSAOp;
+use crate::op::{AtomicUpdateOp, SSAOp};
 use crate::semantic::ObjectKind;
 use crate::{CallSiteId, SSAVar};
 
@@ -301,6 +301,7 @@ pub enum SummaryAtomicOp {
     LoadLinked,
     StoreConditional,
     CompareExchange,
+    ReadModifyWrite,
     Fence,
 }
 
@@ -2233,14 +2234,19 @@ fn collect_local_summary_facts_with_obligation_authority(
                         });
                     }
                 }
-                SSAOp::AtomicCAS(swap) => {
-                    let (addr, expected, space) = (&swap.addr, &swap.expected, swap.space);
+                SSAOp::Atomic(access) => {
+                    let (addr, space) = (&access.addr, access.space);
                     if memory_access_is_local_stack(prepared, addr, space) {
                         continue;
                     }
-                    let location =
-                        classify_memory_access_location(prepared, abi, addr, space, expected.size);
-                    out.unplaced_reach |= unplaced(&location, addr) | bits_of_var(swap.replacement);
+                    let location = classify_memory_access_location(
+                        prepared,
+                        abi,
+                        addr,
+                        space,
+                        access.dst.size,
+                    );
+                    out.unplaced_reach |= unplaced(&location, addr) | bits_of_var(access.stored());
                     mark_location_access(&mut out, location, true, true);
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
@@ -2251,13 +2257,14 @@ fn collect_local_summary_facts_with_obligation_authority(
                         location,
                     });
                     out.atomic_effects.insert(SummaryAtomicEffect {
-                        op: SummaryAtomicOp::CompareExchange,
-                        location,
-                        ordering: if let SSAOp::AtomicCAS(swap) = op {
-                            summary_atomic_ordering(swap.ordering)
-                        } else {
-                            SummaryAtomicOrdering::Unknown
+                        op: match access.update {
+                            AtomicUpdateOp::Fetch { .. } => SummaryAtomicOp::ReadModifyWrite,
+                            AtomicUpdateOp::CompareExchange { .. } => {
+                                SummaryAtomicOp::CompareExchange
+                            }
                         },
+                        location,
+                        ordering: summary_atomic_ordering(access.ordering),
                     });
                 }
                 SSAOp::StoreConditional {

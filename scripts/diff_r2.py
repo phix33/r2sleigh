@@ -10,6 +10,16 @@ Two comparison modes, because the two tools do not yet fill the same columns:
   exact   normalised text must match line for line, with integer literals
           canonicalised because the two spell the same value differently.
           Used where r2s already claims radare2's layout, such as `px`, `pd`.
+  registers  `aoj`: each sampled instruction's size and bytes, and the registers
+          it reads and writes. r2s states them from the lifted IL; radare2's
+          `aoj` has no register field, so its side is `aeaj 1` (ESIL's `I`, the
+          registers read before written, and `W`) after `aei; aeim`, without
+          which ESIL stops at the first stack access and drops the rest. The sample is bounded and deterministic:
+          each entry point `ie` states and SAMPLED_FUNCTIONS FUNC symbols `is`
+          states, evenly spaced by address, and SAMPLED_INSTRUCTIONS instructions
+          from each: where the container says code begins, with no discovery. One disagreement
+          per register one side names and the other does not; a size or bytes
+          disagreement is one, and its registers are not compared.
   values  compares the values each tool reports, column by column where both
           headers name the column. A value r2s reports and radare2 does not is
           a disagreement; a value radare2 reports and r2s does not is unfilled,
@@ -54,7 +64,14 @@ COMMANDS = [
     ("ie", "values"),
     ("iS", "values"),
     ("is", "values"),
+    ("aoj", "registers"),
 ]
+
+# The `aoj` sample: this many FUNC symbols beside the entry points, and this many instructions from each.
+SAMPLED_FUNCTIONS = 4
+SAMPLED_INSTRUCTIONS = 8
+# Printed before each instruction's pair of radare2 answers.
+FENCE = "aoj-fence"
 
 HEX = re.compile(r"0x[0-9a-fA-F]+")
 NOISE = re.compile(r"^\s*(WARN|ERROR|INFO):")
@@ -237,6 +254,8 @@ def differences(command, mode, left, right):
     `None` for a line one tool did not print; a values listing gives each
     value r2s reports and radare2 does not.
     """
+    if mode == "registers":
+        return register_differences(left, right)
     # Only the listing carries trailing annotations; a hex dump's ASCII column
     # can hold a semicolon that must not be mistaken for one.
     strip = command.startswith("pd")
@@ -264,6 +283,62 @@ def differences(command, mode, left, right):
     return found
 
 
+def register_differences(left, right):
+    """Each instruction both tools read at one address: a disagreement about which instruction it
+    is, else each register one side's read or written set names and the other's does not.
+
+    `left` is r2s's sample (`arch` and its `aoj` rows), `right` radare2's rows (`aoj 1` with
+    `aeaj 1`'s `I`, `W` and memory accesses added), both JSON. A detail is (address, field,
+    register or None, side lacking it or None, r2s's opcode, radare2's opcode, context).
+    """
+    sample = json.loads(left or "{}")
+    ours = {row["addr"]: row for row in sample.get("rows", [])}
+    theirs = {row["addr"]: row for row in json.loads(right or "[]")}
+    found = []
+    for address in sorted(ours):
+        mine, other = ours[address], theirs.get(address)
+        spelled = (mine.get("opcode", ""), "<missing>" if other is None else other.get("opcode", ""))
+        context = {
+            "arch": sample.get("arch", ""),
+            "refused": mine.get("refused", ""),
+            "ours": "",
+            "theirs": "",
+        }
+
+        def instruction(field):
+            found.append(("instruction", (address, field, None, None) + spelled + (context,)))
+
+        if other is None:
+            instruction("missing")
+            continue
+        if (mine["size"], mine["bytes"]) != (other.get("size"), other.get("bytes")):
+            instruction("size")
+            continue
+        if spelled == ("invalid", "invalid"):
+            continue
+        # One instruction spelled two ways, or two instructions: either way no sets are compared.
+        if mine.get("mnemonic") != other.get("mnemonic"):
+            instruction("decode")
+            continue
+        if "refused" in mine:
+            instruction("refused")
+            continue
+        # ESIL that never reached the memory the IL accesses stopped there and dropped the rest,
+        # so what its sets hold or lack says nothing.
+        memory = any(op.startswith("STORE") or " LOAD " in op for op in mine.get("il", []))
+        if memory and not (other.get("@R") or other.get("@W")):
+            instruction("halted")
+            continue
+        for field, key in (("reads", "I"), ("writes", "W")):
+            have, want = set(mine[field]), set(other.get(key, []))
+            context = dict(context, ours=" ".join(sorted(have)), theirs=" ".join(sorted(want)))
+            for register in sorted(have - want):
+                found.append(("register", (address, field, register, "r2") + spelled + (context,)))
+            for register in sorted(want - have):
+                found.append(("register", (address, field, register, "r2s") + spelled + (context,)))
+    return found
+
+
 def load_table(path):
     """The radare2 release the table was judged against, and its judged disagreements."""
     if not path.exists():
@@ -284,6 +359,8 @@ def load_judgments(path, table=None):
             raise ValueError("unknown verdict {!r}".format(judgment["verdict"]))
         judgment["values"] = {int(value, 16) for value in judgment.get("values", [])}
         judgment["columns"] = set(judgment.get("columns", []))
+        judgment["registers"] = set(judgment.get("registers", []))
+        judgment["fields"] = set(judgment.get("fields", []))
         judgment["matched"] = 0
     return judged
 
@@ -338,7 +415,28 @@ def judgment_for(judgments, binary, command, difference, corpus=None):
             continue
         if judgment.get("corpus", corpus) != corpus:
             continue
-        if kind == "value":
+        if kind in ("register", "instruction"):
+            _, field, register, lacking, mine, other, context = detail
+            # `{register}` in a pattern is the register judged, `{suffix}` it without its first letter.
+            def pattern(key):
+                text = judgment.get(key, "")
+                if register is not None:
+                    text = text.replace("{register}", re.escape(register)).replace("{suffix}", re.escape(register[1:]))
+                return text
+
+            covered = (
+                (not judgment["fields"] or field in judgment["fields"])
+                and (not judgment["registers"] or register in judgment["registers"])
+                and ("register" not in judgment or re.fullmatch(judgment["register"], register or "") is not None)
+                and judgment.get("lacking", lacking) == lacking
+                and re.search(pattern("r2s"), mine) is not None
+                and re.search(pattern("r2"), other) is not None
+                and all(
+                    re.search(pattern(key), context[key]) is not None
+                    for key in ("arch", "refused", "ours", "theirs")
+                )
+            )
+        elif kind == "value":
             # No values listed covers every value of those binaries; columns listed cover only values
             # r2s prints in them; `r2s` matches r2s's row and `r2` a radare2 row holding the value.
             value, column, row, context = (detail + (None,))[:4]
@@ -368,6 +466,13 @@ def judgment_for(judgments, binary, command, difference, corpus=None):
 def spelled(difference):
     """One disagreement as the report prints it, indented under its command."""
     kind, detail = difference
+    if kind in ("register", "instruction"):
+        address, field, register, lacking, mine, other, context = detail
+        what = field if register is None else "{} {} (not in {}'s)".format(field, register, lacking)
+        return "      {:#x} {}  r2s `{}`  r2 `{}`  [{}] r2s {{{}}} r2 {{{}}}{}".format(
+            address, what, mine, other, context["arch"], context["ours"], context["theirs"],
+            "  ({})".format(context["refused"]) if context["refused"] else "",
+        )
     if kind == "value":
         value, column, row = detail[:3]
         return "      {:#x}{}  {}".format(value, " ({})".format(column) if column else "", row)
@@ -394,16 +499,87 @@ def answers(binary, commands, r2, r2s, timeout):
         reason = opened_error.strip().splitlines()[-1] if opened_error.strip() else "failed"
         return reason.replace("r2s: ", ""), {}
     said = {}
-    for command, _ in commands:
+    for command, mode in commands:
         # Every command seeks first, so a seek that timed out once times out each time.
         if None in said.values():
             said[command] = None
+            continue
+        if mode == "registers":
+            said[command] = sampled_instructions(binary, r2, r2s, timeout)
             continue
         script = "s entry0;{}".format(command)
         right, _, right_code = run(radare2_argv(r2, script, binary), timeout)
         left, _, left_code = run([str(r2s), "-q", "-c", script, str(binary)], timeout)
         said[command] = None if right_code is None or left_code is None else (left, right)
     return None, said
+
+
+def sampled_instructions(binary, r2, r2s, timeout):
+    """(r2s's sample, radare2's rows for the same addresses) as JSON; (None, None) where r2s lists
+    no function to sample; None on a timeout."""
+    listed, _, code = run([str(r2s), "-q", "-c", "i~^arch;ie;is", str(binary)], timeout)
+    if code is None:
+        return None
+    entries = sampled_entries(listed.splitlines())
+    if not entries:
+        return None, None
+    arch = next((line.split()[1] for line in listed.splitlines() if line.split()[:1] == ["arch"]), "")
+    script = ";".join("aoj {} @ {:#x}".format(SAMPLED_INSTRUCTIONS, entry) for entry in entries)
+    left, _, code = run([str(r2s), "-q", "-c", script, str(binary)], timeout)
+    if code is None:
+        return None
+    ours = [row for line in left.splitlines() if line.startswith("[") for row in json.loads(line)]
+    addresses = sorted({row["addr"] for row in ours})
+    if not addresses:
+        return None, None
+    # Each address's pair is fenced, so a command that prints nothing cannot shift the rest.
+    asked = ";".join("?e {};aoj 1 @ {:#x};aeaj 1 @ {:#x}".format(FENCE, a, a) for a in addresses)
+    right, _, code = run(radare2_argv(r2, "aei;aeim;" + asked, binary), timeout)
+    if code is None:
+        return None
+    return json.dumps({"arch": arch, "rows": ours}), json.dumps(radare2_rows(right))
+
+
+def sampled_entries(lines):
+    """The entry points `ie` states, then SAMPLED_FUNCTIONS of the FUNC symbols `is` states, evenly
+    spaced over them by address: where the container says code begins, with no discovery run."""
+    entries, functions, lib = set(), set(), None
+    for line in lines:
+        words = line.split()
+        if words[:1] == ["nth"] and "lib" in words:
+            lib = (line.index(" lib ") + 1, line.index(" name") + 1)
+        if len(words) == 5 and words[-1] == "program" and HEX.fullmatch(words[1]):
+            entries.add(int(words[1], 16))
+        elif len(words) >= 5 and words[4] == "FUNC" and HEX.fullmatch(words[2]) and int(words[2], 16):
+            # A symbol a library defines names the slot the loader fills (a PE import), not code.
+            if lib is None or not line[lib[0] : lib[1]].strip():
+                functions.add(int(words[2], 16))
+    functions = sorted(functions - entries)
+    step = max(1, len(functions) // SAMPLED_FUNCTIONS)
+    return sorted(entries) + functions[::step][:SAMPLED_FUNCTIONS]
+
+
+def radare2_rows(text):
+    """radare2's fenced `aoj 1` and `aeaj 1` answers, one row per address with `I`, `W` and the
+    memory `@R` and `@W` added: `I` is what ESIL reads before writing, as r2s's reads are."""
+    rows, blocks = [], [[]]
+    for line in text.splitlines():
+        if line == FENCE:
+            blocks.append([])
+        elif line.startswith(("[", "{")):
+            blocks[-1].append(line)
+    for lines in blocks[1:]:
+        try:
+            decoded = json.loads(lines[0])[0] if lines else None
+            accessed = json.loads(lines[1]) if len(lines) > 1 else {}
+        except (ValueError, IndexError):
+            continue
+        if decoded is None:
+            continue
+        for key in ("I", "W", "@R", "@W"):
+            decoded[key] = accessed.get(key, [])
+        rows.append(decoded)
+    return rows
 
 
 def compare(name, command, mode, left, right, judgments, corpus=None):
@@ -432,7 +608,9 @@ def grade(corpus, binaries, commands, r2, r2s, judgments, args):
                     continue
                 left, right = said[command]
                 # A binary neither tool has anything to say about is not a difference.
-                if not normalise(right) and not normalise(left):
+                if mode == "registers" and left is None:
+                    continue
+                if mode != "registers" and not normalise(right) and not normalise(left):
                     continue
 
                 found, unjudged, missed = compare(binary.name, command, mode, left, right, judgments, corpus)

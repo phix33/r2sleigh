@@ -47,8 +47,6 @@ struct Assembled {
     prototypes: r2abi::Prototypes,
     /// The register a call returns through, in the coordinates the lift spells.
     link: Option<r2il::Varnode>,
-    /// The register a call writes the instruction set of its target to.
-    mode: Option<r2il::Varnode>,
 }
 
 /// The decoders for a program's instruction sets and what a native request needs of them.
@@ -67,19 +65,26 @@ struct Machines {
     go_unstated: Option<Result<Assembled, Unassembled>>,
 }
 
+/// The byte orders the container states, which select the machine's language.
+fn byte_order(arch: &Arch) -> r2sleigh_lift::ByteOrder {
+    r2sleigh_lift::ByteOrder {
+        data: view::endianness(arch.endian),
+        instructions: arch.instructions.map(view::endianness),
+    }
+}
+
 impl Machines {
     fn load(container: &Container) -> Result<Self, Unassembled> {
         let arch = container.arch.name.clone();
+        let order = byte_order(&container.arch);
         // A PE runs under the Windows toolchain, whose language may differ.
-        let machine = match container.format {
-            Format::Pe => r2sleigh_lift::embedded_windows_machine(&arch),
-            _ => r2sleigh_lift::embedded_machine(&arch),
-        }
-        .map(Machine::new)
-        .map_err(|error| Unassembled::NoSpecification(error.to_string()))?;
+        let windows = container.format == Format::Pe;
+        let machine = r2sleigh_lift::embedded_program_machine(&arch, order, windows)
+            .map(Machine::new)
+            .map_err(|error| Unassembled::NoSpecification(error.to_string()))?;
         // Whether any function is Thumb is discovery's answer, so the
         // decoder is loaded wherever the architecture has one.
-        let thumb = r2sleigh_lift::embedded_thumb_machine(&arch)
+        let thumb = r2sleigh_lift::embedded_thumb_machine(&arch, order)
             .map(|machine| machine.map(Machine::new))
             .transpose()
             .map_err(|error| Unassembled::NoSpecification(error.to_string()))?;
@@ -191,16 +196,6 @@ fn assemble(
                 size: register.size,
             })
     });
-    let mode = machine
-        .arch
-        .registers
-        .iter()
-        .find(|register| register.name == "ISAModeSwitch")
-        .map(|register| r2il::Varnode {
-            space: r2il::SpaceId::Register,
-            offset: register.offset,
-            size: register.size,
-        });
     // Which C library's own declarations apply is what the container
     // states of it, and nothing else: `_Exit` is each library's, and
     // `__fgets_chk` is two interfaces under one name. The program's own
@@ -212,7 +207,6 @@ fn assemble(
         compiler,
         prototypes,
         link,
-        mode,
     })
 }
 
@@ -307,12 +301,8 @@ impl<S: Source + 'static> OpenProgram<S> {
             .expect("the names ask only for the imports")
     }
 
-    /// Where a session starts before anything has been sought.
-    ///
-    /// Wherever the name table puts `entry0`, so `s entry0` and the start agree;
-    /// then the declared entry, which `LC_MAIN` names `main` rather than
-    /// `entry0`; then any entry; then the first code section, because an
-    /// object file declares no entry at all.
+    /// Where a session starts: `entry0` (so `s entry0` agrees), the declared entry, any entry,
+    /// the first code section (an object declares none), else the first mapped byte.
     pub fn start(&self) -> Option<u64> {
         let container = self.source().container();
         let entries = &container.entries;
@@ -332,6 +322,7 @@ impl<S: Source + 'static> OpenProgram<S> {
                     .find(|section| section.is_code() && section.vsize > 0)
                     .map(|section| section.vaddr)
             })
+            .or_else(|| container.segments.first().map(|segment| segment.vaddr))
     }
 
     /// The address a flag spelling names, with `entry0` always the declared
@@ -492,8 +483,8 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         &self.source().container().loader_writes
     }
 
-    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
-        self.source().container().immutable(range)
+    fn permanence(&self, range: &std::ops::Range<u64>) -> Permanence {
+        self.source().container().permanence(range)
     }
 
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
@@ -522,10 +513,6 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         self.view().return_address_register()
-    }
-
-    fn mode_register(&self) -> Option<r2il::Varnode> {
-        self.view().mode_register()
     }
 }
 

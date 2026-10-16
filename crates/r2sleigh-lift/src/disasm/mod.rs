@@ -15,7 +15,7 @@ use libsla::{
     Address, AddressSpace, AddressSpaceId, BoolOp, FloatOp, GhidraSleigh, InstructionLoader, IntOp,
     IntSign, OpCode, PcodeDisassembly, PcodeInstruction, PseudoOp, Sleigh, VarnodeData,
 };
-use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode, select_register_name};
+use r2il::{Endianness, R2ILBlock, R2ILOp, SpaceId, Varnode, select_register_name};
 use r2source::SourceEndianness;
 use r2source::{
     AdvisorySuccessorKind, CanonicalStorageId, CanonicalStorageSpace, MachineProfile,
@@ -65,6 +65,8 @@ struct LoadedSpecification {
     space_map: crate::sleigh::SpaceMap,
     /// Register the processor spec names as the program counter.
     program_counter: String,
+    /// The storage of the registers the processor spec marks hidden, sorted, overlaps joined.
+    hidden_storage: Vec<(u64, u64)>,
     /// Architecture exactly as `extract_architecture` derived it, before any
     /// processor-spec overlay a particular consumer wants.
     arch: Arc<r2il::ArchSpec>,
@@ -76,6 +78,10 @@ struct LoadedSpecification {
     authority: Option<GenuineLiftAuthority>,
     /// The stamp of the last change to the Sleigh instance's decode state.
     decode_state: Cell<u64>,
+    /// The unique space's byte order (Ghidra's is the translator's), which places a truncated read.
+    unique_big_endian: bool,
+    /// The register space's byte order, which places a truncated register read.
+    register_big_endian: bool,
 }
 
 /// Stamps every change to any specification's decode state, so no two changes share one.
@@ -94,6 +100,41 @@ impl LoadedSpecification {
 pub struct Continuation {
     decode_state: u64,
     end: u64,
+}
+
+/// The context an instruction states for an address other than its fall-through, which no continued run takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetContext {
+    pub address: u64,
+    /// Whether the address decodes in another context than this decoder's there: `blx` switching instruction set.
+    pub foreign: bool,
+}
+
+/// Each address an instruction's P-code commits context at, other than its fall-through, in commit order.
+fn target_contexts(pcode: &PcodeDisassembly) -> Vec<TargetContext> {
+    let mut targets = Vec::<TargetContext>::new();
+    for commit in &pcode.context_targets {
+        let foreign = commit.differs();
+        match targets
+            .iter_mut()
+            .find(|one| one.address == commit.address.offset)
+        {
+            Some(one) => one.foreign |= foreign,
+            None => targets.push(TargetContext {
+                address: commit.address.offset,
+                foreign,
+            }),
+        }
+    }
+    targets
+}
+
+/// One instruction lifted in a run: its block, where it leaves the context, and the context it states elsewhere.
+#[derive(Debug)]
+pub struct Lifted {
+    pub block: R2ILBlock,
+    pub continuation: Continuation,
+    pub targets: Vec<TargetContext>,
 }
 
 /// A disassembler that uses libsla to lift instructions to r2il.
@@ -118,6 +159,8 @@ pub struct Decoded {
     pub lifted: Result<R2ILBlock>,
     /// Present only where Sleigh built the P-code, which is what commits the context.
     pub continuation: Option<Continuation>,
+    /// The context the P-code states at other addresses than the fall-through; empty where it did not build.
+    pub targets: Vec<TargetContext>,
 }
 
 /// Embedded Sleigh profiles allowed to mint certifying lift authority.
@@ -135,6 +178,10 @@ pub enum TrustedSleighProfile {
     ArmCortexLe,
     #[cfg(feature = "arm")]
     ArmThumbLe,
+    #[cfg(feature = "arm")]
+    ArmCortexBe,
+    #[cfg(feature = "arm")]
+    ArmThumbBe,
     #[cfg(feature = "arm")]
     Aarch64Le,
     #[cfg(feature = "arm")]
@@ -167,6 +214,8 @@ impl TrustedSleighProfile {
         all.extend([
             Self::ArmCortexLe,
             Self::ArmThumbLe,
+            Self::ArmCortexBe,
+            Self::ArmThumbBe,
             Self::Aarch64Le,
             Self::Aarch64AppleSilicon,
         ]);
@@ -190,6 +239,22 @@ impl TrustedSleighProfile {
         })
     }
 
+    /// ARM in either byte order (BE8 is the little-endian one), TMode clear as Ghidra pairs it
+    /// (ARMt; a Cortex pspec sets TMode, lifting every A32 instruction as Thumb) or set.
+    #[cfg(feature = "arm")]
+    fn arm(self) -> (&'static [u8], &'static str, &'static str) {
+        use sleigh_config::processor_arm as arm;
+        let sla = match self {
+            Self::ArmCortexBe | Self::ArmThumbBe => arm::SLA_ARM8_BE,
+            _ => arm::SLA_ARM8_LE,
+        };
+        let pspec = match self {
+            Self::ArmThumbLe | Self::ArmThumbBe => arm::PSPEC_ARMTTHUMB,
+            _ => arm::PSPEC_ARMT,
+        };
+        (sla, pspec, "ARM")
+    }
+
     pub fn specification(self) -> (&'static [u8], &'static str, &'static str) {
         match self {
             #[cfg(feature = "x86")]
@@ -205,22 +270,9 @@ impl TrustedSleighProfile {
                 "x86-64",
             ),
             #[cfg(feature = "arm")]
-            // Ghidra's own ARM.ldefs pairs ARM8_le with ARMt, which leaves
-            // TMode clear. A Cortex pspec sets TMode, and Cortex-M is
-            // Thumb-only, so pairing it here would lift every A32 instruction
-            // as Thumb: wrong instruction, wrong length, wrong control flow.
-            Self::ArmCortexLe => (
-                sleigh_config::processor_arm::SLA_ARM8_LE,
-                sleigh_config::processor_arm::PSPEC_ARMT,
-                "ARM",
-            ),
-            // The same language with TMode set: Ghidra's own Thumb decoder.
-            #[cfg(feature = "arm")]
-            Self::ArmThumbLe => (
-                sleigh_config::processor_arm::SLA_ARM8_LE,
-                sleigh_config::processor_arm::PSPEC_ARMTTHUMB,
-                "ARM",
-            ),
+            Self::ArmCortexLe | Self::ArmThumbLe | Self::ArmCortexBe | Self::ArmThumbBe => {
+                self.arm()
+            }
             #[cfg(feature = "arm")]
             Self::Aarch64Le => (
                 sleigh_config::processor_aarch64::SLA_AARCH64,
@@ -302,6 +354,10 @@ impl TrustedSleighProfile {
             ("arm", "arm", 32, SourceEndianness::Little) => Ok(Self::ArmCortexLe),
             #[cfg(feature = "arm")]
             ("arm", "thumb", 32, SourceEndianness::Little) => Ok(Self::ArmThumbLe),
+            #[cfg(feature = "arm")]
+            ("arm", "arm", 32, SourceEndianness::Big) => Ok(Self::ArmCortexBe),
+            #[cfg(feature = "arm")]
+            ("arm", "thumb", 32, SourceEndianness::Big) => Ok(Self::ArmThumbBe),
             #[cfg(feature = "riscv")]
             ("riscv", "riscv", 64, SourceEndianness::Little) => Ok(Self::RiscV64Gc),
             _ => Err(LiftError::Unsupported(format!(
@@ -1027,9 +1083,9 @@ fn genuine_block_successors(block: &GenuineLiftedBlock) -> Result<Vec<u64>> {
             R2ILOp::Branch { .. } | R2ILOp::CBranch { .. } => {
                 !control_op_is_intra_instruction(block, op_index)
             }
-            R2ILOp::Return { .. } | R2ILOp::Breakpoint => true,
             R2ILOp::BranchInd { .. } => block.block.switch_info.is_some(),
-            _ => false,
+            // A return or a trap ends the block; a call comes back to the next instruction.
+            _ => op.is_control_flow() && !op.is_call(),
         };
         if decides_successors && block.block.instruction_of(op_index) != Some(last_instruction) {
             return Err(LiftError::Parse(format!(
@@ -1501,6 +1557,9 @@ fn translate_err(e: translate::TranslateError) -> LiftError {
         translate::TranslateError::InvalidSpace(idx) => {
             LiftError::Parse(format!("Invalid space index: {}", idx))
         }
+        error @ translate::TranslateError::UniqueStraddles(_) => {
+            LiftError::Unsupported(error.to_string())
+        }
     }
 }
 
@@ -1539,9 +1598,18 @@ impl LoadedSpecification {
             .map(|name| name.to_ascii_lowercase())
             .collect();
         let mut extracted = crate::sleigh::extract_architecture(&sleigh, arch_name)?;
-        extracted.arch.tracked_entry_values = crate::sleigh::processor_spec_tracked_values(pspec);
-        extracted.arch.program_counter = crate::sleigh::processor_spec_program_counter(pspec);
+        crate::sleigh::apply_processor_spec(&mut extracted.arch, pspec);
         let arch = Arc::new(extracted.arch);
+        let big_endian = |id: SpaceId| {
+            arch.spaces
+                .iter()
+                .find(|space| space.id == id)
+                .and_then(|space| space.endianness)
+                .unwrap_or(arch.memory_endianness)
+                == r2il::Endianness::Big
+        };
+        let (unique_big_endian, register_big_endian) =
+            (big_endian(SpaceId::Unique), big_endian(SpaceId::Register));
         let modelled_user_ops = user_operation::resolve_modelled_user_operations(&arch.user_ops);
         let authority = certifying.then(|| {
             GenuineLiftAuthority::new(
@@ -1552,8 +1620,10 @@ impl LoadedSpecification {
             )
         });
 
+        let hidden_storage = hidden_storage(&arch.registers);
         Ok(Self {
             program_counter: program_counter_from_pspec(pspec),
+            hidden_storage,
             sleigh: RefCell::new(sleigh),
             reg_name_map,
             register_names,
@@ -1563,8 +1633,33 @@ impl LoadedSpecification {
             authority,
             // No stamp is zero, so a fresh specification continues nothing.
             decode_state: Cell::new(0),
+            unique_big_endian,
+            register_big_endian,
         })
     }
+}
+
+/// The ranges `hidden` registers occupy, sorted with overlapping ones joined. O(r log r).
+fn hidden_storage(registers: &[r2il::RegisterDef]) -> Vec<(u64, u64)> {
+    let mut ranges: Vec<(u64, u64)> = registers
+        .iter()
+        .filter(|register| register.hidden)
+        .map(|register| {
+            (
+                register.offset,
+                register.offset.saturating_add(u64::from(register.size)),
+            )
+        })
+        .collect();
+    ranges.sort_unstable();
+    let mut joined: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        match joined.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => joined.push((start, end)),
+        }
+    }
+    joined
 }
 
 /// Load an embedded specification.
@@ -1639,24 +1734,60 @@ impl EmbeddedMachine {
     }
 }
 
-/// Load the embedded machine an architecture name selects.
+/// The byte orders a program states for its machine, which select the language.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ByteOrder {
+    pub data: Endianness,
+    /// Where the program states it apart from `data` (ARM BE8); `None` is the language's own.
+    pub instructions: Option<Endianness>,
+}
+
+impl ByteOrder {
+    pub const LITTLE: Self = Self {
+        data: Endianness::Little,
+        instructions: None,
+    };
+    pub const BIG: Self = Self {
+        data: Endianness::Big,
+        instructions: None,
+    };
+
+    #[cfg(any(feature = "x86", feature = "riscv"))]
+    fn is_little(self) -> bool {
+        self.data == Endianness::Little
+            && matches!(self.instructions, None | Some(Endianness::Little))
+    }
+}
+
+/// Load the embedded machine an architecture name selects, little-endian
+/// unless the name ends in `-be`.
 ///
 /// It carries the compiler specification of the platform's usual toolchain
 /// and, where the language has one, the Windows toolchain's.
 pub fn embedded_machine(arch_name: &str) -> Result<EmbeddedMachine> {
-    machine_of(arch_name, false)
+    let name = arch_name.to_ascii_lowercase();
+    match name.strip_suffix("-be") {
+        Some(name) => machine_of(name, ByteOrder::BIG, false),
+        None => machine_of(&name, ByteOrder::LITTLE, false),
+    }
 }
 
-/// The machine a Windows program for this architecture runs on, where its language differs.
-pub fn embedded_windows_machine(arch_name: &str) -> Result<EmbeddedMachine> {
-    machine_of(arch_name, true)
+/// The machine a program runs on, by its architecture, its byte orders and whether a
+/// Windows toolchain built it, where that toolchain's language differs.
+pub fn embedded_program_machine(
+    arch_name: &str,
+    order: ByteOrder,
+    windows: bool,
+) -> Result<EmbeddedMachine> {
+    machine_of(&arch_name.to_ascii_lowercase(), order, windows)
 }
 
-fn machine_of(arch_name: &str, windows: bool) -> Result<EmbeddedMachine> {
-    let spec =
-        embedded_specification(&arch_name.to_ascii_lowercase(), windows).ok_or_else(|| {
-            LiftError::Unsupported(format!("no embedded Sleigh specification for {arch_name}"))
-        })?;
+fn machine_of(arch_name: &str, order: ByteOrder, windows: bool) -> Result<EmbeddedMachine> {
+    let spec = embedded_specification(arch_name, order, windows).ok_or_else(|| {
+        LiftError::Unsupported(format!(
+            "no embedded Sleigh specification for {arch_name} in {order:?}"
+        ))
+    })?;
     // One parse per thread: the trusted lift reads the same specification through its profile.
     let (arch, disasm) =
         match TrustedSleighProfile::of_specification(spec.sla, spec.pspec, spec.name) {
@@ -1675,9 +1806,12 @@ fn machine_of(arch_name: &str, windows: bool) -> Result<EmbeddedMachine> {
 
 /// The Thumb decoder of an architecture that has one: ARM's second processor
 /// context, which Ghidra ships as the same language with TMode set.
-pub fn embedded_thumb_machine(arch_name: &str) -> Option<Result<EmbeddedMachine>> {
+pub fn embedded_thumb_machine(
+    arch_name: &str,
+    order: ByteOrder,
+) -> Option<Result<EmbeddedMachine>> {
     match arch_name.to_ascii_lowercase().as_str() {
-        "arm" | "arm32" => Some(embedded_machine("arm-thumb")),
+        "arm" | "arm32" => Some(machine_of("arm-thumb", order, false)),
         _ => None,
     }
 }
@@ -1711,9 +1845,27 @@ struct Selection {
     cpu: &'static str,
 }
 
+/// ARM's language for a byte order, as Ghidra's ELF opinion picks it: BE8 is
+/// `v8LEInstruction`, big-endian data over the little-endian instructions.
+#[cfg(feature = "arm")]
+fn arm_language(order: ByteOrder) -> Option<&'static str> {
+    match (order.data, order.instructions.unwrap_or(order.data)) {
+        (Endianness::Little, Endianness::Little) => Some("ARM:LE:32:v8"),
+        (Endianness::Big, Endianness::Big) => Some("ARM:BE:32:v8"),
+        (Endianness::Big, Endianness::Little) => Some("ARM:LEBE:32:v8LEInstruction"),
+        _ => None,
+    }
+}
+
 /// AppleSilicon is the superset decoder; it names no Windows compiler, which v8A does.
+/// AArch64 reads its instructions little-endian in either data order.
 fn selection(
     arch_name: &str,
+    #[cfg_attr(
+        not(any(feature = "x86", feature = "arm", feature = "riscv")),
+        expect(unused_variables, reason = "no architecture is enabled")
+    )]
+    order: ByteOrder,
     #[cfg_attr(
         not(feature = "arm"),
         expect(unused_variables, reason = "only AArch64 has a Windows language")
@@ -1753,11 +1905,13 @@ fn selection(
     };
     match arch_name {
         #[cfg(feature = "x86")]
-        "x86-64" | "x86_64" | "x64" | "amd64" => {
+        "x86-64" | "x86_64" | "x64" | "amd64" if order.is_little() => {
             select(x86, "x86:LE:64:default", None, "x86-64", "x86")
         }
         #[cfg(feature = "x86")]
-        "x86" | "x86-32" | "i386" | "i686" => select(x86, "x86:LE:32:default", None, "x86", "x86"),
+        "x86" | "x86-32" | "i386" | "i686" if order.is_little() => {
+            select(x86, "x86:LE:32:default", None, "x86", "x86")
+        }
         #[cfg(feature = "arm")]
         "aarch64" | "arm64" | "arm64e" if windows => {
             select(aarch64, "AARCH64:LE:64:v8A", None, "aarch64", "arm")
@@ -1771,13 +1925,17 @@ fn selection(
             "arm",
         ),
         #[cfg(feature = "arm")]
-        "arm" | "arm32" => select(arm, "ARM:LE:32:v8", None, "ARM", "arm"),
+        "arm" | "arm32" => select(arm, arm_language(order)?, None, "ARM", "arm"),
         #[cfg(feature = "arm")]
-        "arm-thumb" | "thumb" => {
-            select(arm, "ARM:LE:32:v8", Some("ARMtTHUMB.pspec"), "ARM", "thumb")
-        }
+        "arm-thumb" | "thumb" => select(
+            arm,
+            arm_language(order)?,
+            Some("ARMtTHUMB.pspec"),
+            "ARM",
+            "thumb",
+        ),
         #[cfg(feature = "riscv")]
-        "riscv64" | "riscv" | "rv64" => {
+        "riscv64" | "riscv" | "rv64" if order.is_little() => {
             select(riscv, "RISCV:LE:64:RV64GC", None, "riscv64", "riscv")
         }
         _ => None,
@@ -1785,8 +1943,12 @@ fn selection(
 }
 
 /// The embedded data one lower-cased architecture name selects, read through its language definition.
-fn embedded_specification(arch_name: &str, windows: bool) -> Option<EmbeddedSpecification> {
-    let chosen = selection(arch_name, windows)?;
+fn embedded_specification(
+    arch_name: &str,
+    order: ByteOrder,
+    windows: bool,
+) -> Option<EmbeddedSpecification> {
+    let chosen = selection(arch_name, order, windows)?;
     let Bundle { files, slas } = chosen.bundle;
     let file = |name: &str| {
         files
@@ -2166,6 +2328,25 @@ impl Disassembler {
             .map(std::borrow::Cow::Owned)
     }
 
+    /// Whether the specification declares a register at exactly this range.
+    pub fn declares_register(&self, vn: &Varnode) -> bool {
+        vn.space == SpaceId::Register && self.spec.reg_name_map.contains_key(&(vn.offset, vn.size))
+    }
+
+    /// Whether `vn` lies within registers the processor spec marks hidden. O(log h).
+    pub fn hides_register(&self, vn: &Varnode) -> bool {
+        let end = vn.offset.saturating_add(u64::from(vn.size));
+        let ranges = &self.spec.hidden_storage;
+        let at = ranges.partition_point(|&(start, _)| start <= vn.offset);
+        vn.space == SpaceId::Register && at > 0 && end <= ranges[at - 1].1
+    }
+
+    /// A register as the listing spells it in an operand, so a register set names what `pd` prints.
+    pub fn register_listed(&self, vn: &Varnode) -> Option<String> {
+        let name = self.register_spelling(vn)?;
+        Some(syntax::register_text(&name, &self.arch_name))
+    }
+
     /// Format a varnode as a human-readable string, resolving register names.
     ///
     /// This is useful for pretty-printing P-code operations.
@@ -2204,25 +2385,24 @@ impl Disassembler {
         self.lift_canonical(bytes, addr)
     }
 
-    /// Lift one instruction, keeping the context `after` left where it still holds.
-    ///
-    /// Some of that context is the meaning of what comes next: Thumb's `it`
-    /// sets the condition the following instructions run under, and a decoder
-    /// that starts afresh reads them as unconditional. A walk that lifts one
-    /// instruction at a time therefore saw a different program from the block
-    /// lift that reads the same bytes in a run -- unconditional where the
-    /// machine is predicated -- and the two disagreed about where control
-    /// goes.
+    /// Lift one instruction, keeping the context `after` left where it still holds: that context
+    /// is what the next instructions mean, as Thumb's `it` predicates them.
     pub fn lift_after(
         &self,
         bytes: &[u8],
         addr: u64,
         after: Option<Continuation>,
-    ) -> Result<(R2ILBlock, Continuation)> {
+    ) -> Result<Lifted> {
         self.resume(addr, after)?;
-        let lifted = self.lift_canonical(bytes, addr)?;
-        let end = addr + u64::from(lifted.size);
-        Ok((lifted, self.continuation(end)))
+        let pcode = self.pcode(bytes, addr)?;
+        let targets = target_contexts(&pcode);
+        let block = self.translated(pcode, addr)?;
+        let end = addr + u64::from(block.size);
+        Ok(Lifted {
+            block,
+            continuation: self.continuation(end),
+            targets,
+        })
     }
 
     /// Keep the context `after` left if it is this specification's last decode and ended at `addr`, else start afresh.
@@ -2280,9 +2460,12 @@ impl Disassembler {
     /// One instruction's P-code as r2il, with its local labels normalized.
     fn translated(&self, pcode: PcodeDisassembly, addr: u64) -> Result<R2ILBlock> {
         let mut block = self.translate_pcode(pcode, addr)?;
-        crate::internal_control::normalize_instruction_local_control(&mut block, &|userop| {
-            self.user_op_name(userop).map(str::to_owned)
-        });
+        crate::internal_control::normalize_instruction_local_control(
+            &mut block,
+            &|userop| self.user_op_name(userop).map(str::to_owned),
+            self.spec.register_big_endian,
+        );
+        r2il::number_temporaries(&mut block.ops);
         Ok(block)
     }
 
@@ -2434,12 +2617,14 @@ impl Disassembler {
         let pcode = self.pcode(bytes, addr);
         let end = addr + size as u64;
         let continuation = pcode.is_ok().then(|| self.continuation(end));
+        let targets = pcode.as_ref().map(target_contexts).unwrap_or_default();
         let lifted = pcode.and_then(|pcode| self.translated(pcode, addr));
         Ok(Decoded {
             syntax,
             flow: lifted.as_ref().ok().map(crate::flow::of),
             lifted,
             continuation,
+            targets,
         })
     }
 
@@ -2479,6 +2664,9 @@ impl Disassembler {
                 ops.push(op);
             }
         }
+        if let Some(how) = crate::temporary_move::requested() {
+            crate::temporary_move::move_temporaries(&mut ops, how);
+        }
 
         // Where an expansion's own temporaries may live: above every temporary
         // this instruction already uses. Sleigh scopes the unique space to the
@@ -2494,8 +2682,11 @@ impl Disassembler {
             .unwrap_or(0);
         let address_size = u32::try_from(self.default_code_space().address_size)
             .map_err(|_| LiftError::Parse("default code space address size".into()))?;
+        let ops = translate::whole_unique_reads(ops, self.spec.unique_big_endian, &mut temp_base)
+            .map_err(translate_err)?;
         let ops = translate::canonicalize_memory_operands(ops, address_size, &mut temp_base);
         let ops = translate::split_odd_register_zeroes(ops);
+        let ops = translate::forward_repeated_loads(ops);
 
         // A trap ends the instruction. Sleigh writes `brk` as a user operation
         // that produces `pc` followed by a branch through it, so the branch's

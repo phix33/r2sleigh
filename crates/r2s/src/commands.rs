@@ -262,6 +262,20 @@ pub(crate) const VERBS: &[Verb] = &[
         Some(decompile_json)
     ),
     verb!(
+        ["ao"],
+        Count,
+        Public,
+        "instructions as their lift states them: registers read and written, the IL",
+        Some(crate::opcodes::text)
+    ),
+    verb!(
+        ["aoj"],
+        Count,
+        Public,
+        "instructions as their lift states them, as JSON",
+        Some(crate::opcodes::json)
+    ),
+    verb!(
         ["aa"],
         None,
         Public,
@@ -1187,7 +1201,7 @@ pub(crate) fn symbols(session: &Session) -> Result<Table, String> {
                 spelled(mapped.and_then(|vaddr| file_offset_of(session, vaddr))),
                 spelled(Some(symbol.vaddr)),
                 binding(symbol.binding),
-                symbol_type(symbol.kind),
+                symbol_type(symbol),
                 symbol.size,
                 symbol.library.as_deref().unwrap_or("   "),
                 symbol.name
@@ -1247,7 +1261,7 @@ fn import_rows(session: &Session, table: &mut Table) {
                 spelled(at.and_then(|at| file_offset_of(session, at))),
                 spelled(at),
                 binding(symbol.binding),
-                symbol_type(symbol.kind),
+                symbol_type(symbol),
                 // An import's size is the stub's, which is what a call to it reaches.
                 stub.map_or(symbol.size, |(_, stub)| stub.size),
                 symbol.library.as_deref().unwrap_or("   "),
@@ -1269,9 +1283,13 @@ fn binding(binding: r2image::Binding) -> String {
     }
 }
 
-/// A symbol's type, as radare2 spells it.
-fn symbol_type(kind: r2image::SymbolKind) -> &'static str {
-    match kind {
+/// A symbol's type, as radare2 spells it: every PE directory entry a function, though the
+/// directory states no type.
+fn symbol_type(symbol: &r2image::Symbol) -> &'static str {
+    if symbol.origin.directory.is_some() {
+        return "FUNC";
+    }
+    match symbol.kind {
         r2image::SymbolKind::Function => "FUNC",
         r2image::SymbolKind::Data => "OBJ",
         r2image::SymbolKind::Section => "SECT",

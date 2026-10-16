@@ -349,6 +349,7 @@ pub enum CalleeAtomicOp {
     LoadLinked,
     StoreConditional,
     CompareExchange,
+    ReadModifyWrite,
     Fence,
 }
 

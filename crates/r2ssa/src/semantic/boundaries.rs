@@ -993,6 +993,11 @@ pub(crate) fn convention_call_boundary(
             lane_of,
         });
     }
+    // A variadic or unprototyped call counts no argument past its callee's floor from registers.
+    if count_register_set(at, machine_context) {
+        arguments.truncate(at_least);
+        unproven = Some(CallBoundaryRefusal::CountRegisterSet);
+    }
     // The convention fills every register slot before the argument area, and a
     // convention with none starts there: x86 cdecl passes everything on the
     // stack. A slot this function stored into before the call is one the call
@@ -1987,6 +1992,101 @@ pub(crate) fn reaching_source_return_register_in_block(
         r2il::refusal_evidence!("return-register-unreachable", "carrier={storage:?}");
     }
     found
+}
+
+/// Whether the body sets the convention's vector count for the call at `(block_addr, op_index)` and
+/// for nothing else: a constant at most 8 only that call reads (psABI 3.5.7, ADR "Variadic tail").
+fn count_register_set(at: CallPosition<'_>, machine_context: &SourceMachineContext) -> bool {
+    let CallPosition {
+        prep,
+        graph,
+        block_addr,
+        op_index,
+        ..
+    } = at;
+    let (Some(prep), Some(count)) = (
+        prep,
+        (machine_context.convention_slots()).and_then(|slots| slots.variadic_count_register()),
+    ) else {
+        return false;
+    };
+    // The call's own read of the count register names the value that reaches it.
+    let reads = graph.boundary_reads_spelled_at(block_addr, op_index);
+    let Some(value) = reads.iter().find_map(|read| match graph.op(*read) {
+        Some(SSAOp::CallUse { src }) => (graph.value(*src))
+            .and_then(|value| value.canonical_storage)
+            .is_some_and(|storage| register_storages_overlap(storage, count))
+            .then_some(*src),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let set = (prep.views.representative_constant(value)).is_some_and(|(count, _)| count <= 8)
+        && graph.written_by_body(value)
+        && !value_is_call_clobber(graph, value)
+        && (graph.use_sites(value).iter()).all(|site| reads.contains(&site.inst))
+        && !scrubs_the_guard(at, machine_context, value, count);
+    r2il::refusal_evidence!(
+        "convention-arity-unproven",
+        "callsite ({block_addr:#x}, {op_index}) count register {value:?} set for it alone: {set}"
+    );
+    set
+}
+
+/// Whether `value` overwrites the stack guard the protector loaded into the count register (gcc's
+/// `xor eax, eax` after the guard's store): the protector's, not a count. One reaching search.
+fn scrubs_the_guard(
+    at: CallPosition<'_>,
+    machine_context: &SourceMachineContext,
+    value: ValueId,
+    count: CanonicalStorageId,
+) -> bool {
+    let CallPosition {
+        function,
+        prep,
+        graph,
+        ..
+    } = at;
+    let Some((block_addr, op_index)) = graph.def_inst(value).and_then(|def| graph.walk_start(def))
+    else {
+        return false;
+    };
+    let previous = reaching_abi_value_in_block_with_policy(
+        function,
+        prep,
+        graph,
+        machine_context,
+        block_addr,
+        op_index,
+        count,
+        false,
+    );
+    let Some(ReachingAbiState::Value(previous)) = previous else {
+        return false;
+    };
+    let inserted = function.compiler_inserted();
+    let mut current = previous;
+    // Through the lanes and copies the guard reached the register by, to the protector's read.
+    for _ in 0..4 {
+        let Some(def) = graph.def_inst(current) else {
+            return false;
+        };
+        if graph
+            .op_for_inst(def)
+            .is_some_and(|op| inserted.contains(op))
+        {
+            return true;
+        }
+        match graph.op(def) {
+            Some(
+                SSAOp::Copy { src, .. } | SSAOp::IntZExt { src, .. } | SSAOp::Subpiece { src, .. },
+            ) => {
+                current = *src;
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Whether a value is the fresh definition a call leaves in a register it may

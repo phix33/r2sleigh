@@ -50,7 +50,7 @@ fn a_load_through_a_parameter_plus_a_scaled_index_is_an_element() {
     let artifact = artifact_with_parameters(ops, &[RDI, RSI]);
     let projection = projection(&artifact);
     let roots = canonicalize(&artifact, &projection).expect("canonical roots");
-    let loaded = value_named(&artifact, "tmp:300_1");
+    let loaded = value_named(&artifact, "tmp:1000:300_1");
     let load = roots.value(loaded).expect("the load has a term");
     let arena = roots.arena();
     let TermKind::Subscript { base, index } = arena.term(load.canonical).kind else {
@@ -148,7 +148,7 @@ fn a_dereference_stays_a_load_and_a_load_stays_out_of_its_reader() {
     let roots = canonicalize(&artifact, &projection).expect("canonical roots");
     let arena = roots.arena();
     let load = roots
-        .value(value_named(&artifact, "tmp:300_1"))
+        .value(value_named(&artifact, "tmp:1000:300_1"))
         .expect("load");
     assert!(
         matches!(arena.term(load.canonical).kind, TermKind::Load { .. }),
@@ -237,7 +237,7 @@ fn a_parameter_reloaded_from_its_stack_home_is_still_the_base() {
     let roots = canonicalize(&artifact, &projection).expect("canonical roots");
     let arena = roots.arena();
     let element = roots
-        .value(value_named(&artifact, "tmp:60_1"))
+        .value(value_named(&artifact, "tmp:1000:60_1"))
         .expect("the load has a term");
     let TermKind::Subscript { base, index } = arena.term(element.canonical).kind else {
         panic!(
@@ -268,7 +268,7 @@ fn a_scalar_parameter_is_not_a_candidate_base() {
         "only the dereferenced parameter is a pointer, not the length beside it"
     );
     let element = roots
-        .value(value_named(&artifact, "tmp:60_1"))
+        .value(value_named(&artifact, "tmp:1000:60_1"))
         .expect("the load has a term");
     let TermKind::Subscript { base, .. } = arena.term(element.canonical).kind else {
         panic!("expected an element");

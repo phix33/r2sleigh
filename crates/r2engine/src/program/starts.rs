@@ -58,7 +58,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Stated {
             .map(|entry| (entry.vaddr, entry.thumb))
             .chain(
                 (container.symbols.iter())
-                    .filter(|symbol| symbol.defined && symbol.kind == SymbolKind::Function)
+                    .filter(|symbol| symbol.defined && begins_a_function(inputs, symbol))
                     .map(|symbol| (symbol.vaddr, symbol.thumb)),
             )
             .chain(imports.keys().map(|vaddr| (*vaddr, false)))
@@ -73,4 +73,14 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Stated {
         }
         starts
     }
+}
+
+/// A defined function symbol, or an export where the container states code: a directory states
+/// no type, and an exported address in code is called from outside (PE).
+fn begins_a_function<S: Source + 'static>(
+    inputs: &ProgramInputs<S>,
+    symbol: &r2abi::statement::Symbol,
+) -> bool {
+    let exported = symbol.origin.directory.is_some();
+    symbol.kind == SymbolKind::Function || (exported && inputs.holds_code(symbol.vaddr))
 }

@@ -183,14 +183,16 @@ mod default {
         CPUI_NEW = 69,
         /// Insert a bit-range
         CPUI_INSERT = 70,
-        /// Extract a bit-range
-        CPUI_EXTRACT = 71,
+        /// Extract an unsigned bit-range
+        CPUI_ZPULL = 71,
         /// Count the 1-bits
         CPUI_POPCOUNT = 72,
         /// Count the leading 0-bits
         CPUI_LZCOUNT = 73,
+        /// Extract a signed bit-range
+        CPUI_SPULL = 74,
         /// Value indicating the end of the op-code values
-        CPUI_MAX = 74,
+        CPUI_MAX = 75,
     }
 
     extern "Rust" {
@@ -307,6 +309,21 @@ mod default {
         #[rust_name = "register_tag"]
         unsafe fn registerTag(self: Pin<&mut DocumentStorage>, element: *const Element);
 
+        // A commit aimed past the fall-through
+        type ContextTargetProxy;
+        #[rust_name = "address"]
+        fn getAddress(self: &ContextTargetProxy) -> &Address;
+        #[rust_name = "word"]
+        fn getWord(self: &ContextTargetProxy) -> i32;
+        #[rust_name = "mask"]
+        fn getMask(self: &ContextTargetProxy) -> u32;
+        #[rust_name = "value"]
+        fn getValue(self: &ContextTargetProxy) -> u32;
+        #[rust_name = "held"]
+        fn getHeld(self: &ContextTargetProxy) -> u32;
+        #[rust_name = "flow"]
+        fn getFlow(self: &ContextTargetProxy) -> bool;
+
         // Register varnode
         type RegisterVarnodeName;
         #[rust_name = "register"]
@@ -370,6 +387,11 @@ mod default {
         // The byte modulo every instruction begins on (`define alignment`).
         #[rust_name = "alignment"]
         fn getAlignmentProxy(self: &SleighProxy) -> i32;
+
+        // The commits the last p-code decode aimed at another address than its fall-through,
+        // which Sleigh kept out of its context database.
+        #[rust_name = "context_targets"]
+        fn getContextTargetsProxy(self: &SleighProxy) -> UniquePtr<CxxVector<ContextTargetProxy>>;
 
         /// Discard parser contexts cached by instruction address without
         /// decoding the Sleigh specification again.

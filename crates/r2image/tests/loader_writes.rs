@@ -134,26 +134,25 @@ fn what_the_loader_seals_after_it_is_done_is_stated_beside_what_it_never_lets_th
         .map(|range| (range.start, range.end))
         .collect();
     assert_eq!(sealed, [(0x3da0, 0x4000)]);
-    assert!(
-        container.immutable(&(0x3fc8..0x3fd0)),
-        "a GOT slot is sealed"
-    );
-    assert!(
-        container.immutable(&(0x2018..0x2038)),
-        "read-only data is immutable"
-    );
-    assert!(
-        !container.immutable(&(0x4018..0x4020)),
-        "`g_msg` stays writable"
-    );
-    assert!(
-        !container.immutable(&(0x3ff8..0x4008)),
-        "a range leaving the seal is not"
+    use r2image::Permanence;
+    let at = |range: std::ops::Range<u64>| container.permanence(&range);
+    assert_eq!(at(0x3fc8..0x3fd0), Permanence::Sealed, "a GOT slot");
+    assert_eq!(at(0x2018..0x2038), Permanence::ReadOnly, "read-only data");
+    assert_eq!(at(0x4018..0x4020), Permanence::Writable, "`g_msg`");
+    assert_eq!(
+        at(0x3ff8..0x4008),
+        Permanence::Writable,
+        "a range leaving the seal"
     );
     // `__DATA_CONST` of the Mach-O fixture is mapped writable for dyld and flagged `SG_READ_ONLY`.
     let table = r2image::Image::parse(
         include_bytes!("../../../tests/fixtures/code_pointer_table_O0").to_vec(),
     )
     .expect("the fixture parses");
-    assert!(table.container().immutable(&(0x1_0000_4000..0x1_0000_4018)));
+    assert_eq!(
+        table
+            .container()
+            .permanence(&(0x1_0000_4000..0x1_0000_4018)),
+        Permanence::Sealed
+    );
 }

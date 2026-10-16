@@ -699,8 +699,28 @@ impl SemanticObligationInventory {
         let mut private_reads = Vec::new();
 
         let direct = seeding.seed_direct_branches(graph, &mut required, &mut explicit_inputs);
+        // The instructions whose accesses are one indivisible access with no typed statement.
+        let indivisible: Vec<u64> = graph
+            .insts
+            .iter()
+            .filter(|inst| matches!(inst.payload, InstPayload::Op(SSAOp::IndivisibleAccess)))
+            .filter_map(|inst| graph.instruction_for_inst(inst.id))
+            .collect();
         for inst in graph.insts.iter().filter(|inst| !direct.contains(inst.id)) {
             match &inst.payload {
+                InstPayload::Op(SSAOp::Load { .. } | SSAOp::Store { .. })
+                    if !indivisible.is_empty()
+                        && graph
+                            .instruction_for_inst(inst.id)
+                            .is_some_and(|at| indivisible.contains(&at)) =>
+                {
+                    seed_instruction(
+                        inst.id,
+                        SemanticObligationKind::Atomicity,
+                        SemanticObligationComponent::Whole,
+                        &mut required,
+                    );
+                }
                 InstPayload::Op(op) => {
                     seed_direct_obligations(
                         graph,
@@ -744,7 +764,7 @@ impl SemanticObligationInventory {
                             | crate::SSAOp::StoreConditional { .. }
                             | crate::SSAOp::LoadGuarded { .. }
                             | crate::SSAOp::StoreGuarded { .. }
-                            | crate::SSAOp::AtomicCAS(_)
+                            | crate::SSAOp::Atomic(_)
                     )
                 )
             {
@@ -1751,8 +1771,9 @@ fn seed_direct_obligations(
             Component::MemoryOrdering((*ordering).into()),
             required,
         ),
-        // The monitor it clears is no value C holds, so it owes its atomic effect whole.
-        SSAOp::ClearExclusive => {
+        // The monitor it clears is no value C holds, so it owes its atomic effect whole; an
+        // untyped indivisible access owes its atomicity, which no plain access beside it states.
+        SSAOp::ClearExclusive | SSAOp::IndivisibleAccess => {
             seed_instruction(inst.id, Kind::Atomicity, Component::Whole, required);
         }
         SSAOp::LoadLinked { ordering, .. } | SSAOp::LoadGuarded { ordering, .. } => {
@@ -1797,12 +1818,12 @@ fn seed_direct_obligations(
                 );
             }
         }
-        SSAOp::AtomicCAS(swap) => {
+        SSAOp::Atomic(access) => {
             seed_instruction(inst.id, Kind::Atomicity, Component::Whole, required);
             seed_instruction(
                 inst.id,
                 Kind::MemoryOrdering,
-                Component::MemoryOrdering(swap.ordering.into()),
+                Component::MemoryOrdering(access.ordering.into()),
                 required,
             );
         }
@@ -3249,14 +3270,16 @@ mod tests {
     #[test]
     fn atomic_cas_has_read_write_and_ordering_obligations() {
         let mut block = R2ILBlock::new(0x5000, 4);
-        block.push(R2ILOp::AtomicCAS {
+        block.push(R2ILOp::Atomic(Box::new(r2il::AtomicAccess {
             dst: Varnode::unique(0x10, 8),
             space: SpaceId::Ram,
             addr: Varnode::register(0, 8),
-            expected: Varnode::constant(1, 8),
-            replacement: Varnode::constant(2, 8),
+            update: r2il::AtomicUpdate::CompareExchange {
+                expected: Varnode::constant(1, 8),
+                replacement: Varnode::constant(2, 8),
+            },
             ordering: MemoryOrdering::SeqCst,
-        });
+        })));
         block.push(R2ILOp::Return {
             target: Varnode::register(8, 8),
         });
@@ -3384,6 +3407,55 @@ mod tests {
                         && id.component == SemanticObligationComponent::Whole
                 })
         );
+    }
+
+    /// An instruction the lift could not type as one atomic access owes the atomicity of each
+    /// plain access in it, so none renders as a plain one; another instruction's accesses do not.
+    #[test]
+    fn an_untyped_indivisible_access_owes_atomicity_on_each_access() {
+        let (addr, held) = (Varnode::register(0, 8), Varnode::unique(0x10, 4));
+        let mut block = R2ILBlock::new(0x7000, 4);
+        block.push(R2ILOp::IndivisibleAccess);
+        block.push(R2ILOp::Load {
+            dst: held.clone(),
+            space: SpaceId::Ram,
+            addr: addr.clone(),
+        });
+        block.push(R2ILOp::IntNot {
+            dst: held.clone(),
+            src: held.clone(),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: addr.clone(),
+            val: held.clone(),
+        });
+        block.instructions.push(0, 4, 0x7000);
+        let mut plain = R2ILBlock::new(0x7004, 4);
+        plain.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr,
+            val: held,
+        });
+        plain.push(R2ILOp::Return {
+            target: Varnode::register(8, 8),
+        });
+        plain.instructions.push(0, 2, 0x7004);
+        let artifact = SsaArtifact::raw(&[block, plain], None).expect("indivisible artifact");
+        let atomicity = |at: u64, ordinal: usize| {
+            let inst = artifact
+                .obligations()
+                .disposition_with_id(artifact.graph(), operation_at(&artifact, at, ordinal))
+                .expect("instruction");
+            artifact
+                .obligations()
+                .owned(&inst)
+                .any(|obligation| obligation.id.kind == SemanticObligationKind::Atomicity)
+        };
+        assert!(atomicity(0x7000, 0), "the marker");
+        assert!(atomicity(0x7000, 1), "the load");
+        assert!(atomicity(0x7000, 3), "the store");
+        assert!(!atomicity(0x7004, 0), "a plain store");
     }
 
     #[test]

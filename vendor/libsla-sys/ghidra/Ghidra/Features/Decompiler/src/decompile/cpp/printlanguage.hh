@@ -167,6 +167,7 @@ public:
     optoken,			///< Emit atom as operator
     typetoken,			///< Emit atom as operator
     fieldtoken,			///< Emit atom as structure field
+    bitfieldtoken,		///< Emit atom as structure bitfield
     casetoken,			///< Emit atom as a \e case label
     blanktoken			///< For anonymous types
   };
@@ -324,10 +325,11 @@ protected:
   /// \param val is the value of the constant
   /// \param ct is the data-type of the constant
   /// \param tag is the type of token associated with the constant
-  /// \param vn is the Varnode holding the constant (optional)
-  /// \param op is the PcodeOp using the constant (optional)
+  /// \param vn is the Varnode holding the constant (may be null)
+  /// \param op is the PcodeOp using the constant (may be null)
+  /// \param displayFormat is the default display format to use (may be 0)
   virtual void pushConstant(uintb val,const Datatype *ct,tagtype tag,
-			    const Varnode *vn,const PcodeOp *op)=0;
+			    const Varnode *vn,const PcodeOp *op,uint4 displayFormat)=0;
 
   /// \brief Push a constant marked up by and EquateSymbol onto the RPN stack
   ///
@@ -335,8 +337,8 @@ protected:
   /// \param val is the value of the constant
   /// \param sz is the number of bytes to use for the encoding
   /// \param sym is the EquateSymbol that marks up the constant
-  /// \param vn is the Varnode holding the constant (optional)
-  /// \param op is the PcodeOp using the constant (optional)
+  /// \param vn is the Varnode holding the constant (may be null)
+  /// \param op is the PcodeOp using the constant (may be null)
   virtual bool pushEquate(uintb val,int4 sz,const EquateSymbol *sym,const Varnode *vn,const PcodeOp *op)=0;
 
   /// \brief Push an address which is not in the normal data-flow.
@@ -358,9 +360,10 @@ protected:
   /// If there is no Symbol or other name source for an explicit variable,
   /// this method is used to print something to represent the variable based on its storage address.
   /// \param addr is the storage address
+  /// \param size is the number of storage bytes
   /// \param vn is the Varnode representing the variable (if present)
   /// \param op is a PcodeOp associated with the variable
-  virtual void pushUnnamedLocation(const Address &addr,const Varnode *vn,const PcodeOp *op)=0;
+  virtual void pushUnnamedLocation(const Address &addr,int4 size,const Varnode *vn,const PcodeOp *op)=0;
 
   /// \brief Push a variable that represents only part of a symbol onto the RPN stack
   ///
@@ -428,6 +431,24 @@ protected:
   /// or it can be a statement with no left-hand side.
   /// \param op is the given PcodeOp performing the final operation of the expression
   virtual void emitExpression(const PcodeOp *op)=0;
+
+  /// \brief Emit a call as a \e constructor expression
+  ///
+  /// Use language specific constructor syntax to represent the CALL.
+  /// \param op is the CALL op
+  virtual void emitConstructor(const PcodeOp *op)=0;
+
+  /// \brief Emit STORE to a bit field
+  ///
+  /// Printing for the sequence: `STORE( ptr, INSERT( LOAD(ptr), val, #pos, #sz ) )`
+  /// \param op is the STORE
+  virtual void emitBitFieldStore(const PcodeOp *op)=0;
+
+  /// \brief Emit expression writing to a bitfield
+  ///
+  /// Printing for an expression rooted at INSERT
+  /// \param op is the INSERT
+  virtual void emitBitFieldExpression(const PcodeOp *op)=0;
 
   /// \brief Emit a function declaration
   ///
@@ -577,10 +598,12 @@ public:
   virtual void opCpoolRefOp(const PcodeOp *op)=0;			///< Emit a CPOOLREF operator
   virtual void opNewOp(const PcodeOp *op)=0;				///< Emit a NEW operator
   virtual void opInsertOp(const PcodeOp *op)=0;				///< Emit an INSERT operator
-  virtual void opExtractOp(const PcodeOp *op)=0;			///< Emit an EXTRACT operator
+  virtual void opZpullOp(const PcodeOp *op)=0;				///< Emit a ZPULL operator
   virtual void opPopcountOp(const PcodeOp *op)=0;			///< Emit a POPCOUNT operator
   virtual void opLzcountOp(const PcodeOp *op)=0;			///< Emit a LZCOUNT operator
+  virtual void opSpullOp(const PcodeOp *op)=0;				///< Emit an SPULL operator
   virtual string unnamedField(int4 off,int4 size);			///< Generate an artificial field name
+  virtual string getScopeDelimiter(void) const=0;			///< Return the character string used to separate scope names
 
   static int4 mostNaturalBase(uintb val); 			///< Determine the most natural base for an integer
   static void formatBinary(ostream &s,uintb val);		///< Print a number in binary form

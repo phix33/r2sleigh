@@ -258,8 +258,11 @@ pub enum AnalysisOp {
     /// Insert bits from one input into the section of another: `x[8..16] = y`
     Insert,
 
-    /// Extract bits from the section of an input and copy them to another: `y = x[8..16]`.
+    /// Extract bits from the section of an input, zero-extended into another: `y = x[8..16]`.
     Extract,
+
+    /// Extract bits from the section of an input, sign-extended into another.
+    SignedExtract,
 
     /// A placeholder for address mappings involving segments.
     SegmentOp,
@@ -343,9 +346,10 @@ impl From<sys::OpCode> for OpCode {
             sys::OpCode::CPUI_CPOOLREF => OpCode::Pseudo(PseudoOp::ConstantPoolRef),
             sys::OpCode::CPUI_NEW => OpCode::Pseudo(PseudoOp::New),
             sys::OpCode::CPUI_INSERT => OpCode::Analysis(AnalysisOp::Insert),
-            sys::OpCode::CPUI_EXTRACT => OpCode::Analysis(AnalysisOp::Extract),
+            sys::OpCode::CPUI_ZPULL => OpCode::Analysis(AnalysisOp::Extract),
             sys::OpCode::CPUI_POPCOUNT => OpCode::Popcount,
             sys::OpCode::CPUI_LZCOUNT => OpCode::LzCount,
+            sys::OpCode::CPUI_SPULL => OpCode::Analysis(AnalysisOp::SignedExtract),
             sys::OpCode { repr } => OpCode::Unknown(repr),
         }
     }
@@ -429,7 +433,8 @@ impl From<OpCode> for sys::OpCode {
             OpCode::Analysis(AnalysisOp::PointerSubcomponent) => sys::OpCode::CPUI_PTRSUB,
             OpCode::Analysis(AnalysisOp::SegmentOp) => sys::OpCode::CPUI_SEGMENTOP,
             OpCode::Analysis(AnalysisOp::Insert) => sys::OpCode::CPUI_INSERT,
-            OpCode::Analysis(AnalysisOp::Extract) => sys::OpCode::CPUI_EXTRACT,
+            OpCode::Analysis(AnalysisOp::Extract) => sys::OpCode::CPUI_ZPULL,
+            OpCode::Analysis(AnalysisOp::SignedExtract) => sys::OpCode::CPUI_SPULL,
             OpCode::Unknown(_) => sys::OpCode::CPUI_MAX,
         }
     }

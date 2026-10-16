@@ -115,7 +115,7 @@ impl SSAVarNameKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "SSAVarFields", into = "SSAVarFields")]
 pub struct SSAVar {
-    /// The base name of the variable (e.g., "RAX", "tmp:0x1000", "const:0x42").
+    /// The base name of the variable (e.g., "RAX", "tmp:401334:8", "const:0x42").
     ///
     /// Interned rather than owned: the same few hundred spellings are repeated
     /// across every operation of every function, so a variable points at the
@@ -370,7 +370,7 @@ impl SSAVar {
     /// For named registers (without prefix), outputs "RAX_0".
     /// For unknown registers (with "reg:" prefix), outputs "reg:10_0".
     /// For constants, outputs "const:42_0".
-    /// For temporaries, outputs "tmp:1000_0".
+    /// For temporaries, outputs "tmp:401334:8_1".
     pub fn display_name(&self) -> String {
         // Handle special prefixes (hex fallbacks and other spaces)
         if self.name_kind().is_prefixed_display_name() {

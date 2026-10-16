@@ -438,7 +438,9 @@ fn reload_is_redundant(ops: &[R2ILOp], header: usize) -> bool {
 /// Answers the guard's index.
 fn zero_guard(ops: &[R2ILOp], scan: &ScanLoop, source: &Varnode) -> Option<usize> {
     let guards = (0..scan.header)
-        .filter(|index| matches!(ops[*index], R2ILOp::Branch { .. } | R2ILOp::CBranch { .. }))
+        .filter(|index| {
+            (ops[*index].transfer()).is_some_and(|transfer| transfer.direct && !transfer.call)
+        })
         .collect::<Vec<_>>();
     let [guard] = guards.as_slice() else {
         return None;

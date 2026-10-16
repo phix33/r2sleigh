@@ -173,8 +173,8 @@ fn an_aarch64_store_exclusive_is_one_conditional_store() {
     }
 }
 
-/// An instruction's accesses and orderings in program order: an exclusive's ordering is its own,
-/// any other's is a fence on the side it orders (`vendor/README.md`).
+/// An instruction's accesses and orderings in program order: an exclusive's or an atomic's ordering
+/// is its own, any other's is a fence on the side it orders (`vendor/README.md`).
 fn ordered_accesses(word: u32) -> Vec<String> {
     aarch64(word)
         .iter()
@@ -185,6 +185,11 @@ fn ordered_accesses(word: u32) -> Vec<String> {
             R2ILOp::LoadLinked { ordering, .. } => Some(format!("linked {ordering:?}")),
             R2ILOp::StoreConditional { ordering, .. } => Some(format!("conditional {ordering:?}")),
             R2ILOp::Fence { ordering } => Some(format!("fence {ordering:?}")),
+            R2ILOp::Atomic(access) => Some(match &access.update {
+                r2il::AtomicUpdate::Fetch { op, .. } => format!("{op:?} {:?}", access.ordering),
+                r2il::AtomicUpdate::CompareExchange { .. } => format!("cas {:?}", access.ordering),
+            }),
+            R2ILOp::IndivisibleAccess => Some("indivisible".to_string()),
             R2ILOp::CallOther { .. } | R2ILOp::Unimplemented => Some("unmodelled".to_string()),
             _ => None,
         })
@@ -245,62 +250,25 @@ const ORDERED: [Ordered; 34] = [
     // A limited-ordering acquire orders only within its LORegion, so no ordering is stated.
     ("ldlar x0, [x8]", 0xc8df_7d00, &["unmodelled", "load"]),
     ("stllr w0, [x8]", 0x889f_7d00, &["store", "unmodelled"]),
-    ("ldadd w1, w0, [x8]", 0xb821_0100, &["load", "store"]),
-    (
-        "ldadda w1, w0, [x8]",
-        0xb8a1_0100,
-        &["load", "store", "fence Acquire"],
-    ),
-    (
-        "ldaddl x1, x0, [x8]",
-        0xf861_0100,
-        &["fence Release", "load", "store"],
-    ),
-    (
-        "ldaddal w1, w0, [x8]",
-        0xb8e1_0100,
-        &["fence Release", "load", "store", "fence Acquire"],
-    ),
-    (
-        "staddl w1, [x8]",
-        0xb861_011f,
-        &["fence Release", "load", "store"],
-    ),
-    (
-        "swpal x1, x0, [x8]",
-        0xf8e1_8100,
-        &["fence Release", "load", "store", "fence Acquire"],
-    ),
-    (
-        "ldsmaxal w1, w0, [x8]",
-        0xb8e1_4100,
-        &["fence Release", "load", "store", "fence Acquire"],
-    ),
-    (
-        "cas x0, x1, [x8]",
-        0xc8a0_7d01,
-        &["load", "guarded Relaxed"],
-    ),
-    (
-        "casa w0, w1, [x8]",
-        0x88e0_7d01,
-        &["load", "guarded Relaxed", "fence Acquire"],
-    ),
-    (
-        "casl w0, w1, [x8]",
-        0x88a0_fd01,
-        &["fence Release", "load", "guarded Relaxed"],
-    ),
-    (
-        "casalb w0, w1, [x8]",
-        0x08e0_fd01,
-        &["fence Release", "load", "guarded Relaxed", "fence Acquire"],
-    ),
+    // An atomic read-modify-write takes its release before and its acquire after as its own.
+    ("ldadd w1, w0, [x8]", 0xb821_0100, &["Add Relaxed"]),
+    ("ldadda w1, w0, [x8]", 0xb8a1_0100, &["Add Acquire"]),
+    ("ldaddl x1, x0, [x8]", 0xf861_0100, &["Add Release"]),
+    ("ldaddal w1, w0, [x8]", 0xb8e1_0100, &["Add AcqRel"]),
+    ("staddl w1, [x8]", 0xb861_011f, &["Add Release"]),
+    ("swpal x1, x0, [x8]", 0xf8e1_8100, &["Swap AcqRel"]),
+    ("ldsmaxal w1, w0, [x8]", 0xb8e1_4100, &["SignedMax AcqRel"]),
+    ("cas x0, x1, [x8]", 0xc8a0_7d01, &["cas Relaxed"]),
+    ("casa w0, w1, [x8]", 0x88e0_7d01, &["cas Acquire"]),
+    ("casl w0, w1, [x8]", 0x88a0_fd01, &["cas Release"]),
+    ("casalb w0, w1, [x8]", 0x08e0_fd01, &["cas AcqRel"]),
+    // Two cells compared and written as one access have no typed statement, so the fences stay.
     (
         "caspal x0, x1, x2, x3, [x8]",
         0x4860_fd02,
         &[
             "fence Release",
+            "indivisible",
             "load",
             "load",
             "guarded Relaxed",

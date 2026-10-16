@@ -101,11 +101,15 @@ fn signature(info: &r2engine::program::info::FunctionInfo, name: Option<&str>) -
         (None, true) => "/* unproven */".to_owned(),
         (None, false) => return None,
     };
-    let parameters = info
+    let mut parameters = info
         .arguments
         .iter()
         .map(|argument| argument.declared_as(&argument_name(argument)))
         .collect::<Vec<_>>();
+    // A tail with no named parameter has no C spelling: the list stays unspecified, as `pdd`'s.
+    if info.variadic && !parameters.is_empty() {
+        parameters.push("...".to_owned());
+    }
     Some(format!(
         "signature: {returns} {} ({});",
         name?,

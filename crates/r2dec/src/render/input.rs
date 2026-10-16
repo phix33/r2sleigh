@@ -107,6 +107,12 @@ impl<'a> RenderInput<'a> {
             .type_graph()
     }
 
+    /// Whether arguments continue past the parameters, as the function's interface states.
+    pub fn variadic(&self) -> bool {
+        (self.artifact().machine_context().function_interface())
+            .is_some_and(r2source::SourceFunctionInterface::is_variadic)
+    }
+
     /// Who each call site calls, as r2types resolved it.
     /// Whether the result's second register is open: the body writes it on every return and no
     /// call read decides whether it holds half of the result (doc/adr-language-profile.md, item 1).

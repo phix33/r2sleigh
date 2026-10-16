@@ -19,7 +19,7 @@ compiler.compile(input_file, output_file)?;
 
 ## Compiler Details
 
-The internal SLEIGH compiler is built from Ghidra 11.4.
+The internal SLEIGH compiler is built from Ghidra master `918acd744d` (2026-10-13), the commit `libsla-sys` vendors, whose headers it compiles against.
 
 The SLEIGH compiler may report warnings in its response which reference command line switches. For details on any reported switches, refer to [SLEIGH compiler usage](https://github.com/NationalSecurityAgency/ghidra/blob/1801dc1ee62be73faae29961ec2f17a59423f156/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc#L3736-L3747).
 

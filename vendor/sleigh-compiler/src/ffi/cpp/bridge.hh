@@ -19,7 +19,7 @@ class SleighCompileProxy : public ghidra::SleighCompile {
         void setAllOptionsProxy(const std::vector<PreprocessorDefine> &defines, bool unnecessaryPcodeWarning,
                 bool lenientConflict, bool allCollisionWarning,
                 bool allNopWarning, bool deadTempWarning, bool enforceLocalKeyWord,
-                bool largeTemporaryWarning, bool caseSensitiveRegisterNames, bool debugOutput);
+                bool caseSensitiveRegisterNames, bool debugOutput);
         CompileResponse run_compilation_proxy(const std::string &filein, const std::string &fileout);
 };
 

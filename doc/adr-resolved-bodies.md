@@ -1,6 +1,6 @@
 # ADR: One resolved body per function (P6)
 
-Status: accepted, done (P6a, P6c1, P6c2).
+Status: accepted, done (P6a, P6c1, P6c2, SM2); Summaries in progress.
 
 ## Context
 
@@ -176,12 +176,270 @@ those calls' direct callees, its arity owners (none where one such call names
 no callee). Under `aa` (`Callers::Read`), `Resolved` waits on arity owners as
 on result owners: `Component` is Tarjan over both edges, bottom-up, and a
 function is resolved again where an owner outside its component states an
-exact arity. Members of one component read each other alone, so an argument a
-cycle hands on stays a floor; a fixpoint inside the component costs a
-preparation per member per round and waits on its measurement. Without `aa`, a
+exact arity. Without `aa`, a
 request demands results only, as above, and pays no closure (D23): measured on
 0pack `0x62ecf0`, demanding arity on a cold `pdd` took 20.0 to 36.5 G
 instructions, pumasim `0x23fdf0` 18.1 to 21.2 G.
+
+**A cycle's arities.** Inside a component, an owner is a member, and a
+member resolved alone leaves the slot a recursive call may be handed a floor
+(review.c's `fact`, `AtLeast(1)`, made `main`'s `fact(5)` a counted residual).
+Arity is the set of slots whose incoming value may be read, and any read
+happens at a finite recursion depth, so the least fixpoint over the members is
+exact; the floor was a needless greatest-fixpoint answer. `Resolved`, under
+`aa`, answers a member whose floor a member owns (an open member) by a
+worklist over the component (`least_fixpoint`):
+
+1. each open member is assumed `Exact` at the count it reads alone; every
+   other member an open one calls is stated as `Resolved` answers it, exact or
+   a floor;
+2. an open member is resolved against its outside owners, as above, and the
+   members it calls as assumed;
+3. where its read rises above its assumption (a count, then a floor, then no
+   interface), the assumption rises and every open member calling it is
+   resolved again. An assumption only rises, its count bounded by the slots
+   its body can read, so the work is O(k + (s + 2)·E) preparations for k open
+   members, s slots and E calls between them.
+
+A member's assumption states its interface alone, its result stripped
+(`SourceFunctionInterface::assumed_arity`), and nothing it preserves or
+reaches, so only arity moves: a member's result proof is the one it had. A
+floor with a non-member cause (an indirect call of unstated arity, an unseen
+transfer, a supervisor call, the argument area) survives the member's own
+read, and its callers through it stay floors. A read that falls below its
+assumption would mean recovery is not monotone in its callees' arities; the
+whole component then keeps the floors it had, under refusal evidence
+`arity-fixpoint` (none seen over every function of review.c and shapes.c at
+six builds, nor on the 0pack, pumasim and gzdoom functions below). The
+other open members' answers are deposited, as `Component` deposits its
+components. Measured on release `aa; pdd`, with one more walk per open member
+at its first resolution: 0pack `0x62ecf0` 61.89 to 62.44 G instructions,
+`0x58e3d0` 74.33 to 74.27 G, pumasim `0x23fdf0` 60.17 to 60.12 G, gzdoom
+`0x10070695c` 191.31 to 191.16 G, peak RSS within 4%; no budget is needed.
+
+A recursive root reads itself as its callers do: under `aa` its own entry is
+one of the callees it reads `Resolved`, so its recursive call takes the
+arity the fixpoint states rather than a count off the registers it wrote
+(gcc -O1's `fact` hoists `mov eax, 1` above its compare, and a call handed
+`al` is refused that count). It costs one `Resolved(entry)` per
+self-recursive root, which any caller's render pays anyway; without `aa` the
+root reads only its other callees, as before.
+
+What stays open: a cycle's result (shapes.c's `shape_mutual_even` now calls
+`shape_mutual_odd` with its two arguments, and returns a residual, since each
+member's result is the other's), the next fixpoint of this kind.
+
+### Variadic tail (ROADMAP P7, W14)
+
+A `va_start` prologue saves every argument register past the named ones to
+the convention's register save area, and recovery read those saves as
+parameter reads: shapes.c's `vfold(unsigned, ...)` was `Exact(6)` on x86-64
+and `Exact(8)` on AArch64, and its callers passed slots they never wrote.
+
+**The fact.** A body is variadic with `named` fixed parameters where, in
+entry-stack-pointer coordinates and for one area base `A` and slot width `w`:
+
+1. each argument slot `i` from `named` to the last has its entry value stored
+   at `A + w·i`, and slot `named - 1` has not, with `named ≥ 1`;
+2. nothing else reads those saved values, through merges and copies; a use
+   nothing observes (`xor ecx, ecx`) or a call's implicit use reads nothing;
+3. the bound of the area the convention names is stored to memory, as a
+   `va_list` holds it: System V AMD64's `reg_save_area` (`A`, psABI 3.5.7,
+   Figure 3.33) and AAPCS64's `__gr_top` (`A + w·N`, "Variable argument
+   lists"), r2abi's cited rows, carried by `SourceConventionSlots`.
+
+Rule 3 separates an O0 body spilling its own six parameters, whose spill
+address no `va_list` holds; rule 1's named slot separates an aggregate of
+every parameter whose address is stored (`struct six s = {a, ..., f}; p =
+&s;`), which C before C23 cannot be variadic with; rule 2's other reads
+refuse the area, as does a tail slot the recovered reads still show (a
+call that takes it). The vector block behind `test al, al` and the
+`gp_offset`/`__gr_offs` constants are not required: gcc -O1 and -O2 omit
+the block and the `fp_offset` store when no `va_arg` reads a float.
+
+**Owner.** r2ssa (`save_area::register_save_area`, read by interface
+recovery); r2abi states the anchor; the interface carries it on the one
+variadic bit a declaration's `...` sets (`with_variadic_tail`), with the
+fixed prefix `Exact(named)`: a slot below the area the body never reads is
+a parameter at its slot's width, since the area starts at the first unnamed
+slot. The argument area past the registers and a tail register reaching a
+call of unproven arity are the tail's, not a floor. r2dec spells `, ...`.
+
+**Callers.** A call mints the existing variadic contract: a format literal
+counts its tail, else the call is the counted residual
+`VariadicCount(missing_format_parameter)`. A callee whose result is
+unproven is a statement, and a statement counts no tail, so it states a
+variadic callee `AtLeast(named)`. The body's reads of its tail registers
+and of the vector count (`al`) are named "variadic tail registers" on the
+proof line.
+
+**The `al` input.** A summary resolves alone, where a local callee is
+unread, so a call to `vfold` was counted from the registers written
+(gcc -O0's dead `rdx = 0` among them) and proved `shape_variadic_local`
+`Exact(2)`, while its root, reading `vfold`'s summary, is a floor of 0:
+certification graded `main` calling it with 2, "defined with 0". System V
+hands a call to a variadic or unprototyped function its vector count in
+`al` (psABI 3.5.7; r2abi's row, on `SourceConventionSlots`), so a register
+count is refused (`CountRegisterSet`) where the body sets that register for
+the call alone: a constant at most 8 only the call reads, found from the
+call's own `CallUse`, O(reads). The call keeps no argument past its callee's
+floor, and both grades agree. gcc's stack protector clears its guard from
+`eax` with the same `xor eax, eax`, often just before the first call
+(pumasim `0x21fb90`, `0x23da20`, `0x23fdf0`): a zero over a compiler-inserted
+guard read is the protector's, not a count (one reaching search, only where
+the register is set). Where gcc merges the two the call stays counted, as
+before. A K&R call to an unprototyped function sets `al` too, so its summary
+is a floor until `aa` resolves it against the callee.
+
+**Cost.** One pass over the body's stores and the uses of the saved values,
+O(insts + uses), inside recovery's existing pass; per convention boundary,
+O(the call's reads). Release `pdd`, instructions before and after:
+0pack `0x62ecf0` 19.80 to 19.56 G (`aa; pdd` 62.08 to 61.88 G), 0pack
+`0x58e3d0` 23.25 to 23.06 G (74.51 to 74.30 G, output identical), pumasim
+`0x23fdf0` 18.32 to 18.16 G (60.36 to 60.17 G). Finding the call's reads by
+searching its block first cost 0pack `0x62ecf0` 1.4 G.
+
+**Measured (2026-10-15).** shapes.c, gcc and clang at -O0, -O1, -O2 on
+x86-64 and AArch64, stripped, `aa; pdd`: `vfold` renders
+`(uint32_t arg0, ...)` on all 12 builds (6 or 8 parameters before), and the
+four calls to it in each `shape_variadic_local` are counted residuals where
+they passed up to six slots the caller never wrote. `shape_variadic_local`
+hands its parameters only into tails of unproven count, so its arity is a
+floor of 0 and `main`'s call to it is a `Floor` gap on all 12, never the
+never-assigned residuals it passed. Certification over the 12 builds:
+invented arguments 1 to 0 (aarch64 gcc -O2's `shape_variadic_local` passed
+9 to the 8-ary `vfold`), graded calls 5 fewer per build (the calls now refused); on the
+census binaries invented stays 0 and the census moves only
+`shapes_gcc_x64_O0`'s three. 0pack `0x62ecf0` renders 10 calls to
+`el::base::Writer::construct(int, const char*, ...)` as counted residuals
+where they passed three never-assigned ones; pumasim `0x23fdf0` loses its 85
+never-assigned residuals (97 under `aa`), invented arguments of callees such
+as `QColor::setRgb(int, int, int)`, which handed its unwritten slots to
+`qWarning(const char*, ...)` and was 6-ary. Equivalence on shapes.c (both
+targets, 23 records moved, each with its cause): five records leave equal
+for residual-trap, `shape_variadic_local` on x86-64 clang -O0 and AArch64
+clang -O0/-O1/-O2 and x86-64 gcc -O0's `main`, whose C passed the caller's
+own unwritten registers on and so matched by accident; the W14 `main`
+records stay residual-trap, now at the `Floor` gap rather than
+never-assigned arguments. None closes: that needs the count-driven tail.
+
+**What is left.**
+
+- A count-driven tail: `vfold`'s `va_arg` loop is bounded by its named
+  `count`, so `vfold(1u, a)` passes exactly one; a summary that states it
+  (SM) would close the W14 `main` records. Conditional on SM.
+- The scrub exception rests on the stack-protector check being decided
+  (`UbFreeSource`, the platform's guard row); where it is not, gcc's
+  prologue `xor eax, eax` before a first call still reads as a count, and
+  that call's summary is a floor. K&R calls to unprototyped functions set
+  `al` too, so their summaries are floors until `aa`. Measured only on the
+  census set, shapes.c and three large functions.
+- A floor of 0 renders `(void)` (W11's "no invented `(void)`").
+- AArch64 hands no vector count, so a summary there can still count a call
+  to an unread variadic callee from registers and disagree with its root
+  (AArch64 shapes agreed only because `MayHandOn` fired). Closing it without
+  the closure D23 forbids needs a fact of the call site; conditional.
+- A tail jump to a variadic callee whose count is unproven is spelled
+  `UnsupportedInstruction` plus `TailTransferNotRendered` (pumasim
+  `QColor::setRgb`'s `qWarning`), not by its refusal as M3 spells a call.
+- pumasim `0x23fdf0` under `aa`: three calls to `QWidget::setMinimumSize`
+  that passed three invented arguments are now "another call disagrees with
+  its declaration" gaps (P7's 41, conditional).
+- Named float parameters (`fp_offset`, `__vr_offs`) with W11; Microsoft
+  x64's home area has no row, and Darwin arm64 passes the tail on the stack.
+
+### Summaries (ROADMAP SM, D23)
+
+**The fact.** `Summary(f)` is what a caller reads of a body: its interface
+(arity `Exact` or `AtLeast`, result), what it does through each parameter
+(`PreparedCalleeSummary`), the registers it preserves, its signature, and the
+callees that own what it leaves open. It is `CalleeReads(f)`, `f` resolved
+against its imports, and `Resolved(f, demand)`, `f` resolved again against
+the summaries of the owners outside `Component(f, demand)`, read bottom-up;
+members of one component read each other alone. Key: entry, instruction set,
+demand. Owner: r2engine's database; r2ssa states the interface, summary and
+owners, r2types the signature. `Retention::Held`, a program-wide fact
+computed once (adr-memory-model, decision 2). A prepared body is never held:
+it costs about 8 ns per byte to compute again, a summary microseconds.
+
+**Measured (2026-10-15).** The summary is already one held answer per body,
+per demand, per session (`two_callers_of_one_callee_prepare_it_once`).
+Resolutions by what asked for them:
+
+| Run | Resolutions / bodies | Alone | Again with owners | Root | Root and summary |
+|---|---|---|---|---|---|
+| sort, all 234 `pdd` | 329 / 234 | 90 | 5 | 234 | 85 |
+| pumasim census session, 50 `pdd` | 745 / 649 | 609, each once | 86 | 50 | 10 |
+| pumasim `0x23fdf0` | 121 / 93 | 92 | 28 | 1 | 0 |
+| gzdoom, 60 sampled `pdd` | 281 / 208 | 148 | 9 | 60 | 17, and 64 restated |
+
+**Two grades, by construction.** A root resolves against every direct
+callee's summary, a summary against its owners only. One resolution for both
+gives every callee its callees, the transitive closure D23 forbids (pumasim
+`main` reaches 1949 bodies, about 21 s), or takes callee evidence from the
+root. So a sweep resolves each body once as a root and once as a summary,
+and once more where an owner outside its component proves its result or
+arity.
+
+**The per-request double, removed.** `Native::resolve` prepared a body in
+full, then again where the first folded text it points at (AArch64's
+`adrp`+`add`) or the program's calls read an ambiguous result; the second
+read none of the first's facts unless a declared frame was restated off
+them. The first preparation stops at its seal (`r2ssa::TrustedSeal`: the
+machine context, the owners, the folded table), and its facts are collected
+only where they are the answer or a declared frame reads them. A refusal
+the first fact pass would have raised (an exhausted pass, an unbound span)
+now comes from the second preparation, under the same budget; none moved
+on the census or certification. Discovery's
+handed functions and the dispatch tables read a seal built against the
+convention, recovering nothing: a constant that reaches a call's argument or
+a table is the body's, which no interface decides. Output md5-identical, and
+`aa; afl` identical on radare2's 309 ELF and 137 Mach-O test binaries:
+gzdoom `0x10070695c` `pdd` 46.5 to 41.4 G instructions (672 to 618 MB);
+`aa; afl` 0pack 77.9 to 43.2 G, pumasim 64.0 to 40.6 G, gzdoom 191.6 to
+138.1 G; `aa; pdd` 0pack `0x62ecf0` 96.5 to 62.0 G, pumasim `0x23fdf0` 83.6
+to 60.3 G.
+
+**Invalidation and eviction.** A summary records what it read: the walk's
+bytes, the names and stubs, its owners' summaries and its component; a write
+recomputes exactly what read the written range. `Shared` compares by
+identity, so a recomputed summary is never backdated and a write that moves
+nothing still recomputes its dependents: P8's, under Q.
+
+**Memory bound.** One summary per body asked, O(Σ summaries): the census
+session (50 `pdd`, 649 summaries) peaks at 149.8 MB of heap against
+121.9 MB for its largest function alone, so its held summaries cost at most
+28 MB, about 43 KB each.
+
+**Complexity.** Per body per demand: one construct and seal, one fact pass
+where its facts are read, one more resolution where an owner outside its
+component proves. Components: Tarjan, O(V + E) over the owner edges.
+
+**What is left.**
+
+- Callee reads stay 46% of sort `0x3f50` `pdd` against SM's 10%: one
+  preparation per callee already (59 over 54 bodies), whose 39.4 points are
+  construct 25.3 (recovery 15.7) and seal and facts 12.2. That is recovery's
+  fact pass collected again by the seal (P4, LX4) and F2's single
+  representation.
+- Arity on a cold `pdd`: demanded everywhere it cost 0pack `0x62ecf0`
+  16.5 G; under `aa`, where it is demanded, it closes 9 of pumasim
+  `0x23fdf0`'s 317 floor gaps and 3 `may-hand-on` gaps of 0pack `0x62ecf0`,
+  none on 0pack `0x58e3d0`, sort `0x3f50` or gzdoom `0x10070695c`. The rest
+  chain through local Qt constructors to a slot handed on (`may-hand-on`,
+  LP) or an indirect call (an indirect call's arity, SM). Conditional on
+  those.
+- Alone, then with owners: of the bodies with owners on pumasim `0x23fdf0`,
+  28 resolve again and 8 do not cold, 89 and 6 under `aa`. Sealing alone,
+  and collecting only where no owner proves, saves a fact pass per body
+  resolved again and costs a construct per one not: about 5% of callee
+  preparation cold, 13% under `aa`. Next.
+- One preparation on AArch64: fold literal addresses before recovery, so
+  folded text is captured once. The seal folds after boundary constants,
+  copy forwarding and demand release, with prep facts; a fold before
+  recovery has none of them, so it is a semantic change until the literal
+  sets are shown equal over the AArch64 census and a gzdoom sample. Next,
+  measured first.
 
 ### Budget
 
@@ -193,7 +451,8 @@ answer is a function of the program alone.
 ## Complexity
 
 Walks: one per function asked, held. Resolutions: one per callee asked,
-plus one per function whose result an owner then proves. Components:
+plus one per function whose result an owner then proves; a resolution's
+first seal is collected only where it is read (Summaries). Components:
 Tarjan, O(V + E) over the owner edges the demand names, each component deposited once.
 
 ## Steps
@@ -205,3 +464,5 @@ Tarjan, O(V + E) over the owner edges the demand names, each component deposited
 - P6d, declined: `read_callees` is the one loop a root reads its callees through. The database
   answers it with `Resolved`; a plain `Program` (tests/engine/native.rs, the model integration test)
   with each callee resolved alone, through the same `resolved_alone`.
+- SM2 (2026-10-15): a first seal no second preparation reads is never collected; discovery's
+  handed functions and the dispatch tables read the convention's seal.

@@ -425,7 +425,7 @@ impl Placement {
         }
         let mut common = BTreeMap::new();
         let commons = file.symbols().filter(|_| relocatable);
-        for symbol in commons.filter(|symbol| symbol.section() == object::SymbolSection::Common) {
+        for symbol in commons.filter(|symbol| loader::common(file, symbol)) {
             // A common symbol's value is its alignment.
             let align = symbol.address().clamp(1, 1 << 16);
             let at = end.checked_next_multiple_of(align);
@@ -564,7 +564,8 @@ impl Image {
         };
         let file = object::File::parse(&*data).map_err(|e| ImageError::Parse(e.to_string()))?;
 
-        let arch = map_architecture(file.architecture(), file.is_64(), file.endianness())?;
+        let mut arch = map_architecture(file.architecture(), file.is_64(), file.endianness())?;
+        arch.instructions = instruction_order(&file);
         let format = map_format(file.format());
         // A header may state bytes past the file's end; only the bytes the file holds are its.
         let held = |(offset, size): (u64, u64)| {
@@ -775,10 +776,14 @@ impl Image {
                     (None, object::SymbolKind::Tls) => SymbolKind::Tls,
                     (None, _) => SymbolKind::Other,
                 },
-                // A name is defined here when it sits in a section of this image; `object` counts only STT_FUNC and STT_OBJECT, so every NASM label went unlisted.
-                // An absolute symbol sits in no section and a thread-local one is an offset into its block, so neither value is an address.
+                // Defined where it sits in a section (`object` counts only STT_FUNC and STT_OBJECT); an absolute value is an address only
+                // for a function inside a linked image's code (gABI SHN_ABS), and a thread-local one is an offset into its block.
                 defined: (matches!(symbol.section(), object::SymbolSection::Section(_))
-                    || common.is_some())
+                    || common.is_some()
+                    || (symbol.section() == object::SymbolSection::Absolute
+                        && symbol.kind() == object::SymbolKind::Text
+                        && !relocatable
+                        && executable(address)))
                     && symbol.kind() != object::SymbolKind::Tls,
                 import,
                 // ELF sets the address's low bit; Mach-O states `N_ARM_THUMB_DEF` in `n_desc`.
@@ -829,8 +834,8 @@ impl Image {
         symbols.extend(imports.iter().map(|import| Symbol {
             name: Arc::clone(&import.name),
             vaddr: import.slot,
-            // PE states no type; radare2 lists every import as a function.
-            kind: SymbolKind::Function,
+            // The import directory states no type: code or data, as the exporting image defines it.
+            kind: SymbolKind::Other,
             import: true,
             binding: Binding::Unstated,
             origin: SymbolOrigin {
@@ -843,10 +848,8 @@ impl Image {
         symbols.extend(exports.iter().map(|export| Symbol {
             name: Arc::clone(&export.name),
             vaddr: export.vaddr,
-            kind: match executable(export.vaddr) {
-                true => SymbolKind::Function,
-                false => SymbolKind::Data,
-            },
+            // The export directory states no type; discovery decides what begins a function.
+            kind: SymbolKind::Other,
             defined: true,
             binding: Binding::Global,
             origin: SymbolOrigin {
@@ -868,6 +871,8 @@ impl Image {
             if same {
                 kept.origin.table = kept.origin.table.or(later.origin.table);
                 kept.origin.dynamic = kept.origin.dynamic.or(later.origin.dynamic);
+                kept.origin.directory = kept.origin.directory.or(later.origin.directory);
+                kept.library = kept.library.take().or_else(|| later.library.take());
             }
             same
         });
@@ -1520,6 +1525,19 @@ fn map_permissions(flags: object::SegmentFlags) -> Permissions {
     }
 }
 
+/// The order an instruction reads in where the header states it apart from the data's:
+/// ARM's `EF_ARM_BE8`, little-endian code in a big-endian program.
+fn instruction_order(file: &object::File<'_>) -> Option<Endian> {
+    match (file.architecture(), file.flags()) {
+        (object::Architecture::Arm, object::FileFlags::Elf { e_flags, .. })
+            if e_flags.contains(object::elf::EF_ARM_BE8) =>
+        {
+            Some(Endian::Little)
+        }
+        _ => None,
+    }
+}
+
 fn map_architecture(
     arch: object::Architecture,
     is_64: bool,
@@ -1542,6 +1560,7 @@ fn map_architecture(
         name: name.to_owned(),
         bits: if is_64 { 64 } else { 32 },
         endian,
+        instructions: None,
     })
 }
 
@@ -1575,6 +1594,7 @@ mod tests {
                     name: "x86-64".to_owned(),
                     bits: 64,
                     endian: Endian::Little,
+                    instructions: None,
                 },
                 segments,
                 ..Container::default()

@@ -98,7 +98,7 @@ pub fn projection(artifact: &SsaArtifact) -> MachineProjection {
     MachineProjection::from_artifact(artifact).expect("machine projection")
 }
 
-/// The value id of the SSA variable spelled `name` (`RAX_1`, `tmp:100_1`).
+/// The value id of the SSA variable spelled `name` (`RAX_1`, `tmp:1000:100_1`).
 pub fn value_named(artifact: &SsaArtifact, name: &str) -> ValueId {
     let graph = artifact.graph();
     graph

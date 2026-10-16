@@ -61,6 +61,14 @@ const std::string& RegisterVarnodeName::getName() const {
     return std::get<1>(pair);
 }
 
+ContextTargetProxy::ContextTargetProxy(const ContextTarget &target) : target(target) {}
+const Address& ContextTargetProxy::getAddress() const { return target.addr; }
+int32_t ContextTargetProxy::getWord() const { return target.num; }
+uint32_t ContextTargetProxy::getMask() const { return target.mask; }
+uint32_t ContextTargetProxy::getValue() const { return target.value; }
+uint32_t ContextTargetProxy::getHeld() const { return target.held; }
+bool ContextTargetProxy::getFlow() const { return target.flow; }
+
 SleighProxy::SleighProxy(unique_ptr<RustLoadImageProxy> loader, unique_ptr<ContextDatabase> context)
     : Sleigh(loader.get(), context.get()), loader(move(loader)), context(move(context)) {
 }
@@ -177,6 +185,15 @@ std::unique_ptr<std::vector<std::string>> SleighProxy::getUserOpNamesProxy() con
 /// `define alignment` states it (1 where it states none).
 int32_t SleighProxy::getAlignmentProxy() const {
     return getAlignment();
+}
+
+/// The commits the last p-code decode aimed at another address than its fall-through.
+std::unique_ptr<std::vector<ContextTargetProxy>> SleighProxy::getContextTargetsProxy() const {
+    auto targets = std::unique_ptr<std::vector<ContextTargetProxy>>(new std::vector<ContextTargetProxy>());
+    for (const ContextTarget &target : contextTargets()) {
+        targets->push_back(ContextTargetProxy(target));
+    }
+    return targets;
 }
 
 /// Discard every parser context cached by instruction address while retaining

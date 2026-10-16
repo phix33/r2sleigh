@@ -680,6 +680,9 @@ pub enum CallBoundaryRefusal {
     ResultPassedOn { slot: u32 },
     /// No callee states an arity: the count is only the registers written before the call.
     CountFromRegisters,
+    /// The body sets the convention's vector count for this call alone: the callee is variadic or
+    /// unprototyped, and no register proves how many arguments it takes.
+    CountRegisterSet,
     /// The callee is an import, which has no body here, and no placed declaration states its
     /// arguments; its stub's arity is the loader's, never the import's (ROADMAP P7).
     ImportUnstated(UnstatedImport),
@@ -1655,8 +1658,8 @@ impl<'a> ObjectModelBuilder<'a> {
                 | SSAOp::StoreGuarded { addr, space, .. } => {
                     let _ = self.object_for_address_value(graph, addr, space);
                 }
-                SSAOp::AtomicCAS(ref swap) => {
-                    let _ = self.object_for_address_value(graph, swap.addr, swap.space);
+                SSAOp::Atomic(ref access) => {
+                    let _ = self.object_for_address_value(graph, access.addr, access.space);
                 }
                 _ => {}
             }

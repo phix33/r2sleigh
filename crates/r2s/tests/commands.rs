@@ -533,7 +533,7 @@ fn a_staged_call_passes_its_stack_arguments() {
     assert!(
         staged
             .out
-            .contains("tmp_11f80_19, tmp_11f80_18, rax_45, tmp_4a00_1, rax_42);"),
+            .contains("tmp_40133c_8_1, tmp_401335_8_1, rax_45, tmp_401320_8_1, rax_42);"),
         "{}",
         staged.out
     );
@@ -583,7 +583,7 @@ fn a_call_taking_a_pair_assigns_the_half_its_caller_reads() {
     for line in [
         "pair_401984 = mixed_from(arg0, arg1);",
         "rdx_2 = (uint64_t)((__uint128_t)pair_401984 >> 64U);",
-        "mixed_fold(tmp_11f80_3, rdx_2);",
+        "mixed_fold(tmp_401991_8_1, rdx_2);",
     ] {
         assert!(staged.out.contains(line), "{line}: {}", staged.out);
     }

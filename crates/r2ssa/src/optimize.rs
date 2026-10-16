@@ -1021,8 +1021,7 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
 /// A lane read is a `Subpiece` of its root, and the root's definition says
 /// what the lane holds: the constant copied there, the value an `Insert` put
 /// at that position, the narrower value an extension widened, or a slice of
-/// a wider slice (doc/adr-register-identity.md §5). Copies of non-constants
-/// are left alone: a copy is a statement the prepared SSA keeps.
+/// a wider slice (doc/adr-register-identity.md §5).
 /// Replace every condition assembled from condition codes with the comparison
 /// the source wrote. Always runs: the graph is what every later stage reads.
 /// One equality test a block ends in: `selector == value` sends control to
@@ -1143,7 +1142,8 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
                     SSAOp::Load { .. }
                         | SSAOp::LoadLinked { .. }
                         | SSAOp::LoadGuarded { .. }
-                        | SSAOp::AtomicCAS { .. }
+                        | SSAOp::Atomic(_)
+                        | SSAOp::IndivisibleAccess
                         | SSAOp::CallOther { .. }
                         | SSAOp::CallDefine { .. }
                         | SSAOp::CallRestore { .. }
@@ -1882,7 +1882,10 @@ fn fold_through_definition(
         )
     };
     match producer {
-        SSAOp::Copy { src: value, .. } if const_value(values, *value).is_some() => {
+        // A Sleigh temporary's copy is plumbing (GP-5581 reads its piece in place); a register's stays a statement.
+        SSAOp::Copy { src: value, .. }
+            if const_value(values, *value).is_some() || values.var(src).is_temp() =>
+        {
             subpiece(*value, u64::from(offset))
         }
         SSAOp::Insert(insert) => {
@@ -2954,12 +2957,32 @@ mod sccp_tests {
             })
         );
 
-        // A copy of a non-constant is a statement the prepared SSA keeps.
+        // A register's copy of a non-constant is a statement the prepared SSA keeps.
         let copied = defined_by(SSAOp::Copy {
             dst: root.clone(),
-            src: older,
+            src: older.clone(),
         });
         assert_eq!(fold(&read(0, 4), &copied), None);
+
+        // A Sleigh temporary's copy is read through: `sxth`'s `tmp = w0; sext(tmp:2)` since GP-5581.
+        let temporary = SSAVar::new("tmp:b300", 1, 8);
+        let piece = SSAOp::Subpiece {
+            dst: SSAVar::new("tmp:22808", 1, 2),
+            src: temporary.clone(),
+            offset: 0,
+        };
+        let held = defined_by(SSAOp::Copy {
+            dst: temporary,
+            src: older.clone(),
+        });
+        assert_eq!(
+            fold(&piece, &held),
+            Some(SSAOp::Subpiece {
+                dst: SSAVar::new("tmp:22808", 1, 2),
+                src: older,
+                offset: 0,
+            })
+        );
         let _ = byte;
     }
 }

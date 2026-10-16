@@ -20,7 +20,7 @@ pub mod proved;
 pub mod records;
 pub mod references;
 
-pub use decode::listing;
+pub use decode::{instructions, listing};
 
 /// What the analysis queries have computed and served.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -35,8 +35,9 @@ pub struct AnalysisStats {
 pub use proved::Proved;
 pub use r2ssa::InductionStep;
 pub use records::{
-    Annotation, AnnotationKind, Answered, ArgumentSlot, CallArgument, Callee, Decoders, Line,
-    Listing, Memory, Operand, Parameters, Stop, Trips, WalkedBody,
+    Annotation, AnnotationKind, Answered, ArgumentSlot, CallArgument, Callee, Decoders,
+    Instruction, Line, Listing, Memory, Operand, Parameters, Register, Registers, Semantics, Stop,
+    Trips, Unexpressed, Unlifted, WalkedBody,
 };
 pub use references::{Claimant, Coverage, Reference, References, Role, Unread};
 

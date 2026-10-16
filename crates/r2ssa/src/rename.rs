@@ -47,6 +47,8 @@ pub struct RenameContext {
     /// root (doc/adr-register-identity.md). `None` keeps exact-varnode identities.
     families: Option<Arc<RegisterFamilyInfo>>,
     lanes: LaneState,
+    /// The instruction the operation being renamed belongs to, whose temporaries it names.
+    instruction: u64,
     /// The function's call boundary as identities, named once for every call.
     boundary: BoundaryIdentities,
 }
@@ -89,7 +91,7 @@ struct LaneState {
     suffix: Vec<SSAOp>,
     /// Storage for the root values those operations read and write.
     storage: Vec<(SSAVar, CanonicalStorageId)>,
-    /// The block and operation index, for the temporaries' names.
+    /// The instruction and the operation's index in it, for the temporaries' names (ROADMAP D36).
     site: (u64, usize),
     serial: u32,
     /// The lane this operation writes is widened into its root later in the
@@ -216,6 +218,7 @@ impl RenameContext {
             next_disambiguator: HashMap::new(),
             families,
             lanes: LaneState::default(),
+            instruction: 0,
             boundary: BoundaryIdentities::default(),
         }
     }
@@ -236,16 +239,34 @@ impl RenameContext {
     }
 
     fn fresh_lane_temp(&mut self, size: u32) -> SSAVar {
-        let (block, op_idx) = self.lanes.site;
+        let (instruction, op_idx) = self.lanes.site;
         let serial = self.lanes.serial;
         self.lanes.serial += 1;
-        SSAVar::new(format!("tmp:lane:{block:x}:{op_idx:x}:{serial:x}"), 1, size)
+        SSAVar::new(
+            format!("tmp:lane:{instruction:x}:{op_idx:x}:{serial:x}"),
+            1,
+            size,
+        )
     }
 
-    /// Start renaming the operation at `site`; a new instruction forgets the
-    /// lane temporaries of the last one.
-    fn begin_op(&mut self, site: (u64, usize), new_instruction: bool, defer_lane_write: bool) {
-        self.lanes.site = site;
+    /// Start renaming the operation at `(block, index)`, lifted from `instruction`; a new
+    /// instruction forgets the lane temporaries of the last one.
+    fn begin_op(
+        &mut self,
+        (block, index): (u64, usize),
+        instruction: Option<u64>,
+        new_instruction: bool,
+        defer_lane_write: bool,
+    ) {
+        let within = if new_instruction {
+            0
+        } else {
+            self.lanes.site.1 + 1
+        };
+        // An operation no instruction claims is named by its place in the block.
+        self.lanes.site = instruction.map_or((block, index), |at| (at, within));
+        self.instruction = instruction.unwrap_or(block);
+        self.lanes.serial = 0;
         self.lanes.defer_lane_write = defer_lane_write;
         if new_instruction {
             self.lanes.temps.clear();
@@ -722,20 +743,18 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                 lane_instruction = Some(op_addr);
                 ctx.begin_op(
                     (block_addr, op_idx),
+                    op_addr,
                     new_instruction,
                     lane_write_widened_later(block, op_idx, ctx.families.as_deref()),
                 );
                 let renamed_op = rename_op(op, op_addr, ctx, &mut defined_vars, reg_names);
                 let block_ops = result.blocks.get_mut(&block_addr).unwrap();
                 block_ops.append(&mut ctx.lanes.prefix);
-                let boundary_reads =
-                    if matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. })
-                        && call_boundaries.is_some()
-                    {
-                        append_call_boundary_reads(block_ops, ctx)
-                    } else {
-                        Vec::new()
-                    };
+                let boundary_reads = if op.is_call() && call_boundaries.is_some() {
+                    append_call_boundary_reads(block_ops, ctx)
+                } else {
+                    Vec::new()
+                };
                 record_renamed_op_storage(op, &renamed_op, result);
                 for (var, storage) in boundary_reads {
                     record_canonical_storage(
@@ -759,7 +778,7 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                 }
 
                 let mut written_lanes = Vec::new();
-                if matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. })
+                if op.is_call()
                     && let Some(boundary) = call_boundaries
                 {
                     let boundary_defs = append_call_boundary_defs(
@@ -785,7 +804,7 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                 // After the clobbers, not before them: the run of `CallDefine`
                 // directly following a call is how a result is found, and an
                 // operation in the middle of it ends that run early.
-                if matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. })
+                if op.is_call()
                     && let (Some(identity), Some(entering)) = (
                         stack_pointer_identity,
                         carrier_entering_instruction.as_ref(),
@@ -1220,7 +1239,7 @@ fn write_varnode(
         return ctx.write_lane(varnode, root, defined_vars, reg_names);
     }
     ctx.forget_lanes_of(varnode);
-    let identity = RenameIdentity::from_varnode(varnode, reg_names);
+    let identity = RenameIdentity::from_varnode(varnode, reg_names, ctx.instruction);
     let renamed = ctx.write_var(&identity);
     defined_vars.push(identity);
     renamed
@@ -1317,27 +1336,16 @@ fn rename_op(
                 ordering: *ordering,
             }
         }
-        AtomicCAS {
-            dst,
-            addr,
-            expected,
-            replacement,
-            space,
-            ordering,
-        } => {
-            let addr_ssa = read_varnode(addr, ctx, reg_names);
-            let expected_ssa = read_varnode(expected, ctx, reg_names);
-            let replacement_ssa = read_varnode(replacement, ctx, reg_names);
-            let dst_ssa = write_varnode(dst, ctx, defined_vars, reg_names);
-            SSAOp::AtomicCAS(Box::new(crate::op::AtomicCasOp {
-                dst: dst_ssa,
-                space: *space,
-                addr: addr_ssa,
-                expected: expected_ssa,
-                replacement: replacement_ssa,
-                ordering: *ordering,
-            }))
+        Atomic(access) => {
+            SSAOp::Atomic(Box::new(crate::op::AtomicOp::of(
+                access,
+                |v, written| match written {
+                    true => write_varnode(v, ctx, defined_vars, reg_names),
+                    false => read_varnode(v, ctx, reg_names),
+                },
+            )))
         }
+        IndivisibleAccess => SSAOp::IndivisibleAccess,
         LoadGuarded {
             dst,
             addr,
@@ -2081,7 +2089,7 @@ fn read_varnode(
             if let Some(root) = register_root_slot(vn, ctx.families.as_deref()) {
                 return ctx.read_lane(vn, root, reg_names);
             }
-            let identity = RenameIdentity::from_varnode(vn, reg_names);
+            let identity = RenameIdentity::from_varnode(vn, reg_names, ctx.instruction);
             ctx.read_var(&identity)
         }
     }
@@ -2115,6 +2123,53 @@ mod tests {
             offset,
             size,
         }
+    }
+
+    /// Sleigh scopes a temporary to its instruction (ROADMAP D36): one instruction's read of an
+    /// offset another wrote names its own undefined value, never the other's.
+    #[test]
+    fn a_temporary_is_named_by_its_instruction_and_never_crosses_one() {
+        let mut block = R2ILBlock::new(0x2000, 8);
+        block.push_from(
+            R2ILOp::Copy {
+                dst: make_unique(0x10, 8),
+                src: make_reg(0, 8),
+            },
+            0x2000,
+        );
+        block.push_from(
+            R2ILOp::Copy {
+                dst: make_reg(8, 8),
+                src: make_unique(0x10, 8),
+            },
+            0x2000,
+        );
+        block.push_from(
+            R2ILOp::Copy {
+                dst: make_reg(16, 8),
+                src: make_unique(0x10, 8),
+            },
+            0x2004,
+        );
+        block.push_from(
+            R2ILOp::Return {
+                target: make_const(0, 8),
+            },
+            0x2004,
+        );
+        let function =
+            crate::function::SSAFunction::from_blocks_raw_no_arch(&[block]).expect("raw SSA");
+        let ops = function.named_block(0x2000).expect("block").ops().to_vec();
+        let written = ops[0].dst().expect("the write");
+        assert_eq!((written.name(), written.version), ("tmp:2000:10", 1));
+        let SSAOp::Copy { src: same, .. } = &ops[1] else {
+            panic!("a copy");
+        };
+        assert_eq!(same, written);
+        let SSAOp::Copy { src: other, .. } = &ops[2] else {
+            panic!("a copy");
+        };
+        assert_eq!((other.name(), other.version), ("tmp:2004:10", 0));
     }
 
     #[test]

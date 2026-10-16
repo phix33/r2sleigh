@@ -39,5 +39,17 @@
     <symbol name="H_IRQ" address="ram:0xFFFF0018" entry="true"/>
     <symbol name="H_FIQ" address="ram:0xFFFF001c" entry="true"/>
   </default_symbols>
-  
+  <register_data>
+    <!-- Sleigh's scratch: written and read within one instruction, no machine state -->
+    <register name="tmpNG" hidden="true"/>
+    <register name="tmpZR" hidden="true"/>
+    <register name="tmpCY" hidden="true"/>
+    <register name="tmpOV" hidden="true"/>
+    <register name="shift_carry" hidden="true"/>
+    <register name="mult_addr" hidden="true"/>
+    <register name="mult_dat8" hidden="true"/>
+    <register name="mult_dat16" hidden="true"/>
+    <register name="ISAModeSwitch" hidden="true"/>
+  </register_data>
+
 </processor_spec>

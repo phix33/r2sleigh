@@ -4,9 +4,9 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -183,7 +183,30 @@ int4 VolatileWriteOp::extractAnnotationSize(const Varnode *vn,const PcodeOp *op)
 SegmentOp::SegmentOp(const string &nm,Architecture *g,int4 ind)
   : TermPatternOp(nm,g,segment,ind)
 {
+  spc = (AddrSpace *)0;
+  baseinsize = 0;
+  innerinsize = 0;
+  supportsfarpointer = false;
+  injectId = -1;
+  concatState = -1;
   constresolve.space = (AddrSpace *)0;
+}
+
+/// Test if this op can be treated like a CPUI_PIECE
+/// \return \b true if the op concatenates its inputs
+bool SegmentOp::isConcatenation(void) const
+
+{
+  if (concatState >= 0)
+    return (concatState == 1);
+  uintb high = 0xabababababababab & calc_mask(baseinsize);
+  uintb low = 0x1234567812345678 & calc_mask(innerinsize);
+  uintb whole = (high << innerinsize * 8) | low;
+  vector<uintb> in;
+  in.push_back(high);
+  in.push_back(low);
+  concatState = (whole == execute(in)) ? 1 : 0;
+  return (concatState == 1);
 }
 
 bool SegmentOp::unify(Funcdata &data,PcodeOp *op,
@@ -231,6 +254,7 @@ void SegmentOp::decode(Decoder &decoder)
   baseinsize = 0;
   innerinsize = 0;
   supportsfarpointer = false;
+  concatState = -1;
   name = "segment"; 		// Default name, might be overridden by userop attribute
   for(;;) {
     uint4 attribId = decoder.getNextAttributeId();
@@ -490,6 +514,7 @@ UserPcodeOp *UserOpManage::registerBuiltin(uint4 i)
 void UserOpManage::registerOp(UserPcodeOp *op)
 
 {
+  unique_ptr<UserPcodeOp> owner(op);	// Take ownership
   int4 ind = op->getIndex();
   if (ind < 0) throw LowlevelError("UserOp not assigned an index");
 
@@ -509,7 +534,7 @@ void UserOpManage::registerOp(UserPcodeOp *op)
     // We assume this registration customizes an existing userop
     delete useroplist[ind];		// Delete the old spec
   }
-  useroplist[ind] = op;		// Index crossref
+  useroplist[ind] = owner.release();		// Index crossref
   useropmap[op->getName()] = op; // Name crossref
 
   SegmentOp *s_op = dynamic_cast<SegmentOp *>(op);
@@ -533,15 +558,9 @@ void UserOpManage::registerOp(UserPcodeOp *op)
 void UserOpManage::decodeSegmentOp(Decoder &decoder,Architecture *glb)
 
 {
-  SegmentOp *s_op;
-  s_op = new SegmentOp("",glb,useroplist.size());
-  try {
-    s_op->decode(decoder);
-    registerOp(s_op);
-  } catch(LowlevelError &err) {
-    delete s_op;
-    throw err;
-  }
+  unique_ptr<UserPcodeOp> s_op(new SegmentOp("",glb,useroplist.size()));
+  s_op->decode(decoder);
+  registerOp(s_op.release());
 }
 
 /// Create either a VolatileReadOp or VolatileWriteOp description object based on
@@ -589,14 +608,9 @@ void UserOpManage::decodeVolatile(Decoder &decoder,Architecture *glb)
 void UserOpManage::decodeCallOtherFixup(Decoder &decoder,Architecture *glb)
 
 {
-  InjectedUserOp *op = new InjectedUserOp("",glb,0,0);
-  try {
-    op->decode(decoder);
-    registerOp(op);
-  } catch(LowlevelError &err) {
-    delete op;
-    throw err;
-  }
+  unique_ptr<UserPcodeOp> op(new InjectedUserOp("",glb,0,0));
+  op->decode(decoder);
+  registerOp(op.release());
 }
 
 /// Create a JumpAssistOp description object based on the element
@@ -606,14 +620,9 @@ void UserOpManage::decodeCallOtherFixup(Decoder &decoder,Architecture *glb)
 void UserOpManage::decodeJumpAssist(Decoder &decoder,Architecture *glb)
 
 {
-  JumpAssistOp *op = new JumpAssistOp(glb);
-  try {
-    op->decode(decoder);
-    registerOp(op);
-  } catch(LowlevelError &err) {
-    delete op;
-    throw err;
-  }
+  unique_ptr<UserPcodeOp> op(new JumpAssistOp(glb));
+  op->decode(decoder);
+  registerOp(op.release());
 }
 
 /// \brief Manually install an InjectedUserOp given just names of the user defined op and the p-code snippet
@@ -637,12 +646,7 @@ void UserOpManage::manualCallOtherFixup(const string &useropname,const string &o
 
   int4 injectid = glb->pcodeinjectlib->manualCallOtherFixup(useropname,outname,inname,snippet);
   InjectedUserOp *op = new InjectedUserOp(useropname,glb,userop->getIndex(),injectid);
-  try {
-    registerOp(op);
-  } catch(LowlevelError &err) {
-    delete op;
-    throw err;
-  }
+  registerOp(op);
 }
 
 } // End namespace ghidra

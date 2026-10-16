@@ -67,6 +67,7 @@ pub(crate) mod reaching_rules;
 pub(crate) mod read_only;
 pub mod recover_interface;
 pub(crate) mod rename;
+pub(crate) mod save_area;
 pub(crate) mod semantic;
 mod slice;
 pub(crate) mod slot_promotion;
@@ -109,7 +110,7 @@ pub use function::{
     PhiNode, Prepared, RegisterFamilyInfo, RegisterFamilySlot, RegisterIdentityCensus,
     RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction, Sealed, SourceRef, SourceSite,
     SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind, StackAddressBase,
-    StackAddressRoot, TrustedSsaArtifact, def_use_graph,
+    StackAddressRoot, TrustedSeal, TrustedSsaArtifact, def_use_graph,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,
@@ -163,7 +164,7 @@ pub use obligation::{
     SemanticObligationInventory, SemanticObligationKind, SemanticSourceSite, SpelledInstruction,
     SpelledObligation,
 };
-pub use op::{AtomicCasOp, BlockTransferOp, InsertOp, SSAOp, SelectOp};
+pub use op::{AtomicOp, AtomicUpdateOp, BlockTransferOp, InsertOp, SSAOp, SelectOp};
 pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats};
 pub use r2sleigh_lift::{
     GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION, GenuineLiftedFunction, GenuineLiftedFunctionAuthority,
@@ -196,7 +197,7 @@ pub use semantic::{
     StructuredMemoryAccessFact, StructuredRecursiveCallFact, SupervisorCall, SwitchCertificate,
     SwitchGuardCertificate, SwitchPredicateFact, TripCount, TripGuard, TripRefusal, TripTest,
     UnstatedImport, ValueOwner, VariadicCallsiteArgumentCountEvidence,
-    VariadicCallsiteArgumentCountRefusal, returned_bytes, value_reaching,
+    VariadicCallsiteArgumentCountRefusal, returned_bytes,
 };
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use slot_promotion::promoted_slot_offset;

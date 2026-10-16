@@ -60,13 +60,16 @@ pub trait Program {
         &[]
     }
 
-    /// Whether nothing can write any byte of `range` once the program runs:
-    /// a segment mapped without write permission, or one the loader seals
-    /// after it is done. Where the program says nothing of sealing, only the
-    /// region's own permission answers.
-    fn immutable(&self, range: &std::ops::Range<u64>) -> bool {
-        self.region(range.start)
-            .is_some_and(|region| !region.write && range.end <= region.end)
+    /// How long `range` keeps what the loader leaves there; where the program states no seal,
+    /// the region's own permission answers.
+    fn permanence(&self, range: &std::ops::Range<u64>) -> crate::program::Permanence {
+        let read_only = self
+            .region(range.start)
+            .is_some_and(|region| !region.write && range.end <= region.end);
+        match read_only {
+            true => crate::program::Permanence::ReadOnly,
+            false => crate::program::Permanence::Writable,
+        }
     }
 
     /// Whether another function begins here.
@@ -99,12 +102,6 @@ pub trait Program {
     /// names one. The compiler specification states it; the walk reads the
     /// bytes and cannot know it, which is why it is asked for here.
     fn return_address_register(&self) -> Option<r2il::Varnode> {
-        None
-    }
-
-    /// The register a call writes to say which instruction set its target is
-    /// in, where the machine has more than one: Sleigh's `ISAModeSwitch`.
-    fn mode_register(&self) -> Option<r2il::Varnode> {
         None
     }
 }
@@ -147,10 +144,6 @@ pub struct Body {
     /// Functions this body leaves for without returning, by branching straight
     /// to their entry. A tail call is a call whose result is this function's.
     pub tail_calls: Vec<u64>,
-    /// The instruction set each call target is entered in, where the calling
-    /// instruction wrote the mode register; a call that writes none keeps
-    /// the caller's.
-    pub entered_with: BTreeMap<u64, u64>,
     /// Every place the walk stopped without knowing where control went.
     pub unresolved: Vec<Unresolved>,
     /// The calls the walk ended a block at on a model's word that the callee never returns.
@@ -335,9 +328,9 @@ impl Trace {
         std::mem::take(&mut self.0.reached)
     }
 
-    /// The instruction set each call target is entered in, where the call wrote the mode register.
-    pub const fn entered_with(&self) -> &BTreeMap<u64, u64> {
-        &self.0.entered_with
+    /// Whether each address an instruction states context for decodes in another context than the walk's.
+    pub const fn target_contexts(&self) -> &BTreeMap<u64, bool> {
+        &self.0.target_contexts
     }
 
     /// Every direct call target.
@@ -421,8 +414,6 @@ struct Walk {
     dispatched: BTreeMap<u64, Vec<u64>>,
     /// The register a call leaves its return address in, where there is one.
     link: Option<r2il::Varnode>,
-    /// The register a call writes its target's instruction set to.
-    mode: Option<r2il::Varnode>,
     /// The size of each instruction decoded, by address: a whole program's survey holds one per
     /// instruction, so nothing else rides in it.
     decoded: BTreeMap<u64, u32>,
@@ -439,7 +430,8 @@ struct Walk {
     /// Each call through a slot the loader binds to an import and seals, by instruction: the slot.
     slot_calls: BTreeMap<u64, u64>,
     falls_into: BTreeSet<u64>,
-    entered_with: BTreeMap<u64, u64>,
+    /// Whether each address the lift states context for decodes in another context than this walk's.
+    target_contexts: BTreeMap<u64, bool>,
     unresolved: Vec<Unresolved>,
     /// Calls not known to return, by callee: each call instruction and the address after it.
     gated: BTreeMap<u64, Vec<(u64, u64)>>,
@@ -466,7 +458,6 @@ impl Walk {
             entry,
             dispatched,
             link: program.return_address_register(),
-            mode: program.mode_register(),
             decoded: BTreeMap::new(),
             return_addresses: BTreeMap::new(),
             lifted: lifting.then(BTreeMap::new),
@@ -477,7 +468,7 @@ impl Walk {
             tail_calls: BTreeSet::new(),
             slot_calls: BTreeMap::new(),
             falls_into: BTreeSet::new(),
-            entered_with: BTreeMap::new(),
+            target_contexts: BTreeMap::new(),
             unresolved: Vec::new(),
             gated: BTreeMap::new(),
             assumed: BTreeMap::new(),
@@ -567,9 +558,10 @@ impl Walk {
         fetch.resize(WINDOW, 0);
 
         // The decoder's context continues where this follows the last decode, exactly as a block lift of the same bytes would.
-        let Ok((lifted, context)) = disasm.lift_after(&fetch, addr, self.context) else {
+        let Ok(one) = disasm.lift_after(&fetch, addr, self.context) else {
             return self.stop(addr, UnresolvedReason::Undecodable);
         };
+        let lifted = one.block;
         if lifted.size == 0 {
             return self.stop(addr, UnresolvedReason::Undecodable);
         }
@@ -583,7 +575,12 @@ impl Walk {
         // Whether a call comes back is the callee's fact, decided where it is recorded.
         let terminator = BasicBlock::from_r2il_continuing(&lifted, true).terminator;
         let bytes = fetch[..lifted.size as usize].to_vec();
-        self.context = Some(context);
+        self.context = Some(one.continuation);
+        for target in one.targets {
+            self.target_contexts
+                .entry(target.address)
+                .or_insert(target.foreign);
+        }
         Some(Instruction {
             lifted,
             bytes,
@@ -616,19 +613,6 @@ impl Walk {
             at = *start;
         }
         false
-    }
-
-    /// The constant an instruction writes to the mode register, if any.
-    fn mode_written(&self, ops: &[r2il::R2ILOp]) -> Option<u64> {
-        let mode = self.mode.as_ref()?;
-        ops.iter().rev().find_map(|op| match op {
-            r2il::R2ILOp::Copy { dst, src }
-                if dst.space == mode.space && dst.offset == mode.offset =>
-            {
-                (src.space == r2il::SpaceId::Const).then_some(src.offset)
-            }
-            _ => None,
-        })
     }
 
     fn stop(&mut self, addr: u64, reason: UnresolvedReason) -> Option<Instruction> {
@@ -707,9 +691,6 @@ impl Walk {
             } => {
                 if self.calls.insert(target) {
                     self.reached.calls.push(target);
-                }
-                if let Some(mode) = self.mode_written(&instruction.lifted.ops) {
-                    self.entered_with.entry(target).or_insert(mode);
                 }
                 // A predicated call reaches the next instruction when its predicate fails, whatever the callee does.
                 let predicated = r2il::predicated_call(&instruction.lifted.ops, next);
@@ -896,7 +877,6 @@ impl Walk {
             blocks,
             calls: self.calls.into_iter().collect(),
             tail_calls: self.tail_calls.into_iter().collect(),
-            entered_with: self.entered_with,
             unresolved: self.unresolved,
             exits,
         }

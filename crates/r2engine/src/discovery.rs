@@ -148,6 +148,11 @@ impl Holders {
         (self.pieces.iter()).map(|(start, (end, _))| *start..*end)
     }
 
+    /// Every piece with the entries holding it, in address order.
+    pub fn pieces(&self) -> impl Iterator<Item = (std::ops::Range<u64>, &[u64])> + '_ {
+        (self.pieces.iter()).map(|(start, (end, entries))| (*start..*end, entries.as_slice()))
+    }
+
     /// The entries whose bodies hold this address, in address order.
     pub fn at(&self, address: u64) -> &[u64] {
         self.pieces

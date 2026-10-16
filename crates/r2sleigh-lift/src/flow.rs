@@ -42,7 +42,7 @@ pub fn of(block: &R2ILBlock) -> Flow {
         .iter()
         .filter_map(|op| match op {
             R2ILOp::Return { .. } => Some(Flow::Return),
-            R2ILOp::Call { .. } | R2ILOp::CallInd { .. } => Some(Flow::Call),
+            _ if op.is_call() => Some(Flow::Call),
             R2ILOp::Unimplemented | R2ILOp::Breakpoint => Some(Flow::Trap),
             R2ILOp::CBranch { target, .. } if !target.is_const() => Some(Flow::ConditionalJump),
             R2ILOp::Branch { target } if !target.is_const() => Some(Flow::Jump),

@@ -381,6 +381,14 @@ pub fn lifted(
     Ok(out)
 }
 
+/// Operations as the low tier prints them: each register by its name, each user operation by its own.
+pub(crate) fn spelled_operations(arch: &r2il::ArchSpec, ops: &[r2il::R2ILOp]) -> Vec<String> {
+    let names = register_spellings(arch);
+    ops.iter()
+        .map(|op| spell_registers(&op.to_string(), &names))
+        .collect()
+}
+
 /// How this architecture's registers are spelled by `Varnode`'s own Display,
 /// and what to call each instead.
 ///
@@ -504,6 +512,11 @@ impl Walk {
     /// The walked body, dispatches followed.
     pub fn body(&self) -> &crate::body::Body {
         &self.root.body
+    }
+
+    /// Every function the body reaches, in address order, as its resolution declares them.
+    pub(crate) fn reaches(&self, program: &dyn Program) -> Vec<u64> {
+        reached(&self.root.body, program)
     }
 
     /// The lift of each block of the body, dispatches followed.
@@ -745,8 +758,9 @@ pub(crate) fn handed(
         }
     };
     let walked = native.walked(body);
-    match native.prepare(&walked, &Callees::default()) {
-        Ok(artifact) => native.handed_functions(&artifact, &walked),
+    // What reaches a call's argument is the body's: read off the convention's seal, as a table.
+    match native.convention_seal(&walked, &Callees::default(), Restatement::default()) {
+        Ok(seal) => native.handed_functions(&seal, &walked),
         Err(error) => {
             r2il::refusal_evidence!(
                 "handed-function",
@@ -938,11 +952,26 @@ fn prepare_callee(
         _ => (native, target),
     };
     let walked = walk(target, native.program, address).map_err(|_| Unreadable::NotWalked)?;
-    resolved_alone(native, target, address, ptr_bits, &walked, &[])
+    resolved_alone(
+        native,
+        target,
+        address,
+        ptr_bits,
+        &walked,
+        Stated::default(),
+    )
 }
 
 /// A resolved body, and the callees whose statement could prove what it leaves open.
 type Resolution = (Arc<TrustedSsaArtifact>, Owners);
+
+/// What a body is resolved against beside its imports: its owners resolved, and the arities a
+/// cycle's least fixpoint assumes of its members (doc/adr-resolved-bodies.md, "Arity").
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Stated<'a> {
+    pub(crate) owners: &'a [(u64, Arc<CalleeRead>)],
+    pub(crate) assumed: &'a [(u64, r2source::SourceFunctionInterface)],
+}
 
 /// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md).
 fn resolved_alone(
@@ -951,16 +980,20 @@ fn resolved_alone(
     address: u64,
     ptr_bits: u32,
     walked: &Walk,
-    owners: &[(u64, Arc<CalleeRead>)],
+    stated: Stated<'_>,
 ) -> Result<Resolution, Unreadable> {
     let mut imports = Callees::default();
     let targets = reached(&walked.root.body, native.program);
     declare_imports(native, target, &targets, ptr_bits, &mut imports);
     // Each resolved owner of its result or arity, read as any callee's statement.
-    for (owner, read) in owners {
+    for (owner, read) in stated.owners {
         if let Ok(facts) = &read.facts {
             imports.record(*owner, facts);
         }
+    }
+    // An assumed member states its interface alone: nothing it preserves or reaches.
+    for (member, interface) in stated.assumed {
+        imports.interfaces.insert(*member, interface.clone());
     }
     let resolved = native.resolve(address, walked, &imports, false);
     resolved.map_err(|refusal| match refusal.stopped() {
@@ -984,7 +1017,14 @@ pub(crate) fn callee_summary(
     };
     let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
     let resolved = crate::isolation::isolated(|| {
-        resolved_alone(&native, target, address, ptr_bits, walked, &[])
+        resolved_alone(
+            &native,
+            target,
+            address,
+            ptr_bits,
+            walked,
+            Stated::default(),
+        )
     });
     let (artifact, _) = resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)))?;
     let shared = artifact.shared_artifact();
@@ -999,7 +1039,7 @@ pub(crate) fn callee_read(
     program: &dyn Program,
     address: u64,
     walked: &Walk,
-    owners: &[(u64, Arc<CalleeRead>)],
+    stated: Stated<'_>,
 ) -> CalleeRead {
     let native = match machine(target) {
         Ok(machine) => Native {
@@ -1018,7 +1058,7 @@ pub(crate) fn callee_read(
     };
     let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
     let resolved = crate::isolation::isolated(|| {
-        resolved_alone(&native, target, address, ptr_bits, walked, owners)
+        resolved_alone(&native, target, address, ptr_bits, walked, stated)
     });
     read_of(
         resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked))),
@@ -1083,12 +1123,14 @@ fn read_callees(
     let targets = reached(&root.body, native.program);
     let declared = declare_imports(native, target, &targets, ptr_bits, &mut callees);
     let mut facts = Vec::new();
+    // Under `aa` a recursive root reads itself resolved, as its callers do ("Arity").
+    let own = callers == crate::program::Callers::Read;
     // An import has no body here, declared or not: its stub's arity is the loader's (P7). A
     // sealed import slot is a word of data.
     let bodies: Vec<u64> = targets
         .iter()
         .copied()
-        .filter(|address| *address != entry && !callees.interfaces.contains_key(address))
+        .filter(|address| (own || *address != entry) && !callees.interfaces.contains_key(address))
         .filter(|address| native.program.import_at(*address).is_none())
         .filter(|address| crate::stated::sealed_import(native.program, *address).is_none())
         .collect();
@@ -1293,55 +1335,48 @@ impl Callees {
     }
 }
 
-/// What the container states about whether a table's bytes, as the file holds
-/// them, are what the dispatch reads when it runs.
-///
-/// The seam immutability arrives through. A writable region is `Unsealed`:
-/// the container has not yet been asked whether anything seals it after load
-/// (a RELRO range, a read-only Mach-O segment), and that statement is what
-/// turns it into one the program cannot change or refuses it. Until then the
-/// table is read as before, the refusal evidence says it was read unsealed,
-/// and every table carries this statement -- on `DispatchTable` and so on the
-/// listing's `Switch` -- for that check to consume rather than recompute.
+/// What the container states about whether a table's bytes, as the file holds them, are what
+/// the dispatch reads when it runs; carried on `DispatchTable` and the listing's `Switch`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableBytes {
-    /// Nothing writes them once the program runs, and the loader leaves them
-    /// alone: the bytes are the program's for its whole run.
+    /// Mapped without write permission, and the loader leaves them alone: the bytes are the
+    /// program's for its whole run.
     ReadOnly,
-    /// The program may write them once it runs, and nothing the container
-    /// states seals them after load: what the file holds is not what a
-    /// dispatch reads, so the table is refused.
+    /// The program may write them once it runs, and nothing the container states seals them
+    /// after load: what the file holds is not what a dispatch reads, so the table is refused.
     Unsealed,
-    /// Nothing writes them once the program runs, and the loader writes some
-    /// -- a rebased pointer, a chained fixup -- before it seals them: each
-    /// entry is what the container states the loader writes there, or the
-    /// table is refused.
+    /// Mapped without write permission, and the loader writes some -- a rebased pointer, a
+    /// chained fixup: each entry is what the container states the loader writes there, or the
+    /// file's where it writes nothing.
     LoaderWritten,
+    /// Writable until start-up seals them (RELRO, `SG_READ_ONLY`), and start-up code may write
+    /// them first: each entry is a word the container states the loader writes, or the table is
+    /// refused (ld.so's `__rtld_malloc` holds 0 in the file and its own code fills it).
+    Sealed,
 }
 
 impl TableBytes {
     /// O(log n): one search in the loader's writes and one in what it seals.
     fn of(program: &dyn Program, range: std::ops::Range<u64>) -> Self {
-        match (
-            program.immutable(&range),
-            crate::stated::written(program, &range),
-        ) {
-            (false, _) => Self::Unsealed,
-            (true, true) => Self::LoaderWritten,
-            (true, false) => Self::ReadOnly,
+        use crate::program::Permanence;
+        match program.permanence(&range) {
+            Permanence::Writable => Self::Unsealed,
+            Permanence::Sealed => Self::Sealed,
+            Permanence::ReadOnly if crate::stated::written(program, &range) => Self::LoaderWritten,
+            Permanence::ReadOnly => Self::ReadOnly,
         }
+    }
+
+    /// Whether the word `stated` is what the run reads, for a table of these bytes.
+    fn holds(self, stated: crate::stated::StatedWord) -> bool {
+        self != Self::Sealed || matches!(stated, crate::stated::StatedWord::Loaded(_))
     }
 
     /// Whether the table at `at` may be read as the run's, saying why
     /// wherever the answer is not a plain yes.
-    ///
-    /// A table the loader writes is read as the container states the loader
-    /// writes it, entry by entry; an entry whose value it does not state
-    /// refuses the table there. A table the program may write is refused
-    /// whole: the entries the file holds need not be the ones it jumps by.
     fn read_as_run(self, at: u64) -> bool {
         match self {
-            Self::LoaderWritten => {
+            Self::LoaderWritten | Self::Sealed => {
                 r2il::refusal_evidence!(
                     "dispatch-table",
                     "{at:#x}: {self:?}: read as the values the container states the loader writes"
@@ -1402,8 +1437,9 @@ struct Native<'a> {
 }
 
 impl Native<'_> {
-    /// One body prepared, restated and prepared again against `callees`. With `caller_reads`, every
-    /// call decides an ambiguous result; only its own rendering asks (doc/adr-resolved-bodies.md).
+    /// One body sealed against `callees`, and prepared again where it restates its declared frame
+    /// or text it points at; with `caller_reads`, every call decides an ambiguous result. Its first
+    /// seal's facts are collected only where something reads them (doc/adr-resolved-bodies.md).
     fn resolve(
         &self,
         entry: u64,
@@ -1412,24 +1448,16 @@ impl Native<'_> {
         caller_reads: bool,
     ) -> Result<Resolution, NativeRefusal> {
         let (root, tables) = (&walk.root, &walk.tables[..]);
-        // What the binary's own debug information says this function takes is a
-        // declaration, exactly as an import's is, so it is placed in the
-        // convention's slots the same way and the body is prepared against it.
-        // Without this the engine reads every parameter as the width of the
-        // register it arrived in, whatever the source said.
+        // The binary's debug information declares the body as a library declares an import.
         let declared_prototype =
             Declared::body(self.target, entry).map(|declared| declared.prototype);
         let declared_root = self.declaration(entry);
-        let prepare_first = |reads| match (declared_root.interface.is_some(), tables.is_empty()) {
-            (false, true) => self.prepare_restated(
-                root,
-                callees,
-                Vec::new(),
-                Restatement::default(),
-                &[],
-                reads,
-            ),
-            _ => self.prepare_restated(
+        let seal_first = |reads| match (declared_root.interface.is_some(), tables.is_empty()) {
+            (false, true) => {
+                let restatement = Restatement::default();
+                self.seal(root, callees, Vec::new(), restatement, &[], reads)
+            }
+            _ => self.seal(
                 root,
                 callees,
                 Vec::new(),
@@ -1438,54 +1466,51 @@ impl Native<'_> {
                 reads,
             ),
         };
-        let mut first = prepare_first(None)?;
-        // A body writing both result registers is prepared once more with what the program's calls
+        let mut first = seal_first(None)?;
+        // A body writing both result registers is sealed once more with what the program's calls
         // read of them (doc/adr-resolved-bodies.md, "Caller reads").
-        let reads = (caller_reads && first.shared_artifact().machine_context().result_ambiguous())
+        let reads = (caller_reads && first.machine_context().result_ambiguous())
             .then(|| self.program.result_reads(entry))
             .flatten();
         if reads.is_some() {
-            first = prepare_first(reads)?;
+            drop(first);
+            first = seal_first(reads)?;
         }
-        // A second capture states what the first proved. Preparation recovers the
-        // interface off the instructions and proves which frame slots home which
-        // parameter; declaring those turns the spill into the parameter again,
-        // which is the whole difference between reading a frame and reading a
-        // program. Text the body points at is harvested the same way, because
-        // aarch64 forms an address from a page and an offset and the constant the
-        // literal lives at appears only once those are folded.
-        // The debug information may measure the frame from the frame pointer, and
-        // objects are identified by where they sit relative to the pointer the
-        // function was entered with. The distance between the two is what the
-        // prologue moved, which the first pass proved for every object it placed,
-        // so the declaration is restated into those coordinates rather than
-        // dropped for being in the other ones.
-        let declared_root = crate::declared::rebased(declared_root, &first, declared_prototype);
+        let context = first.machine_context();
+        let owners = Owners {
+            result: context.result_owners().clone(),
+            arity: context.arity_owners().clone(),
+        };
+        // aarch64 forms an address from a page and an offset: its text is captured once folded.
+        let folded = self.folded_literals(&first, root);
+        // Only a declared frame's restatement reads the first's facts, or the first is the answer.
+        let first = match declared_root.interface.is_some() || folded.is_empty() {
+            true => Some(self.collected(first)?),
+            false => None,
+        };
+        // The declared frame, measured from the pointer the function was entered with.
+        let declared_root = match &first {
+            Some(first) => crate::declared::rebased(declared_root, first, declared_prototype),
+            None => declared_root,
+        };
         let declared_slots = declared_root
             .interface
             .as_ref()
             .map(|interface| interface.stack_slots().to_vec())
             .unwrap_or_default();
-        let restated = self.restated(&first, &declared_slots);
-        let folded = self.folded_literals(&first, root);
-        // Only the first preparation recovers the interface; the restated one is handed it.
-        let shared = first.shared_artifact();
-        let context = shared.machine_context();
-        let owners = Owners {
-            result: context.result_owners().clone(),
-            arity: context.arity_owners().clone(),
-        };
-        let artifact = match restated.is_none() && folded.is_empty() {
-            true => first,
-            false => {
-                // A body that proved no frame slot restates nothing, and the
-                // declaration it was prepared against is still the declaration.
+        let restated = (first.as_ref()).and_then(|first| self.restated(first, &declared_slots));
+        let artifact = match first {
+            Some(first) if restated.is_none() && folded.is_empty() => first,
+            first => {
+                drop(first);
+                // A body that proved no frame slot restates nothing, and the declaration stands.
                 let restatement = Restatement {
                     interface: restated.or(declared_root.interface),
                     signature: declared_root.signature,
                     slot_names: declared_root.slot_names,
                 };
-                self.prepare_restated(root, callees, folded, restatement, tables, reads)?
+                let seal = self.seal(root, callees, folded, restatement, tables, reads)?;
+                self.collected(seal)?
             }
         };
         Ok((artifact, owners))
@@ -1579,6 +1604,7 @@ impl Native<'_> {
         &self,
         read: &r2ssa::indirect::DispatchTableRead,
         count: usize,
+        stated: TableBytes,
     ) -> Result<Vec<u64>, (usize, u64)> {
         let endian = match self.machine.endianness {
             SourceEndianness::Little => r2il::Endianness::Little,
@@ -1588,6 +1614,7 @@ impl Native<'_> {
             .map(|k| {
                 let place = read.address + k as u64 * read.stride;
                 crate::stated::stated_word(self.program, place, read.size, endian)
+                    .filter(|word| stated.holds(*word))
                     .map(|word| read.transform.target(word.value(), read.size))
                     .ok_or((k, place))
             })
@@ -1662,7 +1689,7 @@ impl Native<'_> {
         if !stated.read_as_run(at) {
             return None;
         }
-        let targets = match self.stated_targets(read, count) {
+        let targets = match self.stated_targets(read, count, stated) {
             Ok(targets) => targets,
             Err((k, place)) => {
                 refused(format_args!(
@@ -1719,22 +1746,14 @@ impl Native<'_> {
     /// an indirect call or jump uses is still looked up. Only code lying in a
     /// section the container states is data can be read as text that way,
     /// and ruling it out needs the def-use to say how each value is used.
-    fn folded_literals(
-        &self,
-        artifact: &TrustedSsaArtifact,
-        walked: &Walked,
-    ) -> Vec<(u64, String)> {
-        let prepared = artifact.shared_artifact();
+    fn folded_literals(&self, seal: &r2ssa::TrustedSeal, walked: &Walked) -> Vec<(u64, String)> {
         let already = self
             .literals(&walked.body)
             .into_iter()
             .map(|(address, _)| address)
             .collect::<BTreeSet<_>>();
         let mut found = BTreeMap::new();
-        for value in prepared.value_ids() {
-            let Some(address) = prepared.folded_value(value) else {
-                continue;
-            };
+        for address in seal.folded_values() {
             if address == 0 || already.contains(&address) {
                 continue;
             }
@@ -1743,15 +1762,6 @@ impl Native<'_> {
             }
         }
         found.into_iter().collect()
-    }
-
-    /// Capture what was walked and prepare it for the engine.
-    fn prepare(
-        &self,
-        walked: &Walked,
-        callees: &Callees,
-    ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
-        self.prepare_with_literals(walked, callees, Vec::new())
     }
 
     /// The interface the first pass recovered, restated with the frame slots the debug
@@ -1782,23 +1792,8 @@ impl Native<'_> {
             .unwrap_or_default()
     }
 
-    fn prepare_with_literals(
-        &self,
-        walked: &Walked,
-        callees: &Callees,
-        extra_literals: Vec<(u64, String)>,
-    ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
-        self.prepare_restated(
-            walked,
-            callees,
-            extra_literals,
-            Restatement::default(),
-            &[],
-            None,
-        )
-    }
-
-    fn prepare_restated(
+    /// One body captured, built and sealed, its facts not yet collected.
+    fn seal(
         &self,
         walked: &Walked,
         callees: &Callees,
@@ -1806,7 +1801,7 @@ impl Native<'_> {
         restatement: Restatement,
         tables: &[NativePointerTable],
         result_reads: Option<r2source::SourceResultReads>,
-    ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
+    ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
         let capture = Capture {
             extra_literals,
             restatement,
@@ -1814,15 +1809,25 @@ impl Native<'_> {
             result_reads,
         };
         let (lifted, evidence) = self.lifted(walked, callees, capture)?;
-        let artifact = TrustedSsaArtifact::prepare_with_callee_interfaces(
+        TrustedSsaArtifact::seal_with_callee_interfaces(
             lifted,
             Some(self.target.arch),
             &self.control,
             &evidence,
             &premises_reading(result_reads.is_some()),
         )
-        .map_err(NativeRefusal::of_preparation)?;
-        Ok(Arc::new(artifact))
+        .map_err(NativeRefusal::of_preparation)
+    }
+
+    /// A seal's facts collected into the artifact.
+    fn collected(
+        &self,
+        seal: r2ssa::TrustedSeal,
+    ) -> Result<Arc<TrustedSsaArtifact>, NativeRefusal> {
+        let artifact = seal.collect(&self.control);
+        artifact
+            .map(Arc::new)
+            .map_err(NativeRefusal::of_preparation)
     }
 
     /// Where each dispatch of a body walked without its tables reads them, off its seal alone.
@@ -1832,6 +1837,18 @@ impl Native<'_> {
         callees: &Callees,
         restatement: Restatement,
     ) -> Result<Vec<r2ssa::indirect::DispatchTableRead>, NativeRefusal> {
+        let seal = self.convention_seal(walked, callees, restatement)?;
+        Ok(seal.dispatch_table_reads())
+    }
+
+    /// One body captured, built against the convention alone and sealed: what values inside it
+    /// read, which no interface decides.
+    fn convention_seal(
+        &self,
+        walked: &Walked,
+        callees: &Callees,
+        restatement: Restatement,
+    ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
         let capture = Capture {
             extra_literals: Vec::new(),
             restatement,
@@ -1839,7 +1856,7 @@ impl Native<'_> {
             result_reads: None,
         };
         let (lifted, evidence) = self.lifted(walked, callees, capture)?;
-        TrustedSsaArtifact::dispatch_table_reads_with_callee_interfaces(
+        TrustedSsaArtifact::seal_against_convention(
             lifted,
             Some(self.target.arch),
             &self.control,
@@ -2134,11 +2151,10 @@ impl Native<'_> {
     /// Nothing here guesses: a constant is believed only where a declared type
     /// says that slot holds a function, and the caller checks it decodes in
     /// the instruction set the pointer names.
-    fn handed_functions(&self, artifact: &TrustedSsaArtifact, walked: &Walked) -> Vec<u64> {
-        let prepared = artifact.shared_artifact();
+    fn handed_functions(&self, seal: &r2ssa::TrustedSeal, walked: &Walked) -> Vec<u64> {
         let sites = call_sites(&walked.body, self.program);
         let mut found = Vec::new();
-        let graph = prepared.graph();
+        let graph = seal.graph();
         for block in &graph.blocks {
             for &inst in graph.op_insts(block.id) {
                 let (Some(op), Some(id)) = (graph.op(inst), graph.op_for_inst(inst)) else {
@@ -2159,8 +2175,8 @@ impl Native<'_> {
                     if !parameter.is_function() {
                         continue;
                     }
-                    let Some(address) = r2ssa::value_reaching(prepared.as_ref(), id, *storage)
-                        .and_then(|value| prepared.folded_value(value))
+                    let Some(address) = (seal.value_reaching(id, *storage))
+                        .and_then(|value| seal.folded_value(value))
                     else {
                         continue;
                     };
@@ -2244,17 +2260,23 @@ fn literal_accesses(body: &crate::body::Body) -> (BTreeMap<u64, usize>, Vec<std:
     };
     let mut loads = BTreeMap::new();
     let mut stores = Vec::new();
-    for op in body.blocks.iter().flat_map(|block| &block.lifted.ops) {
-        match op {
-            r2il::R2ILOp::Load { dst, addr, .. } if literal(addr) => {
-                let size = usize::try_from(dst.size).unwrap_or(usize::MAX);
+    let accesses = (body.blocks.iter())
+        .flat_map(|block| &block.lifted.ops)
+        .flat_map(r2il::R2ILOp::memory_accesses);
+    for access in accesses {
+        let (addr, size) = (access.addr, access.size);
+        match access.kind {
+            r2il::eval::AccessKind::Read if literal(addr) && !access.repeated => {
+                let size = usize::try_from(size).unwrap_or(usize::MAX);
                 let widest = loads.entry(addr.offset).or_insert(size);
                 *widest = (*widest).max(size);
             }
-            r2il::R2ILOp::Store { addr, val, .. } if literal(addr) => {
-                stores.push(addr.offset..addr.offset.saturating_add(u64::from(val.size)));
-            }
-            _ => {}
+            r2il::eval::AccessKind::Write if literal(addr) => stores.push(match access.repeated {
+                // A repeated write's extent turns on a count and a direction, so it may reach any byte.
+                true => 0..u64::MAX,
+                false => addr.offset..addr.offset.saturating_add(u64::from(size)),
+            }),
+            r2il::eval::AccessKind::Read | r2il::eval::AccessKind::Write => {}
         }
     }
     (loads, stores)
@@ -2376,6 +2398,16 @@ pub(crate) fn convention_slots(
             .with_shared_positions(prototype.shares_positions())
             .with_stack_arguments(stack_arguments)
             .with_variadic_tail_on_stack(target.convention.variadic_tail_on_stack)
+            .with_register_save_area(target.convention.register_save_area.map(
+                |anchor| match anchor {
+                    r2abi::SaveAreaAnchor::Base => r2source::SourceSaveAreaAnchor::Base,
+                    r2abi::SaveAreaAnchor::End => r2source::SourceSaveAreaAnchor::End,
+                },
+            ))
+            .with_variadic_count_register(
+                (target.convention.variadic_count_register)
+                    .and_then(|name| storage(target.arch, name).ok()),
+            )
             .with_entry_stack(target.convention.entry_stack.map(|stack| {
                 r2source::SourceEntryStack {
                     alignment: stack.alignment,

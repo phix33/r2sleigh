@@ -207,6 +207,75 @@ impl Line {
     }
 }
 
+/// One instruction as its lift states it: the line, and what its operations read, write and are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Instruction {
+    pub line: Line,
+    pub semantics: Result<Semantics, Unlifted>,
+}
+
+/// Why an instruction states no operations (ROADMAP D29).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unlifted {
+    /// The bytes are not an instruction.
+    Undecoded,
+    /// It holds a field whose value the container does not state (audit W5).
+    UnstatedField,
+    /// The specification spells it and lifts no operations for it.
+    NotLifted,
+}
+
+impl std::fmt::Display for Unlifted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Undecoded => "the bytes are not an instruction",
+            Self::UnstatedField => "it holds a field whose value the container does not state",
+            Self::NotLifted => "the specification spells it and lifts no operations for it",
+        })
+    }
+}
+
+/// What one instruction's lifted operations state ([`r2il::register_accesses`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Semantics {
+    pub registers: Result<Registers, Unexpressed>,
+    /// Each operation as the low tier (`pdil`) prints it.
+    pub operations: Vec<String>,
+}
+
+/// Why a lifted instruction states no registers it reads and writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unexpressed {
+    /// An operation is `Unimplemented`: the lift could not express it, so what it touches is not stated.
+    Unimplemented,
+}
+
+impl std::fmt::Display for Unexpressed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unimplemented => {
+                "an operation is unimplemented, so what it touches is not stated"
+            }
+        })
+    }
+}
+
+/// The registers one instruction reads and writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Registers {
+    /// Those whose value on entry it reads, in the order its operations first read them.
+    pub reads: Vec<Register>,
+    /// Those it writes, in the order its operations first write them.
+    pub writes: Vec<Register>,
+}
+
+/// A register-space range, and its name as the listing spells it where the specification names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Register {
+    pub storage: r2il::Varnode,
+    pub name: Option<String>,
+}
+
 /// Something the engine can say about one instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Annotation {

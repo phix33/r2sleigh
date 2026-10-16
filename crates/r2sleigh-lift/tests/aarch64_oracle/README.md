@@ -11,7 +11,8 @@ computes what an arm64 CPU computes (ROADMAP VC, LS0; audit T7).
   `driver.c` and runs every case on the CPU from 16 states drawn by one xorshift
   stream, writing `recorded.txt`: per case its page offset, branch distance and
   encoding, and per run the input hash and only what the run changed. Appending
-  cases keeps every earlier recorded run unchanged.
+  cases keeps every earlier run's inputs; an `A` case's encoding and result
+  move when the code grows (`adrp`'s `f0000120` became `f0000140` at #276).
 - The test draws the same states (checking each hash), lifts each case, runs it,
   and compares every register, flag, vector (a NaN matches any NaN in its lane:
   p-code leaves the payload open) and memory byte, including an 8 KiB zero guard

@@ -3,7 +3,7 @@
 
 use crate::common;
 
-use common::{BASE, Literal};
+use common::{BASE, GLIBC, Literal};
 use r2engine::program::OpenProgram;
 
 /// `f` writes both result registers and reads no argument (`xor eax, eax; pxor xmm0, xmm0`): its
@@ -198,6 +198,24 @@ fn a_call_through_a_sealed_import_slot_calls_the_import() {
     assert!(!text.contains("puts("), "{text}");
 }
 
+/// ld.so's `call [__rtld_malloc]`: a sealed slot no relocation fills holds 0 in the file, and
+/// start-up code may write it before the seal, so the call goes through memory, never to `fcn_0`.
+#[test]
+fn a_call_through_a_sealed_slot_the_loader_leaves_is_a_call_through_memory() {
+    let slot = BASE + 0x20;
+    let literal = Literal::of_code(CALL_THROUGH_A_SLOT, &[("caller", BASE, 0x11)])
+        .writable_data_after(slot)
+        .sealed(slot..slot + 8);
+    let text = OpenProgram::of(literal)
+        .rendered(BASE)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(!text.contains("fcn_0"), "{text}");
+    assert!(text.contains("call to an indirect target"), "{text}");
+}
+
 /// A send to `objc_msgSend`, variadic as objc4 declares it, states no argument count: the call is
 /// a gap naming the import and why, never an unsupported instruction (audit M3, RF's W10 case).
 #[test]
@@ -260,4 +278,194 @@ fn an_import_whose_declaration_is_not_placed_is_a_gap_saying_so() {
         ),
         "{text}"
     );
+}
+
+/// `f`: `test edi, edi; je ret; sub edi, 1; call f; ret`, a self-recursive function that never
+/// writes `rsi`; `caller`: `mov edi, 5; mov esi, 7; call f; ret`.
+const SELF_RECURSIVE: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x08, // 1002 je 0x100c
+    0x83, 0xef, 0x01, // 1004 sub edi, 1
+    0xe8, 0xf4, 0xff, 0xff, 0xff, // 1007 call 0x1000
+    0xc3, // 100c ret
+    0xcc, 0xcc, 0xcc, // 100d padding
+    0xbf, 0x05, 0x00, 0x00, 0x00, // 1010 mov edi, 5
+    0xbe, 0x07, 0x00, 0x00, 0x00, // 1015 mov esi, 7
+    0xe8, 0xe1, 0xff, 0xff, 0xff, // 101a call 0x1000
+    0xc3, // 101f ret
+];
+
+/// `root` rendered once `aa` surveyed the program.
+fn surveyed(code: &'static [u8], functions: &[(&str, u64, u64)], root: u64) -> String {
+    let mut open = OpenProgram::of(Literal::of_code(code, functions));
+    open.analyse_program().expect("it surveys");
+    open.rendered(root)
+        .expect("it renders")
+        .response
+        .output
+        .into_text()
+}
+
+/// Alone, `f`'s call to itself may be handed `rsi`, so its arity is a floor of one; the slot is
+/// read only at a finite depth, so the least fixpoint is exact: `f(5)`, never `f(5, 7)`.
+#[test]
+fn under_aa_a_self_recursive_floor_is_its_least_fixpoint() {
+    let functions = [("f", BASE, 0x0d), ("caller", BASE + 0x10, 0x10)];
+    let text = surveyed(SELF_RECURSIVE, &functions, BASE + 0x10);
+    assert!(
+        text.contains("f(5") || text.contains("f((uint32_t)5"),
+        "{text}"
+    );
+    assert!(!text.contains(", 7)"), "{text}");
+    assert!(!text.contains("a floor"), "{text}");
+}
+
+/// gcc -O1's review.c `fact`: `mov eax, 1` before `cmp edi, 1`, so its call to itself is handed
+/// `al` as well as `edi`.
+const FACT_O1: &[u8] = &[
+    0xf3, 0x0f, 0x1e, 0xfa, // 1000 endbr64
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1004 mov eax, 1
+    0x83, 0xff, 0x01, // 1009 cmp edi, 1
+    0x7f, 0x01, // 100c jg 0x100f
+    0xc3, // 100e ret
+    0x53, // 100f push rbx
+    0x89, 0xfb, // 1010 mov ebx, edi
+    0x8d, 0x7f, 0xff, // 1012 lea edi, [rdi - 1]
+    0xe8, 0xe6, 0xff, 0xff, 0xff, // 1015 call 0x1000
+    0x0f, 0xaf, 0xc3, // 101a imul eax, ebx
+    0x5b, // 101d pop rbx
+    0xc3, // 101e ret
+];
+
+/// Under `aa` the root reads itself resolved, as its callers do: its recursive call takes the one
+/// argument `fact`'s least fixpoint states, never the `al` count W14 refuses on a floor.
+#[test]
+fn under_aa_a_recursive_root_calls_itself_with_its_resolved_arity() {
+    let mut open =
+        OpenProgram::of(Literal::of_code(FACT_O1, &[("fact", BASE, 0x1f)]).running_on(GLIBC));
+    open.analyse_program().expect("it surveys");
+    let text = open
+        .rendered(BASE)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(text.contains("= fact("), "{text}");
+    assert!(!text.contains("vector count"), "{text}");
+}
+
+/// `a`: `test edi, edi; je ret; sub edi, 1; call b; ret`, handing `b` the `rsi` it never wrote;
+/// `b`: `test esi, esi; je ret; sub edi, 1; call a; ret`; `caller` writes `edi`, `esi` and `edx`.
+const MUTUAL_RISE: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x08, // 1002 je 0x100c
+    0x83, 0xef, 0x01, // 1004 sub edi, 1
+    0xe8, 0x04, 0x00, 0x00, 0x00, // 1007 call 0x1010
+    0xc3, // 100c ret
+    0xcc, 0xcc, 0xcc, // 100d padding
+    0x85, 0xf6, // 1010 test esi, esi
+    0x74, 0x08, // 1012 je 0x101c
+    0x83, 0xef, 0x01, // 1014 sub edi, 1
+    0xe8, 0xe4, 0xff, 0xff, 0xff, // 1017 call 0x1000
+    0xc3, // 101c ret
+    0xcc, 0xcc, 0xcc, // 101d padding
+    0xbf, 0x05, 0x00, 0x00, 0x00, // 1020 mov edi, 5
+    0xbe, 0x07, 0x00, 0x00, 0x00, // 1025 mov esi, 7
+    0xba, 0x09, 0x00, 0x00, 0x00, // 102a mov edx, 9
+    0xe8, 0xcc, 0xff, 0xff, 0xff, // 102f call 0x1000
+    0xc3, // 1034 ret
+];
+
+/// Alone `a` reads one slot and `b` two, each a floor the other owns. Seeded exact there, `a` hands
+/// `b` its `rsi` and rises to two, so `b` is resolved again: `a(5, 7)`, never `a(5)` nor `, 9)`.
+#[test]
+fn under_aa_a_two_member_cycle_rises_to_its_least_fixpoint() {
+    let functions = [
+        ("a", BASE, 0x0d),
+        ("b", BASE + 0x10, 0x0d),
+        ("caller", BASE + 0x20, 0x15),
+    ];
+    let text = surveyed(MUTUAL_RISE, &functions, BASE + 0x20);
+    assert!(text.contains("a(5, 7)"), "{text}");
+    assert!(!text.contains(", 9)"), "{text}");
+    assert!(!text.contains("a floor"), "{text}");
+}
+
+/// `p` calls `q` and `q` calls `r`, each handing on the `rsi` it never wrote; `r` reads `esi` and
+/// calls `p`; `caller` writes `edi`, `esi` and `edx` and calls `p`.
+const RISE_THROUGH_A_CHAIN: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x08, // 1002 je 0x100c
+    0x83, 0xef, 0x01, // 1004 sub edi, 1
+    0xe8, 0x04, 0x00, 0x00, 0x00, // 1007 call 0x1010
+    0xc3, // 100c ret
+    0xcc, 0xcc, 0xcc, // 100d padding
+    0x85, 0xff, // 1010 test edi, edi
+    0x74, 0x08, // 1012 je 0x101c
+    0x83, 0xef, 0x01, // 1014 sub edi, 1
+    0xe8, 0x04, 0x00, 0x00, 0x00, // 1017 call 0x1020
+    0xc3, // 101c ret
+    0xcc, 0xcc, 0xcc, // 101d padding
+    0x85, 0xf6, // 1020 test esi, esi
+    0x74, 0x08, // 1022 je 0x102c
+    0x83, 0xef, 0x01, // 1024 sub edi, 1
+    0xe8, 0xd4, 0xff, 0xff, 0xff, // 1027 call 0x1000
+    0xc3, // 102c ret
+    0xcc, 0xcc, 0xcc, // 102d padding
+    0xbf, 0x05, 0x00, 0x00, 0x00, // 1030 mov edi, 5
+    0xbe, 0x07, 0x00, 0x00, 0x00, // 1035 mov esi, 7
+    0xba, 0x09, 0x00, 0x00, 0x00, // 103a mov edx, 9
+    0xe8, 0xbc, 0xff, 0xff, 0xff, // 103f call 0x1000
+    0xc3, // 1044 ret
+];
+
+/// Resolved first against `q`'s seed of one, `p` stays at one; `q` then rises to two against `r`,
+/// so `p`, which calls it, is resolved again and rises too: `p(5, 7)`, never `p(5)`.
+#[test]
+fn under_aa_a_rise_resolves_again_the_members_that_call_it() {
+    let functions = [
+        ("p", BASE, 0x0d),
+        ("q", BASE + 0x10, 0x0d),
+        ("r", BASE + 0x20, 0x0d),
+        ("caller", BASE + 0x30, 0x15),
+    ];
+    let text = surveyed(RISE_THROUGH_A_CHAIN, &functions, BASE + 0x30);
+    assert!(text.contains("p(5, 7)"), "{text}");
+    assert!(!text.contains(", 9)"), "{text}");
+    assert!(!text.contains("a floor"), "{text}");
+}
+
+/// `f`: `call [rdi]; call g; ret`, its result `g`'s; `g`: `test edi, edi; je ret; call f; ret`;
+/// `caller`: `mov edi, 5; mov esi, 7; call g; ret`.
+const CYCLE_THROUGH_AN_INDIRECT_CALL: &[u8] = &[
+    0xff, 0x17, // 1000 call [rdi]
+    0xe8, 0x09, 0x00, 0x00, 0x00, // 1002 call 0x1010
+    0xc3, // 1007 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1008 padding
+    0x85, 0xff, // 1010 test edi, edi
+    0x74, 0x05, // 1012 je 0x1019
+    0xe8, 0xe7, 0xff, 0xff, 0xff, // 1014 call 0x1000
+    0xc3, // 1019 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 101a padding
+    0xbf, 0x05, 0x00, 0x00, 0x00, // 1020 mov edi, 5
+    0xbe, 0x07, 0x00, 0x00, 0x00, // 1025 mov esi, 7
+    0xe8, 0xe1, 0xff, 0xff, 0xff, // 102a call 0x1010
+    0xc3, // 102f ret
+];
+
+/// `f`'s indirect call may be handed any slot, a floor no member owns, so `g`, which hands `f` its
+/// `rdi`, stays a floor through it: the call is a gap, never `g(5)` nor `g(5, 7)`.
+#[test]
+fn under_aa_a_cycle_through_an_indirect_call_stays_a_floor() {
+    let functions = [
+        ("f", BASE, 0x08),
+        ("g", BASE + 0x10, 0x0a),
+        ("caller", BASE + 0x20, 0x10),
+    ];
+    let text = surveyed(CYCLE_THROUGH_AN_INDIRECT_CALL, &functions, BASE + 0x20);
+    assert!(
+        text.contains("call to g: its arity is only at least 1 (a floor), and this call writes 2"),
+        "{text}"
+    );
+    assert!(!text.contains("g(5"), "{text}");
 }
