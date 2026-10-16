@@ -370,9 +370,8 @@ fn a_nonzero_count_over_the_stack_guard_is_still_a_vector_count() {
     assert!(!outer.contains("f(5)"), "{outer}");
 }
 
-/// gcc -O0's `vfold(unsigned count, ...)`, looping while its counter is below `count`; `vfold_pair`
-/// fetches two slots per trip; `local` calls `vfold` with 1, 2, 3, 5; `dynamic` passes its own
-/// `count`; `pair_caller` calls `vfold_pair(2, 5, 6)`.
+/// gcc -O0's `vfold(unsigned count, ...)` and `vfold_pair` (two fetches a trip); `local` calls the
+/// first with 1, 2, 3, 5, `dynamic` with its own count, `pair_caller` the second with 2.
 const COUNT_DRIVEN: &[u8] = &[
     0xf3, 0x0f, 0x1e, 0xfa, // 1000 endbr64
     0x55, // 1004 pushq %rbp

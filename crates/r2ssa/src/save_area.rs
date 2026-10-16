@@ -43,22 +43,7 @@ pub(crate) fn register_save_area(
             .filter(|root| root.base == StackAddressBase::StackPointer)
             .map(|root| root.offset)
     };
-    // Each slot's entry value stored at a stack position, and every address stored to memory.
-    let mut saves = vec![Vec::new(); arguments.len()];
-    let mut stored_addresses = BTreeSet::new();
-    for inst in &graph.insts {
-        let InstPayload::Op(SSAOp::Store { addr, val, .. }) = &inst.payload else {
-            continue;
-        };
-        let at = at_entry(*addr);
-        if let Some(offset) = at_entry(*val) {
-            stored_addresses.insert(offset);
-        }
-        let value = prep.views.copy_root(*val);
-        if let (Some(at), Some(slot)) = (at, entry_slot(graph, value, arguments)) {
-            saves[slot].push((at, value, inst.id));
-        }
-    }
+    let (saves, stored_addresses) = entry_saves((graph, prep), arguments, &at_entry);
     let last = arguments.len() - 1;
     let position = |slot: usize| i64::try_from(slot).ok().map(|slot| slot * width);
     for &(top, ..) in &saves[last] {
@@ -125,6 +110,33 @@ pub(crate) fn register_save_area(
             .collect::<Vec<_>>()
     );
     None
+}
+
+/// Per argument slot, where its entry value is stored: the position, the value and the store.
+type Saves = Vec<Vec<(i64, ValueId, InstId)>>;
+
+/// Each slot's entry value stored at a stack position, and every address stored to memory.
+fn entry_saves(
+    (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
+    arguments: &[CanonicalStorageId],
+    at_entry: &impl Fn(ValueId) -> Option<i64>,
+) -> (Saves, BTreeSet<i64>) {
+    let mut saves = vec![Vec::new(); arguments.len()];
+    let mut stored_addresses = BTreeSet::new();
+    for inst in &graph.insts {
+        let InstPayload::Op(SSAOp::Store { addr, val, .. }) = &inst.payload else {
+            continue;
+        };
+        let at = at_entry(*addr);
+        if let Some(offset) = at_entry(*val) {
+            stored_addresses.insert(offset);
+        }
+        let value = prep.views.copy_root(*val);
+        if let (Some(at), Some(slot)) = (at, entry_slot(graph, value, arguments)) {
+            saves[slot].push((at, value, inst.id));
+        }
+    }
+    (saves, stored_addresses)
 }
 
 /// Where `bound` is stored, if a constant store, alone or as a little-endian word with its
