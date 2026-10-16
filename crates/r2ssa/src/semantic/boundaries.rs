@@ -124,9 +124,8 @@ pub(crate) fn variadic_callsite_argument_count(
     })
 }
 
-/// Prove the count of one variadic call from the constant it passes for the parameter its callee's
-/// loop bounds its tail by (doc/adr-resolved-bodies.md, "Count-driven tail"). A count that is no
-/// constant states nothing, so the call stays a counted residual.
+/// A variadic call's count from the constant it passes for the parameter its callee's loop bounds
+/// its tail by (ADR "Count-driven tail"); any other count stays a counted residual.
 fn counted_tail_argument_count(
     graph: &SsaGraph,
     prep: Option<&crate::DecompilePrepFacts>,
