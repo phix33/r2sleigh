@@ -332,17 +332,8 @@ fn relabel_local_branches(out: &mut [R2ILOp], at: &[usize], starts: &[usize]) {
     }
 }
 
-/// Rewrite every direct-address memory operand into an explicit access.
-///
-/// Sleigh spells a memory operand with a constant address as a varnode in the
-/// ram space, and SSA construction would rename that like a register: a read
-/// became an undefined variable, and a write a local nothing else could see.
-/// A read becomes a load into a fresh temporary, a written output becomes a
-/// temporary the operation writes and a store carries out; a copy needs no
-/// temporary at all. The code address a direct transfer names, as
-/// [`R2ILOp::transfer`] states it, is not a memory operand; a slot an indirect
-/// transfer reads its destination from is, and is loaded like any other. A label
-/// inside the instruction keeps naming its operation (`relabel_local_branches`).
+/// Each ram operand at a constant address as an explicit Load or Store, a direct transfer's target excepted;
+/// a local label keeps naming its operation (`relabel_local_branches`). Why: doc/adr-verified-layers.md D34.
 pub fn canonicalize_memory_operands(
     ops: Vec<R2ILOp>,
     address_size: u32,

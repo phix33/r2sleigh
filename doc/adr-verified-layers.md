@@ -51,6 +51,11 @@ structural decisions that close each gap.
 - One applier keeps every instruction-relative label on the op it named, as
   r2ssa's `EditPlan` does for the IR. The per-pass `starts`/`at` vectors of
   `whole_unique_reads` and `canonicalize_memory_operands` are deleted (D1).
+- `canonicalize_memory_operands` exists because SSA would rename a ram-space
+  varnode like a register, making a read undefined and a write invisible. A
+  read loads into a fresh temporary, a written output stores from one, and a
+  copy needs none. A direct transfer's target (`R2ILOp::transfer`) is code,
+  not memory; an indirect transfer's slot is loaded like any other operand.
 - Gate: `decode_sweep` runs each pass's input and output through `r2il::eval`
   from the same seeded states and compares registers and memory. A pass that
   moves a label or drops an effect fails it. This is D31's "each IR rewrite
