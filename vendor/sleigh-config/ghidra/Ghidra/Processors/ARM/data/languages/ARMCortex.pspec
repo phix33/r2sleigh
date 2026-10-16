@@ -43,5 +43,16 @@
     <symbol name="SysTick" address="ram:0x3C" entry="true" type="code_ptr"/>
     <symbol name="IRQ" address="ram:0x40" entry="true" type="code_ptr"/>
   </default_symbols>
-  
+  <register_data>
+    <!-- Sleigh's scratch: written and read within one instruction, no machine state -->
+    <register name="tmpNG" hidden="true"/>
+    <register name="tmpZR" hidden="true"/>
+    <register name="tmpCY" hidden="true"/>
+    <register name="tmpOV" hidden="true"/>
+    <register name="shift_carry" hidden="true"/>
+    <register name="mult_addr" hidden="true"/>
+    <register name="mult_dat8" hidden="true"/>
+    <register name="mult_dat16" hidden="true"/>
+  </register_data>
+
 </processor_spec>
