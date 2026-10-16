@@ -1452,23 +1452,26 @@ struct Walked {
 }
 
 impl Walked {
-    /// The same walk cut to the blocks control can reach an unresolved indirect branch from.
-    ///
-    /// A value at a dispatch is built from the paths that arrive at it, so a block none of them
-    /// crosses decides no table. A kept block's edge to a cut one leaves the function, as a tail jump
-    /// does. O(blocks + edges).
+    /// The same walk cut to the blocks an unresolved indirect branch is reachable from: a value there is built
+    /// from the paths that arrive at it, and a kept block's edge to a cut one leaves the function. O(blocks + edges).
     fn reaching_unresolved(&self) -> Self {
         let blocks = &self.body.blocks;
+        let block_at = |address: u64| {
+            blocks
+                .binary_search_by_key(&address, |block| block.lifted.addr)
+                .ok()
+        };
         let held = |address: u64| {
             let after = blocks.partition_point(|block| block.lifted.addr <= address);
             after.checked_sub(1)
         };
+        let edges = (blocks.iter().enumerate()).flat_map(|(from, block)| {
+            (block.successors.iter()).map(move |(_, target)| (from, *target))
+        });
         let mut preceding = vec![Vec::new(); blocks.len()];
-        for (at, block) in blocks.iter().enumerate() {
-            for (_, target) in &block.successors {
-                if let Ok(to) = blocks.binary_search_by_key(target, |block| block.lifted.addr) {
-                    preceding[to].push(at);
-                }
+        for (from, target) in edges {
+            if let Some(to) = block_at(target) {
+                preceding[to].push(from);
             }
         }
         let indirect = self.body.unresolved.iter();
