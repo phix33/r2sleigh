@@ -73,6 +73,9 @@ fn effective(ops: &[R2ILOp], scratch: impl Fn(&Varnode) -> bool) -> Vec<bool> {
             used[index] = false;
             continue;
         }
+        if let Some(out) = op.output().filter(|out| scratch(out)) {
+            kill(&mut needed, out);
+        }
         let scratches = op.inputs().into_iter().filter(|vn| scratch(vn));
         needed.extend(scratches.map(|vn| {
             let (from, to) = range(vn);
@@ -80,6 +83,21 @@ fn effective(ops: &[R2ILOp], scratch: impl Fn(&Varnode) -> bool) -> Vec<bool> {
         }));
     }
     used
+}
+
+/// Remove the bytes `out` defines from `needed`: no earlier write of them reaches a read after it.
+fn kill(needed: &mut Vec<(SpaceId, u64, u64)>, out: &Varnode) {
+    let (start, end) = range(out);
+    let mut kept = Vec::with_capacity(needed.len() + 1);
+    for &(space, from, to) in needed.iter() {
+        if space != out.space || to <= start || end <= from {
+            kept.push((space, from, to));
+            continue;
+        }
+        kept.extend((from < start).then_some((space, from, start)));
+        kept.extend((end < to).then_some((space, end, to)));
+    }
+    *needed = kept;
 }
 
 /// Disjoint `ranges` with each run of adjacent ones that exactly fills a `declared` register
@@ -291,6 +309,30 @@ mod tests {
         // Unmarked, the same scratch is a register the instruction writes.
         let unmarked = register_accesses(&dead, |_| false).unwrap();
         assert_eq!(unmarked.writes, vec![reg(0x66, 1), reg(0x20, 4)]);
+    }
+
+    #[test]
+    fn an_overwritten_scratch_value_reaches_no_read() {
+        // u = RAX; u = RBX; RCX = u: only RBX reaches the write, for a temporary or a hidden register.
+        for scratch in [unique(0x100, 8), reg(0x400, 8)] {
+            let ops = [
+                R2ILOp::Copy {
+                    dst: scratch.clone(),
+                    src: reg(0x0, 8),
+                },
+                R2ILOp::Copy {
+                    dst: scratch.clone(),
+                    src: reg(0x18, 8),
+                },
+                R2ILOp::Copy {
+                    dst: reg(0x8, 8),
+                    src: scratch.clone(),
+                },
+            ];
+            let accesses = register_accesses(&ops, |vn| vn.offset == 0x400).unwrap();
+            assert_eq!(accesses.reads, vec![reg(0x18, 8)], "{scratch:?}");
+            assert_eq!(accesses.writes, vec![reg(0x8, 8)], "{scratch:?}");
+        }
     }
 
     #[test]
