@@ -4991,6 +4991,32 @@ fn a_stack_protector_check_whose_failure_calls_through_a_slot_is_decided() {
     assert!(!output.contains("compiler-inserted"), "{output}");
 }
 
+/// `if (edi == 0) goto done; call [slot]; done: ret`, the slot at 0x1040.
+const CALL_THROUGH_A_SLOT_BEFORE_A_JOIN: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x06, // 1002 je 0x100a
+    0xff, 0x15, 0x36, 0x00, 0x00, 0x00, // 1004 call [rip+0x36], the slot at 0x1040
+    0xc3, // 100a ret, which the jump reaches
+];
+
+/// The program states the slot's function never returns, so the join after the call is reached
+/// only by the jump: nothing returns a value on the call's path.
+#[test]
+fn a_call_through_a_halting_slot_has_no_edge_to_the_join_after_it() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = HaltingSlot {
+        fixture: Fixture {
+            bytes: CALL_THROUGH_A_SLOT_BEFORE_A_JOIN.to_vec(),
+            name: "halting_slot_before_join",
+        },
+        slot: 0x1040,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(!output.contains("residual_u64"), "{output}");
+    assert_eq!(output.matches("return").count(), 1, "{output}");
+}
+
 /// `mul_div` from `tests/gold/review.c` at gcc -O0: `a * 7 / b + a % b`, with
 /// `a` and `b` spilled to the frame and reloaded for each division.
 const DIVIDE_AFTER_RELOAD: &[u8] = &[
