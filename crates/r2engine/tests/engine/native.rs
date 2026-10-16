@@ -4903,6 +4903,94 @@ fn a_check_whose_failure_returns_is_not_decided() {
     assert!(!output.contains("compiler-inserted"), "{output}");
 }
 
+/// A fixture whose program states that the pointer held at one slot is a function that never returns.
+struct HaltingSlot {
+    fixture: Fixture,
+    slot: u64,
+}
+
+impl r2engine::body::Program for HaltingSlot {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        self.fixture.read(vaddr, max)
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        self.fixture.region(vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        self.fixture.is_entry(vaddr)
+    }
+
+    fn returns_through(&self, slot: u64) -> bool {
+        slot != self.slot
+    }
+}
+
+impl Program for HaltingSlot {
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        self.fixture.holds_static_data(vaddr)
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        self.fixture.extents()
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.fixture.name_at(vaddr)
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        self.fixture.import_at(vaddr)
+    }
+}
+
+/// `CANARY_CHECKED` with the failure called through a slot, as `-fno-plt` calls `__stack_chk_fail`.
+const CANARY_CHECKED_THROUGH_A_SLOT: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // 1004 mov rax, fs:[0x28]
+    0x48, 0x89, 0x44, 0x24, 0x08, // 100d mov [rsp+8], rax
+    0x31, 0xc0, // 1012 xor eax, eax
+    0x48, 0x8b, 0x54, 0x24, 0x08, // 1014 mov rdx, [rsp+8]
+    0x64, 0x48, 0x2b, 0x14, 0x25, 0x28, 0x00, 0x00, 0x00, // 1019 sub rdx, fs:[0x28]
+    0x75, 0x05, // 1022 jne 0x1029
+    0x48, 0x83, 0xc4, 0x18, // 1024 add rsp, 0x18
+    0xc3, // 1028 ret
+    0xff, 0x15, 0x11, 0x00, 0x00, 0x00, // 1029 call [rip+0x11], the slot at 0x1040
+    0xc3, // 102f ret, reached only if the slot's function comes back
+];
+
+/// The failure path is a call through a slot the program says never returns, which is as much a
+/// call that does not come back as a direct one: the check is decided the same.
+#[test]
+fn a_stack_protector_check_whose_failure_calls_through_a_slot_is_decided() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = HaltingSlot {
+        fixture: Fixture {
+            bytes: CANARY_CHECKED_THROUGH_A_SLOT.to_vec(),
+            name: "canary_through_a_slot",
+        },
+        slot: 0x1040,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(thread_pointer_versions(output).is_empty(), "{output}");
+    assert!(output.contains("return 0;"), "{output}");
+    assert!(
+        output.contains("compiler-inserted (assuming ub-free)"),
+        "{output}"
+    );
+    // A slot the program says nothing about may come back, and then nothing proves a protector.
+    let silent = Fixture {
+        bytes: CANARY_CHECKED_THROUGH_A_SLOT.to_vec(),
+        name: "canary_through_a_slot",
+    };
+    let response = decompile(&machine.target(), &silent, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("compiler-inserted"), "{output}");
+}
+
 /// `mul_div` from `tests/gold/review.c` at gcc -O0: `a * 7 / b + a % b`, with
 /// `a` and `b` spilled to the frame and reloaded for each division.
 const DIVIDE_AFTER_RELOAD: &[u8] = &[
