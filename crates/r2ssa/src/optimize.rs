@@ -173,7 +173,8 @@ pub(crate) fn optimize_function_with_return_and_control<C: SsaWorkControl + ?Siz
 /// An operation as the function holds it: operands are the function's ids.
 type Op = SSAOp<VarId>;
 
-type SccpResult = (IdMap<VarId, u64>, HashSet<(u64, u64)>);
+/// The constants proved, the edges found executable, and the blocks an operation with unstated effects can precede.
+type SccpResult = (IdMap<VarId, u64>, HashSet<(u64, u64)>, HashSet<u64>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LatticeValue {
@@ -584,6 +585,7 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
     let Sccp {
         lattice,
         executable,
+        unmodelled,
         ..
     } = sccp;
     let mut consts = IdMap::new(func.values().len());
@@ -593,7 +595,7 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
         }
     }
     control.poll()?;
-    Ok((consts, executable))
+    Ok((consts, executable, unmodelled))
 }
 
 fn mask_for_bits(bits: u32) -> u64 {
@@ -785,7 +787,7 @@ fn replace_sources_with_constants(
 
 fn apply_sccp_results(
     func: &mut SSAFunction,
-    (consts, executable_edges): &SccpResult,
+    (consts, executable_edges, unmodelled): &SccpResult,
     return_carriers: &[CanonicalStorageId],
     mode: SccpMode,
     stats: &mut OptimizationStats,
@@ -812,7 +814,6 @@ fn apply_sccp_results(
     }
 
     let mut rewrites = Vec::new();
-    let unmodelled = after_unmodelled_effects(func);
     for &addr in func.block_addrs() {
         if unmodelled.contains(&addr) {
             continue;
@@ -2603,7 +2604,7 @@ mod sccp_tests {
             ..Default::default()
         }]);
 
-        let (consts, _) = sccp(&func);
+        let (consts, ..) = sccp(&func);
         assert!(
             consts
                 .iter()
@@ -2648,7 +2649,7 @@ mod sccp_tests {
             ],
             ..Default::default()
         }]);
-        let (consts, _) = sccp(&func);
+        let (consts, ..) = sccp(&func);
         let sized = |size| {
             let found = consts.iter().filter(|(key, _)| func.var(*key).size == size);
             found.map(|(_, value)| *value).collect::<Vec<_>>()
@@ -2695,7 +2696,7 @@ mod sccp_tests {
             ..Default::default()
         }]);
 
-        let (consts, _) = sccp(&func);
+        let (consts, ..) = sccp(&func);
         assert!(
             consts.iter().map(|(_, value)| value).any(|v| *v == 8),
             "SCCP should discover y = 8"
@@ -2759,7 +2760,7 @@ mod sccp_tests {
             },
         ]);
 
-        let (consts, executable) = sccp(&func);
+        let (consts, executable, _) = sccp(&func);
         assert!(
             !executable.contains(&(0x1000, 0x1004)),
             "false edge should be non-executable"
@@ -2791,7 +2792,7 @@ mod sccp_tests {
             ..Default::default()
         }]);
 
-        let (consts, _) = sccp(&func);
+        let (consts, ..) = sccp(&func);
         assert!(
             !consts.keys().any(|k| func.var(k).name() == "reg:8"),
             "param-derived values should not be treated as constants"
@@ -2816,7 +2817,7 @@ mod sccp_tests {
             ..Default::default()
         }]);
 
-        let (consts, _) = sccp(&func);
+        let (consts, ..) = sccp(&func);
         assert!(
             !consts.keys().any(|k| func.var(k).name() == "reg:8"),
             "loads are conservative Bottom in SCCP"
@@ -2841,7 +2842,7 @@ mod sccp_tests {
             ..Default::default()
         }]);
 
-        let (consts, _) = sccp(&func);
+        let (consts, ..) = sccp(&func);
         assert!(consts.is_empty(), "no constants should be discovered");
     }
 
