@@ -3,7 +3,10 @@
 
 use std::collections::BTreeSet;
 
-use r2source::{CanonicalStorageId, SourceConventionSlots, SourceSaveAreaAnchor, StackAddressBase};
+use r2source::{
+    CanonicalStorageId, SourceConventionSlots, SourceRegisterSaveArea, SourceSaveAreaAnchor,
+    StackAddressBase,
+};
 
 use crate::graph::{InstId, InstPayload};
 use crate::{SSAOp, SsaGraph, ValueId};
@@ -16,15 +19,15 @@ pub(crate) struct SaveArea {
     pub(crate) saved: crate::dense::IdSet<ValueId>,
 }
 
-/// The register save area the body fills, where its rules prove one (doc/adr-resolved-bodies.md,
-/// "Variadic tail"). Positions are entry-stack-pointer offsets. O(insts + uses of the saved values).
+/// The register save area the body fills, where its rules prove one (ADR "Variadic tail"), at
+/// entry-stack-pointer offsets. O(insts + uses of the saved values), O(insts) per stored bound.
 pub(crate) fn register_save_area(
     graph: &SsaGraph,
     prep: &crate::DecompilePrepFacts,
     slots: &SourceConventionSlots,
     observations: &crate::deadphi::ProvenProgramObservations,
 ) -> Option<SaveArea> {
-    let anchor = slots.register_save_area()?;
+    let area = slots.register_save_area()?;
     let arguments = slots.argument_slots();
     let width = i64::from(arguments.first()?.size);
     if arguments.iter().any(|slot| i64::from(slot.size) != width) {
@@ -42,11 +45,12 @@ pub(crate) fn register_save_area(
         let InstPayload::Op(SSAOp::Store { addr, val, .. }) = &inst.payload else {
             continue;
         };
+        let at = at_entry(*addr);
         if let Some(offset) = at_entry(*val) {
             stored_addresses.insert(offset);
         }
         let value = prep.views.copy_root(*val);
-        if let (Some(at), Some(slot)) = (at_entry(*addr), entry_slot(graph, value, arguments)) {
+        if let (Some(at), Some(slot)) = (at, entry_slot(graph, value, arguments)) {
             saves[slot].push((at, value, inst.id));
         }
     }
@@ -66,11 +70,15 @@ pub(crate) fn register_save_area(
         if named == 0 {
             continue;
         }
-        let bound = match anchor {
+        let bound = match area.anchor {
             SourceSaveAreaAnchor::Base => base,
             SourceSaveAreaAnchor::End => base + position(arguments.len())?,
         };
-        if !stored_addresses.contains(&bound) {
+        // `va_start`'s own write: the bound stored, and beside it the first unnamed slot's distance.
+        let next = base + position(named)? - bound;
+        if !stored_addresses.contains(&bound)
+            || !offset_stored((graph, prep), &at_entry, bound, area, next)
+        {
             continue;
         }
         let mut saved = crate::dense::IdSet::new(graph.values.len());
@@ -95,6 +103,39 @@ pub(crate) fn register_save_area(
             .collect::<Vec<_>>()
     );
     None
+}
+
+/// Whether a constant store, alone or as a little-endian word with its neighbour (clang), holds
+/// `next` in the offset field beside a store of `bound`. O(insts).
+fn offset_stored(
+    (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
+    at_entry: &impl Fn(ValueId) -> Option<i64>,
+    bound: i64,
+    area: SourceRegisterSaveArea,
+    next: i64,
+) -> bool {
+    let stores = || {
+        graph.insts.iter().filter_map(|inst| match &inst.payload {
+            InstPayload::Op(SSAOp::Store { addr, val, .. }) => Some((at_entry(*addr)?, *val)),
+            _ => None,
+        })
+    };
+    let fields = (stores())
+        .filter(|(_, val)| at_entry(*val) == Some(bound))
+        .map(|(at, _)| at + area.offset_field)
+        .collect::<BTreeSet<_>>();
+    let width = i64::from(area.offset_width);
+    let mask = u64::MAX >> (64 - 8 * area.offset_width.clamp(1, 8));
+    stores().any(|(at, val)| {
+        let Some((bits, size)) = prep.views.representative_constant(val) else {
+            return false;
+        };
+        // `bits` holds at most a word: a wider constant states no field past its eighth byte.
+        let last = at + i64::from(size.min(8)) - width;
+        last >= at
+            && (fields.range(at..=last))
+                .any(|field| (bits >> (8 * (field - at))) & mask == next.cast_unsigned() & mask)
+    })
 }
 
 /// The argument slot `value` is the whole entry value of.
@@ -159,21 +200,34 @@ mod tests {
         }
     }
 
-    /// Three argument slots `x0`..`x2`, a `va_list` holding the byte past the area.
+    /// Three argument slots `x0`..`x2`, a `va_list` holding the byte past the area and, 16 bytes
+    /// on, the first unnamed slot's distance from it.
     fn slots() -> SourceConventionSlots {
         SourceConventionSlots::new("test", [register(0), register(8), register(16)], None)
             .expect("slots")
-            .with_register_save_area(Some(SourceSaveAreaAnchor::End))
+            .with_register_save_area(Some(SourceRegisterSaveArea {
+                anchor: SourceSaveAreaAnchor::End,
+                offset_field: 16,
+                offset_width: 4,
+            }))
     }
 
-    /// `sp -= 0x20`, then each `(register, sp offset)` stored, then `sp + anchor` stored to a global,
-    /// and each of `read` stored to another.
-    fn body(saves: &[(u64, u64)], anchor: u64, read: &[u64]) -> R2ILBlock {
+    /// The `va_list` offset field of `named == 1` beside a bound stored at `sp + 0x28`.
+    const OFFSET: (u64, u64, u32) = (0x38, (-16_i64).cast_unsigned(), 4);
+
+    /// `sp -= 0x40`, then each `(register, sp offset)` stored, `sp + anchor` stored at `sp + 0x28`,
+    /// each `(sp offset, constant, width)` stored, `sp + 0x20` and each of `read` to a global.
+    fn body(
+        saves: &[(u64, u64)],
+        anchor: u64,
+        constants: &[(u64, u64, u32)],
+        read: &[u64],
+    ) -> R2ILBlock {
         let mut block = R2ILBlock::new(0x1000, 4);
         block.push(R2ILOp::IntSub {
             dst: Varnode::register(SP, 8),
             a: Varnode::register(SP, 8),
-            b: Varnode::constant(0x20, 8),
+            b: Varnode::constant(0x40, 8),
         });
         let mut temp = 0;
         let mut at = |block: &mut R2ILBlock, offset: u64| {
@@ -194,10 +248,26 @@ mod tests {
             });
         }
         let bound = at(&mut block, anchor);
+        let field = at(&mut block, 0x28);
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: field,
+            val: bound,
+        });
+        for &(offset, constant, width) in constants {
+            let addr = at(&mut block, offset);
+            block.push(R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr,
+                val: Varnode::constant(constant, width),
+            });
+        }
+        // The `va_list` handed on, as `va_start`'s callers do, so the frame stays in memory.
+        let list = at(&mut block, 0x20);
         block.push(R2ILOp::Store {
             space: SpaceId::Ram,
             addr: Varnode::constant(0x9000, 8),
-            val: bound,
+            val: list,
         });
         for &register in read {
             block.push(R2ILOp::Store {
@@ -209,7 +279,7 @@ mod tests {
         block.push(R2ILOp::IntAdd {
             dst: Varnode::register(SP, 8),
             a: Varnode::register(SP, 8),
-            b: Varnode::constant(0x20, 8),
+            b: Varnode::constant(0x40, 8),
         });
         block.push(R2ILOp::Return {
             target: Varnode::register(0x108, 8),
@@ -218,7 +288,12 @@ mod tests {
     }
 
     /// The save area `body` proves, prepared under an interface naming its stack pointer.
-    fn area(saves: &[(u64, u64)], anchor: u64, read: &[u64]) -> Option<SaveArea> {
+    fn area(
+        saves: &[(u64, u64)],
+        anchor: u64,
+        constants: &[(u64, u64, u32)],
+        read: &[u64],
+    ) -> Option<SaveArea> {
         let mut arch = ArchSpec::new("save-area");
         arch.addr_size = 8;
         for (name, offset) in [("x0", 0), ("x1", 8), ("x2", 16), ("sp", SP), ("lr", 0x108)] {
@@ -237,7 +312,7 @@ mod tests {
         .with_stack_pointer_storage(register(SP))
         .expect("stack pointer");
         let artifact = crate::testing::prepared(
-            &[body(saves, anchor, read)],
+            &[body(saves, anchor, constants, read)],
             &crate::Arch::from(arch),
             Some(interface),
             Vec::new(),
@@ -259,21 +334,46 @@ mod tests {
 
     #[test]
     fn the_registers_past_the_named_ones_saved_in_order_below_a_stored_bound_are_a_tail() {
-        let found = area(&[(8, 8), (16, 16)], 24, &[]).expect("a save area");
+        let found = area(&[(8, 8), (16, 16)], 24, &[OFFSET], &[]).expect("a save area");
         assert_eq!(found.named, 1);
         assert_eq!(found.saved.len(), 2);
+        // clang writes `__gr_offs` and `__vr_offs` as one word.
+        let joined = (0x38, 0xffff_ff80_ffff_fff0, 8);
+        assert_eq!(area(&[(8, 8), (16, 16)], 24, &[joined], &[]), found.into());
     }
 
     #[test]
     fn a_save_area_needs_its_bound_stored_a_named_slot_below_it_its_stride_and_no_other_read() {
         let saves = [(8, 8), (16, 16)];
-        assert_eq!(area(&saves, 16, &[]), None, "no bound stored");
+        assert_eq!(area(&saves, 16, &[OFFSET], &[]), None, "no bound stored");
         assert_eq!(
-            area(&[(0, 0), (8, 8), (16, 16)], 24, &[]),
+            area(&[(0, 0), (8, 8), (16, 16)], 24, &[OFFSET], &[]),
             None,
             "every slot saved"
         );
-        assert_eq!(area(&[(8, 16), (16, 8)], 24, &[]), None, "out of order");
-        assert_eq!(area(&saves, 24, &[16]), None, "a saved register read again");
+        assert_eq!(
+            area(&[(8, 16), (16, 8)], 24, &[OFFSET], &[]),
+            None,
+            "out of order"
+        );
+        assert_eq!(
+            area(&saves, 24, &[OFFSET], &[16]),
+            None,
+            "a saved register read again"
+        );
+    }
+
+    /// A struct of arguments 1..n whose address is stored is laid out as a save area, but no
+    /// `va_start` wrote the offset field beside that address.
+    #[test]
+    fn a_suffix_aggregate_whose_address_is_stored_is_no_tail() {
+        let saves = [(8, 8), (16, 16)];
+        assert_eq!(area(&saves, 24, &[], &[]), None, "no offset field");
+        let other = (0x38, (-8_i64).cast_unsigned(), 4);
+        assert_eq!(area(&saves, 24, &[other], &[]), None, "another distance");
+        let elsewhere = (0x3c, OFFSET.1, 4);
+        assert_eq!(area(&saves, 24, &[elsewhere], &[]), None, "another field");
+        let vector = (0x30, 0, 16);
+        assert_eq!(area(&saves, 24, &[vector], &[]), None, "a vector of zeros");
     }
 }

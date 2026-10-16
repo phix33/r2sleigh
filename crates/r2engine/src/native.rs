@@ -2398,12 +2398,16 @@ pub(crate) fn convention_slots(
             .with_shared_positions(prototype.shares_positions())
             .with_stack_arguments(stack_arguments)
             .with_variadic_tail_on_stack(target.convention.variadic_tail_on_stack)
-            .with_register_save_area(target.convention.register_save_area.map(
-                |anchor| match anchor {
-                    r2abi::SaveAreaAnchor::Base => r2source::SourceSaveAreaAnchor::Base,
-                    r2abi::SaveAreaAnchor::End => r2source::SourceSaveAreaAnchor::End,
-                },
-            ))
+            .with_register_save_area(target.convention.register_save_area.map(|area| {
+                r2source::SourceRegisterSaveArea {
+                    anchor: match area.anchor {
+                        r2abi::SaveAreaAnchor::Base => r2source::SourceSaveAreaAnchor::Base,
+                        r2abi::SaveAreaAnchor::End => r2source::SourceSaveAreaAnchor::End,
+                    },
+                    offset_field: area.offset_field,
+                    offset_width: area.offset_width,
+                }
+            }))
             .with_variadic_count_register(
                 (target.convention.variadic_count_register)
                     .and_then(|name| storage(target.arch, name).ok()),

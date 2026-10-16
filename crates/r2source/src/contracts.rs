@@ -3823,16 +3823,26 @@ pub struct SourceConventionSlots {
     /// Every variadic argument travels on the stack from the first slot,
     /// whatever registers the fixed prefix leaves free: Apple's arm64 ABI.
     variadic_tail_on_stack: bool,
-    /// Which bound of the variadic register save area a `va_list` holds, where the convention has one.
-    register_save_area: Option<SourceSaveAreaAnchor>,
+    /// What a `va_list` holds of the variadic register save area, where the convention has one.
+    register_save_area: Option<SourceRegisterSaveArea>,
     /// Where a call hands a variadic or unprototyped callee its count of vector arguments: SysV's `al`.
     variadic_count_register: Option<CanonicalStorageId>,
     /// The entry stack pointer's residue modulo an alignment, where the convention states one.
     entry_stack: Option<SourceEntryStack>,
 }
 
-/// The bound of the general register save area a variadic prologue fills, argument register `i` at
-/// area + slot width * i, that its `va_list` holds (doc/adr-resolved-bodies.md, "Variadic tail").
+/// What a `va_list` holds of the general register save area a variadic prologue fills, argument
+/// register `i` at area + slot width * i (doc/adr-resolved-bodies.md, "Variadic tail").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SourceRegisterSaveArea {
+    pub anchor: SourceSaveAreaAnchor,
+    /// The field `va_start` sets to the first unnamed slot's distance from the bound, in bytes
+    /// from the bound's own field, and its width.
+    pub offset_field: i64,
+    pub offset_width: u32,
+}
+
+/// The bound of the general register save area a `va_list` holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SourceSaveAreaAnchor {
     /// Its start: System V AMD64's `reg_save_area`.
@@ -3981,14 +3991,14 @@ impl SourceConventionSlots {
         self
     }
 
-    /// Which bound of the variadic register save area a `va_list` holds, where the convention has one.
-    pub const fn register_save_area(&self) -> Option<SourceSaveAreaAnchor> {
+    /// What a `va_list` holds of the variadic register save area, where the convention has one.
+    pub const fn register_save_area(&self) -> Option<SourceRegisterSaveArea> {
         self.register_save_area
     }
 
     #[must_use]
-    pub const fn with_register_save_area(mut self, anchor: Option<SourceSaveAreaAnchor>) -> Self {
-        self.register_save_area = anchor;
+    pub const fn with_register_save_area(mut self, area: Option<SourceRegisterSaveArea>) -> Self {
+        self.register_save_area = area;
         self
     }
 

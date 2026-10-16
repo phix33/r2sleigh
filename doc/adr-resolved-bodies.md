@@ -243,22 +243,30 @@ entry-stack-pointer coordinates and for one area base `A` and slot width `w`:
    at `A + w·i`, and slot `named - 1` has not, with `named ≥ 1`;
 2. nothing else reads those saved values, through merges and copies; a use
    nothing observes (`xor ecx, ecx`) or a call's implicit use reads nothing;
-3. the bound of the area the convention names is stored to memory, as a
-   `va_list` holds it: System V AMD64's `reg_save_area` (`A`, psABI 3.5.7,
-   Figure 3.33) and AAPCS64's `__gr_top` (`A + w·N`, "Variable argument
-   lists"), r2abi's cited rows, carried by `SourceConventionSlots`.
+3. `va_start`'s write is there: the bound of the area the convention names
+   is stored at some stack position `P`, as a `va_list` holds it, and a
+   constant store covers the `va_list`'s offset field at `P + d`, holding
+   the first unnamed slot's distance from that bound, `A + w·named - bound`,
+   at the field's width. System V AMD64 holds `reg_save_area` (`A`) with
+   `gp_offset` at `d = -16` (psABI 3.5.7, Figures 3.33 and 3.34), AAPCS64
+   `__gr_top` (`A + w·N`) with `__gr_offs` at `d = +16` ("Variable argument
+   lists"); r2abi's cited rows state both, carried by `SourceConventionSlots`.
+   clang writes the field with its `fp_offset`/`__vr_offs` neighbour as one
+   little-endian word, so a wider store covering the field counts.
 
 Rule 3 separates an O0 body spilling its own six parameters, whose spill
-address no `va_list` holds; rule 1's named slot separates an aggregate of
+address no `va_list` holds, and a struct of arguments `named..N` whose
+address is stored (`struct s = {0, b, ..., g, &s}`), which no `va_start`
+wrote an offset field beside; rule 1's named slot separates an aggregate of
 every parameter whose address is stored (`struct six s = {a, ..., f}; p =
 &s;`), which C before C23 cannot be variadic with; rule 2's other reads
 refuse the area, as does a tail slot the recovered reads still show (a
 call that takes it). The vector block behind `test al, al` and the
-`gp_offset`/`__gr_offs` constants are not required: gcc -O1 and -O2 omit
+`fp_offset`/`__vr_offs` constant are not required: gcc -O1 and -O2 omit
 the block and the `fp_offset` store when no `va_arg` reads a float.
 
 **Owner.** r2ssa (`save_area::register_save_area`, read by interface
-recovery); r2abi states the anchor; the interface carries it on the one
+recovery); r2abi states the anchor and the offset field; the interface carries it on the one
 variadic bit a declaration's `...` sets (`with_variadic_tail`), with the
 fixed prefix `Exact(named)`: a slot below the area the body never reads is
 a parameter at its slot's width, since the area starts at the first unnamed

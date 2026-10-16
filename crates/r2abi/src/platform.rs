@@ -169,9 +169,9 @@ pub struct CallingConvention {
     /// The register a call passes a variadic callee's count of vector
     /// arguments in, which every call may therefore read.
     pub variadic_count_register: Option<&'static str>,
-    /// Where a variadic prologue saves argument register `i`, at area + slot width * i, and
-    /// which bound of that area its `va_list` holds; `None` where the convention has no area.
-    pub register_save_area: Option<SaveAreaAnchor>,
+    /// Where a variadic prologue saves argument register `i`, at area + slot width * i, and what
+    /// its `va_list` holds of that area; `None` where the convention has no area.
+    pub register_save_area: Option<RegisterSaveArea>,
     /// The register a frame-keeping function holds its frame base in.
     pub frame_pointer: Option<&'static str>,
     /// The compiler specification and the prototype in it, where the convention is not the
@@ -190,7 +190,18 @@ pub struct CallingConvention {
     pub citation: &'static str,
 }
 
-/// The bound of the general register save area a `va_list` holds (doc/adr-resolved-bodies.md, "Variadic tail").
+/// What a `va_list` holds of the general register save area (doc/adr-resolved-bodies.md, "Variadic
+/// tail"): a bound of it, and a field `va_start` sets to the first unnamed slot's distance from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterSaveArea {
+    pub anchor: SaveAreaAnchor,
+    /// The offset field's distance in bytes from the bound's own field in the `va_list`.
+    pub offset_field: i64,
+    /// The offset field's width in bytes.
+    pub offset_width: u32,
+}
+
+/// The bound of the general register save area a `va_list` holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveAreaAnchor {
     /// Its start: System V AMD64's `reg_save_area`.
@@ -212,7 +223,11 @@ const SYSTEM_V_AMD64: CallingConvention = CallingConvention {
     variadic_tail_on_stack: false,
     frame_pointer: Some("rbp"),
     variadic_count_register: Some("al"),
-    register_save_area: Some(SaveAreaAnchor::Base),
+    register_save_area: Some(RegisterSaveArea {
+        anchor: SaveAreaAnchor::Base,
+        offset_field: -16,
+        offset_width: 4,
+    }),
     prototype: None,
     refused: None,
     entry_stack: Some(EntryStack {
@@ -223,7 +238,7 @@ const SYSTEM_V_AMD64: CallingConvention = CallingConvention {
     citation: "System V AMD64 psABI 1.0, section 3.2.2: \"The 128-byte area beyond the \
                location pointed to by %rsp is considered to be reserved and shall not be \
                modified by signal or interrupt handlers\"; section 3.5.7: \"%al is used as \
-               hidden argument to specify the number of vector registers used\"; Figure 3.4: %rbp \"callee-saved register; optionally used as frame pointer\"; section 3.2.2: \"the value (%rsp + 8) is always a multiple of 16 when control is transferred to the function entry point\"; section 3.5.7, Figure 3.33: the register save area holds %rdi at offset 0 to %r9 at 40, and \"reg_save_area: The element points to the start of the register save area\"",
+               hidden argument to specify the number of vector registers used\"; Figure 3.4: %rbp \"callee-saved register; optionally used as frame pointer\"; section 3.2.2: \"the value (%rsp + 8) is always a multiple of 16 when control is transferred to the function entry point\"; section 3.5.7, Figure 3.33: the register save area holds %rdi at offset 0 to %r9 at 40, and \"reg_save_area: The element points to the start of the register save area\"; Figure 3.34: the va_list is {unsigned int gp_offset; unsigned int fp_offset; void *overflow_arg_area; void *reg_save_area;}, and \"gp_offset: The element holds the offset in bytes from reg_save_area to the place where the next available general purpose argument register is saved\"",
 };
 
 const MICROSOFT_X64: CallingConvention = CallingConvention {
@@ -268,7 +283,11 @@ const AAPCS64: CallingConvention = CallingConvention {
     variadic_tail_on_stack: false,
     frame_pointer: Some("x29"),
     variadic_count_register: None,
-    register_save_area: Some(SaveAreaAnchor::End),
+    register_save_area: Some(RegisterSaveArea {
+        anchor: SaveAreaAnchor::End,
+        offset_field: 16,
+        offset_width: 4,
+    }),
     prototype: None,
     refused: None,
     entry_stack: Some(EntryStack {
@@ -278,7 +297,7 @@ const AAPCS64: CallingConvention = CallingConvention {
     stack_bound: None,
     citation: "AAPCS64, \"Universal stack constraints\": \"A process may only access \
                (for reading or writing) the closed interval of the entire stack delimited \
-               by [SP, stack-base - 1]\"; its general-purpose register table names r29 FP, the frame pointer; \"Universal stack constraints\": \"SP mod 16 = 0\"; Appendix \"Variable argument lists\": the general register save area holds x0 to x7 in order, and \"__gr_top: set to the address of the byte immediately following the general register argument save area\"",
+               by [SP, stack-base - 1]\"; its general-purpose register table names r29 FP, the frame pointer; \"Universal stack constraints\": \"SP mod 16 = 0\"; Appendix \"Variable argument lists\": the general register save area holds x0 to x7 in order, and \"__gr_top: set to the address of the byte immediately following the general register argument save area\"; the va_list is {void *__stack; void *__gr_top; void *__vr_top; int __gr_offs; int __vr_offs;}, and \"__gr_offs: set to 0 - ((8 - named_gr) * 8)\"",
 };
 
 const AAPCS64_DARWIN: CallingConvention = CallingConvention {
@@ -584,12 +603,20 @@ mod tests {
         assert!(!arm64(Platform::Linux).variadic_tail_on_stack);
         assert_eq!(
             arm64(Platform::Linux).register_save_area,
-            Some(SaveAreaAnchor::End)
+            Some(RegisterSaveArea {
+                anchor: SaveAreaAnchor::End,
+                offset_field: 16,
+                offset_width: 4,
+            })
         );
         assert_eq!(arm64(Platform::Darwin).register_save_area, None);
         assert_eq!(
             x64(Platform::Linux).register_save_area,
-            Some(SaveAreaAnchor::Base)
+            Some(RegisterSaveArea {
+                anchor: SaveAreaAnchor::Base,
+                offset_field: -16,
+                offset_width: 4,
+            })
         );
         assert_eq!(x64(Platform::Windows).register_save_area, None);
         assert_eq!(arm64(Platform::Darwin).name, "arm64");
