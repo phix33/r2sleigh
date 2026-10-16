@@ -524,11 +524,30 @@ impl Walk {
         (self.tables.iter()).map(|table| (table.instruction, table.targets.as_slice()))
     }
 
-    /// The lift of each block of the body, dispatches followed.
+    /// The lift of each block of the body, dispatches followed: a dispatch's block carries the cases
+    /// its table read, so the graph built over the blocks reaches every arm.
     pub fn lifted(&self) -> Vec<r2il::R2ILBlock> {
-        (self.root.body.blocks.iter())
+        let mut blocks = (self.root.body.blocks.iter())
             .map(|block| block.lifted.clone())
-            .collect()
+            .collect::<Vec<_>>();
+        // The body's blocks are in address order, so each table finds its block by search.
+        for table in &self.tables {
+            let after = blocks.partition_point(|block| block.addr <= table.instruction);
+            let Some(block) = after.checked_sub(1).map(|at| &mut blocks[at]) else {
+                continue;
+            };
+            if table.instruction - block.addr < u64::from(block.size) {
+                let cases = (table.cases.iter())
+                    .map(|&(value, target)| r2il::SwitchCase { value, target })
+                    .collect();
+                block.switch_info = Some(r2il::SwitchInfo {
+                    switch_addr: table.instruction,
+                    default_target: None,
+                    cases,
+                });
+            }
+        }
+        blocks
     }
 }
 

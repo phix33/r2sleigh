@@ -196,20 +196,21 @@ fn a_block_operation_and_a_computed_call_name_the_addresses_their_block_folds() 
 }
 
 /// `pick`: `cmp edi, 3; ja default; mov edi, edi; jmp [rdi*8 + 0x1060]` over four arms: `call one`, a read
-/// of the word at 0x1080, `mov eax, 30`, and a tail jump to `one`; the default returns -1. `one` is at 0x1040.
+/// of the word at 0x1080, `lea rax, [0x1090]; ret`, and a tail jump to `one`; the default returns -1.
+/// `one` is at 0x1040.
 const ARMS: &[u8] = &{
-    let mut code = [0xcc_u8; 0x88];
+    let mut code = [0xcc_u8; 0x98];
     let runs: [(usize, &[u8]); 10] = [
-        (0x00, &[0x83, 0xff, 0x03, 0x77, 0x21, 0x89, 0xff]),
+        (0x00, &[0x83, 0xff, 0x03, 0x77, 0x23, 0x89, 0xff]),
         (0x07, &[0xff, 0x24, 0xfd, 0x60, 0x10, 0x00, 0x00]),
         (0x0e, &[0xe8, 0x2d, 0x00, 0x00, 0x00, 0xc3]),
         (
             0x14,
             &[0x48, 0x8b, 0x04, 0x25, 0x80, 0x10, 0x00, 0x00, 0xc3],
         ),
-        (0x1e, &[0xb8, 0x1e, 0x00, 0x00, 0x00, 0xc3]),
-        (0x24, &[0xeb, 0x1a]),
-        (0x26, &[0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3]),
+        (0x1e, &[0x48, 0x8d, 0x05, 0x6b, 0x00, 0x00, 0x00, 0xc3]),
+        (0x26, &[0xeb, 0x18]),
+        (0x28, &[0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3]),
         (0x40, &[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]),
         (
             0x60,
@@ -217,7 +218,7 @@ const ARMS: &[u8] = &{
                 0x0e, 0x10, 0, 0, 0, 0, 0, 0, // 0x1060 -> 0x100e
                 0x14, 0x10, 0, 0, 0, 0, 0, 0, // 0x1068 -> 0x1014
                 0x1e, 0x10, 0, 0, 0, 0, 0, 0, // 0x1070 -> 0x101e
-                0x24, 0x10, 0, 0, 0, 0, 0, 0, // 0x1078 -> 0x1024
+                0x26, 0x10, 0, 0, 0, 0, 0, 0, // 0x1078 -> 0x1026
             ],
         ),
         (0x80, &[0x07, 0, 0, 0, 0, 0, 0, 0]), // the word the second arm reads
@@ -236,7 +237,7 @@ const ARMS: &[u8] = &{
 };
 
 fn arms() -> Literal {
-    Literal::of_code(ARMS, &[("pick", BASE, 0x2c), ("one", BASE + 0x40, 6)])
+    Literal::of_code(ARMS, &[("pick", BASE, 0x2e), ("one", BASE + 0x40, 6)])
 }
 
 #[test]
@@ -249,12 +250,12 @@ fn the_index_holds_what_every_arm_of_a_solved_dispatch_names() {
         listed(index.facts()),
         [
             // ja default, the guard
-            (BASE + 3, BASE + 0x26, Role::Jump, Basis::Decoded),
+            (BASE + 3, BASE + 0x28, Role::Jump, Basis::Decoded),
             // jmp [rdi*8 + 0x1060], which reaches each arm the table holds
             (BASE + 7, BASE + 0xe, Role::Jump, Basis::Solved),
             (BASE + 7, BASE + 0x14, Role::Jump, Basis::Solved),
             (BASE + 7, BASE + 0x1e, Role::Jump, Basis::Solved),
-            (BASE + 7, BASE + 0x24, Role::Jump, Basis::Solved),
+            (BASE + 7, BASE + 0x26, Role::Jump, Basis::Solved),
             // call one, in the first arm
             (BASE + 0xe, one, Role::Call, Basis::Decoded),
             // mov rax, [0x1080], in the second
@@ -264,8 +265,10 @@ fn the_index_holds_what_every_arm_of_a_solved_dispatch_names() {
                 Role::Read { width: 8 },
                 Basis::Decoded
             ),
+            // lea rax, [0x1090]; ret, in the third: the address is the result, which only the def-use sees past the ret
+            (BASE + 0x1e, BASE + 0x90, Role::Value, Basis::Certified),
             // jmp one, the fourth arm's tail call
-            (BASE + 0x24, one, Role::Jump, Basis::Decoded),
+            (BASE + 0x26, one, Role::Jump, Basis::Decoded),
         ]
     );
     // The dispatch is solved, so no walk stopped at it.

@@ -474,3 +474,14 @@ Tarjan, O(V + E) over the owner edges the demand names, each component deposited
   with each callee resolved alone, through the same `resolved_alone`.
 - SM2 (2026-10-15): a first seal no second preparation reads is never collected; discovery's
   handed functions and the dispatch tables read the convention's seal.
+- Q/FS reference index (2026-10-16): `ReferenceIndex` reads `Walked` for every function the survey
+  walked, so `ax`, `axt`, `pdf` and `afb` list one body, a followed dispatch's arms included; the walk
+  hands its dispatches to `WalkedBody` and the annotation pass claims one `Target` per arm at the
+  dispatch line (`Basis::Solved`), for the listing and the index alike. `Walk::lifted` puts a
+  dispatch's cases on its block as `SwitchInfo`, so the walked def-use reaches the arms: without it
+  the arms were unreachable blocks, the graph did not build, and 21 libc, 13 0pack and 77 pumasim
+  bodies went unread. O(ops) per function plus the
+  convention seal a function with an unresolved indirect branch pays to read its tables, as `pdf`
+  does (pumasim `ax` +14% instructions, 0pack +6%, libc-2.31 +37%; `afl` unmoved). The survey and
+  `ResultReads` still lift the plain walk: a call made only inside a switch arm is claimed by the
+  index and read by neither, so the closed world refuses that callee, where both missed it before.
