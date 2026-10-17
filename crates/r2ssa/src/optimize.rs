@@ -3,7 +3,7 @@
 //! This module applies a sequence of lightweight, SSA-safe optimizations
 //! intended to simplify analysis and decompilation output.
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use crate::control::{SsaExecutionStopReason, SsaWorkControl};
 use crate::dense::{Csr, IdMap, IdSet, IdVec};
@@ -860,6 +860,9 @@ fn apply_sccp_results(
     // A decided branch: the edge it no longer takes, and what each merge at
     // the far end read along it, go with it.
     let mut decided = EditPlan::new();
+    let rewrites_dropped = (rewrites.iter())
+        .map(|rw| (rw.block_addr, rw.dead_target))
+        .collect::<Vec<_>>();
     for rw in rewrites {
         // The branch that remains was never a call site the source named, so
         // it keeps no instruction identity.
@@ -889,6 +892,7 @@ fn apply_sccp_results(
         changed = true;
         cfg_changed = true;
     }
+    let mut dead_edges = (rewrites_dropped).into_iter().collect::<BTreeSet<_>>();
     func.apply_edits(decided);
 
     // Every edge SCCP never found executable, read off the graph the
@@ -897,6 +901,7 @@ fn apply_sccp_results(
     for &addr in func.block_addrs() {
         for succ in func.successors(addr) {
             if !executable_edges.contains(&(addr, succ)) {
+                dead_edges.insert((addr, succ));
                 unexecuted.reshape(ShapeEdit::RemoveEdge {
                     from: addr,
                     to: succ,
@@ -928,9 +933,12 @@ fn apply_sccp_results(
     // A block no edge reaches any more goes, and the merges it fed stop
     // reading it; the reorder then drops its operations.
     let mut unreachable = EditPlan::new();
+    let mut dead_blocks = BTreeMap::new();
     for &addr in func.block_addrs() {
         if !reachable.contains(&addr) {
+            dead_blocks.insert(addr, func.get_block(addr).map_or(0, |block| block.size));
             for succ in func.successors(addr) {
+                dead_edges.insert((addr, succ));
                 unreachable.reshape(ShapeEdit::DropPhiSources {
                     block: succ,
                     pred: addr,
@@ -946,6 +954,7 @@ fn apply_sccp_results(
         unreachable.reorder();
     }
     func.apply_edits(unreachable);
+    func.record_decided_dead(dead_blocks, dead_edges);
 
     changed
 }
