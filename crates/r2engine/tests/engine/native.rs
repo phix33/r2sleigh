@@ -6925,3 +6925,33 @@ fn a_call_under_a_guard_the_constants_decide_is_no_call_to_zero() {
         assert!(!rendered.contains(absent), "{absent}:\n{rendered}");
     }
 }
+
+/// `test rdi, rdi; je skip; call 0; skip: mov rsi, rsp; call callee`: the guard is a parameter, so
+/// the call to an unmapped target stays, and the stack pointer merging past it is still the frame.
+#[test]
+fn a_stack_pointer_merged_past_a_call_to_nowhere_is_the_frame_argument_it_is() {
+    let rendered = rendered(
+        &[
+            0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+            0x48, 0x85, 0xff, // 1004 test rdi, rdi
+            0x74, 0x05, // 1007 je 0x100e
+            0xe8, 0xf2, 0xef, 0xff, 0xff, // 1009 call 0
+            0xbf, 0x00, 0x10, 0x00, 0x00, // 100e mov edi, 0x1000
+            0x48, 0x89, 0xe6, // 1013 mov rsi, rsp
+            0x48, 0xc7, 0x04, 0x24, 0x00, 0x00, 0x00, 0x00, // 1016 mov qword [rsp], 0
+            0xe8, 0x0d, 0x00, 0x00, 0x00, // 101e call 0x1030
+            0x48, 0x83, 0xc4, 0x18, // 1023 add rsp, 0x18
+            0xc3, // 1027 ret
+            0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1028 padding
+            0x48, 0x8b, 0x06, // 1030 mov rax, [rsi]
+            0x48, 0x01, 0xf8, // 1033 add rax, rdi
+            0xc3, // 1036 ret
+        ],
+        "frame_past_a_missing_call",
+    );
+    assert!(!rendered.contains("r2sleigh refused"), "{rendered}");
+    assert!(
+        rendered.contains("fcn_1030(0x1000, (uint64_t)(frame + 16U))"),
+        "{rendered}"
+    );
+}
