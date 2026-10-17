@@ -43,7 +43,7 @@ structural decisions that close each gap.
 | Rendered C | the function's behaviour | equivalence on x86-64 and aarch64; a loop runs on the single-threaded path only, so `tests/gold/loop_carried.c` forces a second pass where a conditional write carries the value | present |
 | Cost | time to render | retired instructions natively with a counter (D38); wall time elsewhere, which **depends on host load** | present natively on request; emulated open |
 | Upstream pins | Ghidra, testbins, radare2 releases | **none**: the drift was found by hand (D39) | missing |
-| Gates themselves (`ci.yml`) | that each gate grades every change | `plan` runs coverage, timing, equivalence and the ratchets only for a PR based on master or labelled `full-ci`, so a stacked PR never ran them: #264 turned the coverage job red on master's push and nobody saw it; `tests/gold/atomics.c` and `loop_carried.c` (72 baseline records) sat in no equivalence shard until #293 | **missing**: stack tip and shard coverage unchecked (D43) |
+| Gates themselves (`ci.yml`) | that each gate grades every change | `plan` runs coverage, timing, equivalence and the ratchets only for a PR based on master or labelled `full-ci`, so a stacked PR never ran them: #264 turned the coverage job red on master's push and nobody saw it; `tests/gold/atomics.c` and `loop_carried.c` (72 baseline records) sat in no equivalence shard until #293 | shard coverage checked by `scripts/check_shards.py` (D43); stack tip labelled by `stack-tip.yml`, **unproven on GitHub** until the first merged stack |
 | Oracle breadth | how much of a spec the CPU oracle has seen | x86-64: 387 cases over 117 mnemonic stems of the 1,513 the spec defines (7.7%); AArch64: 489 recorded cases over 783 mnemonics; MIPS, RISC-V and ARM32 none. A resync (GP-6767) swapped the `SHR` arms and only the oracle's 385 cases saw it | **missing**: no ratchet on the fraction (D44) |
 | Provers (`tail_count`, `save_area`, the boundary scrub) | that an accepted proof is sound | adversarial tests written by hand; `quality-gate.sh` runs `cargo mutants` for `r2ssa/src/var.rs` alone. The variadic prover accepted a cursor read after its step (found by a hand-written test, not by any gate) | **missing**: no mutation target on a prover (D45) |
 
@@ -288,6 +288,21 @@ graded.** Owner: GT.
 - Gate: a PR that adds a gold source to a baseline and to no shard fails
   (the `atomics.c` miss of #292, reproduced as a test); a stacked tip runs
   coverage and timing (the #264 miss).
+- Tip labelling (`.github/workflows/stack-tip.yml`, `scripts/stack_tip.py`). A tip is
+  an open PR, not based on master, whose head no other open PR names as its base; a PR
+  whose base was merged and deleted is a tip too. The script plans from every open PR
+  (`gh pr list --limit 500`), so each run is idempotent and runs are serialised.
+  It labels tips lacking `full-ci` and unlabels non-tips carrying it, so a hand-made
+  `full-ci` on a mid-stack PR is removed on the next event; use `workflow_dispatch` of
+  `ci.yml` (which `plan` runs in full) for a one-off. PRs based on master are untouched.
+- Why `pull_request` with a same-repo guard, not `pull_request_target`: the workflow runs
+  the PR's own checkout, and only in-repo branches get a write token, so no fork code
+  ever runs with one. Fork PRs are not labelled until an in-repo event follows.
+- A label added with `GITHUB_TOKEN` starts no workflow, so `labeled` is not in `ci.yml`'s
+  trigger list (`ci-on-request.yml` already handles a human's label, and a second
+  listener would run the full tier twice). The workflow dispatches `ci.yml` on the new
+  tip's branch instead; later pushes see the label in `plan`. There is no ping-pong: the
+  label starts nothing, and a second run plans no change.
 
 **D44. The oracle's breadth is ratcheted.** Owner: VC, with GT.
 - `scripts/oracle_breadth.py` counts the instruction constructors (mnemonics) each
