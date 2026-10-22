@@ -314,6 +314,7 @@ struct slot_head {
     uint64_t guard_caller;       /* return address at a delegated entry */
     uint64_t insns;              /* instructions the call retired, where counted */
     int32_t counter_error;       /* errno of a counter that could not be armed */
+    volatile int32_t budget_signal; /* BUDGET_SIGNAL was the counter's own, not the function's */
     uint32_t trap_site;          /* arg 0 at a trap in the rendering: a residual's site */
     int32_t trap_depth;          /* TRAP_*: which activation of the function trapped */
     uint64_t out_at_capture;     /* bytes on fd 1 and fd 2 when the state was captured */
@@ -503,6 +504,7 @@ static void child_capture(int how)
 static int g_counter = -1;
 static uint64_t g_counter_budget;
 static int g_counter_fake;
+static volatile sig_atomic_t g_budget_raised;
 static uint64_t g_counter_fake_count;
 
 /* A test's stand-in for the counter: the call retires `count`, whatever it does. */
@@ -561,8 +563,20 @@ static void counter_settle(void)
         return;
     }
     g_child_slot->insns = count;
-    if (count > g_counter_budget)
+    if (count > g_counter_budget) {
+        g_budget_raised = 1;
         raise(BUDGET_SIGNAL);
+    }
+}
+
+/* Only the counter's overflow (a positive si_code on its descriptor) or settle's own raise is
+ * the budget; a SIGPWR the function raised or was sent ends the run as an ordinary signal. */
+static void child_budget(int sig, siginfo_t *info, void *context)
+{
+    (void)context;
+    if (g_budget_raised || (info->si_code > 0 && g_counter >= 0 && info->si_fd == g_counter))
+        g_child_slot->budget_signal = 1;
+    raise(sig);  /* SA_RESETHAND restored the default action, which runs on return */
 }
 
 static void child_exit_hook(void)
@@ -727,7 +741,12 @@ static void child_run(struct run_state *run, const struct job_vector *vec, uint6
         sigaction(faults[i], &sa, NULL);
     signal(SIGALRM, SIG_DFL);
     signal(SIGPIPE, SIG_DFL);
-    signal(BUDGET_SIGNAL, SIG_DFL);
+    struct sigaction on_budget;
+    memset(&on_budget, 0, sizeof on_budget);
+    on_budget.sa_sigaction = child_budget;
+    on_budget.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigemptyset(&on_budget.sa_mask);
+    sigaction(BUDGET_SIGNAL, &on_budget, NULL);
     /* The signal mask is inherited, and a blocked SIGALRM arms a timer that never fires. */
     sigset_t none;
     sigemptyset(&none);
@@ -850,7 +869,8 @@ static void run_one(struct run_state *run, const struct job_vector *vec, uint64_
     }
     if (WIFSIGNALED(status)) {
         int sig = WTERMSIG(status);
-        if (sig == BUDGET_SIGNAL && g_head.measure == MEASURE_INSTRUCTIONS)
+        if (sig == BUDGET_SIGNAL && g_head.measure == MEASURE_INSTRUCTIONS
+            && run->slot->budget_signal)
             run->outcome = OUT_BUDGET;
         else if (sig == SIGALRM)
             run->outcome = g_head.measure == MEASURE_TIME ? OUT_BUDGET : OUT_HANG;
