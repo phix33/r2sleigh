@@ -7169,3 +7169,137 @@ fn an_exit_that_only_the_loop_reaches_is_written_in_the_loop_with_what_it_goes_o
 }"#,
     );
 }
+
+/// Code whose second function, at `callee`, the first calls and no summary reads, so each call
+/// declares the callee from its own arguments and result.
+struct CallsAFunction {
+    code: &'static [u8],
+    callee: u64,
+    /// The stub of the import the callee ends by jumping to, and its name.
+    import: (u64, &'static str),
+}
+
+impl r2engine::body::Program for CallsAFunction {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+        let slice = self.code.get(offset..)?;
+        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        code_region(self.code.len(), vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        vaddr == BASE || vaddr == self.callee || self.import_at(vaddr).is_some()
+    }
+}
+
+impl Program for CallsAFunction {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.import_at(vaddr)
+            .or_else(|| (vaddr == BASE).then(|| "scan".to_owned()))
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == self.import.0).then(|| self.import.1.to_owned())
+    }
+}
+
+/// Two calls of `release` disagree about a result; the layouts write them in opposite orders, the
+/// declaration and the call left as a residual must not differ.
+#[test]
+fn a_callee_is_declared_by_its_first_call_in_address_order_whichever_block_is_written_first() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    // The higher exit is written in the loop in the first, after it in the second.
+    for (code, callee, higher) in [
+        (RELEASE_AT_BOTH_EXITS, 0x1030, 0x1015),
+        (RELEASE_AFTER_A_SECOND_WAY_IN, 0x1034, 0x101a),
+    ] {
+        let program = CallsAFunction {
+            code,
+            callee,
+            import: (callee + 30, "free"),
+        };
+        let response = decompile(&target, &program, BASE).expect("decompile");
+        let text = response.output.text();
+        let declaration = format!("uint64_t fcn_{callee:x}(uint64_t, uint64_t);");
+        assert!(text.contains(&declaration), "{declaration}:\n{text}");
+        let disagrees = "another call disagrees with its declaration";
+        assert_eq!(text.matches(disagrees).count(), 1, "{text}");
+        let gap = format!("CallNotRendered at {higher:#x}:");
+        assert!(text.contains(&gap), "{gap}:\n{text}");
+    }
+}
+
+/// `while (*p) { if (*p == c) return release(p, c); p++; } release(p, c); return 0;`, the lower exit
+/// returning what the call leaves in `rax` and the higher overwriting it.
+const RELEASE_AT_BOTH_EXITS: &[u8] = &[
+    0x80, 0x3f, 0x00, // 1000 cmp byte [rdi], 0
+    0x74, 0x10, // 1003 je 0x1015
+    0x40, 0x3a, 0x37, // 1005 cmp sil, [rdi]
+    0x74, 0x05, // 1008 je 0x100f
+    0x48, 0xff, 0xc7, // 100a inc rdi
+    0xeb, 0xf1, // 100d jmp 0x1000
+    0xe8, 0x1c, 0x00, 0x00, 0x00, // 100f call 0x1030
+    0xc3, // 1014 ret
+    0xe8, 0x16, 0x00, 0x00, 0x00, // 1015 call 0x1030
+    0xb8, 0x00, 0x00, 0x00, 0x00, // 101a mov eax, 0
+    0xc3, // 101f ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, // 1020 padding
+    0x48, 0x85, 0xff, // +0 release: test rdi, rdi
+    0x74, 0x13, // +3 je +24
+    0x48, 0x85, 0xf6, // +5 test rsi, rsi
+    0x74, 0x0e, // +8 je +24
+    0x48, 0x8b, 0x87, 0x78, 0x04, 0x00, 0x00, // +10 mov rax, [rdi + 0x478]
+    0x48, 0x85, 0xc0, // +17 test rax, rax
+    0x74, 0x03, // +20 je +25
+    0xff, 0xe0, // +22 jmp rax
+    0xc3, // +24 ret
+    0x48, 0x89, 0xf7, // +25 mov rdi, rsi
+    0xeb, 0x00, // +28 jmp +30
+    0xc3, // +30 free's stub
+];
+
+/// The same search entered through a test of `rdi` that also reaches the higher exit, so that exit
+/// has a second way in and the lower one is the exit written in the loop.
+const RELEASE_AFTER_A_SECOND_WAY_IN: &[u8] = &[
+    0x48, 0x85, 0xff, // 1000 test rdi, rdi
+    0x74, 0x15, // 1003 je 0x101a
+    0x80, 0x3f, 0x00, // 1005 cmp byte [rdi], 0
+    0x74, 0x10, // 1008 je 0x101a
+    0x40, 0x3a, 0x37, // 100a cmp sil, [rdi]
+    0x74, 0x05, // 100d je 0x1014
+    0x48, 0xff, 0xc7, // 100f inc rdi
+    0xeb, 0xf1, // 1012 jmp 0x1005
+    0xe8, 0x1b, 0x00, 0x00, 0x00, // 1014 call 0x1034
+    0xc3, // 1019 ret
+    0xe8, 0x15, 0x00, 0x00, 0x00, // 101a call 0x1034
+    0xb8, 0x00, 0x00, 0x00, 0x00, // 101f mov eax, 0
+    0xc3, // 1024 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, // 1025 padding
+    0x48, 0x85, 0xff, // +0 release: test rdi, rdi
+    0x74, 0x13, // +3 je +24
+    0x48, 0x85, 0xf6, // +5 test rsi, rsi
+    0x74, 0x0e, // +8 je +24
+    0x48, 0x8b, 0x87, 0x78, 0x04, 0x00, 0x00, // +10 mov rax, [rdi + 0x478]
+    0x48, 0x85, 0xc0, // +17 test rax, rax
+    0x74, 0x03, // +20 je +25
+    0xff, 0xe0, // +22 jmp rax
+    0xc3, // +24 ret
+    0x48, 0x89, 0xf7, // +25 mov rdi, rsi
+    0xeb, 0x00, // +28 jmp +30
+    0xc3, // +30 free's stub
+];

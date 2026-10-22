@@ -155,6 +155,29 @@ its array.
 
 Cost: one pass over the frame objects, `O(objects)`.
 
+## D4's callee declarations
+
+C declares a callee once, so every call to it in a function states one prototype. That prototype is
+a fact of the function, not of the order its blocks are written in: `Values::decide_prototypes`
+takes, per named callee, the declaration of its first call in address order (block, then place in
+the block) among the calls whose plan states one, `O(calls log callees)`, before any block is written.
+A call that states another is `DeclarationDisagrees` wherever it is written, and the declarations
+the function emits are those of the calls written. A declaration is a function of the call's plan
+alone (`Values::declaration`): its argument classes, its declared prototype where there is one, its
+result class and `variadic`/`noreturn`.
+
+Before this the first call rendered won, so the placement of a loop's exits (SD, 2026-10-22) changed
+which call that was. pumasim `png_decompress_chunk` (`0x003b6b20`) calls `png_free` seven times, two
+of them with `rax` overwritten after the call and five not; libpng's `png_free` returns nothing and no
+summary reads its body (it jumps through a loaded pointer), so each call declares from its own result. Written in
+address order the first call overwrites `rax`, so `void png_free` won and 23 sites were residual;
+with an exit written in the loop a call that does not overwrite it was first (`uint64_t png_free`,
+20 sites, 25 obligations moved from residual to rendered with no new evidence). The invariant is the
+first outcome, whichever block is written first, and the engine test
+`a_callee_is_declared_by_its_first_call_in_address_order_whichever_block_is_written_first` holds it
+under two layouts. A callee's result is a program fact the call sites should not each spell (ROADMAP
+D58).
+
 ## The proof line
 
 The proof line states what the rendering did and did not show. "Nothing was
