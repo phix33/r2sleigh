@@ -631,9 +631,9 @@ reason = "a branch to a linkage stub r2s names by the slot it reads; radare2 lea
 command = "pd"
 binaries = "*"
 r2 = '^(?!.*_\$s)'
-r2s = '(sym|obj|reloc)\.(imp\.)?_?\$s|sym\._\$s'
+r2s = '(sym|obj|reloc)\.(imp\.)?_?_s(s?\d|S)'
 verdict = "unfilled"
-reason = "Swift names: radare2 demangles them, r2s spells them mangled until LP3's demangler"
+reason = "Swift names: radare2 demangles them, r2s spells them mangled (`$s` is `_s` once the flag filter has run) until LP3's demangler"
 
 [[judged]]
 command = "pd"
