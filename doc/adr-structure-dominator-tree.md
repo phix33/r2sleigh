@@ -101,7 +101,7 @@ per round; a round that decides nothing ends the loop.
 
 - S0: the checker over the old tree; `R2DEC_CONTROL_CERTIFICATE` prints one `control-certificate` line per function (and on the refusal-evidence channel).
 - S1: placement in `structure/place.rs`, the certificate in `structure/certify.rs`; the region builders, domain proofs, linearizer, structuring deadline and every `safety_reason` deleted; noreturn prototypes spelled; irreducible cycles keep a complete inventory.
-- S2, in part: jump-to-next and unreferenced-label elision, `break`/`continue`, while and do-while rotation, switch-tail absorption, bounded tail duplication (`structure/shape.rs`) and short-circuit `if` (`structure/rewrite.rs`), each gated by the checker.
+- S2, in part: jump-to-next and unreferenced-label elision, `break`/`continue` to the innermost loop header and the first block after it, and the checker. The rest of the original S2 was in the legacy cleanup pass `structure/rewrite.rs`, deleted with the legacy decompiler in 51b9d6a9 (2026-10-10) and not replaced: while and do-while rotation (the certificate supports both, the writer emits only `for(;;)`), switch-tail absorption, bounded tail duplication of returns, short-circuit `if`, and return into arms. 2026-10-22 measurement on DecBench (`tests/decbench/RESULT-2026-10-17.md`): this is why 40.2% of r2s's scored functions end in a goto.
 - S3: DecBench read 680 of 860, every mean above the previous run.
 
 ## Left
@@ -109,3 +109,24 @@ per round; a round that decides nothing ends the loop.
 - Labels over functions the old structurer handled exceed what it rendered. Exit: no more labels than before over that set.
 - Condition-chain rewrites (`while (p₁ || p₂)`) and node splitting of irreducible entries. `ControlBdd` no longer exists, so chains need a BDD identity check before they land. Exit: both gated by the checker.
 - Whether lexical ancestry equals dominance retires `region_does_not_dominate_occurrence`. Exit: placement census measured (post-dominance hoisting and `goto` into scope may move the refusal rather than remove it).
+
+## 2026-10-22: what the gotos cost and what recovers it
+
+A classification of all 1,054 DecBench goto functions (8,353 gotos; 150 bodies read by hand against the source and
+the other three tools, a parser classifier over all of them, GED scored with DecBench's own code) found:
+
+- A goto is invisible to GED (labels and gotos add no block). GED scores the block graph. Removing the 40.8% of gotos
+  that target a terminal block cuts the goto share from 38.4% to 24.0% and gains one perfect function. The loss is
+  the CFG features a goto marks: a missing `&&`/`||` (5 per condition), a shared return where the source has several
+  (5 for two returns), `while` against `for(;;)` rotation (3 to 5), and the latch's phi copies (3).
+- Rule 8 (never invent control) is the cause of none of the classes but one (a loop exit into a shared open tail,
+  4% of gotos, no goto-free spelling). Dominators, loop headers, phi inputs, edge copies and selector constants
+  already give the facts every other recovery needs.
+- Ranked by measured gain: (1) return into arms at a fallthrough join when the returned value is a phi fed by distinct
+  edge copies (+15 perfect with 0 lost; +48 net unguarded, 7 lost); (2) bounded duplication of a terminal block at a
+  goto site (-2,590 gotos, +16 with (1)); (3) condition chains as `&&`/`||` by BDD identity of the chain's exit
+  function (ceiling 29); (4) inlining a sole-predecessor exit at its edge when its dominator subtree is closed
+  (-371 gotos, GED-neutral); (5) hoisting a rotated loop's latch copies (ceiling +17). The join classes (48% of gotos)
+  are not worth direct work: another tool is perfect on 3 of 567.
+- Replication into fallthrough arms conflicts with section 5 (fewest labels, then fewest duplicated blocks) unless it
+  is guarded by the phi-of-distinct-edge-copies condition; amend section 5 or ship only the guarded form.
