@@ -7095,6 +7095,43 @@ fn a_value_every_edge_carries_is_one_return() {
     assert_eq!(statements_returning(&text), 1, "{text}");
 }
 
+/// `edi == 0 && esi == 0 ? 1 : 0` as a compiler joins it: both tests jump to the `xor`, the `1`
+/// arm jumps over it, and one `ret` follows.
+const CONJUNCTION_JOINED_BY_A_JUMP: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x75, 0x0b, // 1002 jne 0x100f
+    0x85, 0xf6, // 1004 test esi, esi
+    0x75, 0x07, // 1006 jne 0x100f
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1008 mov eax, 1
+    0xeb, 0x02, // 100d jmp 0x1011
+    0x31, 0xc0, // 100f xor eax, eax
+    0xc3, // 1011 ret
+];
+
+#[test]
+fn a_conjunction_whose_arms_join_at_one_return_returns_in_each_arm() {
+    // The chain stage makes one test of the two, then the arms that fall to the `ret` each hold it.
+    let text = rendered(CONJUNCTION_JOINED_BY_A_JUMP, "both_zero");
+    let tests = text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("if "));
+    assert_eq!(tests.clone().count(), 1, "{text}");
+    assert!(tests.clone().all(|line| line.contains(" && ")), "{text}");
+    assert_eq!(statements_returning(&text), 2, "{text}");
+    assert!(!text.contains("goto"), "{text}");
+    run_rendered(
+        "both_zero",
+        &[&text],
+        r#"int main(void) {
+    if (both_zero(0, 0) != 1) return 1;
+    if (both_zero(1, 0) != 0) return 2;
+    if (both_zero(0, 1) != 0) return 3;
+    if (both_zero(1, 1) != 0) return 4;
+    return 0;
+}"#,
+    );
+}
+
 /// How many `return` statements a rendering writes.
 fn statements_returning(text: &str) -> usize {
     (text.lines())
