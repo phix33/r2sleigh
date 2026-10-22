@@ -606,6 +606,15 @@ reason = "a number is named only where the engine claims it as an address; pd cl
 [[judged]]
 command = "pd"
 binaries = "*"
+corpus = "mach0"
+r2 = 'adrp x\d+, sym\.__mh_execute_header$'
+r2s = 'adrp x\d+, loc\.__mh_execute_header$'
+verdict = "r2s-right"
+reason = "radare2 6.2.4 types every Mach-O symbol FUNC and flags the header `sym.`, though no instruction begins there; its master types them by section (b5df79912a), so a symbol in none is NOTYPE and flagged `loc.`, as r2s flags it (this row flips when the pin moves)"
+
+[[judged]]
+command = "pd"
+binaries = "*"
 r2 = '((lea|mov) r\w+, (qword )?\[?|adrp x\d+, )(sym|str|section)\.'
 r2s = '((lea|mov) r\w+, (qword )?\[?|adrp x\d+, )(reloc|obj)\.'
 verdict = "deliberate"
