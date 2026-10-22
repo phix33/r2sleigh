@@ -131,6 +131,49 @@ fn an_entry_that_is_no_code_states_no_targets() {
     assert_eq!(called(&lines, CALL), []);
 }
 
+/// Two guarded calls over one table: `call [rdi*8 + 0x1050]` takes its three entries as they are, and
+/// `mov rax, [rsi*8 + 0x1050]; add rax, 6; call rax` the first two moved on six bytes; callees at 0x1024, 0x102a, 0x1030.
+fn overlapping() -> Vec<u8> {
+    let mut code = vec![
+        0x83, 0xff, 0x02, // cmp edi, 2
+        0x77, 0x09, // ja 0x100e
+        0x89, 0xff, // mov edi, edi
+        0xff, 0x14, 0xfd, 0x50, 0x10, 0x00, 0x00, // call [rdi*8 + 0x1050]
+        0x83, 0xfe, 0x01, // cmp esi, 1
+        0x77, 0x10, // ja 0x1023
+        0x89, 0xf6, // mov esi, esi
+        0x48, 0x8b, 0x04, 0xf5, 0x50, 0x10, 0x00, 0x00, // mov rax, [rsi*8 + 0x1050]
+        0x48, 0x83, 0xc0, 0x06, // add rax, 6
+        0xff, 0xd0, // call rax
+        0xc3, // ret
+    ];
+    for value in [10u8, 20, 30] {
+        code.extend_from_slice(&[0xb8, value, 0, 0, 0, 0xc3]);
+    }
+    code.resize(0x50, 0);
+    for entry in [BASE + 0x24, BASE + 0x2a, BASE + 0x30] {
+        code.extend_from_slice(&entry.to_le_bytes());
+    }
+    code
+}
+
+#[test]
+fn two_calls_reading_one_table_through_different_arithmetic_each_state_their_own_targets() {
+    let code = leaked(overlapping());
+    let literal =
+        Literal::of_code(code, &[("dispatch", BASE, 0x24)]).data_mapped_after(BASE + 0x50);
+    let lines = listed(literal);
+    let callees = [BASE + 0x24, BASE + 0x2a, BASE + 0x30];
+    let solved = |targets: &[u64]| {
+        targets
+            .iter()
+            .map(|target| (*target, Basis::Solved))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(called(&lines, BASE + 7), solved(&callees));
+    assert_eq!(called(&lines, BASE + 0x21), solved(&callees[1..]));
+}
+
 /// clang -O1's `table_dispatch` on AArch64: `x20` counts 0 to 2 and `blr x8` calls `[x21 + x20 * 8]`.
 /// The callees (`add`, `eor` and `mul` over `x0`, `x1`) begin at `BASE + 0x48`, the table at `BASE + 0x60`.
 fn loop_code() -> Vec<u8> {

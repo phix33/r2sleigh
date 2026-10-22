@@ -1876,17 +1876,25 @@ impl<'a> Native<'a> {
             instruction: read.instruction?,
             stated,
             cases,
-            table: r2source::SourceCodePointerTable::new(
-                at,
-                read.size,
-                targets.clone(),
-                targets
-                    .iter()
-                    .map(|target| self.program.name_at(*target).map(Into::into))
-                    .collect::<Vec<_>>(),
-            ),
+            table: self.captured(read, &targets)?,
             targets,
         })
+    }
+
+    /// The table as the snapshot carries it: where it lies, the dispatch that reads it, each target and its name.
+    fn captured(
+        &self,
+        read: &r2ssa::indirect::DispatchTableRead,
+        targets: &[u64],
+    ) -> Option<r2source::SourceCodePointerTable> {
+        let name = |target: &u64| self.program.name_at(*target).map(Into::into);
+        Some(r2source::SourceCodePointerTable::new(
+            read.address,
+            read.size,
+            read.instruction?,
+            targets,
+            targets.iter().map(name).collect::<Vec<_>>(),
+        ))
     }
 
     /// Whether an instruction lives at an address, which is what makes a table

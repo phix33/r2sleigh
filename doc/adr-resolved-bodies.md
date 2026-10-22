@@ -605,8 +605,9 @@ A call is not a branch: its targets are callees, not successors, so a fetched ca
 `r2ssa::indirect::dispatch_table_reads` for the reads that are calls. A read is a table of the container
 only where `pointer_table` accepts it (inside one region and the file, read-only or loader-stated, every
 entry an instruction), and the root is then sealed again with the fetched tables as `code_pointer_tables`.
-r2ssa states the set on the certificate (`CallsiteCertificate::table_targets`) only where every entry the
-certified range selects is a recorded code pointer: complete or absent. A bottom-tested loop's counter is
+r2ssa states the set on the certificate (`CallsiteCertificate::table_targets`) only from the table captured
+for that very read (`SourceCodePointerTable::instruction`, with its address, entry size and count matching
+the read): two reads of overlapping slots, at other widths or through other arithmetic, each keep their own. A bottom-tested loop's counter is
 no interval to the branch assumptions, which stop at the header merge, so a selector that is a certified
 induction (`StructuredDataflowFacts::induction_range`: a constant start and step, an exact run count, no wrap)
 takes the values its runs give. r2types projects the set to `CalleeResolutionFacts::table_targets`, r2dec

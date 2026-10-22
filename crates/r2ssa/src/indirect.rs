@@ -485,7 +485,7 @@ fn induced_reach(
     ))
 }
 
-/// The functions a call through a table can reach: complete (every selected entry recorded) or absent,
+/// The functions a call through a table can reach: those of the table captured for this very read, or absent,
 /// sorted and distinct (doc/adr-resolved-bodies.md, "Calls through a table").
 pub(crate) fn call_table_targets(
     graph: &SsaGraph,
@@ -497,12 +497,26 @@ pub(crate) fn call_table_targets(
     let op = graph.op(inst)?;
     let induction = |phi| structured.induction_range(phi, values);
     let read = dispatch_table_read(graph, values, &induction, inst, op).filter(|read| read.call)?;
-    let mut targets = std::collections::BTreeSet::new();
-    // Ends at the first entry nothing recorded, so it is bounded by the recorded entries.
-    for k in 0..read.count {
-        targets.insert(context.code_pointer_entry(read.entry_address(k)?)?);
+    // The table fetched for this very read: slots another read covers are not its entries.
+    let table = context.code_pointer_table_at(read.instruction?)?;
+    let same = table.address() == read.address
+        && table.entry_size() == read.size
+        && u64::try_from(table.targets().len()) == Ok(read.count);
+    if !same {
+        r2il::refusal_evidence!(
+            "dispatch-table",
+            "{:#x}: the table captured at the instruction is not the one this read walks",
+            read.address
+        );
+        return None;
     }
-    Some(targets.into_iter().collect())
+    let targets = table.targets().iter().copied();
+    Some(
+        targets
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+    )
 }
 
 /// What each dispatching block switches on.

@@ -507,6 +507,9 @@ pub struct SourceMachineContext {
     /// file states, so what it becomes is a fact about the program rather
     /// than bytes a reader could fetch.
     code_pointer_entries: BTreeMap<u64, u64>,
+    /// The tables the capture fetched, by the indirect transfer that reads each: what a dispatch
+    /// states is what its own table gave it, however another table covers the same slots.
+    code_pointer_tables: BTreeMap<u64, r2source::SourceCodePointerTable>,
     call_site_interfaces: BTreeMap<SourceCallSiteIdentity, SourceCallSiteInterface>,
     /// Literal bytes captured by the same immutable source transaction as the
     /// callsite interfaces. Unlike display strings, these are semantic
@@ -887,6 +890,7 @@ impl SourceMachineContext {
             frame_saves: Vec::new(),
             accepted_premises: BTreeSet::new(),
             code_pointer_entries: BTreeMap::new(),
+            code_pointer_tables: BTreeMap::new(),
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
             read_only: BTreeMap::new(),
@@ -1257,6 +1261,21 @@ impl SourceMachineContext {
 
     pub(crate) fn set_code_pointer_entries(&mut self, entries: BTreeMap<u64, u64>) {
         self.code_pointer_entries = entries;
+    }
+
+    pub(crate) fn set_code_pointer_tables(
+        &mut self,
+        tables: BTreeMap<u64, r2source::SourceCodePointerTable>,
+    ) {
+        self.code_pointer_tables = tables;
+    }
+
+    /// The table the capture fetched for the indirect transfer at this instruction.
+    pub fn code_pointer_table_at(
+        &self,
+        instruction: u64,
+    ) -> Option<&r2source::SourceCodePointerTable> {
+        self.code_pointer_tables.get(&instruction)
     }
 
     /// The function the code pointer slot at this address names.

@@ -2729,7 +2729,9 @@ impl TrustedSsaArtifact {
         // before the facts are collected: a load of such a slot is proven
         // from this, and the collection is what proves it.
         let mut code_pointer_entries = BTreeMap::new();
+        let mut code_pointer_tables = BTreeMap::new();
         for table in source.image().code_pointer_tables() {
+            code_pointer_tables.insert(table.instruction(), table.clone());
             let entry_size = u64::from(table.entry_size());
             for (index, target) in table.targets().iter().enumerate() {
                 let Some(address) = u64::try_from(index)
@@ -2746,6 +2748,7 @@ impl TrustedSsaArtifact {
             }
         }
         machine_context.set_code_pointer_entries(code_pointer_entries);
+        machine_context.set_code_pointer_tables(code_pointer_tables);
         r2il::refusal_evidence!(
             "snapshot-literals",
             "the decoded image delivers {} string literals",
