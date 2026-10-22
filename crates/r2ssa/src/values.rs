@@ -198,8 +198,9 @@ fn solve_counted(
     // What a branch proves about a value it compares holds of every value
     // with the same bits: the narrowing is keyed by copy class, so a copy or
     // a lane read of the compared value read further on is narrowed too.
-    let class = crate::view::class_values(graph, prep.map(|facts| &facts.views));
+    let mut class = crate::view::class_values(graph, prep.map(|facts| &facts.views));
     let reloads = crate::reload::reloads(graph, prep);
+    crate::reload::unite_classes(&mut class, &reloads);
     let same = SameBits {
         class: &class,
         reloads: &reloads,

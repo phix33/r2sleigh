@@ -1702,6 +1702,14 @@ fn guarded_load() -> Vec<R2ILOp> {
 
 /// `cmp [sp+0x10], 0x11; ja out` then `mov eax, [sp+0x10]`: the reload is the compared bits unless `between` runs first.
 fn reloaded_index_range(between: Vec<R2ILOp>) -> Option<(u64, u64)> {
+    reloaded_range_with(&|ops| ops, between)
+}
+
+/// [`reloaded_index_range`] over a guarded block that `rearranged` first changes.
+fn reloaded_range_with(
+    rearranged: &dyn Fn(Vec<R2ILOp>) -> Vec<R2ILOp>,
+    between: Vec<R2ILOp>,
+) -> Option<(u64, u64)> {
     let (arch, interface) = custom_frame();
     let slot = |temp| R2ILOp::IntAdd {
         dst: make_unique(temp, 8),
@@ -1730,7 +1738,7 @@ fn reloaded_index_range(between: Vec<R2ILOp>) -> Option<(u64, u64)> {
         R2ILBlock {
             addr: 0x3600,
             size: 0x20,
-            ops: guarded_load(),
+            ops: rearranged(guarded_load()),
             ..Default::default()
         },
         R2ILBlock {
@@ -1789,6 +1797,31 @@ fn a_reload_of_an_unwritten_slot_is_bounded_by_the_guard_on_the_first_load() {
     assert_eq!(reloaded_index_range(vec![]), Some((0, 0x11)));
     // A store to another slot of the frame leaves the slot as it was.
     assert_eq!(reloaded_index_range(store_at_slot(0x14)), Some((0, 0x11)));
+}
+
+/// The slot read again, into a temporary no one compares, at `at` in the guarded block's operations.
+fn reread_at(at: usize) -> impl Fn(Vec<R2ILOp>) -> Vec<R2ILOp> {
+    move |mut ops| {
+        ops.insert(
+            at,
+            R2ILOp::Load {
+                dst: make_unique(0x38, 4),
+                space: SpaceId::Ram,
+                addr: make_unique(0x30, 8),
+            },
+        );
+        ops
+    }
+}
+
+#[test]
+fn a_guard_on_any_load_of_the_slot_bounds_the_reload_after_it() {
+    // Three reads of one slot: the guard is on the second when the first is ahead of it, and on the first when the
+    // second is ahead of the compare. Either way the third, after the branch, is the compared bits.
+    for at in [3, 4] {
+        let range = reloaded_range_with(&reread_at(at), vec![]);
+        assert_eq!(range, Some((0, 0x11)), "the other read at operation {at}");
+    }
 }
 
 #[test]

@@ -171,6 +171,38 @@ pub(crate) fn reloads(
     rereads.found
 }
 
+/// Put each reload in the copy class of the load it rereads: the loads of one slot are one value, so a
+/// guard on any of them bounds all of them. `O(V)` over the class table, by union-find on its entries.
+pub(crate) fn unite_classes(class: &mut [ValueId], reloads: &IdMap<ValueId, ValueId>) {
+    fn find(parent: &mut [ValueId], mut at: ValueId) -> ValueId {
+        while parent[at.0 as usize] != at {
+            let up = parent[parent[at.0 as usize].0 as usize];
+            parent[at.0 as usize] = up;
+            at = up;
+        }
+        at
+    }
+    // Every representative is its own parent, so a chain ends.
+    let mut parent = class.to_vec();
+    for rep in class.iter() {
+        if let Some(own) = parent.get_mut(rep.0 as usize) {
+            *own = *rep;
+        }
+    }
+    for (reload, first) in reloads.iter() {
+        let (Some(a), Some(b)) = (class.get(reload.0 as usize), class.get(first.0 as usize)) else {
+            continue;
+        };
+        let (a, b) = (find(&mut parent, *a), find(&mut parent, *b));
+        if a != b {
+            parent[a.max(b).0 as usize] = a.min(b);
+        }
+    }
+    for entry in class.iter_mut() {
+        *entry = find(&mut parent, *entry);
+    }
+}
+
 impl Rereads<'_> {
     fn step(&mut self, op: &SSAOp<ValueId>, output: Option<ValueId>, held: &mut Held) {
         let (graph, prep) = (self.graph, self.prep);
