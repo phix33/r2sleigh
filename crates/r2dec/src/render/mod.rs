@@ -120,7 +120,10 @@ pub fn render(
             crate::structure::condition::Marks::copy_of(&mut marks, id)
         })
     };
-    let mut body = crate::structure::shape::shape(&mut fresh, body);
+    let body = crate::structure::shape::shape(&mut fresh, body);
+    let mut body = stage("loop rotation", body, &mut marks, &certified, |body, _| {
+        crate::structure::rotate::rotate(body) != 0
+    });
     let BlockMarks { blocks, addresses } = marks;
     let selections = select(&c, &mut body, &|id| {
         blocks.get(id.index() as usize).copied()

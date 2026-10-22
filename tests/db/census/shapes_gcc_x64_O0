@@ -812,32 +812,24 @@ uint64_t shape_struct_array(uint32_t arg0, uint32_t arg1)
     uint32_t tmp_401a90_18_1;
     _Alignas(16) uint8_t frame[88];
 
-    /* r2dec proof: no individual construct is marked; 85 source obligations: 73 rendered, 7 elided, 0 refused, 5 compiler-inserted (assuming ub-free); 20 statements rendered; the result's second register is open: no call read decides it */
+    /* r2dec proof: no individual construct is marked; 85 source obligations: 73 rendered, 7 elided, 0 refused, 5 compiler-inserted (assuming ub-free); 16 statements rendered; the result's second register is open: no call read decides it */
     {
         rdi_1 = (uint64_t)(uint32_t)arg0;
         rsi_1 = (uint64_t)(uint32_t)arg1;
         stack_m104_1 = 0;
-        for (; ; ) {
-            if ((uint8_t)((uint32_t)stack_m104_1 <= (uint32_t)7U)) {
-                r2sleigh_store_u32((void*)((uint64_t)(frame + 0U) + (uint64_t)((uint64_t)(uint32_t)stack_m104_1 * (uint64_t)2U) * 4U), (uint32_t)((uint32_t)((uint64_t)rdi_1 >> 0U) + (uint32_t)((uint64_t)((uint64_t)(int32_t)stack_m104_1 * (uint64_t)0xffffffff9e3779b1U) >> 0U)));
-                r2sleigh_store_u32((void*)((uint64_t)(frame + 0U) + (uint64_t)((uint64_t)((uint64_t)(uint32_t)stack_m104_1 * (uint64_t)2U) + (uint64_t)1U) * 4U), (uint32_t)((uint32_t)((uint64_t)rsi_1 >> 0U) ^ (uint32_t)((uint64_t)((uint64_t)(int32_t)stack_m104_1 * (uint64_t)0xffffffff9e3779b9U) >> 0U)));
-                stack_m104_1 = (uint32_t)((uint32_t)stack_m104_1 + (uint32_t)1U);
-            } else {
-                break;
-            }
+        while ((uint8_t)((uint32_t)stack_m104_1 <= (uint32_t)7U)) {
+            r2sleigh_store_u32((void*)((uint64_t)(frame + 0U) + (uint64_t)((uint64_t)(uint32_t)stack_m104_1 * (uint64_t)2U) * 4U), (uint32_t)((uint32_t)((uint64_t)rdi_1 >> 0U) + (uint32_t)((uint64_t)((uint64_t)(int32_t)stack_m104_1 * (uint64_t)0xffffffff9e3779b1U) >> 0U)));
+            r2sleigh_store_u32((void*)((uint64_t)(frame + 0U) + (uint64_t)((uint64_t)((uint64_t)(uint32_t)stack_m104_1 * (uint64_t)2U) + (uint64_t)1U) * 4U), (uint32_t)((uint32_t)((uint64_t)rsi_1 >> 0U) ^ (uint32_t)((uint64_t)((uint64_t)(int32_t)stack_m104_1 * (uint64_t)0xffffffff9e3779b9U) >> 0U)));
+            stack_m104_1 = (uint32_t)((uint32_t)stack_m104_1 + (uint32_t)1U);
         }
         {
             stack_m100_1 = 0;
             stack_m96_1 = 0;
-            for (; ; ) {
-                if ((uint8_t)((uint32_t)stack_m100_1 <= (uint32_t)7U)) {
-                    tmp_401a78_18_1 = r2sleigh_load_u32((void*)((uint64_t)(frame + 0U) + (uint64_t)((uint64_t)(uint32_t)stack_m100_1 * (uint64_t)2U) * 4U));
-                    tmp_401a90_18_1 = r2sleigh_load_u32((void*)((uint64_t)(frame + 0U) + (uint64_t)((uint64_t)((uint64_t)(uint32_t)((uint32_t)((uint32_t)stack_m100_1 + (uint32_t)3U) & (uint32_t)7U) * (uint64_t)2U) + (uint64_t)1U) * 4U));
-                    stack_m100_1 = (uint32_t)((uint32_t)stack_m100_1 + (uint32_t)1U);
-                    stack_m96_1 = (uint64_t)((uint64_t)((uint64_t)(uint32_t)16U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)(uint32_t)tmp_401a90_18_1 << (uint64_t)(uint32_t)16U)) ^ (uint64_t)((uint64_t)(uint32_t)tmp_401a78_18_1 + (uint64_t)((uint64_t)stack_m96_1 * (uint64_t)0x100000001b3U)));
-                } else {
-                    break;
-                }
+            while ((uint8_t)((uint32_t)stack_m100_1 <= (uint32_t)7U)) {
+                tmp_401a78_18_1 = r2sleigh_load_u32((void*)((uint64_t)(frame + 0U) + (uint64_t)((uint64_t)(uint32_t)stack_m100_1 * (uint64_t)2U) * 4U));
+                tmp_401a90_18_1 = r2sleigh_load_u32((void*)((uint64_t)(frame + 0U) + (uint64_t)((uint64_t)((uint64_t)(uint32_t)((uint32_t)((uint32_t)stack_m100_1 + (uint32_t)3U) & (uint32_t)7U) * (uint64_t)2U) + (uint64_t)1U) * 4U));
+                stack_m100_1 = (uint32_t)((uint32_t)stack_m100_1 + (uint32_t)1U);
+                stack_m96_1 = (uint64_t)((uint64_t)((uint64_t)(uint32_t)16U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)(uint32_t)tmp_401a90_18_1 << (uint64_t)(uint32_t)16U)) ^ (uint64_t)((uint64_t)(uint32_t)tmp_401a78_18_1 + (uint64_t)((uint64_t)stack_m96_1 * (uint64_t)0x100000001b3U)));
             }
             {
                 rax_23 = stack_m96_1;
@@ -868,29 +860,21 @@ uint64_t shape_stack_buffer(uint64_t arg0, uint8_t arg1)
     uint8_t tmp_401b4c_18_1;
     _Alignas(16) uint8_t frame[88];
 
-    /* r2dec proof: no individual construct is marked; 74 source obligations: 62 rendered, 7 elided, 0 refused, 5 compiler-inserted (assuming ub-free); 17 statements rendered; the result's second register is open: no call read decides it */
+    /* r2dec proof: no individual construct is marked; 74 source obligations: 62 rendered, 7 elided, 0 refused, 5 compiler-inserted (assuming ub-free); 13 statements rendered; the result's second register is open: no call read decides it */
     {
         rsi_1 = (uint64_t)(uint8_t)arg1;
         stack_m104_1 = 0;
-        for (; ; ) {
-            if ((uint8_t)((uint32_t)stack_m104_1 <= (uint32_t)63U)) {
-                r2sleigh_store_u8((void*)((uint64_t)(frame + 0U) + (uint64_t)(uint32_t)stack_m104_1 * 1U), (uint8_t)((uint64_t)((uint64_t)(uint32_t)((uint64_t)((uint64_t)(uint8_t)((uint32_t)(uint8_t)((uint32_t)((uint32_t)stack_m104_1 & (uint32_t)7U) >> 0U) & (uint32_t)(uint8_t)63U) >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)arg0 >> (uint64_t)(uint8_t)((uint32_t)(uint8_t)((uint32_t)((uint32_t)stack_m104_1 & (uint32_t)7U) >> 0U) & (uint32_t)(uint8_t)63U))) >> 0U) + (uint64_t)(uint32_t)((uint64_t)((uint64_t)(int32_t)((uint64_t)rsi_1 >> 0U) * (uint64_t)(int32_t)stack_m104_1) >> 0U)) >> 0U));
-                stack_m104_1 = (uint32_t)((uint32_t)stack_m104_1 + (uint32_t)1U);
-            } else {
-                break;
-            }
+        while ((uint8_t)((uint32_t)stack_m104_1 <= (uint32_t)63U)) {
+            r2sleigh_store_u8((void*)((uint64_t)(frame + 0U) + (uint64_t)(uint32_t)stack_m104_1 * 1U), (uint8_t)((uint64_t)((uint64_t)(uint32_t)((uint64_t)((uint64_t)(uint8_t)((uint32_t)(uint8_t)((uint32_t)((uint32_t)stack_m104_1 & (uint32_t)7U) >> 0U) & (uint32_t)(uint8_t)63U) >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)arg0 >> (uint64_t)(uint8_t)((uint32_t)(uint8_t)((uint32_t)((uint32_t)stack_m104_1 & (uint32_t)7U) >> 0U) & (uint32_t)(uint8_t)63U))) >> 0U) + (uint64_t)(uint32_t)((uint64_t)((uint64_t)(int32_t)((uint64_t)rsi_1 >> 0U) * (uint64_t)(int32_t)stack_m104_1) >> 0U)) >> 0U));
+            stack_m104_1 = (uint32_t)((uint32_t)stack_m104_1 + (uint32_t)1U);
         }
         {
             stack_m100_1 = 0;
             stack_m96_1 = (uint64_t)0xcbf29ce484222325U;
-            for (; ; ) {
-                if ((uint8_t)((uint32_t)stack_m100_1 <= (uint32_t)63U)) {
-                    tmp_401b4c_18_1 = r2sleigh_load_u8((void*)((uint64_t)(frame + 0U) + (uint64_t)(uint32_t)((uint32_t)((uint32_t)stack_m100_1 + (uint32_t)((uint32_t)stack_m100_1 * (uint32_t)4U)) & (uint32_t)63U) * 1U));
-                    stack_m100_1 = (uint32_t)((uint32_t)stack_m100_1 + (uint32_t)1U);
-                    stack_m96_1 = (uint64_t)((uint64_t)((uint64_t)stack_m96_1 ^ (uint64_t)(uint8_t)tmp_401b4c_18_1) * (uint64_t)0x100000001b3U);
-                } else {
-                    break;
-                }
+            while ((uint8_t)((uint32_t)stack_m100_1 <= (uint32_t)63U)) {
+                tmp_401b4c_18_1 = r2sleigh_load_u8((void*)((uint64_t)(frame + 0U) + (uint64_t)(uint32_t)((uint32_t)((uint32_t)stack_m100_1 + (uint32_t)((uint32_t)stack_m100_1 * (uint32_t)4U)) & (uint32_t)63U) * 1U));
+                stack_m100_1 = (uint32_t)((uint32_t)stack_m100_1 + (uint32_t)1U);
+                stack_m96_1 = (uint64_t)((uint64_t)((uint64_t)stack_m96_1 ^ (uint64_t)(uint8_t)tmp_401b4c_18_1) * (uint64_t)0x100000001b3U);
             }
             {
                 rax_21 = stack_m96_1;

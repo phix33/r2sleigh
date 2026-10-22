@@ -878,7 +878,7 @@ fn respell_test(test: &mut CExpr) {
 
 /// Turn a comparison, through the markers and the cast to a flag, into its opposite. Whether it
 /// was one; an expression that is not is left as it was.
-fn opposite(expr: &mut CExpr) -> bool {
+pub(super) fn opposite(expr: &mut CExpr) -> bool {
     match expr {
         CExpr::Observed { expr, .. } | CExpr::Paren(expr) => opposite(expr),
         CExpr::Cast { expr, .. } => opposite(expr),

@@ -97,3 +97,21 @@ fn a_second_test_joins_the_chain_only_if_it_computes_nothing_the_function_keeps(
     assert_eq!(tests_of(&flags).len(), 1, "{flags}");
     assert!(flags.contains(" && "), "{flags}");
 }
+
+/// `xor eax, eax; jmp test; body: inc eax; test: cmp eax, edi; jl body; ret`
+const COUNT_UP: &[u8] = &[
+    0x31, 0xc0, 0xeb, 0x02, 0xff, 0xc0, 0x39, 0xf8, 0x7c, 0xfa, 0xc3,
+];
+
+#[test]
+fn a_loop_that_tests_before_its_body_is_a_while() {
+    let c = c_of(COUNT_UP);
+    assert_eq!(c.matches("while (").count(), 1, "{c}");
+    assert!(!c.contains("for (; ; )") && !c.contains("break"), "{c}");
+    // The test is the machine's: stay while the counter is below the bound.
+    let test = c
+        .lines()
+        .find(|line| line.contains("while ("))
+        .expect("a loop");
+    assert!(test.contains('<'), "{c}");
+}

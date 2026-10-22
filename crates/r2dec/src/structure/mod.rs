@@ -5,4 +5,5 @@
 pub(crate) mod certify;
 pub(crate) mod condition;
 pub(crate) mod place;
+pub(crate) mod rotate;
 pub(crate) mod shape;

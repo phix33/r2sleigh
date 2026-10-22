@@ -509,10 +509,10 @@ impl Walker<'_> {
                 if self.body_owns_no_block(body) {
                     return open;
                 }
-                self.walk_pre_test_loop(body, open)
+                self.walk_pre_test_loop(loop_test(stmt), body, open)
             }
             // A do-while nobody observed cannot say which block its test is.
-            CStmt::DoWhile { body, .. } => self.walk_do_while(&[], body, open),
+            CStmt::DoWhile { body, .. } => self.walk_do_while(&[], loop_test(stmt), body, open),
             CStmt::Switch { cases, default, .. } => {
                 self.walk_switch(open, cases, default.as_deref())
             }
@@ -606,7 +606,9 @@ impl Walker<'_> {
             CStmt::Expr(selection) if (self.role)(stmt) == StatementRole::Selects => {
                 self.walk_selection(&blocks, selection, open)
             }
-            CStmt::DoWhile { body, .. } => self.walk_do_while(&blocks, body, open),
+            CStmt::DoWhile { body, .. } => {
+                self.walk_do_while(&blocks, loop_test(inner), body, open)
+            }
             CStmt::For {
                 cond: None, body, ..
             } => self.walk_infinite_loop(body, open),
@@ -622,7 +624,7 @@ impl Walker<'_> {
                     Some(header) => self.enter_block(open, header),
                     None => open,
                 };
-                self.walk_pre_test_loop(body, open)
+                self.walk_pre_test_loop(loop_test(inner), body, open)
             }
             CStmt::If { .. }
             | CStmt::Switch { .. }
@@ -729,10 +731,18 @@ impl Walker<'_> {
         out
     }
 
-    fn walk_pre_test_loop(&mut self, body: &CStmt, open: Vec<OpenEnd>) -> Vec<OpenEnd> {
+    fn walk_pre_test_loop(
+        &mut self,
+        test: Option<&CExpr>,
+        body: &CStmt,
+        open: Vec<OpenEnd>,
+    ) -> Vec<OpenEnd> {
         let Some(owner) = self.single_owner(&open, "loop") else {
             return Vec::new();
         };
+        if let Some(test) = test {
+            self.note_test(owner, test);
+        }
         let header = self.occurrences[owner].block;
         self.frames.push(Frame::Loop {
             head: LoopHead::Block(header),
@@ -785,6 +795,7 @@ impl Walker<'_> {
     fn walk_do_while(
         &mut self,
         candidates: &[u64],
+        test: Option<&CExpr>,
         body: &CStmt,
         open: Vec<OpenEnd>,
     ) -> Vec<OpenEnd> {
@@ -846,8 +857,11 @@ impl Walker<'_> {
                 }),
             }
         }
-        for test in &tests {
-            self.occurrences[*test]
+        for at in &tests {
+            if let Some(test) = test {
+                self.note_test(*at, test);
+            }
+            self.occurrences[*at]
                 .edges
                 .push((Target::Block(entry), EdgeLabel::True));
         }
@@ -905,6 +919,14 @@ impl Walker<'_> {
         };
         carry.extend(breaks);
         carry
+    }
+}
+
+/// The test of a `while` or `do-while`, which a `for` of the lowering does not state as one.
+fn loop_test(stmt: &CStmt) -> Option<&CExpr> {
+    match stmt.unobserved() {
+        CStmt::While { cond, .. } | CStmt::DoWhile { cond, .. } => Some(cond),
+        _ => None,
     }
 }
 

@@ -260,18 +260,14 @@ uint32_t fcn_11c1(uint32_t* arg0, uint32_t arg1)
     uint32_t stack_m12_1;
     uint32_t tmp_11f4_0_1;
 
-    /* r2dec proof: no individual construct is marked; 31 source obligations: 24 rendered, 7 elided, 0 refused; 9 statements rendered */
+    /* r2dec proof: no individual construct is marked; 31 source obligations: 24 rendered, 7 elided, 0 refused; 7 statements rendered */
     {
         stack_m16_1 = 0;
         stack_m12_1 = 0;
-        for (; ; ) {
-            if ((uint8_t)((int32_t)stack_m12_1 < (int32_t)arg1)) {
-                tmp_11f4_0_1 = r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)(int32_t)stack_m12_1 * 4U));
-                stack_m16_1 = (uint32_t)((uint32_t)stack_m16_1 + (uint32_t)tmp_11f4_0_1);
-                stack_m12_1 = (uint32_t)((uint32_t)stack_m12_1 + (uint32_t)1U);
-            } else {
-                break;
-            }
+        while ((uint8_t)((int32_t)stack_m12_1 < (int32_t)arg1)) {
+            tmp_11f4_0_1 = r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)(int32_t)stack_m12_1 * 4U));
+            stack_m16_1 = (uint32_t)((uint32_t)stack_m16_1 + (uint32_t)tmp_11f4_0_1);
+            stack_m12_1 = (uint32_t)((uint32_t)stack_m12_1 + (uint32_t)1U);
         }
         {
             return (uint32_t)stack_m16_1;
@@ -361,18 +357,14 @@ uint32_t fcn_1277(uint64_t arg0)
     uint32_t stack_m12_1;
     uint64_t tmp_1294_8_1;
 
-    /* r2dec proof: no individual construct is marked; 28 source obligations: 21 rendered, 7 elided, 0 refused; 9 statements rendered */
+    /* r2dec proof: no individual construct is marked; 28 source obligations: 21 rendered, 7 elided, 0 refused; 7 statements rendered */
     {
         stack_m32_1 = arg0;
         stack_m12_1 = 0;
-        for (; ; ) {
-            if ((uint8_t)((uint64_t)stack_m32_1 != (uint64_t)0U)) {
-                tmp_1294_8_1 = r2sleigh_load_u64((void*)(uint64_t)((uint64_t)stack_m32_1 + (uint64_t)8U));
-                stack_m32_1 = tmp_1294_8_1;
-                stack_m12_1 = (uint32_t)((uint32_t)stack_m12_1 + (uint32_t)1U);
-            } else {
-                break;
-            }
+        while ((uint8_t)((uint64_t)stack_m32_1 != (uint64_t)0U)) {
+            tmp_1294_8_1 = r2sleigh_load_u64((void*)(uint64_t)((uint64_t)stack_m32_1 + (uint64_t)8U));
+            stack_m32_1 = tmp_1294_8_1;
+            stack_m12_1 = (uint32_t)((uint32_t)stack_m12_1 + (uint32_t)1U);
         }
         {
             return (uint32_t)stack_m12_1;
@@ -465,19 +457,15 @@ double fcn_12ef(uint64_t* arg0, uint32_t arg1)
     uint64_t tmp_1324_0_1;
     double tmp_lane_132d_0_2_1;
 
-    /* r2dec proof: no individual construct is marked; 41 source obligations: 34 rendered, 7 elided, 0 refused; 15 statements rendered */
+    /* r2dec proof: no individual construct is marked; 41 source obligations: 34 rendered, 7 elided, 0 refused; 13 statements rendered */
     {
         stack_m20_1 = 0;
         stack_m16_1 = 0;
-        for (; ; ) {
-            if ((uint8_t)((int32_t)stack_m20_1 < (int32_t)arg1)) {
-                tmp_1324_0_1 = r2sleigh_load_u64((void*)((uint64_t)arg0 + (uint64_t)(int32_t)stack_m20_1 * 8U));
-                tmp_lane_132d_0_2_1 = r2sleigh_float_from_bits_64(tmp_1324_0_1) + r2sleigh_float_from_bits_64(stack_m16_1);
-                stack_m20_1 = (uint32_t)((uint32_t)stack_m20_1 + (uint32_t)1U);
-                stack_m16_1 = r2sleigh_float_to_bits_64(tmp_lane_132d_0_2_1);
-            } else {
-                break;
-            }
+        while ((uint8_t)((int32_t)stack_m20_1 < (int32_t)arg1)) {
+            tmp_1324_0_1 = r2sleigh_load_u64((void*)((uint64_t)arg0 + (uint64_t)(int32_t)stack_m20_1 * 8U));
+            tmp_lane_132d_0_2_1 = r2sleigh_float_from_bits_64(tmp_1324_0_1) + r2sleigh_float_from_bits_64(stack_m16_1);
+            stack_m20_1 = (uint32_t)((uint32_t)stack_m20_1 + (uint32_t)1U);
+            stack_m16_1 = r2sleigh_float_to_bits_64(tmp_lane_132d_0_2_1);
         }
         {
             if ((uint8_t)((uint32_t)arg1 == (uint32_t)0U)) {
@@ -537,16 +525,12 @@ uint32_t fcn_1391(uint32_t arg0)
     uint32_t tmp_lane_13cf_0_0_1;
     uint32_t tmp_lane_13d8_6_0_1;
 
-    /* r2dec proof: no individual construct is marked; 32 source obligations: 24 rendered, 8 elided, 0 refused; 10 statements rendered; the result's second register is open: no call read decides it */
+    /* r2dec proof: no individual construct is marked; 32 source obligations: 24 rendered, 8 elided, 0 refused; 8 statements rendered; the result's second register is open: no call read decides it */
     {
         stack_m12_1 = 0;
-        for (; ; ) {
-            if ((uint8_t)((int32_t)stack_m12_1 <= (int32_t)15U)) {
-                r2sleigh_store_u32((void*)(uint64_t)((uint64_t)((uint64_t)(int32_t)stack_m12_1 * (uint64_t)4U) + (uint64_t)0x4040U), (uint32_t)((uint64_t)((uint64_t)(uint32_t)arg0 + (uint64_t)(uint32_t)stack_m12_1) >> 0U));
-                stack_m12_1 = (uint32_t)((uint32_t)stack_m12_1 + (uint32_t)1U);
-            } else {
-                break;
-            }
+        while ((uint8_t)((int32_t)stack_m12_1 <= (int32_t)15U)) {
+            r2sleigh_store_u32((void*)(uint64_t)((uint64_t)((uint64_t)(int32_t)stack_m12_1 * (uint64_t)4U) + (uint64_t)0x4040U), (uint32_t)((uint64_t)((uint64_t)(uint32_t)arg0 + (uint64_t)(uint32_t)stack_m12_1) >> 0U));
+            stack_m12_1 = (uint32_t)((uint32_t)stack_m12_1 + (uint32_t)1U);
         }
         {
             tmp_lane_13cf_0_0_1 = r2sleigh_load_u32((void*)(uint64_t)0x4010U);
@@ -646,17 +630,13 @@ uint32_t fcn_1489(uint32_t arg0)
     uint32_t stack_m28_1;
     uint32_t stack_m12_1;
 
-    /* r2dec proof: no individual construct is marked; 27 source obligations: 20 rendered, 7 elided, 0 refused; 8 statements rendered */
+    /* r2dec proof: no individual construct is marked; 27 source obligations: 20 rendered, 7 elided, 0 refused; 6 statements rendered */
     {
         stack_m28_1 = arg0;
         stack_m12_1 = 0;
-        for (; ; ) {
-            if ((uint8_t)((uint32_t)stack_m28_1 != (uint32_t)0U)) {
-                stack_m28_1 = (uint32_t)((uint32_t)((uint32_t)stack_m28_1 - (uint32_t)1U) & (uint32_t)stack_m28_1);
-                stack_m12_1 = (uint32_t)((uint32_t)stack_m12_1 + (uint32_t)1U);
-            } else {
-                break;
-            }
+        while ((uint8_t)((uint32_t)stack_m28_1 != (uint32_t)0U)) {
+            stack_m28_1 = (uint32_t)((uint32_t)((uint32_t)stack_m28_1 - (uint32_t)1U) & (uint32_t)stack_m28_1);
+            stack_m12_1 = (uint32_t)((uint32_t)stack_m12_1 + (uint32_t)1U);
         }
         {
             return (uint32_t)stack_m12_1;
@@ -680,24 +660,20 @@ uint64_t fcn_14b5(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
     uint32_t tmp_1504_0_1;
     uint64_t rax_14;
 
-    /* r2dec proof: no individual construct is marked; 45 source obligations: 37 rendered, 8 elided, 0 refused; 20 statements rendered */
+    /* r2dec proof: no individual construct is marked; 45 source obligations: 37 rendered, 8 elided, 0 refused; 18 statements rendered */
     {
         stack_m12_1 = 0;
-        for (; ; ) {
-            if ((uint8_t)((int32_t)stack_m12_1 < (int32_t)arg1)) {
-                tmp_14e4_0_1 = r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)(int32_t)stack_m12_1 * 4U));
-                if ((uint8_t)((uint32_t)arg2 != (uint32_t)tmp_14e4_0_1)) {
-                    tmp_1504_0_1 = r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)(int32_t)stack_m12_1 * 4U));
-                    if ((uint8_t)((int32_t)arg2 < (int32_t)tmp_1504_0_1)) {
-                        goto L2;
-                    } else {
-                        stack_m12_1 = (uint32_t)((uint32_t)stack_m12_1 + (uint32_t)1U);
-                    }
+        while ((uint8_t)((int32_t)stack_m12_1 < (int32_t)arg1)) {
+            tmp_14e4_0_1 = r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)(int32_t)stack_m12_1 * 4U));
+            if ((uint8_t)((uint32_t)arg2 != (uint32_t)tmp_14e4_0_1)) {
+                tmp_1504_0_1 = r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)(int32_t)stack_m12_1 * 4U));
+                if ((uint8_t)((int32_t)arg2 < (int32_t)tmp_1504_0_1)) {
+                    goto L2;
                 } else {
-                    goto L0;
+                    stack_m12_1 = (uint32_t)((uint32_t)stack_m12_1 + (uint32_t)1U);
                 }
             } else {
-                break;
+                goto L0;
             }
         }
         {
