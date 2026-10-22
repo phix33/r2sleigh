@@ -7133,3 +7133,39 @@ fn a_return_a_loop_exits_to_is_written_where_it_exits() {
 }"#,
     );
 }
+
+/// The same search whose end-of-string exit goes on to choose between two returns on `edx`: an
+/// exit with one way in and a closed subtree of three blocks, beside the found exit.
+const SEARCH_WITH_A_BRANCHING_EXIT: &[u8] = &[
+    0x80, 0x3f, 0x00, // 1000 cmp byte [rdi], 0
+    0x74, 0x0a, // 1003 je 0x100f
+    0x40, 0x3a, 0x37, // 1005 cmp sil, [rdi]
+    0x74, 0x15, // 1008 je 0x101f
+    0x48, 0xff, 0xc7, // 100a inc rdi
+    0xeb, 0xf1, // 100d jmp 0x1000
+    0x85, 0xd2, // 100f test edx, edx
+    0x74, 0x06, // 1011 je 0x1019
+    0xb8, 0x00, 0x00, 0x00, 0x00, // 1013 mov eax, 0
+    0xc3, // 1018 ret
+    0xb8, 0x03, 0x00, 0x00, 0x00, // 1019 mov eax, 3
+    0xc3, // 101e ret
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 101f mov eax, 1
+    0xc3, // 1024 ret
+];
+
+#[test]
+fn an_exit_that_only_the_loop_reaches_is_written_in_the_loop_with_what_it_goes_on_to() {
+    let text = rendered(SEARCH_WITH_A_BRANCHING_EXIT, "which_byte");
+    assert!(!text.contains("goto"), "{text}");
+    run_rendered(
+        "which_byte",
+        &[&text],
+        r#"int main(void) {
+    if ((uint32_t)which_byte((uint64_t)"abc", 'b', 1) != 1) return 1;
+    if ((uint32_t)which_byte((uint64_t)"abc", 'c', 0) != 1) return 2;
+    if ((uint32_t)which_byte((uint64_t)"abc", 'z', 1) != 0) return 3;
+    if ((uint32_t)which_byte((uint64_t)"abc", 'z', 0) != 3) return 4;
+    return 0;
+}"#,
+    );
+}

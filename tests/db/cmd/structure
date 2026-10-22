@@ -120,3 +120,122 @@ int32_t classify(int32_t x)
 
 EOF
 RUN
+
+# A loop's exit that only one edge of the loop reaches, and whose dominator subtree no edge leaves,
+# is written where that edge leaves the loop (doc/adr-structure-dominator-tree.md §4). The first
+# exit stays after the loop, where `break` reaches it. `find_then_choose`'s match is a test and
+# two returns of its own; `skip_then_find` leaves from inside its first loop with a store and a
+# return, and from its second with a return.
+
+NAME=an exit with one way in and a closed subtree is written where its edge leaves the loop
+FILE=tests/fixtures/loop_exits_gcc_x64_O2
+CMDS=<<EOF
+pdd @ sym.find_then_choose
+pdd @ sym.skip_then_find
+EOF
+EXPECT=<<EOF
+uint64_t find_then_choose(uint64_t arg0, uint32_t arg1, uint32_t arg2)
+{
+    extern char sink[];
+
+    uint64_t rdi_1;
+    uint8_t tmp_40105e_0_1;
+    uint32_t tmp_lane_40105e_1_0_1;
+
+    /* r2dec proof: no individual construct is marked; 44 source obligations: 34 rendered, 10 elided, 0 refused; 16 statements rendered; 1 data object type refused */
+    {
+        rdi_1 = arg0;
+        for (; ; ) {
+            tmp_40105e_0_1 = r2sleigh_load_u8((void*)rdi_1);
+            tmp_lane_40105e_1_0_1 = (uint32_t)(int8_t)tmp_40105e_0_1;
+            if ((uint8_t)((uint8_t)tmp_40105e_0_1 != (uint8_t)0U)) {
+                r2sleigh_store_u32((void*)&sink, (uint32_t)tmp_lane_40105e_1_0_1);
+                if ((uint8_t)((uint32_t)tmp_lane_40105e_1_0_1 == (uint32_t)arg1)) {
+                    if ((uint8_t)((uint32_t)arg2 == (uint32_t)0U)) {
+                        r2sleigh_store_u32((void*)&sink, (uint32_t)2U);
+                        return 20;
+                    } else {
+                        r2sleigh_store_u32((void*)&sink, (uint32_t)1U);
+                        return 10;
+                    }
+                } else {
+                    rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
+                }
+            } else {
+                break;
+            }
+        }
+        {
+            r2sleigh_store_u32((void*)&sink, (uint32_t)3U);
+            return 0;
+        }
+    }
+}
+
+uint64_t skip_then_find(uint64_t arg0, uint32_t arg1, uint32_t arg2)
+{
+    extern char sink[];
+
+    uint64_t rcx_2;
+    uint64_t rdi_1;
+    uint8_t tmp_4010bb_0_1;
+    uint64_t rax_1;
+    uint64_t rax_3;
+    uint64_t rdx_2;
+    uint32_t tmp_lane_4010e2_2_0_1;
+    uint8_t tmp_4010d0_8_1;
+    uint32_t tmp_lane_4010b0_6_0_1;
+
+    /* r2dec proof: no individual construct is marked; 79 source obligations: 69 rendered, 10 elided, 0 refused; 28 statements rendered; 1 data object type refused */
+    {
+        rcx_2 = 0;
+        rdi_1 = arg0;
+        for (; ; ) {
+            tmp_4010bb_0_1 = r2sleigh_load_u8((void*)rdi_1);
+            rax_1 = (uint64_t)(uint32_t)(int8_t)tmp_4010bb_0_1;
+            if ((uint8_t)((uint8_t)tmp_4010bb_0_1 == (uint8_t)32U)) {
+                tmp_lane_4010b0_6_0_1 = (uint32_t)((uint32_t)((uint64_t)rcx_2 >> 0U) + (uint32_t)1U);
+                if ((uint8_t)((int32_t)arg2 < (int32_t)tmp_lane_4010b0_6_0_1)) {
+                    r2sleigh_store_u32((void*)&sink, (uint32_t)tmp_lane_4010b0_6_0_1);
+                    return (uint64_t)0xffffffffU;
+                } else {
+                    rcx_2 = (uint64_t)(uint32_t)tmp_lane_4010b0_6_0_1;
+                    rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
+                }
+            } else {
+                break;
+            }
+        }
+        {
+            if ((uint8_t)((uint8_t)tmp_4010bb_0_1 == (uint8_t)0U)) {
+            } else {
+                rax_3 = rax_1;
+                rdx_2 = rdi_1;
+                for (; ; ) {
+                    if ((uint8_t)((uint32_t)((uint64_t)rax_3 >> 0U) != (uint32_t)arg1)) {
+                        tmp_4010d0_8_1 = r2sleigh_load_u8((void*)(uint64_t)((uint64_t)rdx_2 + (uint64_t)1U));
+                        if ((uint8_t)((uint8_t)tmp_4010d0_8_1 == (uint8_t)0U)) {
+                            return 0;
+                        } else {
+                            rax_3 = (uint64_t)(uint32_t)(int8_t)tmp_4010d0_8_1;
+                            rdx_2 = (uint64_t)((uint64_t)rdx_2 + (uint64_t)1U);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                {
+                    tmp_lane_4010e2_2_0_1 = (uint32_t)((uint64_t)((uint64_t)(uint32_t)((uint32_t)((uint64_t)rcx_2 >> 0U) - (uint32_t)((uint64_t)rdi_1 >> 0U)) + (uint64_t)rdx_2) >> 0U);
+                    r2sleigh_store_u32((void*)&sink, (uint32_t)tmp_lane_4010e2_2_0_1);
+                    return (uint64_t)(uint32_t)((uint32_t)tmp_lane_4010e2_2_0_1 + (uint32_t)100U);
+                }
+            }
+            {
+                return 0;
+            }
+        }
+    }
+}
+
+EOF
+RUN
