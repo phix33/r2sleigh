@@ -83,11 +83,13 @@ with `r2types`.
 
 **D48. The census audits its own hunks.** Owner: GT.
 - A census move is classified by a per-feature audit script (the same statements
-  respelled, a dead arm removed, a residual turned into rendering); only hunks no script
-  classifies need a human, who reads each.
-- Gate: blessing a census change needs zero unclassified hunks, each class named in the
-  commit message with its count. This is AGENTS.md's "each moved line read and judged",
-  automated where it can be and never skipped.
+  respelled, a dead arm removed, a residual turned into rendering). A script clears a hunk
+  by itself only for a class whose equivalence it checks, such as the same statements
+  respelled, compared on a normal form. Every semantic class (a dead arm, a residual turned
+  into rendering) is listed by count and sample for a human to read and judge.
+- Gate: blessing a census change needs zero unclassified hunks and every semantic class
+  reviewed, each class named in the commit message with its count. This is AGENTS.md's
+  "each moved line read and judged", automated where it can be and never skipped.
 
 **D49. Every refusal and residual has a catalog row.** Owner: `r2engine`, with `r2ssa`.
 - A catalog maps each typed refusal and residual cause (D29 records, `SourceArityFloor`
