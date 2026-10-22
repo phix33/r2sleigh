@@ -542,6 +542,8 @@ impl SourceDataObject {
 pub struct SourceCodePointerTable {
     address: u64,
     entry_size: u32,
+    /// The indirect transfer that reads it: the targets are what that read makes of the entries.
+    instruction: u64,
     targets: Box<[u64]>,
     /// What radare2 calls the function each entry names, in the same order.
     /// Presentation only: the address is what the table claims.
@@ -552,12 +554,14 @@ impl SourceCodePointerTable {
     pub fn new(
         address: u64,
         entry_size: u32,
+        instruction: u64,
         targets: impl Into<Box<[u64]>>,
         target_names: impl Into<Box<[Option<Box<str>>]>>,
     ) -> Self {
         Self {
             address,
             entry_size,
+            instruction,
             targets: targets.into(),
             target_names: target_names.into(),
         }
@@ -574,6 +578,10 @@ impl SourceCodePointerTable {
 
     pub const fn entry_size(&self) -> u32 {
         self.entry_size
+    }
+
+    pub const fn instruction(&self) -> u64 {
+        self.instruction
     }
 
     pub fn targets(&self) -> &[u64] {

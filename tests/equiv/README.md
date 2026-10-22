@@ -325,10 +325,12 @@ the domain and is dropped (`cost.py`, ADR D38).
   there yet. A run whose measure or budget differs from `--baseline`'s is
   refused before anything is graded (exit 1), and `merge_shards.py` refuses
   shards that counted differently.
-- The self-tests include two cases under a fake counter (`Cost.fake`, a count
+- The self-tests include three cases under a fake counter (`Cost.fake`, a count
   the runtime reports for every rendering run in place of the counter): one
   retires one instruction more than four times the budget and must be `slow`,
-  one exactly that and must be `equal`. They need no performance counter, so
+  one exactly that and must be `equal`, and one raises `SIGPWR` (the budget's
+  signal) itself and must not be `slow`: only the counter's overflow is the
+  budget. They need no performance counter, so
   they run on every host and target and pin the verdict path.
 
 *Object links on AArch64.* GNU ld for AArch64 (2.42, and gold) resolves the

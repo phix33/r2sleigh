@@ -457,6 +457,7 @@ pub struct Literal {
     patches: BTreeMap<u64, u8>,
     written: Vec<(u64, Range<u64>)>,
     revision: u64,
+    header: u64,
     container: Container,
 }
 
@@ -476,6 +477,7 @@ impl Literal {
             patches: BTreeMap::new(),
             written: Vec::new(),
             revision: 0,
+            header: 0,
             container: Container {
                 format: Format::Elf,
                 arch: Arch {
@@ -579,6 +581,18 @@ impl Literal {
     /// A `.plt` holding PLT0, the zero pad after it, and one stub for `_Exit`, then a caller.
     pub fn plt() -> Self {
         Self::plt_importing("_Exit")
+    }
+
+    /// [`Self::plt`] with its one slot filled by an `IRELATIVE` resolver: no import is bound anywhere.
+    pub fn plt_resolved() -> Self {
+        let mut program = Self::plt();
+        program.container.relocations.clear();
+        for write in &mut program.container.loader_writes {
+            if matches!(write.kind, WriteKind::Import { .. }) {
+                write.kind = WriteKind::Resolver(BASE + 0x40);
+            }
+        }
+        program
     }
 
     /// The same `.plt` padded as ld pads it, its sections aligned as ld
@@ -747,6 +761,19 @@ impl Literal {
             ..Symbol::default()
         });
         self
+    }
+
+    /// The same program with `size` zero bytes mapped at address 0, as an ELF header is in a shared object.
+    pub fn with_header(mut self, size: u64) -> Self {
+        self.header = size;
+        self.preceded_by(Section {
+            name: ".header".to_owned(),
+            vaddr: 0,
+            vsize: size,
+            role: SectionRole::Data,
+            loaded: true,
+            ..Section::default()
+        })
     }
 
     /// The same program with a section listed ahead of its code.
@@ -937,6 +964,10 @@ impl Literal {
 
 impl Source for Literal {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        if vaddr < self.header {
+            let left = usize::try_from(self.header - vaddr).unwrap_or(usize::MAX);
+            return Some(vec![0; max.min(left)]);
+        }
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
         let rest = self.code.get(offset..).filter(|rest| !rest.is_empty())?;
         Some(

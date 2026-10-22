@@ -82,6 +82,13 @@ fn a_pe32_export_wraps_at_32_bits() {
 }
 
 #[test]
+fn a_zero_name_count_ignores_the_name_and_ordinal_pointers() {
+    let image = image(include_bytes!("data/pe_export_ordinals.dll"));
+    assert_eq!(symbol(&image, "Ordinal_5").vaddr, 0x402000);
+    assert_eq!(symbol(&image, "Ordinal_6").vaddr, 0x402010);
+}
+
+#[test]
 fn a_vc6_delay_descriptor_states_addresses() {
     let image = image(include_bytes!("data/pe_delay_vc6.exe"));
     let later = symbol(&image, "later");

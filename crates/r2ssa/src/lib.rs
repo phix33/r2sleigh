@@ -38,7 +38,6 @@ pub(crate) mod demand;
 pub mod dense;
 pub(crate) mod division;
 pub mod domtree;
-pub mod fate;
 pub mod fixpoint;
 pub(crate) mod frame_address;
 pub mod function;
@@ -66,6 +65,7 @@ pub(crate) mod printf;
 pub(crate) mod reaching_rules;
 pub(crate) mod read_only;
 pub mod recover_interface;
+mod reload;
 pub(crate) mod rename;
 pub(crate) mod save_area;
 pub(crate) mod semantic;
@@ -118,7 +118,9 @@ pub use function::{
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,
 };
-pub use integrity::{ScalarWidthRule, SsaIntegrityError, SsaValueSite, validate_ssa_function};
+pub use integrity::{
+    IntegrityRule, ScalarWidthRule, SsaIntegrityError, SsaValueSite, validate_ssa_function,
+};
 pub use interproc::{
     ArgumentReach, CallArgObservation, FunctionSemanticLinkage, FunctionSemanticSummary,
     InterprocFunctionId, InterprocFunctionInput, InterprocSummaryDiagnostics, InterprocSummarySet,

@@ -31,6 +31,20 @@ fn a_lone_stub_begins_at_its_transfer_not_at_the_pad_before_it() {
     assert_eq!(size, Some(BASE + 0x20 - PLT_STUB));
 }
 
+/// A static image's `.plt` holds only `IRELATIVE` stubs: no relocation binds an import, yet each stub is code
+/// the loader sends through a word it fills, so it is a function start and no body may absorb it.
+#[test]
+fn a_stub_through_a_resolver_slot_is_a_start_in_an_image_that_binds_no_import() {
+    let program = OpenProgram::of(Literal::plt_resolved());
+    program.loaded().expect("it is current");
+    let linkage = program.imports();
+    assert!(linkage.stubs.is_empty(), "{:?}", linkage.stubs);
+    assert_eq!(
+        linkage.unnamed.keys().copied().collect::<Vec<_>>(),
+        [PLT_STUB]
+    );
+}
+
 /// PLT0's padding and a stub's landing pad both lift to nothing, so what
 /// does nothing does not say where the stub begins; the section's stated
 /// alignment does. (`printf@plt` in a clang -O2 build was named four bytes

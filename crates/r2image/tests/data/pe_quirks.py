@@ -8,6 +8,7 @@ pe_header_entry.exe an EXE whose AddressOfEntryPoint is 0: the loader starts it 
 pe_dll_noentry.dll  a DLL whose AddressOfEntryPoint is 0: it has no DllMain
 pe_flat.exe         SectionAlignment 4 and no sections: the file is mapped as it lies, entry in the headers
 pe_export_wrap.dll  a PE32 export at RVA 0xffffffff above base 0x1000000, which wraps to 0xffffff
+pe_export_ordinals.dll  two ordinal-only exports, NumberOfNames 0 beside a stale AddressOfNames and no ordinal table
 pe_delay_vc6.exe    a VC6 delay-load descriptor (dlattrRva clear), whose fields are addresses
 """
 
@@ -127,6 +128,24 @@ def export_wrap():
     )
 
 
+def export_ordinals():
+    # Two functions, NumberOfNames 0, a stale AddressOfNames and AddressOfNameOrdinals 0.
+    edata = 0x1000
+    directory = struct.pack(
+        "<IIHHIIIIIII", 0, 0, 0, 0, edata + 0x40, 5, 2, 0, edata + 0x28, edata + 0x30, 0
+    )
+    body = bytearray(0x50)
+    body[: len(directory)] = directory
+    struct.pack_into("<II", body, 0x28, 0x2000, 0x2010)
+    body[0x40:0x46] = b"o.dll\0"
+    return pe32(
+        [(b".edata", edata, 0x50, 0x200, 0x200, DATA, bytes(body))],
+        entry=0,
+        dll=True,
+        directories={0: (edata, 0x50)},
+    )
+
+
 def delay_vc6():
     # One VC6 descriptor: every field an address. Its table at 0x1000, the IAT at 0x1080, the name
     # table at 0x1090, the hint/name at 0x10a0, the DLL's name at 0x10c0.
@@ -150,6 +169,7 @@ if __name__ == "__main__":
         ("pe_dll_noentry.dll", dll_noentry),
         ("pe_flat.exe", flat),
         ("pe_export_wrap.dll", export_wrap),
+        ("pe_export_ordinals.dll", export_ordinals),
         ("pe_delay_vc6.exe", delay_vc6),
     ]:
         (here / name).write_bytes(build())

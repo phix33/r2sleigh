@@ -64,6 +64,21 @@ declarations.
   frame objects, with phis keyed by `BlockId`), r2types, the renderer, and
   `afv`/`afi`, so the shell and the C name the same objects the same way.
 
+## Reloads
+
+Value ranges narrow by copy class, and two loads of one slot are two values. `r2ssa::reload` names, for
+each load of an exact entry-stack slot, the earlier load it rereads: the two loads read one width at one
+slot along a chain of blocks each entered only from the one before, and no write to a slot that may
+overlap, call or opaque operation runs between them. The value solver reads such a load as that earlier
+load under what its block assumes, and puts the loads of one chain in one copy class, so `cmp dword [rsp +
+0x10], 0x11; ja` bounds the index a later `mov eax, [rsp + 0x10]` feeds a jump table (libc-2.31 `clnt_sperror`)
+whichever load of the slot the compare read. A slot nothing escapes is promoted to a value (P4.3) and needs
+none of this. Memory SSA cannot own the fact: the object model it is built over reads the value ranges. Cost
+`O(ops log h)` for `h` held slots: one table is walked down the chains with an undo trail, so a branch copies
+nothing, a clobber moves the table into the trail in `O(1)`, and a store to an exact slot keeps what it
+misses, looking only at the slots within 64 bytes of it; any other write drops all of it. Stack slots only: a pointer's reload is the
+same fact but a volatile or device read is not, and nothing in the IR says which.
+
 ## Done
 
 - P4.0, measured (2026-10-06): `scripts/frame_agree.py` compares `afv` with

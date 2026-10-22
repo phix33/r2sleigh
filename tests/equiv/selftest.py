@@ -43,6 +43,8 @@ graded through the same path an engine rendering takes:
   (a fake counter says so, so no performance counter is needed) must be
   ``slow``, and one that retires exactly that must stay ``equal``: the budget
   decides, and only the count can.
+* a rendering that raises the budget's own signal (SIGPWR) is not ``slow``: only
+  the counter's overflow is the budget.
 """
 
 from __future__ import annotations
@@ -339,6 +341,11 @@ CASES = [
          cost=Cost("instructions", _BUDGET, fake=RENDERING_FACTOR * _BUDGET + 1)),
     Case("at-the-instruction-budget", "st_add", "equal", _IDENTITY_ADD,
          cost=Cost("instructions", _BUDGET, fake=RENDERING_FACTOR * _BUDGET)),
+    # A SIGPWR the rendering raises itself is a signal, not the counter's budget: not `slow`.
+    Case("a-budget-signal-the-rendering-raises", "st_add", "differs", _tu(
+        "#include <signal.h>\nint32_t sub_add(int32_t a, int32_t b)\n{\n"
+        "    raise(SIGPWR);\n    return (int32_t)((uint32_t)a + (uint32_t)b);\n}\n"),
+        cost=Cost("instructions", _BUDGET, fake=1)),
 ]
 
 

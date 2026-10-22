@@ -226,7 +226,15 @@ impl Container {
             .is_some_and(|sealed| range.end <= sealed.end);
         match (read_only, sealed) {
             (true, _) => Permanence::ReadOnly,
-            (false, true) if self.posture.interpreter.is_some() => Permanence::SealedByInterpreter,
+            (false, true)
+                if self
+                    .posture
+                    .interpreter
+                    .as_deref()
+                    .is_some_and(|path| !path.is_empty()) =>
+            {
+                Permanence::SealedByInterpreter
+            }
             (false, true) => Permanence::Sealed,
             (false, false) => Permanence::Writable,
         }
@@ -928,5 +936,22 @@ mod tests {
         );
         assert_eq!(container.loader_write_at(0x20), None);
         assert_eq!(container.written_ranges(), [0x10..0x20, 0x40..0x48]);
+    }
+
+    #[test]
+    fn an_interpreter_whose_path_is_unreadable_does_not_seal_a_range() {
+        let relro = 0x2000..0x2010;
+        let container = |interpreter: Option<&str>| Container {
+            sealed: vec![relro.clone()],
+            posture: Posture {
+                interpreter: interpreter.map(str::to_owned),
+                ..Posture::default()
+            },
+            ..Container::default()
+        };
+        let of = |interpreter| container(interpreter).permanence(&(0x2000..0x2008));
+        assert_eq!(of(Some("/lib/ld.so")), Permanence::SealedByInterpreter);
+        assert_eq!(of(Some("")), Permanence::Sealed);
+        assert_eq!(of(None), Permanence::Sealed);
     }
 }

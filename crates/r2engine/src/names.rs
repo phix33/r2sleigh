@@ -12,6 +12,7 @@
 //! belongs to, and spelling is a projection of the pair. Whoever opened the
 //! binary fills it; the engine and the shell read it.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -152,54 +153,68 @@ impl Name {
     /// Every spelling that seeks to this name, as `NameDb::by_spelling` keys it: the listed one
     /// past its prefix, and a symbol's bare text, which radare2 also accepts (`s main`).
     fn seeks(&self) -> Vec<(usize, Arc<str>)> {
-        let listed = match self.namespace {
-            Namespace::String => identifier(&self.text).into(),
-            _ => Arc::clone(&self.text),
+        let listed: Arc<str> = match self.flagged() {
+            Cow::Borrowed(_) => Arc::clone(&self.text),
+            Cow::Owned(text) => text.into(),
         };
-        let mut seeks = vec![(self.namespace as usize, listed)];
+        let mut seeks = vec![(self.namespace as usize, Arc::clone(&listed))];
         if self.namespace == Namespace::Symbol {
-            seeks.push((BARE, Arc::clone(&self.text)));
+            seeks.push((BARE, listed));
         }
         seeks
     }
 
-    pub fn spelled(&self) -> String {
+    /// The text past the prefix, as radare2 names the flag.
+    fn flagged(&self) -> Cow<'_, str> {
         match self.namespace {
-            Namespace::String => format!("{}{}", self.namespace.prefix(), identifier(&self.text)),
-            _ => format!("{}{}", self.namespace.prefix(), self.text),
+            Namespace::String => identifier(&self.text).into(),
+            _ => flag_filter(&self.text),
         }
+    }
+
+    pub fn spelled(&self) -> String {
+        format!("{}{}", self.namespace.prefix(), self.flagged())
     }
 }
 
-/// The text as radare2 names a string's flag: the scanner's escaped form through the flag filter
-/// (`r_name_filter`): letters, digits, `.`, `:` and `_` kept, dash-like characters made `_`.
-fn identifier(text: &str) -> String {
+/// A flag name as radare2 keeps it (`r_name_filter`): letters, digits, `.`, `:` and `_` stay,
+/// dash-like characters and a backslash before an escape letter become `_`, the rest are dropped.
+fn flag_filter(text: &str) -> Cow<'_, str> {
+    let kept = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '_');
+    if text.chars().all(kept) {
+        return Cow::Borrowed(text);
+    }
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            c if c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '_') => out.push(c),
-            // An escape letter after the backslash the escaping writes: the backslash becomes `_`.
-            '\n' | '\r' | '\t' | '\x0c' | '\x08' | '\x0b' | '\x07' => {
-                out.push('_');
-                out.push(match c {
-                    '\n' => 'n',
-                    '\r' => 'r',
-                    '\t' => 't',
-                    '\x0c' => 'f',
-                    '\x08' => 'b',
-                    '\x0b' => 'v',
-                    _ => 'a',
-                });
-            }
+            c if kept(c) => out.push(c),
             '\\' if chars.peek().is_some_and(|next| "sbfnrtva".contains(*next)) => out.push('_'),
-            c if c.is_ascii_control() => out.push_str(&format!("x{:02x}", c as u32)),
             '!' | '"' | '$' | '%' | '(' | ')' | ',' | '-' | '/' | ';' | '<' | '>' | '?' | '@'
             | '[' | ']' | '`' | '~' | ' ' => out.push('_'),
             _ => {}
         }
     }
-    out
+    Cow::Owned(out)
+}
+
+/// The text as radare2 names a string's flag: the scanner's escaped form through the flag filter.
+fn identifier(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\x0c' => escaped.push_str("\\f"),
+            '\x08' => escaped.push_str("\\b"),
+            '\x0b' => escaped.push_str("\\v"),
+            '\x07' => escaped.push_str("\\a"),
+            c if c.is_ascii_control() => escaped.push_str(&format!("\\x{:02x}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    flag_filter(&escaped).into_owned()
 }
 
 /// Every address this program has a name for.
@@ -367,6 +382,28 @@ mod tests {
         let name = named("hello %s\n", Namespace::String, 10);
         assert_eq!(&*name.text, "hello %s\n");
         assert_eq!(name.spelled(), "str.hello__s_n");
+    }
+
+    #[test]
+    fn a_name_is_spelled_as_the_flag_radare2_makes_of_it() {
+        // `r_name_filter`: dash-like characters become `_`, other invalid ones are dropped, `.:_` stay.
+        let name = named("__OBJC_METACLASS_RO_$_Test", Namespace::Object, 0);
+        assert_eq!(&*name.text, "__OBJC_METACLASS_RO_$_Test");
+        assert_eq!(name.spelled(), "obj.__OBJC_METACLASS_RO___Test");
+        assert_eq!(
+            named("a-b'c::d.\u{e9}", Namespace::Symbol, 0).spelled(),
+            "sym.a_bc::d."
+        );
+    }
+
+    #[test]
+    fn a_filtered_name_seeks_by_its_flag_and_not_by_the_text_the_filter_changed() {
+        let mut db = NameDb::new();
+        db.insert(0x1000, named("ro_$_Test", Namespace::Symbol, 0));
+        for spelling in ["sym.ro___Test", "ro___Test"] {
+            assert_eq!(db.address_of(spelling), Some(0x1000), "{spelling}");
+        }
+        assert_eq!(db.address_of("sym.ro_$_Test"), None);
     }
 
     #[test]

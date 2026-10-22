@@ -158,6 +158,7 @@ impl<'a> TripCounter<'a> {
         for block in blocks {
             let other = self.exit_test(lp, *block)?;
             let same = other.induction.phi == first.induction.phi
+                && other.induction.width_bits == width
                 && other.induction.step == first.induction.step
                 && other.evidence.reads_update == first.evidence.reads_update
                 && other.exit == first.exit
@@ -243,7 +244,10 @@ impl<'a> TripCounter<'a> {
         if induction.phi == tested {
             return Some(false);
         }
-        if induction.update == tested {
+        // A comparison names its operand by copy class: the update's root, where it is copied on.
+        if induction.update == tested
+            || crate::constant::root_of(self.graph, induction.update) == tested
+        {
             return Some(true);
         }
         if self.width_of(tested) >= self.width_of(induction.phi) {
@@ -955,5 +959,125 @@ mod tests {
             0xba, 0x08, 0, 0, 0, 0x85, 0xc9, 0x74, 0x05, 0x83, 0xea, 0x01, 0x75, 0xf7, 0xc3,
         ];
         assert_eq!(x86(two_exits), [Err(TripRefusal::MultipleExits)]);
+    }
+
+    fn ret() -> R2ILOp {
+        R2ILOp::Return {
+            target: Varnode::register(16, 8),
+        }
+    }
+
+    /// A latch that steps the 64-bit counter and leaves the loop when its `size` low bytes equal 5.
+    fn latch(at: u64, size: u32) -> R2ILBlock {
+        let mut block = R2ILBlock::new(at, 4);
+        let tested = match size {
+            8 => {
+                block.push(step(8, 1));
+                counter(8)
+            }
+            _ => {
+                // `add eax, 1` in a 64-bit register: the low half stepped, then widened.
+                let (low, next) = (Varnode::unique(0x100, 4), Varnode::unique(0x108, 4));
+                block.push(R2ILOp::Subpiece {
+                    dst: low.clone(),
+                    src: counter(8),
+                    offset: 0,
+                });
+                block.push(R2ILOp::IntAdd {
+                    dst: next.clone(),
+                    a: low,
+                    b: Varnode::constant(1, 4),
+                });
+                block.push(R2ILOp::IntZExt {
+                    dst: counter(8),
+                    src: next.clone(),
+                });
+                next
+            }
+        };
+        block.push(R2ILOp::IntNotEqual {
+            dst: cond(),
+            a: tested,
+            b: Varnode::constant(5, size),
+        });
+        block.push(R2ILOp::CBranch {
+            target: Varnode::ram(0x7010, 8),
+            cond: cond(),
+        });
+        block
+    }
+
+    #[test]
+    fn latches_testing_one_phi_at_different_widths_state_no_count() {
+        use crate::semantic::{LoopEvidence, empty_value_ranges, header_trips};
+        let mut arch = ArchSpec::new("trip-test");
+        arch.addr_size = 8;
+        arch.add_register(RegisterDef::new("rip", 16, 8));
+        arch.add_register(RegisterDef::new("cond", 24, 1));
+        arch.add_register(RegisterDef::new("which", 32, 1));
+        arch.add_register(RegisterDef::new("counter", 40, 8));
+        let mut entry = R2ILBlock::new(0x7000, 4);
+        entry.push(R2ILOp::Copy {
+            dst: counter(8),
+            src: Varnode::constant(0, 8),
+        });
+        entry.push(R2ILOp::Branch {
+            target: Varnode::ram(0x7010, 8),
+        });
+        let mut header = R2ILBlock::new(0x7010, 4);
+        header.push(R2ILOp::CBranch {
+            target: Varnode::ram(0x7020, 8),
+            cond: Varnode::register(32, 1),
+        });
+        let (mut low_exit, mut exit) = (R2ILBlock::new(0x7018, 4), R2ILBlock::new(0x7024, 4));
+        low_exit.push(ret());
+        exit.push(ret());
+        // One latch tests the low half of the counter against 5, the other the whole of it.
+        let blocks = [
+            entry,
+            header,
+            latch(0x7014, 4),
+            low_exit,
+            latch(0x7020, 8),
+            exit,
+        ];
+        let artifact = SsaArtifact::for_decompile(&blocks, Some(&crate::Arch::from(arch)));
+        let artifact = artifact.expect("an artifact");
+        let evidence = LoopEvidence {
+            predicates: artifact.predicates(),
+            values: empty_value_ranges(),
+        };
+        let trips = header_trips(artifact.function(), artifact.graph(), evidence, 0x7010);
+        assert_eq!(
+            trips.map(|trips| trips.count),
+            Err(TripRefusal::MultipleExits)
+        );
+    }
+
+    /// The trip counts of AArch64 code mapped at `0x1000`.
+    fn aarch64(words: &[u32]) -> Vec<Trips> {
+        let bytes: &'static [u8] = Box::leak(
+            words
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        trips_of(&lifted(
+            "aarch64",
+            Code {
+                base: 0x1000,
+                bytes,
+            },
+            0x1000,
+        ))
+    }
+
+    #[test]
+    fn an_update_the_machine_copies_on_is_the_value_the_exit_tests() {
+        // mov x0, xzr; L: add x0, x0, #1; cmp x0, #3; b.ne L; ret -- the add writes a temporary
+        // the register is copied from, and the comparison names the temporary.
+        let words = [0xaa1f03e0, 0x91000400, 0xf1000c1f, 0x54ffffc1, 0xd65f03c0];
+        assert_eq!(aarch64(&words), [Ok(TripCount::Exact(3))]);
     }
 }

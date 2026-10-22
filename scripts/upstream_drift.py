@@ -173,7 +173,7 @@ def measure_git(pin: Pin, git: Git, now: datetime.datetime, root: pathlib.Path) 
     if not git.on_branch(commit):
         raise Unmeasurable(f"{pin.name}: {pin.pinned} is not an ancestor of the branch of {pin.url}")
     lacked = git.lacks(commit, pin.paths)
-    oldest = lacked[-1][1] if lacked else None
+    oldest = min((date for _, date in lacked), default=None)
     evidence, found = ("", [])
     if pin.vendored is not None:
         evidence, found = contradictions(git, pin, commit, root)

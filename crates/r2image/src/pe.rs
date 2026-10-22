@@ -448,7 +448,7 @@ fn exports_of(
     ) else {
         return Vec::new();
     };
-    if by_name != 0 && by_ordinal == 0 {
+    if names != 0 && by_name != 0 && by_ordinal == 0 {
         return Vec::new();
     }
     let (addresses, _) = addresses.as_chunks::<4>();

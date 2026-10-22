@@ -235,22 +235,36 @@ impl SSAFunction {
 type Forwarded = IdMap<VarId, VarId>;
 
 /// Follow each copy to the end of its chain, so a copy of a copy names the
-/// original. A chain that meets itself is left pointing at its immediate
-/// source, which is still correct and cannot happen in valid SSA. Each step
-/// is one index, and a chain is walked once per variable that starts it.
+/// original. A chain that meets itself leaves its cycle pointing at each
+/// member's immediate source, which cannot happen in valid SSA. Each variable
+/// is walked once and the root written back along the path: `O(copies)`.
 fn resolve_chains(forwarded: Forwarded) -> Forwarded {
     let mut resolved = forwarded.clone();
+    let mut done = IdSet::<VarId>::default();
+    let mut on_path = IdSet::<VarId>::default();
+    let mut path = Vec::new();
     for key in forwarded.keys() {
-        let mut seen = vec![key];
-        let mut current = forwarded[key];
-        while let Some(next) = forwarded.get(current).copied() {
-            if seen.contains(&next) {
-                break;
+        let mut current = key;
+        let (root, tail) = loop {
+            if done.contains(current) {
+                break (resolved[current], path.len());
             }
-            seen.push(current);
-            current = next;
+            if !forwarded.contains(current) {
+                break (current, path.len());
+            }
+            if on_path.contains(current) {
+                let entry = path.iter().position(|var| *var == current);
+                break (current, entry.expect("a variable on the path is in it"));
+            }
+            on_path.insert(current);
+            path.push(current);
+            current = forwarded[current];
+        };
+        for (at, var) in path.drain(..).enumerate() {
+            on_path.remove(var);
+            done.insert(var);
+            resolved.insert(var, if at < tail { root } else { forwarded[var] });
         }
-        resolved.insert(key, current);
     }
     resolved
 }
@@ -302,6 +316,29 @@ mod tests {
 
     fn op_at(func: &SSAFunction, addr: u64, index: usize) -> SSAOp {
         func.named_block(addr).expect("block").ops()[index].clone()
+    }
+
+    #[test]
+    fn a_long_chain_resolves_every_link_to_its_head_in_linear_time() {
+        const LINKS: u32 = 100_000;
+        let mut chain = Forwarded::new(LINKS as usize + 1);
+        for link in 1..=LINKS {
+            chain.insert(VarId(link), VarId(link - 1));
+        }
+        let root = resolve_chains(chain);
+        assert!((1..=LINKS).all(|link| root.get(VarId(link)) == Some(&VarId(0))));
+    }
+
+    #[test]
+    fn a_chain_that_meets_itself_stops_at_its_immediate_source() {
+        let mut cycle = Forwarded::new(3);
+        cycle.insert(VarId(0), VarId(1));
+        cycle.insert(VarId(1), VarId(0));
+        cycle.insert(VarId(2), VarId(0));
+        let root = resolve_chains(cycle);
+        assert_eq!(root.get(VarId(0)), Some(&VarId(1)));
+        assert_eq!(root.get(VarId(1)), Some(&VarId(0)));
+        assert!([VarId(0), VarId(1)].contains(&root[VarId(2)]));
     }
 
     #[test]

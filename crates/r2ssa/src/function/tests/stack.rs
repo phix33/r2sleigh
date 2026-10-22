@@ -1640,3 +1640,199 @@ fn a_redefined_temporary_stops_holding_the_frame_address() {
     ]);
     assert_eq!(sites, BTreeSet::from([(0x4000, 2)]));
 }
+
+/// A machine with a stack pointer and a return address register, and the interface stating them.
+fn custom_frame() -> (ArchSpec, SourceFunctionInterface) {
+    let mut arch = ArchSpec::new("custom-frame");
+    arch.addr_size = 8;
+    arch.add_register(RegisterDef::new("custom_sp", 0x10, 8));
+    arch.add_register(RegisterDef::new("custom_ra", 0x20, 8));
+    let register = |offset| CanonicalStorageId {
+        space: crate::CanonicalStorageSpace::Register,
+        offset,
+        size: 8,
+    };
+    let interface = SourceFunctionInterface::new_exact(
+        b"custom-reload".to_vec(),
+        "custom-unknown",
+        [],
+        SourceFunctionReturn::Void,
+        [],
+    )
+    .and_then(|interface| interface.with_return_address_storage(register(0x20)))
+    .and_then(|interface| interface.with_stack_pointer_storage(register(0x10)))
+    .expect("exact custom interface");
+    (arch, interface)
+}
+
+/// `sp -= 0x20`, the slot's address stored away so the slot stays in memory, then `cmp [sp + 0x10], 0x11; ja 0x3640`.
+fn guarded_load() -> Vec<R2ILOp> {
+    vec![
+        R2ILOp::IntSub {
+            dst: make_reg(0x10, 8),
+            a: make_reg(0x10, 8),
+            b: make_const(0x20, 8),
+        },
+        R2ILOp::IntAdd {
+            dst: make_unique(0x30, 8),
+            a: make_reg(0x10, 8),
+            b: make_const(0x10, 8),
+        },
+        R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: make_reg(0x30, 8),
+            val: make_unique(0x30, 8),
+        },
+        R2ILOp::Load {
+            dst: make_unique(0x40, 4),
+            space: SpaceId::Ram,
+            addr: make_unique(0x30, 8),
+        },
+        R2ILOp::IntLess {
+            dst: make_unique(0x45, 1),
+            a: make_const(0x11, 4),
+            b: make_unique(0x40, 4),
+        },
+        R2ILOp::CBranch {
+            target: make_const(0x3640, 8),
+            cond: make_unique(0x45, 1),
+        },
+    ]
+}
+
+/// `cmp [sp+0x10], 0x11; ja out` then `mov eax, [sp+0x10]`: the reload is the compared bits unless `between` runs first.
+fn reloaded_index_range(between: Vec<R2ILOp>) -> Option<(u64, u64)> {
+    reloaded_range_with(&|ops| ops, between)
+}
+
+/// [`reloaded_index_range`] over a guarded block that `rearranged` first changes.
+fn reloaded_range_with(
+    rearranged: &dyn Fn(Vec<R2ILOp>) -> Vec<R2ILOp>,
+    between: Vec<R2ILOp>,
+) -> Option<(u64, u64)> {
+    let (arch, interface) = custom_frame();
+    let slot = |temp| R2ILOp::IntAdd {
+        dst: make_unique(temp, 8),
+        a: make_reg(0x10, 8),
+        b: make_const(0x10, 8),
+    };
+    let load = |temp, dst| R2ILOp::Load {
+        dst,
+        space: SpaceId::Ram,
+        addr: make_unique(temp, 8),
+    };
+    let mut second = vec![];
+    second.extend(between);
+    second.extend([
+        slot(0x50),
+        load(0x50, make_unique(0x60, 4)),
+        R2ILOp::IntZExt {
+            dst: make_unique(0x70, 8),
+            src: make_unique(0x60, 4),
+        },
+        R2ILOp::Return {
+            target: make_reg(0x20, 8),
+        },
+    ]);
+    let blocks = vec![
+        R2ILBlock {
+            addr: 0x3600,
+            size: 0x20,
+            ops: rearranged(guarded_load()),
+            ..Default::default()
+        },
+        R2ILBlock {
+            addr: 0x3620,
+            size: 0x20,
+            ops: second,
+            ..Default::default()
+        },
+        R2ILBlock {
+            addr: 0x3640,
+            size: 4,
+            ops: vec![R2ILOp::Return {
+                target: make_reg(0x20, 8),
+            }],
+            ..Default::default()
+        },
+    ];
+    let artifact = SsaArtifact::for_decompile_with_interface(
+        &blocks,
+        Some(&crate::Arch::from(arch)),
+        interface,
+    )
+    .expect("frame artifact must build");
+    let graph = artifact.graph();
+    let extended = graph
+        .insts
+        .iter()
+        .filter(|inst| {
+            matches!(
+                inst.payload,
+                crate::graph::InstPayload::Op(SSAOp::IntZExt { .. })
+            )
+        })
+        .find(|inst| graph.block_id_for_addr(0x3620) == Some(inst.block))?;
+    artifact.facts().values.get(extended.output?)?.bounds()
+}
+
+/// A four-byte store of one into the frame at `sp + displacement`.
+fn store_at_slot(displacement: u64) -> Vec<R2ILOp> {
+    vec![
+        R2ILOp::IntAdd {
+            dst: make_unique(0x80, 8),
+            a: make_reg(0x10, 8),
+            b: make_const(displacement, 8),
+        },
+        R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: make_unique(0x80, 8),
+            val: make_const(1, 4),
+        },
+    ]
+}
+
+#[test]
+fn a_reload_of_an_unwritten_slot_is_bounded_by_the_guard_on_the_first_load() {
+    assert_eq!(reloaded_index_range(vec![]), Some((0, 0x11)));
+    // A store to another slot of the frame leaves the slot as it was.
+    assert_eq!(reloaded_index_range(store_at_slot(0x14)), Some((0, 0x11)));
+}
+
+/// The slot read again, into a temporary no one compares, at `at` in the guarded block's operations.
+fn reread_at(at: usize) -> impl Fn(Vec<R2ILOp>) -> Vec<R2ILOp> {
+    move |mut ops| {
+        ops.insert(
+            at,
+            R2ILOp::Load {
+                dst: make_unique(0x38, 4),
+                space: SpaceId::Ram,
+                addr: make_unique(0x30, 8),
+            },
+        );
+        ops
+    }
+}
+
+#[test]
+fn a_guard_on_any_load_of_the_slot_bounds_the_reload_after_it() {
+    // Three reads of one slot: the guard is on the second when the first is ahead of it, and on the first when the
+    // second is ahead of the compare. Either way the third, after the branch, is the compared bits.
+    for at in [3, 4] {
+        let range = reloaded_range_with(&reread_at(at), vec![]);
+        assert_eq!(range, Some((0, 0x11)), "the other read at operation {at}");
+    }
+}
+
+#[test]
+fn a_write_that_may_reach_the_slot_keeps_the_two_loads_apart() {
+    let unknown = vec![R2ILOp::Store {
+        space: SpaceId::Ram,
+        addr: make_reg(0x30, 8),
+        val: make_const(1, 4),
+    }];
+    for between in [unknown, store_at_slot(0x10), store_at_slot(0x12)] {
+        let range = reloaded_index_range(between.clone());
+        assert_ne!(range, Some((0, 0x11)), "{between:?}");
+    }
+}

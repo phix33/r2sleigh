@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import upstream_drift as drift  # noqa: E402
@@ -126,7 +127,8 @@ class World(unittest.TestCase):
 
     def run_main(self, now: datetime.datetime, *, clone=None) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), mock.patch.dict(os.environ):
+            os.environ.pop("GITHUB_STEP_SUMMARY", None)
             status = drift.main(
                 ["--root", str(self.root)],
                 now=now,
@@ -149,6 +151,15 @@ class Measure(World):
         self.assertEqual(got["x86"].age_days, 89)
         for name in ("MIPS", "Ghidra base"):
             self.assertEqual((got[name].behind, got[name].oldest, got[name].age_days), (0, None, 0))
+
+    def test_the_age_is_the_oldest_date_even_where_the_log_lists_a_newer_one_last(self) -> None:
+        repo = init(self.root / "skewed")
+        base = commit(repo, utc(1, 1), {"f": "1"})
+        commit(repo, utc(3, 1), {"f": "2"})
+        commit(repo, utc(2, 1), {"f": "3"})
+        pin = drift.Pin("skewed", "testbins", "u", base)
+        got = drift.measure_git(pin, drift.Git(repo), utc(5, 1), self.root)
+        self.assertEqual((got.behind, got.oldest), (2, utc(2, 1)))
 
     def test_the_budget_is_the_last_day_a_pin_may_wait(self) -> None:
         day = utc(2, 1) + datetime.timedelta(days=drift.BUDGET_DAYS["ghidra"])
@@ -245,6 +256,18 @@ class Alarm(World):
         self.assertEqual(status, 1)
         self.assertIn("REFUTED (1 files)", out)
         self.assertIn(f"x86: {IA} is earlier than the pin", out)
+
+
+class Summary(World):
+    def test_the_table_is_appended_to_the_step_summary_where_one_is_named(self) -> None:
+        target = self.root / "summary.md"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), mock.patch.dict(os.environ):
+            os.environ["GITHUB_STEP_SUMMARY"] = str(target)
+            drift.main(
+                ["--root", str(self.root)], now=utc(5, 1), releases=lambda url: self.release_list, clone=self.clone
+            )
+        self.assertIn("x86", target.read_text())
 
 
 class Releases(unittest.TestCase):

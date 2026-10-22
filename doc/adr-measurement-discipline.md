@@ -55,8 +55,10 @@ Kuna's own documentation admits its output varies with the worker split
 ## Decisions
 
 **D46. Moves are separated from noise by paired tests.** Owner: GT.
-- A nightly job scores a pinned sample against the previous night. Pass and fail
-  transitions are tested with McNemar's exact test (perfect rate) and a sign test
+- A nightly job scores a pinned sample against the last night that passed, a baseline that
+  advances only on a pass or an explicit bless, so a regression keeps failing until it is
+  fixed or blessed. It also reports against the pinned blessed baseline, so drift below the
+  threshold shows as it accumulates. Pass and fail transitions are tested with McNemar's exact test (perfect rate) and a sign test
   (value). The p-values are Holm-adjusted together and a change is significant below 0.01.
 - Timing is an A/B of tonight's build against last night's in alternating order, with a
   bootstrap interval over binaries. A slowdown counts only when the interval excludes 0 and
@@ -71,19 +73,23 @@ with `r2types`.
   `worse` decide shipping: a change flipping 400 functions each way moves the total by zero.
   Layout work also records layout F1 and nesting F1, because `type_match` cannot see
   structures.
-- A pinned project list splits mining from reporting. The report prints both columns, and
-  a PR citing a held-out regression is rejected (AGENTS.md: tests must not train the
+- A pinned project list splits mining from reporting. The mining column gates a PR. The
+  held-out column is printed by the nightly and at an item's exit, never per PR, and a
+  held-out regression opens an investigation instead of rejecting a change. The list is
+  re-pinned once it has been read to decide a change (AGENTS.md: tests must not train the
   engine).
 - Gate: `report_decbench.py` prints the split and the improved and worse counts; a PR with
   `worse > 0` states each function's cause.
 
 **D48. The census audits its own hunks.** Owner: GT.
 - A census move is classified by a per-feature audit script (the same statements
-  respelled, a dead arm removed, a residual turned into rendering); only hunks no script
-  classifies need a human, who reads each.
-- Gate: blessing a census change needs zero unclassified hunks, each class named in the
-  commit message with its count. This is AGENTS.md's "each moved line read and judged",
-  automated where it can be and never skipped.
+  respelled, a dead arm removed, a residual turned into rendering). A script clears a hunk
+  by itself only for a class whose equivalence it checks, such as the same statements
+  respelled, compared on a normal form. Every semantic class (a dead arm, a residual turned
+  into rendering) is listed by count and sample for a human to read and judge.
+- Gate: blessing a census change needs zero unclassified hunks and every semantic class
+  reviewed, each class named in the commit message with its count. This is AGENTS.md's
+  "each moved line read and judged", automated where it can be and never skipped.
 
 **D49. Every refusal and residual has a catalog row.** Owner: `r2engine`, with `r2ssa`.
 - A catalog maps each typed refusal and residual cause (D29 records, `SourceArityFloor`
@@ -94,7 +100,9 @@ with `r2types`.
 
 **D50. Batch decompilation is parallel and byte-identical.** Owner: `r2engine`; `r2s`
 writes the files.
-- A pool schedules longest functions first, runs callees before callers, enforces a budget
+- A pool schedules the condensation of the call graph callee
+  first, longest first among those ready, with each recursive component one task solved by
+  `r2ssa::fixpoint` in ascending address order, enforces a budget
   and a memory stop per function (a refusal that names the limit, never partial C), and
   merges results by position.
 - Gate: output is byte-identical for one worker and eight on the census set, with no
@@ -105,3 +113,24 @@ writes the files.
 D48 first (small, and every later change is graded by it), D46 and D47 with the DecBench
 harness (D10 decides where they run), D49 beside RF, D50 after the cost path (ROADMAP
 order, item 8): a pool over a slow per-function path only multiplies the cost.
+
+## 2026-10-22 review: where r2s stands against the field
+
+An evidence review of the whole project (caps and caches, a capability matrix, direction and blockers,
+measured performance, then a critic who re-verified five claims) found the following; D51 to D57 in the ROADMAP own it.
+
+- **Quality.** r2s is fourth of four on DecBench union-perfect (20.1%, [record](../tests/decbench/RESULT-2026-10-17.md)),
+  first on byte_match, last on type_match. Its edge is verification (certification, equivalence, oracles, typed
+  refusals), not recovery. Coverage is proof-first: bash renders 38.0% of 1,568 functions with no marked
+  construct, fedora ls 58.7%.
+- **Behind the field, by name.** IDA, Ghidra and Kuna decompile more architectures (r2s: x86-64 and AArch64 only);
+  Ghidra, IDA and Binary Ninja have persistence and annotation (r2s: none); every peer has a scripting API or
+  agent surface (r2s: JSON on three verbs); IDA has library identification and Windows API types (r2s: neither);
+  Kuna decompiles in parallel (r2s: single-threaded). r2s has no debugger, symbolic execution, patching or UI beyond
+  the TUI.
+- **Caps and caches.** 31 cap sites, 4 of which keep a partial result silently; 3 cells outside the query
+  database break the cache rule; no Dylint covers a cap, and the cache lint sees one crate of 13.
+- **Blockers.** Merge latency of a deep stack (28 PRs merged after 4.7 days), CI capacity, one Linux host, the
+  absence of a feedback path from users, and a bench that is not in the tree it grades.
+- **Not claimed.** Memory and latency leads over other tools are unmeasured (the bench records no RSS). Kuna's
+  19 MB claim is unverified.
