@@ -26,16 +26,6 @@ pub(crate) enum EdgeLabel {
     Default,
 }
 
-impl EdgeLabel {
-    fn inverted(&self) -> Self {
-        match self {
-            Self::True => Self::False,
-            Self::False => Self::True,
-            other => other.clone(),
-        }
-    }
-}
-
 /// Where an edge arrives: a block of this function, or somewhere outside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Target {
@@ -192,7 +182,6 @@ pub(crate) struct ControlCertificate {
     pub(crate) blocks: usize,
     pub(crate) duplicated: Vec<u64>,
     pub(crate) contracted: usize,
-    pub(crate) inversions: usize,
     pub(crate) unreachable_missing: usize,
 }
 
@@ -221,12 +210,11 @@ impl fmt::Display for ControlCertificate {
         }
         write!(
             f,
-            " occurrences={} blocks={} duplicated={} contracted={} inversions={} unreachable={}",
+            " occurrences={} blocks={} duplicated={} contracted={} unreachable={}",
             self.occurrences,
             self.blocks,
             self.duplicated.len(),
             self.contracted,
-            self.inversions,
             self.unreachable_missing
         )
     }
@@ -1227,52 +1215,36 @@ fn read_chains(
     reading
 }
 
-/// How one occurrence's edges stand against the ones its block (or its chain) expects.
-enum Judgement {
-    Agrees,
-    /// Every label swapped, which a plain test reads as the text negating it.
-    Inverted,
-    Violates(Violation),
-}
-
-/// Compare an occurrence with `expected`. A chain's test says which exit it takes, so for it
-/// (`exact`) no inversion or conversion is read into the arms.
+/// Compare an occurrence with `expected`, labels and all: a negation is read from the `!` over a
+/// marked atom, never from swapped arms. For a marked test (`exact`) no conversion is read either.
 fn judge(
     cfg: &CFG,
     occurrence: &Occurrence,
     expected: Vec<(Target, EdgeLabel)>,
     exact: bool,
-) -> Judgement {
+) -> Option<Violation> {
     let block = occurrence.block;
     let mut rendered = occurrence.edges.clone();
     rendered.sort();
     if rendered.is_empty() {
         let continues = (expected.iter()).any(|(target, _)| matches!(target, Target::Block(_)));
         return match (continues, occurrence.returned) {
-            (false, _) => Judgement::Agrees,
-            (true, true) => Judgement::Violates(Violation::ReturnWhereMachineContinues { block }),
-            (true, false) => Judgement::Violates(Violation::FallsOffEnd { block }),
+            (false, _) => None,
+            (true, true) => Some(Violation::ReturnWhereMachineContinues { block }),
+            (true, false) => Some(Violation::FallsOffEnd { block }),
         };
     }
     if rendered == expected {
-        return Judgement::Agrees;
+        return None;
     }
-    if !exact {
-        let mut swapped: Vec<_> = (rendered.iter())
-            .map(|(target, label)| (*target, label.inverted()))
-            .collect();
-        swapped.sort();
-        if swapped == expected {
-            return Judgement::Inverted;
-        }
-        if switch_edges_agree(&rendered, &expected)
-            || converted_conditional_agrees(&rendered, &expected)
-        {
-            return Judgement::Agrees;
-        }
+    if !exact
+        && (switch_edges_agree(&rendered, &expected)
+            || converted_conditional_agrees(&rendered, &expected))
+    {
+        return None;
     }
     let terminator = cfg.get_block(block).map(|block| &block.terminator);
-    Judgement::Violates(match terminator {
+    Some(match terminator {
         Some(
             BlockTerminator::None
             | BlockTerminator::Call {
@@ -1386,7 +1358,6 @@ pub(crate) fn certify<R: Into<StatementRole>>(
         members: chain_members,
     } = read_chains(&occurrences, &chains, &count, &machine, &mut violations);
 
-    let mut inversions = 0;
     for (index, occurrence) in occurrences.iter().enumerate() {
         if chain_faulted.contains(&index) {
             continue;
@@ -1395,11 +1366,7 @@ pub(crate) fn certify<R: Into<StatementRole>>(
             Some(edges) => (edges.clone(), true),
             None => (expected_edges(cfg, occurrence.block, &contract), false),
         };
-        match judge(cfg, occurrence, expected, exact) {
-            Judgement::Agrees => {}
-            Judgement::Inverted => inversions += 1,
-            Judgement::Violates(violation) => violations.push(violation),
-        }
+        violations.extend(judge(cfg, occurrence, expected, exact));
     }
 
     let mut contracted = contracted.into_inner();
@@ -1428,7 +1395,6 @@ pub(crate) fn certify<R: Into<StatementRole>>(
         blocks,
         duplicated,
         contracted: contracted.len(),
-        inversions,
         unreachable_missing,
     }
 }
@@ -1556,7 +1522,6 @@ mod tests {
         assert!(certificate.ok(), "{certificate}");
         assert_eq!(certificate.occurrences, 4);
         assert_eq!(certificate.contracted, 0);
-        assert_eq!(certificate.inversions, 0);
     }
 
     #[test]
@@ -1616,10 +1581,65 @@ mod tests {
         ]);
         let straight = run(body.clone(), &blocks(0x30, 0x40), 0x10, &[]);
         assert!(straight.ok(), "{straight}");
-        assert_eq!(straight.inversions, 0);
-        let inverted = run(body, &blocks(0x40, 0x30), 0x10, &[]);
-        assert!(inverted.ok(), "{inverted}");
-        assert_eq!(inverted.inversions, 1);
+        // A test the text does not mark cannot say it is negated, so the swapped edges are refused.
+        let swapped = run(body, &blocks(0x40, 0x30), 0x10, &[]);
+        assert!(
+            swapped
+                .violations
+                .iter()
+                .any(|violation| matches!(violation, Violation::EdgeMismatch { block: 0x20, .. })),
+            "{swapped}"
+        );
+    }
+
+    /// The loop whose test block 0x20 is marked on its one atom, which says which edge stays.
+    fn marked_while(test: impl Fn(CExpr) -> CExpr) -> CStmt {
+        let atom = CExpr::observe_one(test_render_observation_id(0x20), cond());
+        CStmt::Block(vec![
+            at(0x10, expr()),
+            at(0x20, CStmt::while_loop(test(atom), at(0x30, expr()))),
+            at(0x40, CStmt::Return(None)),
+        ])
+    }
+
+    fn loop_blocks(true_target: u64, false_target: u64) -> CFG {
+        cfg(
+            0x10,
+            &[
+                (0x10, branch(0x20)),
+                (0x20, cond_branch(true_target, false_target)),
+                (0x30, branch(0x20)),
+                (0x40, BlockTerminator::Return),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_loop_test_of_one_marked_atom_is_read_with_the_polarity_it_is_written() {
+        let not = |expr| CExpr::unary(crate::ast::UnaryOp::Not, expr);
+        // The machine stays in the loop when the test holds: the atom is the loop's test.
+        let stays = run(
+            marked_while(|atom| atom),
+            &loop_blocks(0x30, 0x40),
+            0x10,
+            &[],
+        );
+        assert!(stays.ok(), "{stays}");
+        // It leaves when the test holds: the atom alone would stay when the machine leaves.
+        let leaves = loop_blocks(0x40, 0x30);
+        let wrong = run(marked_while(|atom| atom), &leaves, 0x10, &[]);
+        assert!(
+            wrong
+                .violations
+                .iter()
+                .any(|violation| matches!(violation, Violation::EdgeMismatch { block: 0x20, .. })),
+            "{wrong}"
+        );
+        // ... and the negated atom stays when the machine does.
+        let right = run(marked_while(not), &leaves, 0x10, &[]);
+        assert!(right.ok(), "{right}");
+        let again = run(marked_while(not), &loop_blocks(0x30, 0x40), 0x10, &[]);
+        assert!(!again.ok(), "{again}");
     }
 
     #[test]
@@ -2033,10 +2053,6 @@ mod tests {
         let wrong = chain_text(both(atom(0x10), atom(0x20)), 0x40);
         let certificate = run(wrong, &chain_cfg(), 0x10, &[("L", 0x40)]);
         assert!(!certificate.ok(), "{certificate}");
-        assert_eq!(
-            certificate.inversions, 0,
-            "no inversion is read into a chain"
-        );
         // Negated, the same arms are right.
         let negated = CExpr::unary(crate::ast::UnaryOp::Not, both(atom(0x10), atom(0x20)));
         let right = run(

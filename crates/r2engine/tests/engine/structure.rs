@@ -116,6 +116,27 @@ fn a_loop_that_tests_before_its_body_is_a_while() {
     assert!(test.contains('<'), "{c}");
 }
 
+/// `xor eax, eax; test: cmp eax, edi; jge done; inc eax; jmp test; done: ret`: the header leaves the
+/// loop when its jump is taken.
+const COUNT_UNTIL: &[u8] = &[
+    0x31, 0xc0, 0x39, 0xf8, 0x7d, 0x04, 0xff, 0xc0, 0xeb, 0xf8, 0xc3,
+];
+
+#[test]
+fn a_loop_that_leaves_when_its_jump_is_taken_stays_on_the_opposite_test() {
+    let c = c_of(COUNT_UNTIL);
+    let test = c
+        .lines()
+        .find(|line| line.contains("while ("))
+        .unwrap_or_else(|| panic!("a while: {c}"));
+    // `jge done` leaves once i >= arg0, so the loop stays while arg0 > i, and the text says that.
+    assert!(
+        test.contains("arg0 > ") && !test.contains(">=") && !test.contains('!'),
+        "{c}"
+    );
+    assert!(!c.contains("for (; ; )") && !c.contains("break"), "{c}");
+}
+
 /// `test edi, edi; je skip; xor eax, eax; body: inc eax; cmp eax, edi; jne body; ret; skip: xor eax, eax; ret`
 const COUNT_TO: &[u8] = &[
     0x85, 0xff, 0x74, 0x09, 0x31, 0xc0, 0xff, 0xc0, 0x39, 0xf8, 0x75, 0xfa, 0xc3, 0x31, 0xc0, 0xc3,

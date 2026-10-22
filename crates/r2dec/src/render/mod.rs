@@ -216,8 +216,8 @@ fn structured(
     let body = stage("latch copies", body, marks, &certified, |body, _| {
         crate::structure::latch::hoist(body) != 0
     });
-    stage("loop rotation", body, marks, &certified, |body, _| {
-        crate::structure::rotate::rotate(body) != 0
+    stage("loop rotation", body, marks, &certified, |body, marks| {
+        crate::structure::rotate::rotate(body, marks) != 0
     })
 }
 

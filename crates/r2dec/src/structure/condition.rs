@@ -452,8 +452,8 @@ fn marked(expr: &CExpr, block_of: &dyn Fn(RenderObservationId) -> Option<u64>) -
     false
 }
 
-/// The test as a chain when an atom carries a block's marker, else `Ok(None)`; every atom is marked,
-/// so a `!` is the chain's own and never the lowering's.
+/// The test as atoms when one carries a block's marker, else `Ok(None)`; every atom is marked, so a
+/// `!` is the writer's own and never the lowering's. One atom is a rotated loop's test, with its polarity.
 pub(crate) fn read(
     test: &CExpr,
     block_of: &dyn Fn(RenderObservationId) -> Option<u64>,
@@ -463,10 +463,9 @@ pub(crate) fn read(
     }
     let mut blocks = Vec::new();
     let formula = read_into(test, true, block_of, &mut blocks)?;
-    match blocks.len() {
-        0 => Err(ChainFault::Shape),
-        1 => Ok(None),
-        _ => Ok(Some(Written { formula, blocks })),
+    match blocks.is_empty() {
+        true => Err(ChainFault::Shape),
+        false => Ok(Some(Written { formula, blocks })),
     }
 }
 
@@ -539,9 +538,10 @@ pub(crate) fn exits<M: Machine>(
         if index > 0 && machine.entered_from_outside(*block, &members) {
             return Err(ChainFault::Outside { block: *block });
         }
+        // A lone test has no edge inside it: the loop that re-enters it leaves it.
         let mut edge = |target: u64| match blocks.iter().position(|member| *member == target) {
-            Some(at) => Edge::Node(at),
-            None => Edge::Exit(exit_index(&mut targets, machine.arrives(target))),
+            Some(at) if blocks.len() > 1 => Edge::Node(at),
+            _ => Edge::Exit(exit_index(&mut targets, machine.arrives(target))),
         };
         let (on_true, on_false) = (edge(on_true), edge(on_false));
         nodes.push((on_true, on_false));
@@ -813,8 +813,8 @@ fn spell_expr(formula: &Formula, atoms: &[CExpr]) -> CExpr {
     }
 }
 
-/// A chain's negated integer comparison reads as the opposite comparison; run after the final
-/// certificate, which needs the `!` as written (a float's negation is no comparison, `FLt`).
+/// A negated integer comparison over a marked atom (a chain's, a rotated loop's) reads as the
+/// opposite comparison. After the final certificate, which reads the `!`; the table is tested whole.
 pub(crate) fn respell_negations(stmt: &mut CStmt) {
     match stmt {
         CStmt::Observed { stmt, .. } => respell_negations(stmt),
@@ -879,7 +879,7 @@ fn respell_test(test: &mut CExpr) {
 
 /// Turn a comparison, through the markers and the cast to a flag, into its opposite. Whether it
 /// was one; an expression that is not is left as it was.
-pub(super) fn opposite(expr: &mut CExpr) -> bool {
+fn opposite(expr: &mut CExpr) -> bool {
     match expr {
         CExpr::Observed { expr, .. } | CExpr::Paren(expr) => opposite(expr),
         CExpr::Cast { expr, .. } => opposite(expr),

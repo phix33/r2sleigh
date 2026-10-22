@@ -1,26 +1,33 @@
 //! Loop rotation: `for (;;)` written as `while` or `do-while` where the loop is one, with the test's
 //! markers on the loop for the certificate (`doc/adr-structure-dominator-tree.md` §5, 2026-10-22).
 
+use super::condition::Marks;
 use crate::ast::{BinaryOp, CExpr, CStmt, UnaryOp};
 
 /// Write each `for (;;)` of the tree as the loop it is, where it is one; the number written.
 /// O(statements): each loop is read once, from the statements at the top and bottom of its body.
-pub(crate) fn rotate(stmt: &mut CStmt) -> usize {
+pub(crate) fn rotate(stmt: &mut CStmt, marks: &mut dyn Marks) -> usize {
     match stmt {
-        CStmt::Observed { stmt, .. } => rotate(stmt),
-        CStmt::Block(stmts) => stmts.iter_mut().map(rotate).sum(),
+        CStmt::Observed { stmt, .. } => rotate(stmt, marks),
+        CStmt::Block(stmts) => stmts.iter_mut().map(|stmt| rotate(stmt, marks)).sum(),
         CStmt::If {
             then_body,
             else_body,
             ..
-        } => rotate(then_body) + else_body.as_deref_mut().map_or(0, rotate),
-        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => rotate(body),
+        } => {
+            let in_then = rotate(then_body, marks);
+            in_then + else_body.as_deref_mut().map_or(0, |arm| rotate(arm, marks))
+        }
+        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => rotate(body, marks),
         CStmt::Switch { cases, default, .. } => {
             let in_cases: usize = (cases.iter_mut())
                 .flat_map(|case| case.body.iter_mut())
-                .map(rotate)
+                .map(|stmt| rotate(stmt, marks))
                 .sum();
-            in_cases + default.iter_mut().flatten().map(rotate).sum::<usize>()
+            in_cases
+                + (default.iter_mut().flatten())
+                    .map(|stmt| rotate(stmt, marks))
+                    .sum::<usize>()
         }
         CStmt::For {
             init: None,
@@ -28,15 +35,15 @@ pub(crate) fn rotate(stmt: &mut CStmt) -> usize {
             update: None,
             body,
         } => {
-            let inner = rotate(body);
+            let inner = rotate(body, marks);
             let Some(shape) = read(body) else {
                 return inner;
             };
             let taken = std::mem::replace(&mut **body, CStmt::Empty);
-            *stmt = build(taken, shape);
+            *stmt = build(taken, shape, marks);
             inner + 1
         }
-        CStmt::For { body, .. } => rotate(body),
+        CStmt::For { body, .. } => rotate(body, marks),
         _ => 0,
     }
 }
@@ -72,8 +79,9 @@ fn read(body: &CStmt) -> Option<Shape> {
     })
 }
 
-/// The loop statement for a body [`read`] took apart, which carries the test's markers.
-fn build(body: CStmt, shape: Shape) -> CStmt {
+/// The loop statement for a body [`read`] took apart, which carries the test's markers. The test
+/// is written over atoms that carry them too, so the certificate reads which way it stays.
+fn build(body: CStmt, shape: Shape, marks: &mut dyn Marks) -> CStmt {
     let mut stmts = Vec::new();
     flatten(body, &mut stmts);
     let Some(CStmt::Observed { ids, stmt }) = stmts.pop() else {
@@ -87,9 +95,13 @@ fn build(body: CStmt, shape: Shape) -> CStmt {
     else {
         unreachable!("read found an if with both arms");
     };
+    let atom = match marked(&cond) {
+        true => cond,
+        false => CExpr::observe_all(ids.iter().map(|id| marks.copy_of(id)), cond),
+    };
     let (stay, test) = match shape.leaves_on_true {
-        true => (*else_body, negated(cond)),
-        false => (*then_body, cond),
+        true => (*else_body, negated(atom)),
+        false => (*then_body, atom),
     };
     let looped = match shape.latch {
         true => CStmt::DoWhile {
@@ -168,8 +180,8 @@ pub(super) fn continues(stmt: &CStmt) -> bool {
     }
 }
 
-/// The test that holds where `test` does not. A chain's atoms (marked) take the `!` and the
-/// connectives swap; an integer comparison swaps to its opposite (floats have none, `FLt`).
+/// The test that holds where `test` does not, over marked atoms: they take the `!` and the
+/// connectives swap. An integer comparison reads as its opposite once certified (`respell_negations`).
 fn negated(test: CExpr) -> CExpr {
     match test {
         CExpr::Binary {
@@ -188,18 +200,11 @@ fn negated(test: CExpr) -> CExpr {
             op: UnaryOp::Not,
             operand,
         } if marked(&operand) => *operand,
-        atom if marked(&atom) => CExpr::unary(UnaryOp::Not, atom),
-        plain => {
-            let mut opposite = plain.clone();
-            match super::condition::opposite(&mut opposite) {
-                true => opposite,
-                false => CExpr::unary(UnaryOp::Not, plain),
-            }
-        }
+        atom => CExpr::unary(UnaryOp::Not, atom),
     }
 }
 
-/// Whether a test is a chain's: some part of it carries a block's marker, which the lowering never puts there.
+/// Whether a test carries a block's marker somewhere, which the lowering never puts there.
 fn marked(expr: &CExpr) -> bool {
     let mut pending = vec![expr];
     while let Some(expr) = pending.pop() {
@@ -214,7 +219,20 @@ fn marked(expr: &CExpr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::test_render_observation_id;
+    use crate::ast::{RenderObservationId, test_render_observation_id};
+
+    /// Markers whose block is their index; the copy of marker `n` is marker `1000 + n`.
+    struct Fixture;
+
+    impl Marks for Fixture {
+        fn block_of(&self, id: RenderObservationId) -> Option<u64> {
+            Some(u64::from(id.index() % 1000))
+        }
+
+        fn copy_of(&mut self, id: RenderObservationId) -> RenderObservationId {
+            test_render_observation_id(1000 + id.index())
+        }
+    }
 
     fn marker(block: u32, stmt: CStmt) -> CStmt {
         CStmt::observe_one(test_render_observation_id(block), stmt)
@@ -250,8 +268,16 @@ mod tests {
     }
 
     fn rotated_once(mut body: CStmt) -> (CStmt, usize) {
-        let count = rotate(&mut body);
+        let count = rotate(&mut body, &mut Fixture);
         (body, count)
+    }
+
+    /// The block whose marker an atom carries.
+    fn atom_block(atom: &CExpr) -> Option<u64> {
+        let CExpr::Observed { ids, .. } = atom else {
+            return None;
+        };
+        ids.iter().find_map(|id| Fixture.block_of(id))
     }
 
     #[test]
@@ -269,7 +295,13 @@ mod tests {
         let CStmt::While { cond, body } = &**stmt else {
             panic!("a while");
         };
-        assert!(matches!(cond, CExpr::IntLit(0x10)), "not negated: {cond:?}");
+        // The test is one atom, which carries a marker of the test's block of its own.
+        assert!(matches!(cond.unobserved(), CExpr::IntLit(0x10)), "{cond:?}");
+        assert_eq!(atom_block(cond), Some(0x10), "{cond:?}");
+        assert!(
+            ids.iter().all(|id| id.index() < 1000),
+            "the loop keeps the test's own markers"
+        );
         assert!(matches!(&**body, CStmt::Block(stmts) if stmts.len() == 1));
     }
 
@@ -286,32 +318,50 @@ mod tests {
         let CStmt::While { cond, .. } = &**stmt else {
             panic!("a while");
         };
-        assert!(
-            matches!(
-                cond,
-                CExpr::Unary {
-                    op: UnaryOp::Not,
-                    ..
-                }
-            ),
-            "{cond:?}"
-        );
+        // The negation is written over the marked atom, where the certificate reads it.
+        let CExpr::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } = cond
+        else {
+            panic!("a negation: {cond:?}");
+        };
+        assert_eq!(atom_block(operand), Some(0x10), "{operand:?}");
     }
 
     #[test]
-    fn an_integer_comparison_that_is_negated_is_its_opposite() {
+    fn a_comparison_the_loop_leaves_on_reads_as_the_opposite_once_certified() {
         let mut symbols = crate::symbol::SymbolTable::new();
         let x = CExpr::var(symbols.declare_or_reuse("x"));
-        let less = CExpr::binary(BinaryOp::Lt, x.clone(), CExpr::int(9));
-        let CExpr::Binary { op, .. } = negated(less) else {
-            panic!("a comparison");
+        let leaving = |cond: CExpr| {
+            let header = marker(
+                0x10,
+                CStmt::if_stmt(cond, brk(), Some(CStmt::Block(vec![work(0x20)]))),
+            );
+            let (mut looped, _) = rotated_once(forever(vec![header]));
+            crate::structure::condition::respell_negations(&mut looped);
+            let CStmt::Observed { stmt, .. } = looped else {
+                panic!("marked");
+            };
+            let CStmt::While { cond, .. } = *stmt else {
+                panic!("a while");
+            };
+            cond
         };
-        assert_eq!(op, BinaryOp::Ge);
-        let float = CExpr::binary(BinaryOp::FLt, x, CExpr::int(9));
+        let less = leaving(CExpr::binary(BinaryOp::Lt, x.clone(), CExpr::int(9)));
         assert!(
-            matches!(negated(float), CExpr::Unary { .. }),
-            "no float opposite"
+            matches!(
+                less.unobserved(),
+                CExpr::Binary {
+                    op: BinaryOp::Ge,
+                    ..
+                }
+            ),
+            "{less:?}"
         );
+        // A float comparison has no opposite, so the loop keeps the `!`.
+        let float = leaving(CExpr::binary(BinaryOp::FLt, x, CExpr::int(9)));
+        assert!(matches!(float, CExpr::Unary { .. }), "{float:?}");
     }
 
     #[test]
@@ -381,7 +431,7 @@ mod tests {
 
     // -- The certificate reads the rotated loop as it read the `for`.
 
-    use super::super::certify::{ControlCertificate, StatementRole, certify};
+    use super::super::certify::{ControlCertificate, StatementRole, Violation, certify};
     use r2ssa::cfg::{BasicBlock, BlockTerminator, CFG};
     use r2ssa::domtree::DomTree;
 
@@ -413,7 +463,7 @@ mod tests {
             cfg,
             &DomTree::compute(cfg),
             cfg.entry,
-            &|id| Some(u64::from(id.index())),
+            &|id| Fixture.block_of(id),
             &|_| None,
             &|_| StatementRole::Plain,
             &|_| true,
@@ -425,7 +475,7 @@ mod tests {
         let before = certified(&body, cfg);
         assert!(before.ok(), "the for: {before} {:?}", before.violations);
         let mut after = body;
-        assert_eq!(rotate(&mut after), 1);
+        assert_eq!(rotate(&mut after, &mut Fixture), 1);
         let rotated = certified(&after, cfg);
         assert!(
             rotated.ok(),
@@ -544,7 +594,66 @@ mod tests {
         let before = certified(&body, &cfg);
         assert!(before.ok(), "the for: {before} {:?}", before.violations);
         let mut after = body;
-        assert_eq!(rotate(&mut after), 1);
+        assert_eq!(rotate(&mut after, &mut Fixture), 1);
         assert!(!certified(&after, &cfg).ok());
+    }
+
+    #[test]
+    fn a_loop_the_machine_leaves_on_its_true_edge_certifies_only_with_the_test_negated() {
+        // The header leaves on true; the latch of the second loop does too.
+        let header = cfg(
+            0x10,
+            &[
+                (0x10, branch(0x20)),
+                (0x20, cond_branch(0x50, 0x30)),
+                (0x30, branch(0x20)),
+                (0x50, BlockTerminator::Return),
+            ],
+        );
+        let stay = CStmt::Block(vec![work(0x30)]);
+        let while_body = CStmt::Block(vec![
+            work(0x10),
+            forever(vec![test(0x20, brk(), stay)]),
+            exit(),
+        ]);
+        let latch = cfg(
+            0x10,
+            &[
+                (0x10, branch(0x20)),
+                (0x20, branch(0x30)),
+                (0x30, cond_branch(0x50, 0x20)),
+                (0x50, BlockTerminator::Return),
+            ],
+        );
+        let do_body = CStmt::Block(vec![
+            work(0x10),
+            forever(vec![work(0x20), test(0x30, brk(), nothing())]),
+            exit(),
+        ]);
+        for (body, cfg) in [(while_body, header), (do_body, latch)] {
+            let rotated = both_certify(body, &cfg);
+            // The same loop with the negation dropped is the other test, which the machine does not run.
+            let CStmt::Block(mut stmts) = rotated else {
+                panic!("a block");
+            };
+            let CStmt::Observed { ids, stmt } = stmts.remove(1) else {
+                panic!("marked");
+            };
+            let mut flipped = *stmt;
+            let (CStmt::While { cond, .. } | CStmt::DoWhile { cond, .. }) = &mut flipped else {
+                panic!("a loop");
+            };
+            let CExpr::Unary { operand, .. } = std::mem::replace(cond, CExpr::int(0)) else {
+                panic!("a negation");
+            };
+            *cond = *operand;
+            stmts.insert(1, CStmt::observe_all(ids.iter(), flipped));
+            let certificate = certified(&CStmt::Block(stmts), &cfg);
+            assert!(
+                (certificate.violations.iter())
+                    .any(|violation| matches!(violation, Violation::EdgeMismatch { .. })),
+                "{certificate}"
+            );
+        }
     }
 }
