@@ -106,8 +106,8 @@ pub(crate) struct Evidence<'a> {
 }
 
 /// The structural rewrites, in order: jumps to the next position and to the end of a breakable
-/// go, unreferenced labels go, a return the arms fall into is copied into them, and a skipped
-/// block is copied into the arms that fall to it.
+/// go, unreferenced labels go, a terminal block is copied to the sites that reach it, and a
+/// skipped block is copied into the arms that fall to it.
 pub(crate) fn shape(occ: &mut Occurrences, ev: &Evidence<'_>, stmt: CStmt) -> CStmt {
     let mut stmt = stmt;
     let scope = Scope {
@@ -115,8 +115,8 @@ pub(crate) fn shape(occ: &mut Occurrences, ev: &Evidence<'_>, stmt: CStmt) -> CS
     };
     shape_stmt(&mut stmt, Cont::Unknown, &scope);
     drop_unreferenced_labels(&mut stmt);
-    // A return the arms fall into shows once the jumps to the next position have gone.
-    super::tails::join_returns(occ, ev, &mut stmt);
+    // A terminal block shows as a tail once the jumps to the next position have gone.
+    super::tails::inline_tails(occ, ev, &mut stmt);
     shape_stmt(&mut stmt, Cont::Unknown, &scope);
     drop_unreferenced_labels(&mut stmt);
     // A skipped block shows only once the jumps to it have gone.
@@ -639,7 +639,7 @@ fn drop_labels(stmt: &mut CStmt, referenced: &BTreeSet<String>) {
     }
 }
 
-fn drop_unreferenced_labels(stmt: &mut CStmt) {
+pub(super) fn drop_unreferenced_labels(stmt: &mut CStmt) {
     let mut referenced = BTreeSet::new();
     collect_gotos(stmt, &mut referenced);
     drop_labels(stmt, &referenced);

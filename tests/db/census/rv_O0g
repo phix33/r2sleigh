@@ -318,7 +318,7 @@ int32_t classify(int32_t x)
 {
     uint64_t rax_14;
 
-    /* r2dec proof: no individual construct is marked; 38 source obligations: 22 rendered, 16 elided, 0 refused; 19 statements rendered */
+    /* r2dec proof: no individual construct is marked; 38 source obligations: 22 rendered, 16 elided, 0 refused; 18 statements rendered */
     {
         if ((uint8_t)((uint32_t)7U < (uint32_t)x)) {
         } else {
@@ -326,37 +326,37 @@ int32_t classify(int32_t x)
             case 7:
                 {
                     rax_14 = 87;
-                    goto L1;
+                    return (int32_t)rax_14;
                 }
             case 5:
                 {
                     rax_14 = 65;
-                    goto L1;
+                    return (int32_t)rax_14;
                 }
             case 4:
                 {
                     rax_14 = 54;
-                    goto L1;
+                    return (int32_t)rax_14;
                 }
             case 3:
                 {
                     rax_14 = 43;
-                    goto L1;
+                    return (int32_t)rax_14;
                 }
             case 2:
                 {
                     rax_14 = 32;
-                    goto L1;
+                    return (int32_t)rax_14;
                 }
             case 1:
                 {
                     rax_14 = 21;
-                    goto L1;
+                    return (int32_t)rax_14;
                 }
             case 0:
                 {
                     rax_14 = 10;
-                    goto L1;
+                    return (int32_t)rax_14;
                 }
             case 6:
                 break;
@@ -366,7 +366,6 @@ int32_t classify(int32_t x)
             rax_14 = (uint64_t)0xffffffffU;
         }
         {
-L1: ;
             return (int32_t)rax_14;
         }
     }
@@ -756,7 +755,7 @@ int32_t find(const int32_t* v, int32_t n, int32_t key)
     uint64_t rax_14;
     _Alignas(16) uint8_t frame[40];
 
-    /* r2dec proof: no individual construct is marked; 58 source obligations: 44 rendered, 14 elided, 0 refused; 25 statements rendered */
+    /* r2dec proof: no individual construct is marked; 58 source obligations: 44 rendered, 14 elided, 0 refused; 24 statements rendered */
     {
         r2sleigh_store_u32((void*)(uint64_t)(frame + 28U), (uint32_t)0U);
         for (; ; ) {
@@ -787,7 +786,7 @@ int32_t find(const int32_t* v, int32_t n, int32_t key)
 L0: ;
             tmp_14eb_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 28U));
             rax_14 = (uint64_t)(uint32_t)tmp_14eb_8_1;
-            goto L4;
+            return (int32_t)rax_14;
         }
         {
 L2: ;
@@ -797,7 +796,6 @@ L3: ;
             rax_14 = (uint64_t)0xffffffffU;
         }
         {
-L4: ;
             return (int32_t)rax_14;
         }
     }

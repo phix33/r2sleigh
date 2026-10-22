@@ -50,3 +50,73 @@ uint64_t inverted_guard(uint32_t arg0)
 
 EOF
 RUN
+
+# A terminal block of at most four statements (a `return`, or a call that never returns) is
+# written at each `goto` that reaches it, and the block goes once nothing falls into it. `classify`
+# is a switch whose every case sets the result and jumps to the one epilogue.
+
+NAME=a terminal block is written at each jump to it
+FILE=tests/fixtures/rv_O0g
+CMDS=<<EOF
+pdd @ sym.classify
+EOF
+EXPECT=<<EOF
+int32_t classify(int32_t x)
+{
+    uint64_t rax_14;
+
+    /* r2dec proof: no individual construct is marked; 38 source obligations: 22 rendered, 16 elided, 0 refused; 18 statements rendered */
+    {
+        if ((uint8_t)((uint32_t)7U < (uint32_t)x)) {
+        } else {
+            switch ((uint32_t)x) {
+            case 7:
+                {
+                    rax_14 = 87;
+                    return (int32_t)rax_14;
+                }
+            case 5:
+                {
+                    rax_14 = 65;
+                    return (int32_t)rax_14;
+                }
+            case 4:
+                {
+                    rax_14 = 54;
+                    return (int32_t)rax_14;
+                }
+            case 3:
+                {
+                    rax_14 = 43;
+                    return (int32_t)rax_14;
+                }
+            case 2:
+                {
+                    rax_14 = 32;
+                    return (int32_t)rax_14;
+                }
+            case 1:
+                {
+                    rax_14 = 21;
+                    return (int32_t)rax_14;
+                }
+            case 0:
+                {
+                    rax_14 = 10;
+                    return (int32_t)rax_14;
+                }
+            case 6:
+                break;
+            }
+        }
+        {
+            rax_14 = (uint64_t)0xffffffffU;
+        }
+        {
+            return (int32_t)rax_14;
+        }
+    }
+}
+
+EOF
+RUN

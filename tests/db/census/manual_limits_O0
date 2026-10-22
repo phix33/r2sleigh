@@ -310,7 +310,7 @@ uint32_t _table_walk(uint64_t arg0, uint8_t* arg1)
     uint64_t x8_30;
     uint32_t stack_m4_1;
 
-    /* r2dec proof: no individual construct is marked; 120 source obligations: 117 rendered, 3 elided, 0 refused; 40 statements rendered */
+    /* r2dec proof: no individual construct is marked; 120 source obligations: 117 rendered, 3 elided, 0 refused; 39 statements rendered */
     {
         stack_m40_1 = arg0;
         stack_m28_1 = 0;
@@ -391,7 +391,7 @@ uint32_t _table_walk(uint64_t arg0, uint8_t* arg1)
             {
                 tmp_100000a58_8_1 = r2sleigh_load_u32((void*)stack_m40_1);
                 stack_m4_1 = (uint32_t)((uint32_t)tmp_100000a58_8_1 + (uint32_t)stack_m28_3);
-                goto L7;
+                return (uint32_t)stack_m4_1;
             }
         }
         {
@@ -399,7 +399,6 @@ L6: ;
             stack_m4_1 = (uint32_t)((uint32_t)0U - (uint32_t)stack_m28_1);
         }
         {
-L7: ;
             return (uint32_t)stack_m4_1;
         }
     }
@@ -434,7 +433,7 @@ uint32_t _state_machine(uint8_t* arg0)
     uint32_t stack_m20_7;
     uint32_t stack_m4_1;
 
-    /* r2dec proof: no individual construct is marked; 216 source obligations: 213 rendered, 3 elided, 0 refused; 85 statements rendered */
+    /* r2dec proof: no individual construct is marked; 216 source obligations: 213 rendered, 3 elided, 0 refused; 84 statements rendered */
     {
         stack_m32_1 = 0;
         stack_m24_1 = 0;
@@ -603,7 +602,7 @@ L9: ;
         {
             {
                 stack_m4_1 = (uint32_t)((uint32_t)0xfffffe70U - (uint32_t)((uint64_t)stack_m32_1 >> 0U));
-                goto L17;
+                return (uint32_t)stack_m4_1;
             }
         }
         {
@@ -612,26 +611,25 @@ L10: ;
         {
 L11: ;
             stack_m4_1 = (uint32_t)((uint32_t)0xfffffed4U - (uint32_t)((uint64_t)stack_m32_1 >> 0U));
-            goto L17;
+            return (uint32_t)stack_m4_1;
         }
         {
 L6: ;
             {
                 stack_m4_1 = (uint32_t)((uint32_t)0xffffff38U - (uint32_t)((uint64_t)stack_m32_1 >> 0U));
-                goto L17;
+                return (uint32_t)stack_m4_1;
             }
         }
         {
 L2: ;
             stack_m4_1 = (uint32_t)((uint32_t)0xffffff9cU - (uint32_t)((uint64_t)stack_m32_1 >> 0U));
-            goto L17;
+            return (uint32_t)stack_m4_1;
         }
         {
 L16: ;
             stack_m4_1 = (uint32_t)((uint32_t)stack_m24_1 + (uint32_t)stack_m20_1);
         }
         {
-L17: ;
             return (uint32_t)stack_m4_1;
         }
     }

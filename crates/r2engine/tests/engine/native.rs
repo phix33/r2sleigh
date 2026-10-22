@@ -7101,3 +7101,35 @@ fn statements_returning(text: &str) -> usize {
         .filter(|line| line.trim_start().starts_with("return"))
         .count()
 }
+
+/// `while (*p) { if (*p == c) return 1; p++; } return 0;`: the loop has two exits, and the second
+/// is reached from inside it.
+const SEARCH_WITH_TWO_EXITS: &[u8] = &[
+    0x80, 0x3f, 0x00, // 1000 cmp byte [rdi], 0
+    0x74, 0x0a, // 1003 je 0x100f
+    0x40, 0x3a, 0x37, // 1005 cmp sil, [rdi]
+    0x74, 0x08, // 1008 je 0x1012
+    0x48, 0xff, 0xc7, // 100a inc rdi
+    0xeb, 0xf1, // 100d jmp 0x1000
+    0x31, 0xc0, // 100f xor eax, eax
+    0xc3, // 1011 ret
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1012 mov eax, 1
+    0xc3, // 1017 ret
+];
+
+#[test]
+fn a_return_a_loop_exits_to_is_written_where_it_exits() {
+    let text = rendered(SEARCH_WITH_TWO_EXITS, "has_byte");
+    assert!(!text.contains("goto"), "{text}");
+    run_rendered(
+        "has_byte",
+        &[&text],
+        r#"int main(void) {
+    if ((uint32_t)has_byte((uint64_t)"abc", 'b') != 1) return 1;
+    if ((uint32_t)has_byte((uint64_t)"abc", 'c') != 1) return 2;
+    if ((uint32_t)has_byte((uint64_t)"abc", 'z') != 0) return 3;
+    if ((uint32_t)has_byte((uint64_t)"", 'z') != 0) return 4;
+    return 0;
+}"#,
+    );
+}
