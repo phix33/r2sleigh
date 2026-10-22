@@ -55,8 +55,10 @@ Kuna's own documentation admits its output varies with the worker split
 ## Decisions
 
 **D46. Moves are separated from noise by paired tests.** Owner: GT.
-- A nightly job scores a pinned sample against the previous night. Pass and fail
-  transitions are tested with McNemar's exact test (perfect rate) and a sign test
+- A nightly job scores a pinned sample against the last night that passed, a baseline that
+  advances only on a pass or an explicit bless, so a regression keeps failing until it is
+  fixed or blessed. It also reports against the pinned blessed baseline, so drift below the
+  threshold shows as it accumulates. Pass and fail transitions are tested with McNemar's exact test (perfect rate) and a sign test
   (value). The p-values are Holm-adjusted together and a change is significant below 0.01.
 - Timing is an A/B of tonight's build against last night's in alternating order, with a
   bootstrap interval over binaries. A slowdown counts only when the interval excludes 0 and
