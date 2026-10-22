@@ -18,10 +18,15 @@ impl CoveringSpans {
         spans: &BTreeMap<StackAddressRoot, i64>,
         evidenced: &BTreeSet<StackAddressRoot>,
     ) -> Self {
-        let held: Vec<(StackAddressRoot, i64)> = (spans.iter())
-            .filter(|(root, _)| evidenced.contains(root))
-            .map(|(root, end)| (*root, *end))
-            .collect();
+        // Both maps are in root order: one merge keeps the spans whose root is evidenced.
+        let mut held = Vec::with_capacity(evidenced.len().min(spans.len()));
+        let mut spans = spans.iter().peekable();
+        for root in evidenced {
+            while spans.next_if(|(span, _)| *span < root).is_some() {}
+            if let Some((span, end)) = spans.next_if(|(span, _)| *span == root) {
+                held.push((*span, *end));
+            }
+        }
         let leaves = held.len().next_power_of_two();
         let mut tree = vec![i64::MIN; 2 * leaves];
         for (index, (_, end)) in held.iter().enumerate() {
