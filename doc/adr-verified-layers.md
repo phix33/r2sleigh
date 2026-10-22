@@ -305,15 +305,18 @@ graded.** Owner: GT.
   label starts nothing, and a second run plans no change.
 
 **D44. The oracle's breadth is ratcheted.** Owner: VC, with GT.
-- `scripts/oracle_breadth.py` counts the instruction constructors (mnemonics) each
-  vendored specification defines and those with at least one recorded oracle case,
-  per processor, and prints the uncovered list sorted by how often a compiler
-  emits them (the reference bench's and the corpus' `ao` counts).
-- The count of uncovered mnemonics may fall and never rise; a spec resync that
-  adds constructors lowers the covered fraction and so fails until cases are
-  added. The first target is x86-64 from 7.7% to every mnemonic the corpus emits,
-  then AArch64 to 100% by name. MIPS, RISC-V and ARM32 stay refused (D32) and are
-  listed as zero.
+- `scripts/oracle_breadth.py` counts, per processor, the mnemonics each vendored
+  specification defines and its instruction constructors (a mnemonic's width,
+  addressing-mode and extension forms, identified by table and constructor id in
+  the compiled `.sla`), and how many have at least one recorded oracle case. It
+  prints the uncovered list sorted by how often a compiler emits them (the
+  reference bench's and the corpus' `ao` counts).
+- The uncovered count of mnemonics and of constructors may each fall and never
+  rise. A resync that adds a mnemonic or a new form of a covered one lowers the
+  covered fraction and fails until a case for it is added. The first target is
+  x86-64 from 7.7% to every mnemonic the corpus emits, then AArch64 to 100% by
+  name, then by constructor. MIPS, RISC-V and ARM32 stay refused (D32) and are
+  listed as zero. Until the script lands the gate is not built.
 - Gate: CI fails when the uncovered count rises; the baseline moves by a bless
   commit only down.
 
