@@ -99,30 +99,14 @@ pub fn render(
         distinct_return: &distinct_return,
     };
     let mut occurrences = Occurrences::new(blocks, addresses);
-    let mut body = structured(
-        input,
-        body,
-        &labels,
-        &never_return,
-        &evidence,
-        &mut occurrences,
-    );
+    let mut body = structured(input, body, &labels, &evidence, &mut occurrences);
     let selections = select(&c, &mut body, &|id| occurrences.block_of(id));
-    let role = |stmt: &CStmt| statement_role(stmt, &never_return, &selections);
+    let role = |stmt: &CStmt| statement_role(stmt, &never_returns, &selections);
     certify_control(input, &body, &occurrences, &labels, &role)?;
     crate::structure::condition::respell_negations(&mut body);
     // What remains is linear emission of a certified body, so a stop here keeps what was reached.
     let stopped = work.with_phase(DecompileWorkPhase::Rendering).poll().err();
-    match &values {
-        Some(values) => {
-            c.params = values.params();
-            c.variadic = input.variadic();
-            c.locals = values.locals();
-            c.externs = values.externs();
-            c.extern_objects = values.extern_objects();
-        }
-        None => c.params_known = false,
-    }
+    declare(&mut c, input, values.as_ref());
     c.body = match body {
         CStmt::Block(stmts) => stmts,
         stmt => vec![stmt],
@@ -162,6 +146,20 @@ pub fn render(
     })
 }
 
+/// What the values stage declared for `c`, or that its parameters are unknown.
+fn declare(c: &mut CFunction, input: &RenderInput<'_>, values: Option<&values::Values>) {
+    match values {
+        Some(values) => {
+            c.params = values.params();
+            c.variadic = input.variadic();
+            c.locals = values.locals();
+            c.externs = values.externs();
+            c.extern_objects = values.extern_objects();
+        }
+        None => c.params_known = false,
+    }
+}
+
 /// `c` ready to emit: a wide carrier is a struct the unit defines, with the helpers that take it
 /// apart, and each declared tag it spells is defined after them.
 fn ready_with_carriers(c: CFunction, tags: &tags::Tags) -> crate::codegen::EmissionReadyFunction {
@@ -196,13 +194,12 @@ fn structured(
     input: &RenderInput<'_>,
     body: Vec<CStmt>,
     labels: &BTreeMap<u64, String>,
-    never_return: &std::collections::BTreeSet<String>,
     evidence: &Evidence<'_>,
     marks: &mut Occurrences,
 ) -> CStmt {
     let unselected = std::collections::BTreeSet::new();
     let certified = |stmt: &CStmt, marks: &Occurrences| {
-        let role = |stmt: &CStmt| statement_role(stmt, never_return, &unselected);
+        let role = |stmt: &CStmt| statement_role(stmt, evidence.never_returns, &unselected);
         let certificate = control_certificate(input, stmt, marks, labels, &role);
         match certificate.ok() {
             true => Ok(()),
@@ -336,7 +333,7 @@ fn select(
 /// What the certificate reads a statement as: a selection the stage recorded, or one ending control.
 fn statement_role(
     stmt: &CStmt,
-    never_return: &std::collections::BTreeSet<String>,
+    never_returns: &dyn Fn(&CStmt) -> bool,
     selections: &std::collections::BTreeSet<RenderObservationId>,
 ) -> StatementRole {
     match stmt
@@ -345,7 +342,7 @@ fn statement_role(
         .any(|id| selections.contains(id))
     {
         true => StatementRole::Selects,
-        false => (traps(stmt) || calls_never_returning(stmt, never_return)).into(),
+        false => (traps(stmt) || never_returns(stmt)).into(),
     }
 }
 
