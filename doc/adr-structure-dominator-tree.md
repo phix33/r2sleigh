@@ -87,6 +87,16 @@ the outermost loop in `Λ(y)`, and its whole dominator subtree moves with it
 is `continue` to the innermost enclosing header, inline adjacency, or `goto`.
 Merge children and exits are written in ascending RPO.
 
+An exit `y` of loop `L` with one forward way in (the edge from its immediate dominator `x`) whose
+dominator subtree no edge leaves (*closed*) is written where that edge leaves `L`, not after it,
+unless `break` reaches it: the first exit of one loop stays after the loop. `Placement::inlines` is
+the one predicate `compute` (the exit lists) and `edge` (the arms) share. A closed subtree holds no
+loop another block belongs to, so the text it adds inside `L` leaves no `continue`, `break` or label.
+Closedness is the preorder interval of the subtree holding the extremes of its blocks' successors'
+positions, `O(B + E)`. The difference-on-tree count over `idom` answers how many edges leave a
+subtree and needs the lowest common ancestor of each edge (`O((B + E) log B)`, a lifting table);
+only whether any edge leaves is asked, so it is not built.
+
 This writes each block exactly once, satisfies `I_S` for any graph,
 reducible or not, runs in `O(|B| + |E|)` after the dominator tree, and makes
 every backward `goto` target a loop header or an irreducible-cycle entry.
@@ -114,6 +124,31 @@ every exit is a bare transfer or a block only the chain reaches), `shape`, the l
 certificate holds each stage to the machine's edges with their labels, so a stage that changes a test's polarity says
 so on a marked atom or is refused (§3).
 
+A terminal tail is a run of at most four expression statements from a label, through the sibling
+blocks the text falls into, to a `return`, a call to a callee declared never to return, or a `goto`
+to another run (a cycle of jumps has none); it holds no residual or gap, because a copy would be a
+second site of one unproven cell (the skipped-block copy asks the same predicate, `tails::copyable`,
+so a skipped block holding a residual stays one). Each `goto` to a tail is replaced by a fresh copy (every marker
+minted anew), and a tail nothing falls into and no `goto` names goes with the blocks it ran through
+(`structure/tails.rs`). A copy carries its blocks' whole out-edge sets, which `I_S` already asks of a
+block written twice, so a copy where the edge did not go is refused by the certificate. The pass
+runs after the skipped-block copy, which needs the jumps the tail copies replace: `bi_windup`'s
+`put_byte` is a block the compiler merged out of two arms and the copy into those arms is the source's
+shape, where a tail copied first leaves it shared. The preference order of this section holds: a tail
+copy removes a label, so it outranks the duplicate block it costs.
+
+A `return` whose value is a merge of the return's own block, and whose inputs are pairwise-distinct
+canonical terms, is copied into every arm end of the conditional that falls into it. That is the
+one place a block is duplicated without a label to remove, so it needs a fact the CFG states and a
+join does not: the edges carry values no other edge carries (`Values::returns_distinct_merge`, `O(1)`
+per return block, over the graph's phi and the canonical terms, never names or spelled text). A
+side effect before the return, a label something still jumps to, a merge that carries itself or one
+two edges give the same term are not this shape. The assignment before each copy stays
+(`x = a; return x;`); folding it touches the merge's ledger accounting and is its own step.
+The unguarded form (any `return` after a conditional with two falling arms, `return;` too) was
+measured and not shipped: the CFG does not say a source wrote two returns where it wrote one, and
+`return a || b` compiles to the same merge of `1` and `b` as `if (a) return 1; return b`.
+
 ### §6 Decided branches
 
 Preparation runs sparse conditional constants in `SccpMode::Decide`
@@ -135,6 +170,8 @@ per round; a round that decides nothing ends the loop.
   and `do-while` rotation (`structure/rotate.rs`), with the latch's copies written before its test (`structure/latch.rs`);
   switch-tail absorption, bounded tail duplication of returns and return into arms are still not replaced. See the
   section below.
+
+- S4 (2026-10-22): the recoveries below, each checked by `I_S` on its result.
 
 ## Left
 
@@ -218,9 +255,57 @@ regression to chase: the next reader should not rediscover it, and no recovery i
 whose exit arm is not a bare `break` (34, conditional on the exit being the only way out); chains whose DAG is not
 read-once (a selection between two tests), refused for now; splitting a chain around a block that renders text; a
 chain whose exit is a `continue` to its own head, which `exits` reads as an edge inside the chain, so its `ExitCount`
-fault reverts every chain of the function (ROADMAP D58).
+fault reverts every chain of the function (ROADMAP D59).
 Equivalence cells at risk: `branchy`, `hashes`, `shapes` and `values` at O0, O1 and O2 under both compilers (every
 function with a chain or a rotated loop).
+
+## 2026-10-22: terminal tails, joined returns and sole exits
+
+The goto analysis above ranked what the gotos cost on DecBench: GED scores the block graph, a label
+adds no block, and the loss is a shared return where the source has several, a missing `&&`/`||`,
+`while` against `for (;;)`, and a latch arm's copies. These three landed on top of the chains, each with a
+unit test that fails without it, a counter-test where it must not fire, a behaviour test through
+the engine (compiled and run) and a `tests/db/cmd/structure` golden on a real function:
+
+- Joined returns (`tails::join_returns`, evidence `Values::returns_distinct_merge`).
+- Terminal tails at their jumps, through the blocks after them and through jumps to other tails
+  (`tails::inline_tails`), after the skipped-block copy.
+- Sole closed exits (`Placement::inline_exits`, `closed_subtrees`).
+
+Measured on bzip2, zlib and grep at O2 and O2-noinline (1,305 to 1,313 binary-function pairs
+scored in both, 552 distinct functions): these are projects the analysis mined, so the numbers
+are mined-set numbers. Perfect is GED 0 under DecBench's own code, run on contabo over the tip
+build's output and each step's (the tip reproduces the 2026-10-17 run's GED on 1,308 of 1,313):
+
+| step | perfect | total GED against the tip | gotos | functions with a goto |
+|---|---|---|---|---|
+| tip | 203 | 0 | 4,654 | 623 |
+| joined returns | 207 (+5, 1 lost) | -213 | 4,654 | 623 |
+| tails at their jumps, first order | 199 (+5, 9 lost) | -1,833 | 3,474 | 499 |
+| sole closed exits | 199 | -1,835 | 3,460 | 497 |
+| skipped block first | 211 (+9, 1 lost) | -1,759 | 3,472 | 497 |
+| runs through blocks and jumps | 212 (+10, 1 lost) | -1,937 | 2,694 | 426 |
+
+The 212 are 102 distinct functions of 552 (96 at the tip); the ten new are seven (level, function)
+pairs, `BZ2_bzCompressEnd` and `BZ2_bzDecompressEnd` at both levels, `myfeof`, `buf_has_encoding_errors`
+and `inflateUndermine` at one (the zlib ones in four binaries); the one lost is `skip_devices`, whose
+source is `return a || b`. The unguarded join on the first step: 218 perfect (+17, 2 lost), total GED -452.
+Over the 558 distinct functions the goto classes of the analysis go from 2,214 to 1,356: TR1 487 to 22,
+TR4 246 to 23, FW 580 to 237; left are JN 305 and JNB 283 (a jump over a block no rule closes), FW 237,
+LX 139 (an exit that is not closed), TR16 133 (a tail of five to sixteen statements), SP 86, CC 68,
+IR 57. Held out (23 binaries of radare2's test set, x86-64 and AArch64, 1,834 functions): rendered
+1,496 and refused 338 before and after, with the same functions refused; gotos 2,941 to 2,112; no
+function gains a goto.
+
+Left, by when:
+
+- Next: the assignment before a copied or joined return, folded at the owner that spells the edge
+  copy (`return a;`); `&&`/`||` chains behind a BDD identity check (the analysis' ceiling is 29
+  bodies); while/do-while rotation (3 to 5 GED each) and a latch arm's copies (ceiling 17).
+- Conditional: the four-statement bound (tails of five to sixteen are 133 gotos; it moves with a
+  measurement on projects the analysis did not mine); the unguarded join, only with a CFG fact that
+  separates `return a || b` from two returns.
+- Unnecessary: the lowest-common-ancestor count for closedness.
 
 ## 2026-10-23: what the chain and latch passes cost
 
