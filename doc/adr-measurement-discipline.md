@@ -113,3 +113,24 @@ writes the files.
 D48 first (small, and every later change is graded by it), D46 and D47 with the DecBench
 harness (D10 decides where they run), D49 beside RF, D50 after the cost path (ROADMAP
 order, item 8): a pool over a slow per-function path only multiplies the cost.
+
+## 2026-10-22 review: where r2s stands against the field
+
+An evidence review of the whole project (caps and caches, a capability matrix, direction and blockers,
+measured performance, then a critic who re-verified five claims) found the following; D51 to D57 in the ROADMAP own it.
+
+- **Quality.** r2s is fourth of four on DecBench union-perfect (20.1%, [record](../tests/decbench/RESULT-2026-10-17.md)),
+  first on byte_match, last on type_match. Its edge is verification (certification, equivalence, oracles, typed
+  refusals), not recovery. Coverage is proof-first: bash renders 38.0% of 1,568 functions with no marked
+  construct, fedora ls 58.7%.
+- **Behind the field, by name.** IDA, Ghidra and Kuna decompile more architectures (r2s: x86-64 and AArch64 only);
+  Ghidra, IDA and Binary Ninja have persistence and annotation (r2s: none); every peer has a scripting API or
+  agent surface (r2s: JSON on three verbs); IDA has library identification and Windows API types (r2s: neither);
+  Kuna decompiles in parallel (r2s: single-threaded). r2s has no debugger, symbolic execution, patching or UI beyond
+  the TUI.
+- **Caps and caches.** 31 cap sites, 4 of which keep a partial result silently; 3 cells outside the query
+  database break the cache rule; no Dylint covers a cap, and the cache lint sees one crate of 13.
+- **Blockers.** Merge latency of a deep stack (28 PRs merged after 4.7 days), CI capacity, one Linux host, the
+  absence of a feedback path from users, and a bench that is not in the tree it grades.
+- **Not claimed.** Memory and latency leads over other tools are unmeasured (the bench records no RSS). Kuna's
+  19 MB claim is unverified.
