@@ -2,14 +2,17 @@
 //!
 //! A function whose result a callee's statement could prove is resolved again against that callee
 //! resolved, bottom-up over the components of those demands; under `aa`, so is one whose arity
-//! a callee's could make exact, and a cycle's arities are their least fixpoint.
+//! a callee's could make exact; a cycle's arities and results are their least fixpoint.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use r2source::SourceFunctionInterface;
+use r2source::{
+    SourceArityFloor, SourceFloorCause, SourceFunctionInterface, SourceResultCause,
+    SourceResultSeed, SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall,
+};
 
-use super::analysis::{CalleeReads, Shared, Walked, callee_read};
+use super::analysis::{CalleeReads, Shared, callee_read};
 use super::{ProgramInputs, Source, View};
 use crate::native::{CalleeRead, Stated, Unreadable};
 use crate::query::db::{Db, Hold, Query, Retention};
@@ -78,13 +81,54 @@ fn owners<S: Source + 'static>(
 /// set it is entered in.
 fn bodies<S: Source + 'static>(view: &View<'_, S>, read: &CalleeRead, demand: Demand) -> Vec<Node> {
     let arity = match demand {
-        Demand::Result => None,
-        Demand::Arity => Some(&read.owners.arity),
+        Demand::Result => BTreeSet::new(),
+        Demand::Arity => arity_owners(read),
     };
-    let owners = read.owners.result.iter().chain(arity.into_iter().flatten());
-    let owners = owners.copied().collect::<BTreeSet<_>>().into_iter();
+    let owners = result_owners(read).into_iter().chain(arity);
+    let owners = owners.collect::<BTreeSet<_>>().into_iter();
     let bodies = owners.filter(|owner| crate::native::Program::import_at(view, *owner).is_none());
     bodies.map(|owner| (owner, view.thumb_at(owner))).collect()
+}
+
+/// The callees whose stated arity could make a read's floor exact: none where any cause is not a
+/// call to a callee stating nothing or a floor (D37). O(causes).
+fn arity_owners(read: &CalleeRead) -> BTreeSet<u64> {
+    let floor = (read.interface.as_ref()).and_then(SourceFunctionInterface::arity_floor);
+    let owners = floor.into_iter().flat_map(SourceArityFloor::causes);
+    let owners = owners.map(|cause| match cause {
+        SourceFloorCause::HandedOn(
+            SourceUnprovenCall::Unstated(callee) | SourceUnprovenCall::Floor(callee),
+        ) => Some(*callee),
+        SourceFloorCause::HandedOn(
+            SourceUnprovenCall::Indirect | SourceUnprovenCall::Stated(_),
+        )
+        | SourceFloorCause::UnresolvedTransfer
+        | SourceFloorCause::SupervisorEntry
+        | SourceFloorCause::ArgumentAreaUnplaced
+        | SourceFloorCause::ArgumentAreaRead
+        | SourceFloorCause::RegisterRead => None,
+    });
+    owners.collect::<Option<_>>().unwrap_or_default()
+}
+
+/// The callees whose stated result could prove a read's: none where any cause is not a call to a
+/// named callee (D37). O(causes).
+fn result_owners(read: &CalleeRead) -> BTreeSet<u64> {
+    let unproven = (read.interface.as_ref()).and_then(SourceFunctionInterface::unproven_result);
+    let owners = unproven.into_iter().flat_map(SourceUnprovenResult::causes);
+    let owners = owners.map(|cause| match cause {
+        SourceResultCause::Returned(SourceUnstatedCall::Direct(callee))
+        | SourceResultCause::Tailed(SourceUnstatedCall::Direct(callee)) => Some(*callee),
+        SourceResultCause::Returned(SourceUnstatedCall::Indirect)
+        | SourceResultCause::Tailed(SourceUnstatedCall::Indirect)
+        | SourceResultCause::TailsDisagree
+        | SourceResultCause::NoReturn
+        | SourceResultCause::Clobbered
+        | SourceResultCause::HandedBack
+        | SourceResultCause::Ambiguous
+        | SourceResultCause::Undefined => None,
+    });
+    owners.collect::<Option<_>>().unwrap_or_default()
 }
 
 /// One function resolved against the resolved callees its result or arity waits on.
@@ -110,8 +154,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Resolved {
         let cycle = db
             .get::<Component>(&(node, demand))
             .expect("a component asks for no resolution");
-        if demand == Demand::Arity && member_owned(&alone.0, &cycle.members) {
-            return least_fixpoint(db, &view, &cycle.members, node);
+        if member_owned(&alone.0, &cycle.members, demand) {
+            return least_fixpoint(db, &view, &cycle.members, node, demand);
         }
         outside_resolved(db, node, &alone, &cycle.members, demand)
     }
@@ -172,39 +216,72 @@ fn stopped_read() -> Shared<CalleeRead> {
     Shared(Arc::new(CalleeRead {
         interface: None,
         facts: Err(Unreadable::Stopped),
-        owners: Default::default(),
     }))
 }
 
 /// Whether a read's arity is a floor some member of its component owns.
-fn member_owned(read: &CalleeRead, members: &[Node]) -> bool {
-    let floor = (read.interface.as_ref()).is_some_and(|interface| !interface.arity().is_exact());
-    let member = |owner: &u64| members.binary_search_by_key(owner, |(at, _)| *at).is_ok();
-    floor && read.owners.arity.iter().any(member)
+fn arity_open(read: &CalleeRead, members: &[Node]) -> bool {
+    arity_owners(read)
+        .iter()
+        .any(|owner| is_member(members, *owner))
 }
 
-/// The arity a cycle's fixpoint assumes of a member, and the interface its callers are handed;
-/// `None` is unstated, the top.
+/// Whether a read's result is unproven on calls some member of its component owns.
+fn result_open(read: &CalleeRead, members: &[Node]) -> bool {
+    result_owners(read)
+        .iter()
+        .any(|owner| is_member(members, *owner))
+}
+
+fn is_member(members: &[Node], owner: u64) -> bool {
+    members.binary_search_by_key(&owner, |(at, _)| *at).is_ok()
+}
+
+/// Whether a read's arity or result, as `demand` asks, is one a member of its component owns.
+fn member_owned(read: &CalleeRead, members: &[Node], demand: Demand) -> bool {
+    result_open(read, members) || (demand == Demand::Arity && arity_open(read, members))
+}
+
+/// What a read states that a cycle's fixpoint moves: its parameters' count and whether that is a
+/// floor, and, where the member's result is open, the result it states.
+type State = (usize, bool, Option<Option<SourceResultSeed>>);
+
+/// The arity and result a cycle's fixpoint assumes of a member, and the interface its callers are
+/// handed.
 struct Assumed {
     count: usize,
     floor: bool,
+    /// Where the member's result is open: the result assumed, `None` inside being unstated, the top.
+    result: Option<Option<SourceResultSeed>>,
     interface: SourceFunctionInterface,
 }
 
 impl Assumed {
-    /// What a read states; `floor` false assumes it exact.
-    fn of(read: &CalleeRead, floor: bool) -> Option<Self> {
+    /// What a read states: exact arity where `exact`, the seed as the result where `track`, else
+    /// the read's own with the result stripped.
+    fn of(read: &CalleeRead, exact: bool, track: bool) -> Option<Self> {
         let interface = read.interface.as_ref()?;
-        let floor = floor && !interface.arity().is_exact();
+        let cause = interface.arity_floor().filter(|_| !exact);
+        let result = track.then(|| interface.unproven_result().and_then(|r| r.seed()));
         Some(Self {
             count: interface.arity().floor(),
-            floor,
-            interface: interface.clone().assumed_arity(floor),
+            floor: cause.is_some(),
+            result,
+            interface: interface.clone().assumed(cause.cloned(), result.flatten()),
         })
     }
 
-    fn state(assumed: &Option<Self>) -> Option<(usize, bool)> {
-        assumed.as_ref().map(|held| (held.count, held.floor))
+    fn state(assumed: &Option<Self>) -> Option<State> {
+        let held = assumed.as_ref()?;
+        Some((held.count, held.floor, held.result))
+    }
+
+    /// What a read of a member states, as far as the member's assumption tracks it.
+    fn read_state(read: &CalleeRead, tracked: bool) -> Option<State> {
+        let interface = read.interface.as_ref()?;
+        let arity = interface.arity();
+        let result = tracked.then(|| interface.stated_result());
+        Some((arity.floor(), !arity.is_exact(), result))
     }
 
     /// Raise an assumption to what a read of its member states; whether it moved.
@@ -219,36 +296,57 @@ impl Assumed {
         let arity = interface.arity();
         let count = arity.floor().max(held.count);
         let floor = held.floor || !arity.is_exact();
-        if (count, floor) == (held.count, held.floor) {
+        let result = held
+            .result
+            .map(|seed| join(seed, interface.stated_result()));
+        if (count, floor, result) == (held.count, held.floor, held.result) {
             return false;
         }
+        let cause = (interface.arity_floor()).or_else(|| held.interface.arity_floor());
         let from = match arity.floor() >= held.count {
             true => interface.clone(),
             false => held.interface.clone(),
         };
+        let interface = from.assumed(cause.filter(|_| floor).cloned(), result.flatten());
         *held = Self {
             count,
             floor,
-            interface: from.assumed_arity(floor),
+            result,
+            interface,
         };
         true
     }
 }
 
-/// A cycle's arities as their least fixpoint (doc/adr-resolved-bodies.md, "Arity"); the answer
-/// for `node`, the other open members' deposited.
+/// The result both states: the wider of two integers in one carrier, and none where either is
+/// unstated or they are not one carrier.
+fn join(
+    held: Option<SourceResultSeed>,
+    read: Option<SourceResultSeed>,
+) -> Option<SourceResultSeed> {
+    let (held, read) = (held?, read?);
+    (held.slot == read.slot).then(|| SourceResultSeed {
+        slot: held.slot,
+        bits: held.bits.max(read.bits),
+        signed: held.signed && read.signed,
+    })
+}
+
+/// A cycle's arities and results as their least fixpoint (doc/adr-resolved-bodies.md, "Arity" and
+/// "A cycle's results"); the answer for `node`, the other open members' deposited.
 fn least_fixpoint<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,
     view: &View<'_, S>,
     members: &[Node],
     node: Node,
+    demand: Demand,
 ) -> Shared<CalleeRead> {
-    let mut cycle = Cycle::new(db, members);
+    let mut cycle = Cycle::new(db, members, demand);
     let mut pending = (0..members.len())
         .filter(|at| cycle.open[*at])
         .collect::<BTreeSet<_>>();
-    // Terminates: an assumption only rises, its count bounded by the slots its body can read, then
-    // a floor, then unstated; each rise queues its callers once: O(k + (s + 2)·E) preparations.
+    // Terminates: an assumption only rises (count, floor, none; result width, none), and each rise
+    // queues its callers once: O(k + (s + 6)·E) preparations.
     while let Some(at) = pending.pop_first() {
         let Some(rose) = cycle.resolve(db, view, at) else {
             return stopped_read();
@@ -260,11 +358,11 @@ fn least_fixpoint<S: Source + 'static>(
     let open = (0..members.len()).filter(|at| cycle.open[*at]);
     let mut answers = open.map(|at| (at, cycle.settled(at)));
     let mut answers = answers.by_ref().collect::<Vec<_>>();
-    // A read below its assumption is no fixpoint: every open member keeps the floor it had.
+    // A read below its assumption is no fixpoint: every open member keeps what it had.
     if answers.iter().any(|(_, read)| read.is_none()) {
         r2il::refusal_evidence!(
-            "arity-fixpoint",
-            "a member of {:#x}'s cycle read below its assumed arity",
+            "cycle-fixpoint",
+            "a member of {:#x}'s cycle read below its assumption",
             node.0
         );
         for (at, read) in &mut answers {
@@ -273,7 +371,7 @@ fn least_fixpoint<S: Source + 'static>(
                 members[*at],
                 &cycle.alone[*at],
                 members,
-                Demand::Arity,
+                demand,
             ));
         }
     }
@@ -283,19 +381,22 @@ fn least_fixpoint<S: Source + 'static>(
         let read = read.expect("every open member is answered");
         match members[at] == node {
             true => own = Some(read),
-            false => deposited.push(((members[at], Demand::Arity), read)),
+            false => deposited.push(((members[at], demand), read)),
         }
     }
     db.deposit::<Resolved>(deposited);
     own.expect("the member asked for is open")
 }
 
-/// One component's least fixpoint in progress: a member whose floor a member owns is open, seeded
-/// exact at what it reads alone; every other member an open one calls is stated as resolved.
+/// One component's least fixpoint in progress: a member whose floor or result a member owns is
+/// open, seeded at what it reads alone; every other member an open one calls is stated as resolved.
 struct Cycle<'m> {
     members: &'m [Node],
+    demand: Demand,
     alone: Vec<Shared<CalleeRead>>,
     open: Vec<bool>,
+    /// Whether an open member's result is the one it owns.
+    tracked: Vec<bool>,
     assumed: Vec<Option<Assumed>>,
     /// Whether a member is stated yet: an open one from its seed, another once an open one calls it.
     stated: Vec<bool>,
@@ -306,7 +407,11 @@ struct Cycle<'m> {
 }
 
 impl<'m> Cycle<'m> {
-    fn new<S: Source + 'static>(db: &Db<ProgramInputs<S>>, members: &'m [Node]) -> Self {
+    fn new<S: Source + 'static>(
+        db: &Db<ProgramInputs<S>>,
+        members: &'m [Node],
+        demand: Demand,
+    ) -> Self {
         let alone = members.iter().map(|member| {
             db.get::<CalleeReads>(member)
                 .expect("a read asks for no resolution")
@@ -314,16 +419,22 @@ impl<'m> Cycle<'m> {
                 .clone()
         });
         let alone = alone.collect::<Vec<_>>();
-        let open = alone.iter().map(|read| member_owned(&read.0, members));
+        let open = (alone.iter()).map(|read| member_owned(&read.0, members, demand));
         let open = open.collect::<Vec<_>>();
-        let assumed = alone.iter().zip(&open);
-        let assumed =
-            assumed.map(|(read, open)| open.then(|| Assumed::of(&read.0, false)).flatten());
+        let tracked = alone.iter().map(|read| result_open(&read.0, members));
+        let tracked = tracked.collect::<Vec<_>>();
+        let assumed = alone.iter().zip(&open).zip(&tracked);
+        let assumed = assumed.map(|((read, open), track)| {
+            let exact = demand == Demand::Arity && arity_open(&read.0, members);
+            open.then(|| Assumed::of(&read.0, exact, *track)).flatten()
+        });
         let k = members.len();
         Self {
             members,
+            demand,
             assumed: assumed.collect(),
             stated: open.clone(),
+            tracked,
             alone,
             open,
             outside: vec![Vec::new(); k],
@@ -370,28 +481,28 @@ impl<'m> Cycle<'m> {
         view: &View<'_, S>,
         at: usize,
     ) -> Option<()> {
-        let owners = bodies(view, &self.alone[at].0, Demand::Arity).into_iter();
+        let owners = bodies(view, &self.alone[at].0, self.demand).into_iter();
         for owner in owners.filter(|owner| self.members.binary_search(owner).is_err()) {
-            let read = resolved(db, owner)?;
+            let read = resolved(db, owner, self.demand)?;
             self.outside[at].push((owner.0, read.0));
         }
-        let walked = db
-            .get::<Walked>(&self.members[at])
-            .expect("a walk asks for no resolution");
-        let reaches = match &walked.0 {
-            Ok(walk) => walk.reaches(view),
-            Err(refusal) if refusal.stopped() => return None,
-            Err(_) => Vec::new(),
-        };
+        // The members it calls are the callees its causes name, so no walk finds them.
         let members = self.members;
-        let calls = reaches
-            .into_iter()
-            .filter_map(|callee| members.binary_search_by_key(&callee, |(at, _)| *at).ok());
+        let alone = &self.alone[at].0;
+        let arity = match self.demand {
+            Demand::Result => BTreeSet::new(),
+            Demand::Arity => arity_owners(alone),
+        };
+        let named = result_owners(alone).into_iter().chain(arity);
+        let named = named.collect::<BTreeSet<_>>().into_iter();
+        let calls =
+            named.filter_map(|callee| members.binary_search_by_key(&callee, |(at, _)| *at).ok());
         for callee in calls {
             self.callees[at].push(callee);
             self.callers[callee].push(at);
             if !self.stated[callee] {
-                self.assumed[callee] = Assumed::of(&resolved(db, members[callee])?.0, true);
+                let read = resolved(db, members[callee], self.demand)?;
+                self.assumed[callee] = Assumed::of(&read.0, false, false);
                 self.stated[callee] = true;
             }
         }
@@ -403,18 +514,19 @@ impl<'m> Cycle<'m> {
         let read = self.answers[at]
             .clone()
             .expect("every open member is resolved");
-        let state = Assumed::state(&Assumed::of(&read.0, true));
+        let state = Assumed::read_state(&read.0, self.tracked[at]);
         (state == Assumed::state(&self.assumed[at])).then_some(read)
     }
 }
 
-/// A function as `Resolved` answers it under `aa`, or `None` where the request stopped.
+/// A function as `Resolved` answers it for `demand`, or `None` where the request stopped.
 fn resolved<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,
     node: Node,
+    demand: Demand,
 ) -> Option<Shared<CalleeRead>> {
     let read = db
-        .get::<Resolved>(&(node, Demand::Arity))
+        .get::<Resolved>(&(node, demand))
         .expect("demands below a cycle close");
     (!stopped(&read.0)).then(|| (*read).clone())
 }
@@ -523,6 +635,51 @@ mod tests {
         closed
             .map(|closed| closed.members.iter().map(|(at, _)| *at).collect())
             .collect()
+    }
+
+    /// A read whose interface is a floor of exactly `causes`.
+    fn floor_of(causes: impl IntoIterator<Item = SourceFloorCause>) -> CalleeRead {
+        let interface = SourceFunctionInterface::new(
+            b"owners".to_vec(),
+            "sysv",
+            Vec::<r2source::SourceAbiParameterSpec>::new(),
+            r2source::SourceFunctionReturn::Void,
+            Vec::<r2source::SourceStackSlotSpec>::new(),
+        )
+        .expect("an interface")
+        .with_arity_floor(SourceArityFloor::of(causes).expect("some cause"));
+        CalleeRead {
+            interface: Some(interface),
+            facts: Err(Unreadable::NotWalked),
+        }
+    }
+
+    #[test]
+    fn a_floor_is_owned_only_where_every_cause_is_a_call_a_callee_can_lift() {
+        use SourceFloorCause::HandedOn;
+        let calls = [
+            HandedOn(SourceUnprovenCall::Unstated(0x10)),
+            HandedOn(SourceUnprovenCall::Floor(0x20)),
+        ];
+        assert_eq!(arity_owners(&floor_of(calls)), BTreeSet::from([0x10, 0x20]));
+        // Each cause no callee's statement lifts keeps the whole floor, whatever else is owned.
+        let unliftable = [
+            HandedOn(SourceUnprovenCall::Indirect),
+            HandedOn(SourceUnprovenCall::Stated(0x30)),
+            SourceFloorCause::UnresolvedTransfer,
+            SourceFloorCause::SupervisorEntry,
+            SourceFloorCause::ArgumentAreaUnplaced,
+            SourceFloorCause::ArgumentAreaRead,
+            SourceFloorCause::RegisterRead,
+        ];
+        for cause in unliftable {
+            let causes = calls.into_iter().chain([cause]);
+            assert_eq!(
+                arity_owners(&floor_of(causes)),
+                BTreeSet::new(),
+                "{cause:?}"
+            );
+        }
     }
 
     #[test]

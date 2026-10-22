@@ -710,6 +710,15 @@ fn a_dispatch_says_where_its_table_is_and_each_arm_which_cases_reach_it() {
     assert!(!unresolved, "{said:?}");
 }
 
+#[test]
+fn the_low_tier_is_the_body_the_listing_lists_arms_included() {
+    let text = OpenProgram::of(table_switch())
+        .lifted(BASE)
+        .expect("it lifts");
+    assert!(text.contains("\nBlock 0x100e "), "{text}");
+    assert!(!text.contains("stopped at"), "{text}");
+}
+
 /// Each dispatch table a function listing reads: where, how many entries, and what the container states of its bytes.
 fn tables_of(lines: &[Line]) -> Vec<(u64, usize, r2engine::native::TableBytes)> {
     lines
@@ -821,6 +830,41 @@ fn a_dispatch_table_in_memory_the_program_may_write_is_read_only_through_the_loa
     assert_eq!(relocated(4), [(table, 4, sealed)]);
 }
 
+/// An interpreted executable is relocated by its interpreter first, so an unwritten RELRO entry is
+/// the file's arm; a static image keeps the refusal above (ROADMAP M18).
+#[test]
+fn a_sealed_table_of_an_interpreted_executable_reads_the_words_no_record_writes() {
+    use r2engine::native::TableBytes;
+    let table = BASE + 0x30;
+    let sealed = || {
+        table_switch()
+            .writable_data_after(table)
+            .sealed(table..table + 0x20)
+    };
+    let tables = |literal| {
+        let lines = OpenProgram::of(literal).function_listing(BASE);
+        tables_of(&lines.expect("it lists").lines.value)
+    };
+    assert_eq!(
+        tables(sealed()),
+        [],
+        "no interpreter: start-up may write it"
+    );
+    assert_eq!(
+        tables(sealed().interpreted()),
+        [(table, 4, TableBytes::ReadOnly)]
+    );
+    let mut relocated = sealed().interpreted();
+    relocated.write(table, &[0; 8]);
+    let relocated = relocated.loader_written(LoaderWrite {
+        place: table,
+        width: 8,
+        kind: WriteKind::Relative(0x100e),
+        encoding: r2engine::program::Encoding::Word,
+    });
+    assert_eq!(tables(relocated), [(table, 4, TableBytes::LoaderWritten)]);
+}
+
 #[test]
 fn a_dispatch_table_whose_entry_leaves_what_the_container_states_is_code_is_refused() {
     // The segment is executable throughout, so every entry decodes; but from
@@ -907,10 +951,9 @@ impl Source for Faulting {
 
 #[test]
 fn a_walk_that_panics_is_the_listings_refusal_and_the_session_goes_on() {
-    // The analysis was isolated, and the listing it fell back to walked the
-    // body again outside any boundary: the same defect in the walk then
-    // unwound through the caller, and a shell ended with it. Where not even
-    // the plain walk can be read, nothing is listed and the error says where
+    // The listing it falls back to reads the body the walk holds, and the walk is
+    // isolated: the same defect in it never unwinds through the caller. Where
+    // not even the walk can be read, nothing is listed and the error says where
     // the defect was raised.
     let ret = TWO + 5;
     let mut program = OpenProgram::of(Faulting {
@@ -924,7 +967,7 @@ fn a_walk_that_panics_is_the_listings_refusal_and_the_session_goes_on() {
         ),
         Err(refused) => refused,
     };
-    assert!(refused.contains("the plain walk panicked at "), "{refused}");
+    assert!(refused.contains("the walk panicked at "), "{refused}");
     assert!(refused.contains("listing.rs"), "{refused}");
     let defect = format!("a defect reading {ret:#x}");
     assert!(refused.contains(&defect), "{refused}");

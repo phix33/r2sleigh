@@ -29,14 +29,16 @@ nothing: an argument a body hands on is invisible until the callee's
 interface exists, and an unread slot sits beside almost every call. So
 demand is for results only:
 
-- r2ssa's interface recovery states `result_owners`: where the result is
-  unproven, the direct callees whose unstated result owns it (a tail target
-  no prototype describes, or a call whose result reaches an exit).
+- r2ssa's interface recovery states why a result is unproven
+  (`SourceUnprovenResult`): the direct callees whose unstated result owns it
+  (a tail target no prototype describes, or a call whose result reaches an
+  exit) are its owners where every cause is a call.
 - `Resolved(f)` is `f` resolved alone where it has no owner; otherwise it is
   `f` resolved again with each owner outside `f`'s demand cycle resolved,
   and only where some owner then states its result.
 - `Demand(f)` is the cycle of result demands `f` is in, by Tarjan over the
-  owners; members of one cycle read each other resolved alone.
+  owners; members of one cycle read each other as the cycle's fixpoint states
+  them ("A cycle's results").
 - A callee whose interface mints no call contract, its result unproven or
   its parameters a floor, is stated instead (`CalleeStatement`): a call to it
   reads the registers the caller provably wrote, at least as many as the
@@ -167,13 +169,15 @@ calls and their callees' entry reads.
 A function's arity is `Exact(n)` or `AtLeast(n)` (`r2source::SourceArity`),
 stated apart from its result: a callee whose result is unproven keeps an exact
 arity, and a call to it hands on exactly its `n` arguments. Recovery states a
-floor where its reads cannot see every argument: a transfer the walk did not
-follow, a supervisor call, the argument area read past an incomplete register
-prefix, or an argument slot handed to a call of unproven arity.
+floor where its reads cannot see every argument, and why, as typed causes
+(`SourceArityFloor`, doc/adr-verified-layers.md D37): a transfer the walk did
+not follow, a supervisor call, the argument area read past an incomplete
+register prefix, a register slot read past it, or an argument slot handed to a
+call of unproven arity.
 
-The last cause alone is one the callee's statement can lift: recovery names
-those calls' direct callees, its arity owners (none where one such call names
-no callee). Under `aa` (`Callers::Read`), `Resolved` waits on arity owners as
+The last cause alone is one the callee's statement can lift: r2engine reads
+the callees of those calls as the floor's arity owners (none where any cause
+is another, or a call names no callee). Under `aa` (`Callers::Read`), `Resolved` waits on arity owners as
 on result owners: `Component` is Tarjan over both edges, bottom-up, and a
 function is resolved again where an owner outside its component states an
 exact arity. Without `aa`, a
@@ -201,9 +205,9 @@ worklist over the component (`least_fixpoint`):
    its body can read, so the work is O(k + (s + 2)·E) preparations for k open
    members, s slots and E calls between them.
 
-A member's assumption states its interface alone, its result stripped
-(`SourceFunctionInterface::assumed_arity`), and nothing it preserves or
-reaches, so only arity moves: a member's result proof is the one it had. A
+A member's assumption states its interface alone, its result stripped or
+seeded (`SourceFunctionInterface::assumed`), and nothing it preserves or
+reaches, so arity moves, and a result only where "A cycle's results" tracks it. A
 floor with a non-member cause (an indirect call of unstated arity, an unseen
 transfer, a supervisor call, the argument area) survives the member's own
 read, and its callers through it stay floors. A read that falls below its
@@ -213,7 +217,8 @@ whole component then keeps the floors it had, under refusal evidence
 six builds, nor on the 0pack, pumasim and gzdoom functions below). The
 other open members' answers are deposited, as `Component` deposits its
 components. Measured on release `aa; pdd`, with one more walk per open member
-at its first resolution: 0pack `0x62ecf0` 61.89 to 62.44 G instructions,
+at its first resolution (gone since D37: a floor's causes name the members an
+open one calls): 0pack `0x62ecf0` 61.89 to 62.44 G instructions,
 `0x58e3d0` 74.33 to 74.27 G, pumasim `0x23fdf0` 60.17 to 60.12 G, gzdoom
 `0x10070695c` 191.31 to 191.16 G, peak RSS within 4%; no budget is needed.
 
@@ -225,9 +230,39 @@ arity the fixpoint states rather than a count off the registers it wrote
 self-recursive root, which any caller's render pays anyway; without `aa` the
 root reads only its other callees, as before.
 
-What stays open: a cycle's result (shapes.c's `shape_mutual_even` now calls
-`shape_mutual_odd` with its two arguments, and returns a residual, since each
-member's result is the other's), the next fixpoint of this kind.
+**A cycle's results.** Inside a component a result is the same fixpoint, over
+return values instead of argument counts, and it runs in the same worklist
+(`least_fixpoint`) on every request's result demand, not only under `aa`.
+Recovery states why a result is unproven as typed causes
+(`SourceUnprovenResult`, doc/adr-verified-layers.md D37), and a member is
+result-open where every cause is a call to a named callee and one is a member.
+The lattice is the integer result of one carrier: a width of 8, 16, 32 or 64
+bits, then unstated.
+
+1. each result-open member is seeded at the carrier the convention names, at
+   the width the paths that return a value of their own write, the calls that
+   define the carrier set aside (`seed_result`): no such path, no seed, and the
+   member starts unstated;
+2. an open member is resolved against the members it calls as assumed
+   (`SourceFunctionInterface::assumed`, the seed as a return with its logical
+   type), and what its own read states of the result joins the assumption: the
+   wider width of one carrier, signed only where both are, else unstated;
+3. a member's read is its answer where it states exactly what was assumed of
+   it; otherwise no member of the component is, and each keeps the result it
+   had under refusal evidence `cycle-fixpoint`.
+
+A seed is where the iteration starts and it only rises: the result is
+proven where the paths of its own prove it and every call on a path hands back
+the same carrier. A member with no path of its own, one that returns what the
+caller left in the carrier, or one returning an indirect call's result is
+unseeded or unowned and stays a residual with its partner. Without `aa` the
+result is stated all the same; a call to a partner whose arity is a floor
+renders as a gap until `aa` resolves the arities.
+
+The width of a call-defined value is still the carrier's, not the callee's
+stated width (`recovered_result` reads a `CallDefine` as all data), so a pair
+over `int` is `uint64_t` as `int f() { return g(); }` is; a callee's width
+on the call fact would narrow both.
 
 ### Variadic tail (ROADMAP P7, W14)
 
@@ -333,9 +368,7 @@ never-assigned arguments. None closes: that needs the count-driven tail.
 
 **What is left.**
 
-- A count-driven tail: `vfold`'s `va_arg` loop is bounded by its named
-  `count`, so `vfold(1u, a)` passes exactly one; a summary that states it
-  (SM) would close the W14 `main` records. Conditional on SM.
+- A count-driven tail beyond gcc -O0 on x86-64: see "Count-driven tail".
 - The scrub exception rests on the stack-protector check being decided
   (`UbFreeSource`, the platform's guard row); where it is not, gcc's
   prologue `xor eax, eax` before a first call still reads as a count, and
@@ -355,6 +388,251 @@ never-assigned arguments. None closes: that needs the count-driven tail.
   its declaration" gaps (P7's 41, conditional).
 - Named float parameters (`fp_offset`, `__vr_offs`) with W11; Microsoft
   x64's home area has no row, and Darwin arm64 passes the tail on the stack.
+
+### Count-driven tail (ROADMAP SM, W14)
+
+`vfold(unsigned count, ...)` fetches one slot per trip of a loop that runs while its counter is
+below `count`, so `vfold(1u, a)` passes exactly one. The call stays a counted residual
+(`missing_format_parameter`) until the body states that bound.
+
+**The fact.** A variadic body with a register save area (above) consumes at most `P` tail
+arguments, `P` one of its named parameters, where in entry-stack-pointer coordinates:
+
+1. the `va_list` cells are the convention's rows (r2abi): the bound `va_start` stored at `B`, the
+   offset field at `B + offset_field`, the stack pointer at `B + stack_field`;
+2. every cursor is a value, wherever it lives (`tail_cursors`): the base (the bound `va_start`
+   stores, or its cell's load), an offset (the offset cell's load, or the constant `va_start`
+   leaves in it where a merge takes it beside a step of its own value), the overflow pointer (the
+   first stack argument's address, or its cell's load), an address in the tail (the base and an
+   offset, or either path of a merge of them), or the overflow pointer plus the rounding
+   AAPCS64's alignment adds before its mask. Kinds close under copies, widenings of an offset,
+   merges (of values something observes) and steps of one slot; where the bound is the first
+   stack argument's address (gcc's `__gr_top` is), a value is both until its uses say which.
+   Every other use refuses: no address into the tail is passed, stored or indexed otherwise, no
+   load reads a tail slot at a constant address, no store reaches a cell but `va_start`'s and a
+   cursor's own. A sum of an offset that is only compared (`cmn` beside the `add`) is no step. A
+   call's implicit read of a cursor left in an argument register is no read: the registers a call
+   reads are the convention's, not the callee's, as for the entry saves above;
+3. a step is an add of one slot to an offset or the overflow pointer, or the masked rounding of
+   it from a pointer the convention's entry stack alignment puts on a slot; a fetch is a load
+   through the overflow pointer or an address. A fetch reads a value no step of its trip made:
+   such a value reaches a load only round the loop's header;
+4. one loop `L` holds every step and fetch and is not inside another, and its trips are counted
+   by either of
+   - the header's runs, which `semantic/trips` states (doc/ssa.md, "Loop trip counts"): an
+     induction at the width its exit test reads (a counter kept in a 64-bit register steps and is
+     tested at 32), an equality exit with an odd step, every latch alike where each latch leaves
+     the loop from its own test, and a guard that excludes the zero count. The form is one
+     named parameter's entry value at its width, so the header runs `count` times; the induction
+     may be the count itself counted down. The value ranges are the empty ones, so only equality
+     exits count symbolically (an ordered exit needs constant ends);
+   - or a counter cell the body zeroes once and steps by one, which `L`'s only exit, leaving from
+     its header `H`, tests `counter < count` (or `!=`) against the count cell, stored once from
+     the entry value of a named argument register before `L` (the version that proved gcc -O0);
+5. a tally of steps and fetches is recorded at each block on its first arrival and equal on every
+   later one: from the header, a path steps at most once and fetches at most once, and at each
+   edge back to it has done both or neither (the counter cell's version balances them against its
+   own step); a cell's load whose value reaches a fetch or a step comes before the trip's step;
+6. where the offset field counts up to zero (AAPCS64's `__gr_offs`, which `va_start` sets to
+   `-8 * unnamed registers`) every step of it runs where the value stepped is negative by the
+   branches dominating it alone, so the cursor stays at most zero and a multiple of a slot, and a
+   branch on it that no value takes one way carries no tally. Without this the register path's
+   second step (`__gr_offs + 8 > 0`, then the stack) is a second step on a trip. A condition over
+   the one cursor is decided as the set of 32-bit values it holds for (`tail_offsets`): the
+   comparisons with a constant, the flags `cmp` and `cmn` set (the carry too, which `b.ls` reads),
+   the sign bit `tbz` tests. The sets are unions of intervals, not strided ones, because a sum that
+   wraps splits one in two.
+
+Then each header run consumes at most one slot, and the header runs `count` times (or the counter
+never passes `count`), so the loop consumes at most `count` slots, at `count`'s width, unsigned,
+or signed for the counter cell's ordered test (a negative count runs no trip). The proof does not
+read which of the two paths a trip takes: the psABI's selection (registers first, then the stack)
+is assumed of the body, as every compiler emits it. `SourceTailCount` carries
+`(parameter, width, signed)` on `SourceFunctionInterface`, minted beside the variadic bit.
+
+Rule 4 refuses a loop that tests at its latch unless a guard before it excludes the zero count (a
+do-while runs once at count 0), a loop one of whose latches never tests, latches that test
+different bounds or step the counter differently, and a loop entered again. Rule 3 refuses
+`for (...) { va_arg; va_arg; }` (two slots a trip), an unrolled loop (clang -O2 steps twice a
+trip and finishes outside the loop), a conditional `va_arg`, and a fetch through the stepped
+pointer (trip `i` reads slot `i + 1`, the `ap + 8` peek). Rule 2 refuses a `va_list` handed to
+`vprintf` and a double fetched through `fp_offset`. A frame address into the cells, or arithmetic
+past an object into them, is out of bounds in C and not read.
+
+**Owner.** r2ssa (`tail_count`, `tail_cursors`, `tail_offsets`, run inside interface recovery on
+the preparation's graph; the header's run count is `semantic::trips`', asked through
+`header_trips`), r2abi the `stack_field` row (psABI Figure 3.34, AAPCS64's `va_list`) and the
+entry stack alignment row. The callee's interface rides the call site's
+`exact_callee_interface`, so no second rule is minted.
+
+**Callers.** A call whose callee states a count, with no format rule, passes the constant it holds
+for that parameter (`resolve_const_value`), masked to the counted width, as the tail: `named + count`
+arguments. A count no constant fixes is `CountArgumentNotConstant`, a count the call does not carry
+`CountArgumentUnavailable`, and a tail past 1,024 `ArgumentCountOverflow`; each is the counted
+residual, and `VariadicCallsiteArgumentCountEvidence` names its basis (`Format` or `Count`).
+Carriers are placed as for a format count, so the tail past the registers is the stack's.
+
+**Cost.** Only a body with a save area runs it: O(insts + uses) scans (each value is tagged once, a
+merge of the overflow pointer with an address once more), a dominator query per store, one
+predicate collection, one header trip count per candidate loop (O(latches)), and on AArch64 one
+interval set per branch on the offset (O(predicates x dominators)); the callsite is O(1). Release
+`pdd` instructions, base and head, two runs each: 0pack `0x62ecf0` 20.30 and 20.30 G to 20.30 and
+20.31 G, pumasim `0x23fdf0` 19.23 and 19.24 G to 19.19 and 19.19 G, output byte-identical, peak
+RSS 226 and 236 MB to 233 and 226 MB (pumasim 233 and 237 to 250 and 240); under `aa` 0pack
+74.13 and 74.12 G to 74.11 and 74.06 G, pumasim 82.00 and 82.26 G to 81.98 and 82.09 G.
+
+**Measured (2026-10-17).** shapes.c, stripped, `aa; pdd @ shape_variadic_local`, the twelve builds
+(two compilers, three levels, two targets): nine prove `vfold` and render `vfold(1, a)`,
+`vfold(2, a, b)`, `vfold(3, a, b, a ^ b)` and `vfold(5, a, b, a ^ b, a + b, a | b)`, against one
+(x86-64 gcc -O0, #312) before: gcc -O0, -O1, -O2 and clang -O1 on x86-64, gcc -O0, -O1, -O2 and
+clang -O1, -O2 on AArch64. The three that refuse give a visible reason (`R2DEC_TRACE_REFUSAL`,
+site `tail-count`), `vfold` still `(uint32_t arg0, ...)` and the calls still counted residuals:
+clang -O0 on both targets reaches the `va_list` through a pointer it keeps in a stack slot and
+spills the offset (`a Offset cursor is stored other than to its cell`), and x86-64 clang -O2
+unrolls the loop by two and finishes outside it (`no loop holds every step`). On the eight builds
+#312 did not prove, `shape_variadic_local` goes from 8 gaps to 0; `main` goes from 4 to 2 on six of
+them and from 2 to 0 on AArch64 gcc -O0 and -O2 (the two left are a call with an arity floor of 1).
+Each acceptance rule has a test that edits a compiler's bytes to break it and refuses for that
+rule's reason (`variadic_registers.rs`).
+
+**What is left.**
+
+- A count-driven tail beyond gcc -O0 on x86-64: see "Count-driven tail".
+- The scrub exception rests on the stack-protector check being decided
+  (`UbFreeSource`, the platform's guard row); where it is not, gcc's
+  prologue `xor eax, eax` before a first call still reads as a count, and
+  that call's summary is a floor. K&R calls to unprototyped functions set
+  `al` too, so their summaries are floors until `aa`. Measured only on the
+  census set, shapes.c and three large functions.
+- A floor of 0 renders `(void)` (W11's "no invented `(void)`").
+- AArch64 hands no vector count, so a summary there can still count a call
+  to an unread variadic callee from registers and disagree with its root
+  (AArch64 shapes agreed only because `MayHandOn` fired). Closing it without
+  the closure D23 forbids needs a fact of the call site; conditional.
+- A tail jump to a variadic callee whose count is unproven is spelled
+  `UnsupportedInstruction` plus `TailTransferNotRendered` (pumasim
+  `QColor::setRgb`'s `qWarning`), not by its refusal as M3 spells a call.
+- pumasim `0x23fdf0` under `aa`: three calls to `QWidget::setMinimumSize`
+  that passed three invented arguments are now "another call disagrees with
+  its declaration" gaps (P7's 41, conditional).
+- Named float parameters (`fp_offset`, `__vr_offs`) with W11; Microsoft
+  x64's home area has no row, and Darwin arm64 passes the tail on the stack.
+
+### Count-driven tail (ROADMAP SM, W14)
+
+`vfold(unsigned count, ...)` fetches one slot per trip of a loop that runs while its counter is
+below `count`, so `vfold(1u, a)` passes exactly one. The call stays a counted residual
+(`missing_format_parameter`) until the body states that bound.
+
+**The fact.** A variadic body with a register save area (above) consumes at most `P` tail
+arguments, `P` one of its named parameters, where in entry-stack-pointer coordinates:
+
+1. the `va_list` cells are the convention's rows (r2abi): the bound `va_start` stored at `B`, the
+   offset field at `B + offset_field`, the stack pointer at `B + stack_field`;
+2. every cursor is a value, wherever it lives (`tail_cursors`): the base (the bound `va_start`
+   stores, or its cell's load), an offset (the offset cell's load, or the constant `va_start`
+   leaves in it where a merge takes it beside a step of its own value), the overflow pointer (the
+   first stack argument's address, or its cell's load), an address in the tail (the base and an
+   offset, or either path of a merge of them), or the overflow pointer plus the rounding
+   AAPCS64's alignment adds before its mask. Kinds close under copies, widenings of an offset,
+   merges (of values something observes) and steps of one slot; where the bound is the first
+   stack argument's address (gcc's `__gr_top` is), a value is both until its uses say which.
+   Every other use refuses: no address into the tail is passed, stored or indexed otherwise, no
+   load reads a tail slot at a constant address, no store reaches a cell but `va_start`'s and a
+   cursor's own. A sum of an offset that is only compared (`cmn` beside the `add`) is no step. A
+   call's implicit read of a cursor left in an argument register is no read: the registers a call
+   reads are the convention's, not the callee's, as for the entry saves above;
+3. a step is an add of one slot to an offset or the overflow pointer, or the masked rounding of
+   it from a pointer the convention's entry stack alignment puts on a slot; a fetch is a load
+   through the overflow pointer or an address. A fetch reads a value no step of its trip made:
+   such a value reaches a load only round the loop's header;
+4. one loop `L` holds every step and fetch and is not inside another, and its trips are counted
+   by either of
+   - the header's runs, which `semantic/trips` states (doc/ssa.md, "Loop trip counts"): an
+     induction at the width its exit test reads (a counter kept in a 64-bit register steps and is
+     tested at 32), an equality exit with an odd step, every latch alike where each latch leaves
+     the loop from its own test, and a guard that excludes the zero count. The form is one
+     named parameter's entry value at its width, so the header runs `count` times; the induction
+     may be the count itself counted down. The value ranges are the empty ones, so only equality
+     exits count symbolically (an ordered exit needs constant ends);
+   - or a counter cell the body zeroes once and steps by one, which `L`'s only exit, leaving from
+     its header `H`, tests `counter < count` (or `!=`) against the count cell, stored once from
+     the entry value of a named argument register before `L` (the version that proved gcc -O0);
+5. a tally of steps and fetches is recorded at each block on its first arrival and equal on every
+   later one: from the header, a path steps at most once and fetches at most once, and at each
+   edge back to it has done both or neither (the counter cell's version balances them against its
+   own step); a cell's load whose value reaches a fetch or a step comes before the trip's step;
+6. where the offset field counts up to zero (AAPCS64's `__gr_offs`, which `va_start` sets to
+   `-8 * unnamed registers`) every step of it runs where the value stepped is negative by the
+   branches dominating it alone, so the cursor stays at most zero and a multiple of a slot, and a
+   branch on it that no value takes one way carries no tally. Without this the register path's
+   second step (`__gr_offs + 8 > 0`, then the stack) is a second step on a trip. A condition over
+   the one cursor is decided as the set of 32-bit values it holds for (`tail_offsets`): the
+   comparisons with a constant, the flags `cmp` and `cmn` set (the carry too, which `b.ls` reads),
+   the sign bit `tbz` tests. The sets are unions of intervals, not strided ones, because a sum that
+   wraps splits one in two.
+
+Then each header run consumes at most one slot, and the header runs `count` times (or the counter
+never passes `count`), so the loop consumes at most `count` slots, at `count`'s width, unsigned,
+or signed for the counter cell's ordered test (a negative count runs no trip). The proof does not
+read which of the two paths a trip takes: the psABI's selection (registers first, then the stack)
+is assumed of the body, as every compiler emits it. `SourceTailCount` carries
+`(parameter, width, signed)` on `SourceFunctionInterface`, minted beside the variadic bit.
+
+Rule 4 refuses a loop that tests at its latch unless a guard before it excludes the zero count (a
+do-while runs once at count 0), a loop one of whose latches never tests, latches that test
+different bounds or step the counter differently, and a loop entered again. Rule 3 refuses
+`for (...) { va_arg; va_arg; }` (two slots a trip), an unrolled loop (clang -O2 steps twice a
+trip and finishes outside the loop), a conditional `va_arg`, and a fetch through the stepped
+pointer (trip `i` reads slot `i + 1`, the `ap + 8` peek). Rule 2 refuses a `va_list` handed to
+`vprintf` and a double fetched through `fp_offset`. A frame address into the cells, or arithmetic
+past an object into them, is out of bounds in C and not read.
+
+**Owner.** r2ssa (`tail_count`, `tail_cursors`, `tail_offsets`, run inside interface recovery on
+the preparation's graph; the header's run count is `semantic::trips`', asked through
+`header_trips`), r2abi the `stack_field` row (psABI Figure 3.34, AAPCS64's `va_list`) and the
+entry stack alignment row. The callee's interface rides the call site's
+`exact_callee_interface`, so no second rule is minted.
+
+**Callers.** A call whose callee states a count, with no format rule, passes the constant it holds
+for that parameter (`resolve_const_value`), masked to the counted width, as the tail: `named + count`
+arguments. A count no constant fixes is `CountArgumentNotConstant`, a count the call does not carry
+`CountArgumentUnavailable`, and a tail past 1,024 `ArgumentCountOverflow`; each is the counted
+residual, and `VariadicCallsiteArgumentCountEvidence` names its basis (`Format` or `Count`).
+Carriers are placed as for a format count, so the tail past the registers is the stack's.
+
+**Cost.** Only a body with a save area runs it: O(insts + uses) scans (each value is tagged once, a
+merge of the overflow pointer with an address once more), a dominator query per store, one
+predicate collection, one header trip count per candidate loop (O(latches)), and on AArch64 one
+interval set per branch on the offset (O(predicates x dominators)); the callsite is O(1). Release
+`pdd` instructions, base and head, two runs each: 0pack `0x62ecf0` 20.30 and 20.30 G to 20.30 and
+20.31 G, pumasim `0x23fdf0` 19.23 and 19.24 G to 19.19 and 19.19 G, output byte-identical, peak
+RSS 226 and 236 MB to 233 and 226 MB (pumasim 233 and 237 to 250 and 240); under `aa` 0pack
+74.13 and 74.12 G to 74.11 and 74.06 G, pumasim 82.00 and 82.26 G to 81.98 and 82.09 G.
+
+**Measured (2026-10-17).** shapes.c, stripped, `aa; pdd @ shape_variadic_local`, the twelve builds
+(two compilers, three levels, two targets): nine prove `vfold` and render `vfold(1, a)`,
+`vfold(2, a, b)`, `vfold(3, a, b, a ^ b)` and `vfold(5, a, b, a ^ b, a + b, a | b)`, against one
+(x86-64 gcc -O0, #312) before: gcc -O0, -O1, -O2 and clang -O1 on x86-64, gcc -O0, -O1, -O2 and
+clang -O1, -O2 on AArch64. The three that refuse give a visible reason (`R2DEC_TRACE_REFUSAL`,
+site `tail-count`), `vfold` still `(uint32_t arg0, ...)` and the calls still counted residuals:
+clang -O0 on both targets reaches the `va_list` through a pointer it keeps in a stack slot and
+spills the offset (`a Offset cursor is stored other than to its cell`), and x86-64 clang -O2
+unrolls the loop by two and finishes outside it (`no loop holds every step`). `shape_variadic_local`
+goes from 8 gaps to 0 on the nine; `main` goes from 4 to 2 on six of them and from 2 to 0 on AArch64
+gcc -O0 and -O2 (the two left are the indirect-call floor of #264). Each acceptance rule has a test that edits a compiler's bytes to
+break it and refuses for that rule's reason (`variadic_registers.rs`).
+
+**What is left.**
+
+- clang -O0: the `va_list` reached through a stored address needs that address read as the
+  cells', which the cursor uses refuse.
+- An unrolled loop (clang -O2 on x86-64) steps twice a trip and finishes outside the loop; its
+  count bounds the loop and a remainder, which needs the remainder's trip count read.
+- A load that starts below the unnamed slots and spans into them is not seen by `uses` (it tests
+  the address a value roots at, not the access width); neither gcc nor clang emits one.
+- A count in a global or a struct field, and a tail bounded by a sentinel (`NULL`-terminated), are
+  not counts of a parameter and stay residuals.
 
 ### Summaries (ROADMAP SM, D23)
 
@@ -474,3 +752,30 @@ Tarjan, O(V + E) over the owner edges the demand names, each component deposited
   with each callee resolved alone, through the same `resolved_alone`.
 - SM2 (2026-10-15): a first seal no second preparation reads is never collected; discovery's
   handed functions and the dispatch tables read the convention's seal.
+- Q/FS reference index (2026-10-16): `ReferenceIndex` reads `Walked` for every function the survey
+  walked, so `ax`, `axt`, `pdf`, `afb`, `pdil` and `ResultReads` read one body, a followed
+  dispatch's arms included. `Walk::lifted` puts a dispatch's cases on its block as `SwitchInfo`, the one
+  carrier: the walked def-use reaches the arms (without it they were unreachable blocks, the graph did not
+  build, and 21 libc, 13 0pack and 77 pumasim bodies went unread), and the annotation pass claims one `Target`
+  per arm at the dispatch line (`Basis::Solved`), for the listing and the index alike. A walk whose tables
+  could not be read keeps the walk that follows none and says why (`Walk::refusal`); the analyses take
+  `Walking::resolved`, the listing and the index take the body. The survey's discovery walk is the one other
+  plain walk: `Walked` reads the returns it deposits, so it cannot read `Walked`.
+  The def-use graph the claims ask is the validated function's, without the seal (`Prepared::def_use_graph`).
+  A computed address is left in a register the instruction's operands name, so x87's instruction pointer is
+  no reference.
+  Cost (`ax`, instructions): O(ops) per function plus the convention seal a function with an unresolved indirect
+  branch pays to read its tables, cut to the blocks that reach the branch (`Walked::reaching_unresolved`, a
+  value at a dispatch is built from the paths that arrive at it): libc-2.31 11.8 of the 12.9 extra G before the
+  cut and 8.2 after (about 480 unresolved indirect transfers walked, 97 dispatches solved); the arms add 7 to 17%
+  more code to claim. Without table reading the index is below the old one, which sealed a graph for every
+  claim (libc 57.6 to 49.8 G); with it, pumasim +2.5%, 0pack +0.3%, libc +16%, peak RSS pumasim +6%.
+  `ResultReads` reads the same body at no measured cost (`aa; pdd` on five census functions, +/-0.5%).
+- D6 (2026-10-16): the dispatch tables of a body are the held query `DispatchTables`, read once per function
+  and read by the survey and by `Walked`. The survey runs its table-free fixpoint, tells `ComesBack` the
+  answers so far (`Walker::answered`, so a table read finds its callees decided), then continues each
+  finished trace through its arms (`Trace::dispatch`, `Walker::dispatch`) and the fixpoint with it: the
+  arms' callees are believed, and `afl` sizes, `afb`, `afi`, the callers `ResultReads` sees and the
+  holders all read the body `Walked` walks. A lone `pdd` asks `DispatchTables` for its own function only,
+  so it stays a lazy single-function request. One round: a dispatch first reached through an arm stays
+  unresolved, as before.

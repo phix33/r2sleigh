@@ -2,6 +2,7 @@
 
 mod common;
 
+mod apple;
 mod architecture;
 mod arity;
 mod arm;
@@ -22,9 +23,11 @@ mod ranges;
 mod references;
 mod rendered;
 mod result_reads;
+mod results;
 mod reuse;
 mod signature;
 mod staged;
 mod start;
 mod variadic;
+mod variadic_registers;
 mod walk;

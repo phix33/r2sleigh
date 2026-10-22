@@ -28,6 +28,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::plan::Plan;
 use crate::translate::{self, PcodeSource};
 use crate::{LiftError, Result};
 use user_operation::{
@@ -312,13 +313,13 @@ impl TrustedSleighProfile {
             #[cfg(feature = "riscv")]
             Self::RiscV32Gc => (
                 sleigh_config::processor_riscv::SLA_RISCV_ILP32D,
-                sleigh_config::processor_riscv::PSPEC_RV32GC,
+                sleigh_config::processor_riscv::PSPEC_RV32,
                 "riscv32",
             ),
             #[cfg(feature = "riscv")]
             Self::RiscV64Gc => (
                 sleigh_config::processor_riscv::SLA_RISCV_LP64D,
-                sleigh_config::processor_riscv::PSPEC_RV64GC,
+                sleigh_config::processor_riscv::PSPEC_RV64,
                 "riscv64",
             ),
         }
@@ -1407,12 +1408,10 @@ fn validate_owned_snapshot_cfg(
             .copied()
             .collect::<Vec<_>>();
 
-        let call_may_not_return = matches!(
-            terminator,
-            Some(R2ILOp::Call { .. } | R2ILOp::CallInd { .. })
-        ) && machine_only
-            .iter()
-            .all(|(kind, _, _)| *kind == AdvisorySuccessorKind::Fallthrough);
+        let call_may_not_return = terminator.is_some_and(R2ILOp::is_call)
+            && machine_only
+                .iter()
+                .all(|(kind, _, _)| *kind == AdvisorySuccessorKind::Fallthrough);
         let table_unresolved = matches!(terminator, Some(R2ILOp::BranchInd { .. }))
             && lifted_block.block().switch_info.is_none();
 
@@ -1546,6 +1545,33 @@ impl<'a> PcodeSource for DisasmInstructionWrapper<'a> {
     }
 }
 
+/// One lift pass over an instruction's operations: what it was given and what it returned.
+#[derive(Debug, Clone)]
+pub struct PassRun {
+    pub pass: &'static str,
+    pub before: Vec<R2ILOp>,
+    pub after: Vec<R2ILOp>,
+}
+
+/// Run one pass, recording its input and output where a trace is asked for.
+fn passed(
+    trace: &mut Option<&mut Vec<PassRun>>,
+    pass: &'static str,
+    ops: Vec<R2ILOp>,
+    run: impl FnOnce(Vec<R2ILOp>) -> Result<Vec<R2ILOp>>,
+) -> Result<Vec<R2ILOp>> {
+    let before = trace.is_some().then(|| ops.clone());
+    let after = run(ops)?;
+    if let (Some(trace), Some(before)) = (trace.as_deref_mut(), before) {
+        trace.push(PassRun {
+            pass,
+            before,
+            after: after.clone(),
+        });
+    }
+    Ok(after)
+}
+
 fn translate_err(e: translate::TranslateError) -> LiftError {
     match e {
         translate::TranslateError::MissingOutput(op) => {
@@ -1557,7 +1583,8 @@ fn translate_err(e: translate::TranslateError) -> LiftError {
         translate::TranslateError::InvalidSpace(idx) => {
             LiftError::Parse(format!("Invalid space index: {}", idx))
         }
-        error @ translate::TranslateError::UniqueStraddles(_) => {
+        error @ (translate::TranslateError::UniqueStraddles(_)
+        | translate::TranslateError::ConstLoadWidth(..)) => {
             LiftError::Unsupported(error.to_string())
         }
     }
@@ -1713,8 +1740,8 @@ pub struct EmbeddedMachine {
     /// The compiler specification of the platform's usual toolchain: the
     /// stack pointer, the return address and the prototype models.
     pub compiler_spec: &'static str,
-    /// Every compiler the language's definitions (`.ldefs`) name, by id, with its
-    /// specification: `windows` for a PE's toolchain, `golang` for Go's.
+    /// Every compiler the language's definitions (`.ldefs`) name, by id, with its specification:
+    /// `windows` for a PE's, `golang` for Go's, `apple` for a Mach-O's AArch64 (GP-3139).
     pub compilers: Vec<(String, &'static str)>,
     /// The language's DWARF register numbering.
     pub dwarf: crate::profile::DwarfRegisters,
@@ -1841,6 +1868,8 @@ struct Selection {
     language: &'static str,
     /// A processor specification the language does not list: Thumb's TMode-set context.
     pspec: Option<&'static str>,
+    /// The language whose compilers the platform uses, where the decoder's own name another's.
+    compilers: Option<&'static str>,
     name: &'static str,
     cpu: &'static str,
 }
@@ -1899,6 +1928,7 @@ fn selection(
             bundle,
             language,
             pspec,
+            compilers: None,
             name,
             cpu,
         })
@@ -1916,14 +1946,18 @@ fn selection(
         "aarch64" | "arm64" | "arm64e" if windows => {
             select(aarch64, "AARCH64:LE:64:v8A", None, "aarch64", "arm")
         }
+        // Since GP-3139 AppleSilicon's compiler is Apple's variadic convention; the platform's are v8A's.
         #[cfg(feature = "arm")]
-        "aarch64" | "arm64" | "arm64e" => select(
-            aarch64,
-            "AARCH64:LE:64:AppleSilicon",
-            None,
-            "aarch64",
-            "arm",
-        ),
+        "aarch64" | "arm64" | "arm64e" => Some(Selection {
+            compilers: Some("AARCH64:LE:64:v8A"),
+            ..select(
+                aarch64,
+                "AARCH64:LE:64:AppleSilicon",
+                None,
+                "aarch64",
+                "arm",
+            )?
+        }),
         #[cfg(feature = "arm")]
         "arm" | "arm32" => select(arm, arm_language(order)?, None, "ARM", "arm"),
         #[cfg(feature = "arm")]
@@ -1936,7 +1970,7 @@ fn selection(
         ),
         #[cfg(feature = "riscv")]
         "riscv64" | "riscv" | "rv64" if order.is_little() => {
-            select(riscv, "RISCV:LE:64:RV64GC", None, "riscv64", "riscv")
+            select(riscv, "RISCV:LE:64:default", None, "riscv64", "riscv")
         }
         _ => None,
     }
@@ -1956,22 +1990,40 @@ fn embedded_specification(
             .find(|(file, _)| *file == name)
             .map(|(_, text)| *text)
     };
-    let definition = files
-        .iter()
-        .filter(|(file, _)| file.ends_with(".ldefs"))
-        .flat_map(|(_, text)| crate::profile::LanguageDefinition::parse_all(text))
-        .find(|language| language.id == chosen.language)?;
-    let usual = definition
+    let language = |id: &str| {
+        files
+            .iter()
+            .filter(|(file, _)| file.ends_with(".ldefs"))
+            .flat_map(|(_, text)| crate::profile::LanguageDefinition::parse_all(text))
+            .find(|language| language.id == id)
+    };
+    let definition = language(chosen.language)?;
+    let named;
+    let toolchains = match chosen.compilers {
+        Some(id) => {
+            named = language(id)?;
+            &named
+        }
+        None => &definition,
+    };
+    let usual = toolchains
         .compiler("gcc")
-        .or_else(|| definition.compiler("default"))?;
+        .or_else(|| toolchains.compiler("default"))?;
     Some(EmbeddedSpecification {
         sla: slas.iter().find(|(sla, _)| *sla == definition.sla)?.1,
         pspec: file(chosen.pspec.unwrap_or(&definition.pspec))?,
         cspec: file(usual)?,
-        compilers: definition
+        compilers: toolchains
             .compilers
             .iter()
             .filter_map(|(id, spec)| Some((id.clone(), file(spec)?)))
+            // The decoder's own default, where the platform's compilers are borrowed from v8A.
+            .chain(
+                chosen
+                    .compilers
+                    .and(definition.compiler("default").and_then(file))
+                    .map(|spec| ("apple".to_owned(), spec)),
+            )
             .collect(),
         dwarf: definition
             .dwarf
@@ -2612,7 +2664,7 @@ impl Disassembler {
     pub fn decode(&self, bytes: &[u8], addr: u64, after: Option<Continuation>) -> Result<Decoded> {
         self.resume(addr, after)?;
         let (mnemonic, body, size) = self.native_parts(bytes, addr)?;
-        let mut syntax = syntax::radare2(&mnemonic, &body, size, &self.arch_name);
+        let mut syntax = syntax::radare2(&mnemonic, &body, size, &self.arch_name, bytes);
         syntax.registers = syntax::register_spans(&syntax.body, &self.spec.register_names);
         // The P-code is built from the parse just printed, and a finished build is what is known to commit its context.
         let pcode = self.pcode(bytes, addr);
@@ -2656,6 +2708,25 @@ impl Disassembler {
 
     /// Translate a P-code disassembly to an r2il block.
     fn translate_pcode(&self, pcode: PcodeDisassembly, addr: u64) -> Result<R2ILBlock> {
+        self.translate_traced(pcode, addr, None)
+    }
+
+    /// One instruction's operations as each lift pass leaves them, for the gate that runs a pass's
+    /// input and output through `r2il::eval` from one state (`decode_sweep`, ROADMAP D34).
+    pub fn lift_passes(&self, bytes: &[u8], addr: u64) -> Result<Vec<PassRun>> {
+        self.clear_decode_cache()?;
+        let pcode = self.pcode(bytes, addr)?;
+        let mut runs = Vec::new();
+        self.translate_traced(pcode, addr, Some(&mut runs))?;
+        Ok(runs)
+    }
+
+    fn translate_traced(
+        &self,
+        pcode: PcodeDisassembly,
+        addr: u64,
+        mut trace: Option<&mut Vec<PassRun>>,
+    ) -> Result<R2ILBlock> {
         let instr_size = pcode.origin.size as u32;
         let mut block = R2ILBlock::new(addr, instr_size);
 
@@ -2669,11 +2740,8 @@ impl Disassembler {
             crate::temporary_move::move_temporaries(&mut ops, how);
         }
 
-        // Where an expansion's own temporaries may live: above every temporary
-        // this instruction already uses. Sleigh scopes the unique space to the
-        // instruction, so that is the whole extent an expansion has to stay
-        // clear of, and taking it from the instruction itself means there is no
-        // offset to guess and nothing to collide with.
+        // An expansion's own temporaries live above every one the instruction uses (Sleigh scopes
+        // the unique space to the instruction), so none collides.
         let mut temp_base = ops
             .iter()
             .flat_map(|op| op.output().into_iter().chain(op.inputs()))
@@ -2683,31 +2751,51 @@ impl Disassembler {
             .unwrap_or(0);
         let address_size = u32::try_from(self.default_code_space().address_size)
             .map_err(|_| LiftError::Parse("default code space address size".into()))?;
-        let ops = translate::whole_unique_reads(ops, self.spec.unique_big_endian, &mut temp_base)
-            .map_err(translate_err)?;
-        let ops = translate::canonicalize_memory_operands(ops, address_size, &mut temp_base);
-        let ops = translate::split_odd_register_zeroes(ops);
-        let ops = translate::forward_repeated_loads(ops);
+        let big_endian = self.spec.unique_big_endian;
+        let ops = passed(&mut trace, "whole_unique_reads", ops, |ops| {
+            translate::whole_unique_reads(ops, big_endian, &mut temp_base).map_err(translate_err)
+        })?;
+        let ops = passed(&mut trace, "canonicalize_memory_operands", ops, |ops| {
+            Ok(translate::canonicalize_memory_operands(
+                ops,
+                address_size,
+                &mut temp_base,
+            ))
+        })?;
+        let ops = passed(&mut trace, "split_odd_register_zeroes", ops, |ops| {
+            Ok(translate::split_odd_register_zeroes(ops))
+        })?;
+        let ops = passed(&mut trace, "forward_repeated_loads", ops, |ops| {
+            Ok(translate::forward_repeated_loads(ops))
+        })?;
+        let ops = passed(&mut trace, "expand_user_operations", ops, |ops| {
+            Ok(self.expand_user_operations(ops, temp_base))
+        })?;
 
-        // A trap ends the instruction. Sleigh writes `brk` as a user operation
-        // that produces `pc` followed by a branch through it, so the branch's
-        // only definition of its target is the trap itself; expanding the trap
-        // into `Breakpoint`, which produces nothing, would leave that branch
-        // reading a `pc` nothing defines. Control does not reach it either way
-        // -- the exception is taken at the trap and does not come back -- so
-        // the operations Sleigh writes after it in the same instruction are not
-        // executed, and dropping them is what the machine does.
+        // A trap ends the instruction: the exception is taken and does not come back, so the
+        // operations Sleigh writes after it (a branch through the `pc` the trap produced) never run.
         for op in ops {
-            for expanded in self.expand_user_operation(op, temp_base) {
-                let traps = matches!(expanded, R2ILOp::Breakpoint);
-                block.push(expanded);
-                if traps {
-                    return Ok(block);
-                }
+            let traps = matches!(op, R2ILOp::Breakpoint);
+            block.push(op);
+            if traps {
+                break;
             }
         }
+        // O(ops): a lift that states IL `r2il` rejects is a refusal, not a block (D34).
+        r2il::validate_block(&block).map_err(|error| LiftError::Invalid(error.to_string()))?;
 
         Ok(block)
+    }
+
+    /// Each modelled user operation as the operations it stands for, the others left as they are.
+    fn expand_user_operations(&self, ops: Vec<R2ILOp>, temp_base: u64) -> Vec<R2ILOp> {
+        let mut plan = Plan::new();
+        for (index, op) in ops.iter().enumerate() {
+            if let Some(expanded) = self.expand_user_operation(op, temp_base) {
+                plan.expand(index, expanded);
+            }
+        }
+        plan.apply(ops)
     }
 
     /// The name the architecture gives the user-defined operation at `index`.
@@ -2736,14 +2824,14 @@ impl Disassembler {
     ///
     /// Which operation an index names was resolved once, when the
     /// specification was loaded; this is one lookup.
-    fn expand_user_operation(&self, op: R2ILOp, temp_base: u64) -> Vec<R2ILOp> {
+    fn expand_user_operation(&self, op: &R2ILOp, temp_base: u64) -> Option<Vec<R2ILOp>> {
         let R2ILOp::CallOther {
             userop,
             output,
             inputs,
-        } = &op
+        } = op
         else {
-            return vec![op];
+            return None;
         };
         let modelled = usize::try_from(*userop)
             .ok()
@@ -2801,9 +2889,7 @@ impl Disassembler {
             }
             None => None,
         };
-        let Some(mut expanded) = expanded else {
-            return vec![op];
-        };
+        let mut expanded = expanded?;
         // An Advanced SIMD write clears every bit of the vector register above it (Arm ARM,
         // "Vector registers"); Ghidra's pseudo-op constructors leave that out.
         if modelled.is_some_and(ModelledUserOperation::is_neon)
@@ -2815,7 +2901,7 @@ impl Disassembler {
                 src: output.clone(),
             });
         }
-        expanded
+        Some(expanded)
     }
 
     /// The register `written` is the low bytes of, where it is a strict part of one.

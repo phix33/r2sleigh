@@ -191,10 +191,9 @@ pub(crate) fn collect_callee_stack_allocation_certificates<'a>(
     };
     let contains_call = graph.blocks.iter().any(|block| {
         graph.op_insts(block.id).iter().any(|inst| {
-            matches!(
-                graph.op(*inst),
-                Some(SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::CallOther { .. })
-            )
+            graph
+                .op(*inst)
+                .is_some_and(|op| op.is_call() || matches!(op, SSAOp::CallOther { .. }))
         })
     });
     let explicit_contract = SourceStackAllocationContract::new(contract.growth());
@@ -1005,11 +1004,25 @@ pub(crate) fn collect_stack_geometry_certificate(
                     })
             })
     };
+    // A call's read of the stack pointer carrier says where the frame stands, never a value the
+    // program uses: it neither makes the frame's arithmetic a program value nor names an object.
+    let call_locates_frame = |site: &UseSite| {
+        let carrier = machine_context.and_then(SourceMachineContext::stack_pointer_carrier);
+        carrier.is_some()
+            && matches!(
+                graph.inst(site.inst).map(|inst| &inst.payload),
+                Some(InstPayload::Op(SSAOp::CallUse { .. }))
+            )
+            && graph
+                .value(graph.inputs(site.inst)[site.input_idx])
+                .and_then(|value| value.canonical_storage)
+                == carrier
+    };
     let setup = greatest_closed(
         graph,
         &geometry_outputs,
         candidates,
-        |site| inside(site) || names_own_object(site),
+        |site| inside(site) || names_own_object(site) || call_locates_frame(site),
         |_, _| {},
     );
     let frame_setup = (geometry_outputs.iter())
@@ -1529,10 +1542,7 @@ pub(crate) fn collect_stack_call_argument_values(
         let Some(op) = graph.op(producer) else {
             continue;
         };
-        if matches!(
-            op,
-            SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::Return { .. }
-        ) {
+        if op.is_call() || matches!(op, SSAOp::Return { .. }) {
             break;
         }
         let SSAOp::Store {

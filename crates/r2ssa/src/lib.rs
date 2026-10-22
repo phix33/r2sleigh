@@ -75,6 +75,9 @@ pub mod span;
 pub(crate) mod stack_bound;
 pub(crate) mod stack_protector;
 mod strided;
+pub(crate) mod tail_count;
+pub(crate) mod tail_cursors;
+pub(crate) mod tail_offsets;
 #[cfg(test)]
 pub(crate) mod testing;
 pub mod value_table;
@@ -145,16 +148,18 @@ pub use machine_context::{
     MachineMemoryEndianness, MachineMemoryModel, MachineMemorySpace, MachineRegisterGeometryState,
     SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION, SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION,
     SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceAbiClass, SourceAbiParameterSpec,
-    SourceAggregateLayout, SourceAggregateMember, SourceArity, SourceBoundaryReads,
-    SourceCallArgumentSpec, SourceCallEffect, SourceCallResult, SourceCallSiteIdentity,
-    SourceCallSiteInterface, SourceCallSiteInterfaceError, SourceCarrierKind,
-    SourceCarrierProjection, SourceCodeSignature, SourceConventionSlots, SourceFormatParameterRule,
-    SourceFunctionInterface, SourceFunctionInterfaceError, SourceFunctionReturn,
-    SourceLogicalValue, SourceMachineContext, SourceMachineRoles, SourceMachineRolesError,
-    SourceOpaqueTag, SourceParameterLocation, SourceStackAllocationContract, SourceStackGrowth,
+    SourceAggregateLayout, SourceAggregateMember, SourceArity, SourceArityFloor,
+    SourceBoundaryReads, SourceCallArgumentSpec, SourceCallEffect, SourceCallResult,
+    SourceCallSiteIdentity, SourceCallSiteInterface, SourceCallSiteInterfaceError,
+    SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature, SourceConventionSlots,
+    SourceFloorCause, SourceFormatParameterRule, SourceFunctionInterface,
+    SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineContext,
+    SourceMachineRoles, SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation,
+    SourceResultCause, SourceResultSeed, SourceStackAllocationContract, SourceStackGrowth,
     SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias,
     SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
-    loaded_target_slot, terminal_indirect_loaded_slot,
+    SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall, loaded_target_slot,
+    terminal_indirect_loaded_slot,
 };
 pub use obligation::{
     CanonicalInstructionId, CanonicalInstructionSite, ObligationInventoryFailure,
@@ -164,8 +169,8 @@ pub use obligation::{
     SemanticObligationInventory, SemanticObligationKind, SemanticSourceSite, SpelledInstruction,
     SpelledObligation,
 };
-pub use op::{AtomicOp, AtomicUpdateOp, BlockTransferOp, InsertOp, SSAOp, SelectOp};
-pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats};
+pub use op::{AtomicOp, AtomicUpdateOp, BlockTransferOp, InsertOp, OpTransfer, SSAOp, SelectOp};
+pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats, SccpMode};
 pub use r2sleigh_lift::{
     GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION, GenuineLiftedFunction, GenuineLiftedFunctionAuthority,
     TrustedLiftedFunction,

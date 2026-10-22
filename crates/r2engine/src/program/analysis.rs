@@ -57,9 +57,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Analysed {
         let walk = db
             .get::<Walked>(&(entry, thumb))
             .expect("a walk asks for no analysis");
-        let walk = match &walk.0 {
+        let walk = match walk.resolved() {
             Ok(walk) => walk,
-            Err(refusal) => return Analysis(Err(refusal.clone())),
+            Err(refusal) => return Analysis(Err(refusal)),
         };
         let analysed = crate::isolation::isolated(|| {
             crate::native::analysed_from(&target, &view, (entry, walk), callers)
@@ -108,6 +108,16 @@ impl PartialEq for Walking {
     }
 }
 
+impl Walking {
+    /// The walk where its dispatch tables were read, for the analyses that need them resolved; the
+    /// refusal otherwise. The listing and the index read the body whatever the tables did.
+    pub(super) fn resolved(&self) -> Result<&Arc<crate::native::Walk>, NativeRefusal> {
+        let walk = self.0.as_ref().map_err(Clone::clone)?;
+        walk.refusal()
+            .map_or(Ok(walk), |refusal| Err(refusal.clone()))
+    }
+}
+
 impl<S: Source + 'static> Query<ProgramInputs<S>> for Walked {
     type Key = (u64, bool);
     type Value = Walking;
@@ -121,7 +131,10 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Walked {
             Ok(target) => target,
             Err(refusal) => return Walking(Err(refusal)),
         };
-        let walked = crate::isolation::isolated(|| crate::native::walk(&target, &view, entry));
+        let tables = || (*dispatch_tables(db, (entry, thumb)).0).clone();
+        let walked = crate::isolation::isolated(|| {
+            crate::native::walk_reading(&target, &view, entry, &tables)
+        });
         Walking(
             walked
                 .unwrap_or_else(|panicked| Err(panicked.into()))
@@ -130,11 +143,56 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Walked {
     }
 
     fn hold(value: &Walking) -> Hold {
-        match value.0.as_ref().is_err_and(NativeRefusal::stopped) {
+        match value.resolved().is_err_and(|refusal| refusal.stopped()) {
             true => Hold::Stopped,
             false => Hold::Held,
         }
     }
+}
+
+/// The dispatch tables one function's body reads, by its entry and whether it is Thumb: read once for the survey, the walk and the listings.
+pub(super) struct DispatchTables;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for DispatchTables {
+    type Key = (u64, bool);
+    type Value = Shared<crate::native::Tables>;
+    const NAME: &'static str = "dispatch-tables";
+    const RETENTION: Retention = Retention::Held;
+
+    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
+        // The survey asks while it runs, so no mode is read: the key states the set.
+        let view = View::new(db, false);
+        let read = target(&view, entry, thumb).map(|target| {
+            crate::isolation::isolated(|| crate::native::dispatch_tables(&target, &view, entry))
+        });
+        Shared(Arc::new(match read {
+            Ok(Ok(tables)) => tables,
+            Ok(Err(panicked)) => crate::native::Tables::refused(panicked.into()),
+            Err(refusal) => crate::native::Tables::refused(refusal),
+        }))
+    }
+
+    fn hold(value: &Self::Value) -> Hold {
+        match value.0.refusal().is_some_and(NativeRefusal::stopped) {
+            true => Hold::Stopped,
+            false => Hold::Held,
+        }
+    }
+}
+
+/// The tables read for a body; a cycle reads as none, which is a walk following no table.
+pub(super) fn dispatch_tables<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    key: (u64, bool),
+) -> Shared<crate::native::Tables> {
+    db.get::<DispatchTables>(&key).map_or_else(
+        |cycle| {
+            Shared(Arc::new(crate::native::Tables::refused(
+                NativeRefusal::Prepare(format!("{cycle:?}")),
+            )))
+        },
+        |tables| (*tables).clone(),
+    )
 }
 
 /// What one callee's body proves, resolved alone, by its entry and whether it is Thumb.
@@ -171,7 +229,6 @@ pub(super) fn callee_read<S: Source + 'static>(
     let unread = |reason| CalleeRead {
         interface: None,
         facts: Err(reason),
-        owners: Default::default(),
     };
     let view = View::new(db, true);
     let target = view
@@ -180,7 +237,7 @@ pub(super) fn callee_read<S: Source + 'static>(
     let walked = db
         .get::<Walked>(&(address, thumb))
         .expect("a walk asks for no callee");
-    match (target, &walked.0) {
+    match (target, walked.resolved()) {
         (_, Err(refusal)) if refusal.stopped() => unread(Unreadable::Stopped),
         (_, Err(_)) => unread(Unreadable::NotWalked),
         (Some(Ok(target)), Ok(walked)) => {

@@ -167,6 +167,12 @@ impl Prepared {
         self
     }
 
+    /// The def-use graph of the function as it stands: none of the passes sealing runs, and none of
+    /// the facts it derives. `O(n)`.
+    pub(crate) fn def_use_graph(&self) -> SsaGraph {
+        SsaGraph::from_function_with_storage(&self.ir)
+    }
+
     /// The prep facts of a function that is analysed here and never sealed:
     /// interface recovery reads them off the provisional function it
     /// recovers from.
@@ -351,10 +357,6 @@ impl Sealed {
                 },
                 control,
             )?;
-        // The seal refused the function's and its prep facts' exhaustion; this is the collection's.
-        if let Some(exhausted) = facts.exhausted() {
-            return Err(SsaPrepareError::Exhausted(exhausted));
-        }
         // What one prepared function holds is the space every later stage has
         // to work above, so it is reported beside the phases that built it.
         r2il::refusal_evidence!(

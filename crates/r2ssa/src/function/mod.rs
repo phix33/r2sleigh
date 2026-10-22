@@ -148,7 +148,7 @@ pub struct DecompilePrepFacts {
     /// Full-width entry ABI values that may serve as parameter address bases.
     pub formal_parameter_bases: IdMap<crate::graph::ValueId, usize>,
     /// The stack-root solve moved a state past its height: the function refuses.
-    pub exhausted: Option<crate::fixpoint::Exhausted>,
+    pub(crate) exhausted: Option<crate::fixpoint::Exhausted>,
 }
 
 impl Default for DecompilePrepFacts {
@@ -646,14 +646,8 @@ fn release_undemanded_bytes(
 /// reference index answer it from the same graph.
 pub fn def_use_graph(blocks: &[R2ILBlock], arch: Option<&crate::Arch>) -> Option<SsaGraph> {
     let function = SSAFunction::from_blocks_raw(blocks, arch)?;
-    let machine_context = SourceMachineContext::from_blocks(blocks, arch);
-    let sealed = Lifted::new(function)
-        .validate()
-        .map_err(integrity_refusal)
-        .ok()?
-        .seal(&machine_context)
-        .ok()?;
-    let graph = sealed.graph().clone();
+    let prepared = Lifted::new(function).validate().map_err(integrity_refusal);
+    let graph = prepared.ok()?.def_use_graph();
     (!graph.blocks.is_empty()).then_some(graph)
 }
 
@@ -1219,7 +1213,8 @@ impl SsaArtifact {
             assumptions,
             &self.machine_context,
             "assume",
-        );
+        )
+        .expect("assumptions reach no fixpoint, and this function's collection settled");
         let aggregate_accesses = collect_aggregate_access_projections(
             self.graph(),
             &facts.addresses,
@@ -2550,8 +2545,6 @@ impl TrustedSsaArtifact {
         // nothing construction reads differs between the two contexts.
         let stated_interface = source.function_interface().is_some();
         let mut built = None;
-        let mut result_owners = BTreeSet::new();
-        let mut arity_owners = BTreeSet::new();
         let mut result_ambiguous = false;
         // Whether the recovered result is void on the premise that no caller outside the image reads it.
         let mut closed_world = false;
@@ -2642,14 +2635,14 @@ impl TrustedSsaArtifact {
                     &provisional_machine_context,
                     crate::recover_interface::Stated::of(&source),
                 );
-                let Some(recovered) = recovered else {
-                    break 'recovered None;
+                let recovered = match recovered {
+                    Ok(Some(recovered)) => recovered,
+                    Ok(None) => break 'recovered None,
+                    Err(exhausted) => {
+                        preliminary.note_exhausted(exhausted);
+                        break 'recovered None;
+                    }
                 };
-                if let Some(exhausted) = recovered.exhausted() {
-                    preliminary.note_exhausted(exhausted);
-                }
-                result_owners.clone_from(recovered.result_owners());
-                arity_owners.clone_from(recovered.arity_owners());
                 result_ambiguous = recovered.result_ambiguous();
                 closed_world = recovered.assumes_closed_world();
                 let minted = crate::recover_interface::mint_recovered_interface(
@@ -2718,8 +2711,6 @@ impl TrustedSsaArtifact {
         machine_context.set_reentering_callees(reentering.clone());
         machine_context.set_unstated_imports(unstated_imports.clone());
         machine_context.set_callee_preserved(callees.preserved().clone());
-        machine_context.set_result_owners(result_owners);
-        machine_context.set_arity_owners(arity_owners);
         machine_context.set_result_ambiguous(result_ambiguous);
         // A call to this function itself is stated by the interface just settled, where it mints none.
         let mut callee_statements = callee_statements;
@@ -2955,8 +2946,14 @@ pub struct SSAFunction {
     /// The operations a decided compiler-inserted check is: a canary (under `Premise::UbFreeSource`)
     /// or a runtime's stack bound (by its model).
     compiler_inserted: crate::dense::IdSet<crate::arena::OpId>,
-    /// The failure blocks a decided compiler-inserted check removed, whose instructions stay owed.
-    compiler_inserted_blocks: BTreeSet<u64>,
+    /// The failure blocks a decided compiler-inserted check removed, by address and byte size; their instructions stay owed.
+    compiler_inserted_blocks: BTreeMap<u64, u32>,
+    /// The edges those checks removed, (from, to): the source's successors the graph no longer holds.
+    compiler_removed_edges: BTreeSet<(u64, u64)>,
+    /// The blocks SCCP dropped as unreachable after deciding a branch, by address and byte size; they owe no obligation.
+    decided_dead_blocks: BTreeMap<u64, u32>,
+    /// The edges SCCP dropped with them, (from, to).
+    decided_dead_edges: BTreeSet<(u64, u64)>,
     /// The premises a rewrite of this function relied on, whatever later became of what it rewrote.
     premises: BTreeSet<r2source::Premise>,
     /// The calls its walk ended at on a model's word that the callee never returns.
@@ -3354,6 +3351,9 @@ impl Clone for SSAFunction {
             promoted_slots: self.promoted_slots.clone(),
             compiler_inserted: self.compiler_inserted.clone(),
             compiler_inserted_blocks: self.compiler_inserted_blocks.clone(),
+            compiler_removed_edges: self.compiler_removed_edges.clone(),
+            decided_dead_blocks: self.decided_dead_blocks.clone(),
+            decided_dead_edges: self.decided_dead_edges.clone(),
             premises: self.premises.clone(),
             assumed_exits: self.assumed_exits.clone(),
             stack_pointer_carrier: self.stack_pointer_carrier,
@@ -3899,10 +3899,12 @@ impl SSAFunction {
     pub(crate) fn record_compiler_inserted(
         &mut self,
         ops: crate::dense::IdSet<crate::arena::OpId>,
-        blocks: BTreeSet<u64>,
+        blocks: BTreeMap<u64, u32>,
+        edges: BTreeSet<(u64, u64)>,
     ) {
         self.compiler_inserted.extend(ops.iter());
         self.compiler_inserted_blocks.extend(blocks);
+        self.compiler_removed_edges.extend(edges);
     }
 
     /// Record a premise a rewrite relied on.
@@ -3927,8 +3929,32 @@ impl SSAFunction {
     }
 
     /// The failure blocks a decided compiler-inserted check removed.
-    pub fn compiler_inserted_blocks(&self) -> &BTreeSet<u64> {
+    pub fn compiler_inserted_blocks(&self) -> &BTreeMap<u64, u32> {
         &self.compiler_inserted_blocks
+    }
+
+    /// The blocks a decided branch left unreachable, which the function's bytes still hold.
+    pub fn decided_dead_blocks(&self) -> &BTreeMap<u64, u32> {
+        &self.decided_dead_blocks
+    }
+
+    /// The edges a decided branch dropped, (from, to), in address order.
+    pub fn decided_dead_edges(&self) -> &BTreeSet<(u64, u64)> {
+        &self.decided_dead_edges
+    }
+
+    pub(crate) fn record_decided_dead(
+        &mut self,
+        blocks: BTreeMap<u64, u32>,
+        edges: BTreeSet<(u64, u64)>,
+    ) {
+        self.decided_dead_blocks.extend(blocks);
+        self.decided_dead_edges.extend(edges);
+    }
+
+    /// The edges a decided check removed, (from, to), in address order.
+    pub fn compiler_removed_edges(&self) -> &BTreeSet<(u64, u64)> {
+        &self.compiler_removed_edges
     }
 
     /// Set the function name.

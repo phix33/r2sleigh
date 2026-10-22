@@ -668,6 +668,28 @@ pub fn step<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Flow {
     executed(op, state).unwrap_or_else(Flow::Stop)
 }
 
+/// Execute one instruction's operations, following the local labels its branches name: `Flow::Next`
+/// when control falls past the last, else the transfer or stop that ended the run.
+pub fn run<M: Mapped>(ops: &[R2ILOp], state: &mut State<M>) -> Flow {
+    let mut at = 0usize;
+    while let Some(op) = ops.get(at) {
+        at = match (step(op, state), op.local_offset()) {
+            (Flow::Next, _) => at + 1,
+            (Flow::Transfer(_), Some(offset)) => {
+                let named = isize::try_from(offset)
+                    .ok()
+                    .and_then(|offset| at.checked_add_signed(offset));
+                match named {
+                    Some(named) if named <= ops.len() => named,
+                    _ => return Flow::Stop(Stop::Unmodelled),
+                }
+            }
+            (flow, _) => return flow,
+        };
+    }
+    Flow::Next
+}
+
 fn executed<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<Flow, Stop> {
     state.spend()?;
     if let Some(flow) = transfer(op, state)? {
@@ -900,7 +922,7 @@ impl Float {
     }
 }
 
-/// An IEEE binary16 value, exactly: only widening reads one, so no float16 rounding is modelled.
+/// An IEEE binary16 value, exactly.
 fn binary16(bits: u16) -> f64 {
     let magnitude = match (bits >> 10) & 0x1f {
         0 => f64::from(bits & 0x3ff) * 2f64.powi(-24),
@@ -912,6 +934,37 @@ fn binary16(bits: u16) -> f64 {
         magnitude
     } else {
         -magnitude
+    }
+}
+
+/// `x` rounded once to binary16, ties to even; a NaN is the canonical quiet one.
+fn to_binary16(x: f64) -> u16 {
+    let sign = if x.is_sign_negative() { 0x8000 } else { 0 };
+    let magnitude = x.abs();
+    let bits = if x.is_nan() {
+        return 0x7e00;
+    } else if magnitude >= 65520.0 {
+        0x7c00
+    } else if magnitude < 2f64.powi(-14) {
+        // Subnormal: a multiple of 2^-24, exact in a double, and 1024 of them is the least normal.
+        (magnitude * 2f64.powi(24)).round_ties_even() as u16
+    } else {
+        let double = magnitude.to_bits();
+        let exponent = ((double >> 52) as i32 - 1023 + 15) as u64;
+        let fraction = double & ((1 << 52) - 1);
+        let (kept, rest) = (fraction >> 42, fraction & ((1 << 42) - 1));
+        let half = (exponent << 10) | kept;
+        let up = rest > 1 << 41 || (rest == 1 << 41 && half & 1 == 1);
+        (half + u64::from(up)) as u16
+    };
+    sign | bits
+}
+
+/// `x` as a float `bytes` wide, rounded once.
+fn converted(x: f64, bytes: u32) -> Result<u128, Stop> {
+    match bytes {
+        2 => Ok(u128::from(to_binary16(x))),
+        _ => Ok(Float::of(0, bytes)?.at(x).bits()),
     }
 }
 
@@ -981,7 +1034,7 @@ fn floating<M: Mapped>(op: &R2ILOp, state: &mut State<M>) -> Result<bool, Stop> 
                 2 => binary16(state.read(src)? as u16),
                 _ => float(src)?.wide(),
             };
-            (dst, Float::of(0, dst.size)?.at(x).bits())
+            (dst, converted(x, dst.size)?)
         }
         R2ILOp::Int2Float { dst, src } => {
             let integer = Word::new(state.read(src)?, src.size)?.signed()?;
@@ -1642,7 +1695,7 @@ mod tests {
     }
 
     #[test]
-    fn a_half_widens_exactly_and_never_narrows() {
+    fn a_half_widens_exactly_and_narrows_once_ties_to_even() {
         let widen = R2ILOp::FloatFloat {
             dst: register(32, 4),
             src: register(0, 2),
@@ -1671,12 +1724,33 @@ mod tests {
         );
         let narrow = R2ILOp::FloatFloat {
             dst: register(32, 2),
-            src: register(0, 4),
+            src: register(0, 8),
         };
-        assert_eq!(
-            float_run(&narrow, &[(0, 4, single(0.5))]),
-            Err(Stop::Unmodelled)
-        );
+        let double = |x: f64| u128::from(x.to_bits());
+        for (wide, half) in [
+            (0.5, 0x3800u16),
+            (-1.0, 0xbc00),
+            (65504.0, 0x7bff),
+            (65519.999, 0x7bff),
+            (65520.0, 0x7c00),
+            (f64::NEG_INFINITY, 0xfc00),
+            (2049.0, 0x6800),
+            (2051.0, 0x6802),
+            (2049.0 + 2f64.powi(-40), 0x6801),
+            (2f64.powi(-24), 0x0001),
+            (2f64.powi(-25), 0x0000),
+            (3.0 * 2f64.powi(-25), 0x0002),
+            (2f64.powi(-25) * 1.0000001, 0x0001),
+            (1023.5 * 2f64.powi(-24), 0x0400),
+            (-0.0, 0x8000),
+            (f64::NAN, 0x7e00),
+        ] {
+            assert_eq!(
+                float_run(&narrow, &[(0, 8, double(wide))]),
+                Ok(u128::from(half)),
+                "{wide}"
+            );
+        }
     }
 
     #[test]
@@ -1723,5 +1797,40 @@ mod tests {
         let mut short = State::new(Endianness::Little, nothing_mapped, 1).expect("little-endian");
         assert_eq!(step(&R2ILOp::Nop, &mut short), Flow::Next);
         assert_eq!(step(&R2ILOp::Nop, &mut short), Flow::Stop(Stop::Exhausted));
+    }
+
+    /// A run follows the label a taken branch names and skips what it jumps over; a label outside
+    /// the instruction stops it.
+    #[test]
+    fn a_run_follows_the_local_labels_its_branches_name() {
+        let label = |offset: i64| Varnode::constant(offset as u64 & 0xffff_ffff, 4);
+        let set = |at: u64, value: u64| R2ILOp::Copy {
+            dst: register(at, 1),
+            src: Varnode::constant(value, 1),
+        };
+        let ops = [
+            R2ILOp::CBranch {
+                target: label(3),
+                cond: register(0, 1),
+            },
+            set(8, 1),
+            R2ILOp::Branch { target: label(2) },
+            set(8, 2),
+            set(16, 3),
+        ];
+        for (cond, written) in [(0, 1), (1, 2)] {
+            let mut machine = state();
+            machine.set_register(0, 1, cond).expect("a flag");
+            assert_eq!(run(&ops, &mut machine), Flow::Next);
+            assert_eq!(machine.register(8, 1), Some(written));
+            assert_eq!(machine.register(16, 1), Some(3));
+        }
+        let mut machine = state();
+        for outside in [label(2), label(-1)] {
+            let branch = [R2ILOp::Branch { target: outside }];
+            assert_eq!(run(&branch, &mut machine), Flow::Stop(Stop::Unmodelled));
+        }
+        let end = [R2ILOp::Branch { target: label(1) }];
+        assert_eq!(run(&end, &mut machine), Flow::Next);
     }
 }

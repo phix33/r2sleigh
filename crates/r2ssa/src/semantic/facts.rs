@@ -468,8 +468,6 @@ pub struct MemorySSAFacts {
     pub uses_by_inst: crate::dense::IdMap<InstId, Vec<MemoryUseFact>>,
     pub defs_by_inst: crate::dense::IdMap<InstId, Vec<MemoryDefFact>>,
     pub phis_by_block: BTreeMap<u64, Vec<MemoryPhiFact>>,
-    /// The solve moved a state past its height: the function refuses (doc/adr-fixpoint.md).
-    pub exhausted: Option<crate::fixpoint::Exhausted>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -606,6 +604,31 @@ pub struct SourceCallArgumentFact {
 /// Per-callsite proof of a variadic argument count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VariadicCallsiteArgumentCountEvidence {
+    pub basis: VariadicCountBasis,
+    pub total_argument_count: usize,
+}
+
+impl VariadicCallsiteArgumentCountEvidence {
+    /// The format literal that counted the tail, where one did.
+    pub const fn format(&self) -> Option<&FormatCountEvidence> {
+        match &self.basis {
+            VariadicCountBasis::Format(format) => Some(format),
+            VariadicCountBasis::Count(_) => None,
+        }
+    }
+}
+
+/// What counted a variadic tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariadicCountBasis {
+    /// A literal format string, read by the rule that names the format parameter.
+    Format(FormatCountEvidence),
+    /// A constant count argument, which the callee's own loop bounds its tail by.
+    Count(TailCountEvidence),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatCountEvidence {
     /// Which rule named the format parameter: radare2's recovered prototype,
     /// or the callee's own body. Orthogonal to `merged_literals`, which is
     /// about the literal rather than the parameter.
@@ -617,7 +640,13 @@ pub struct VariadicCallsiteArgumentCountEvidence {
     pub format_argument_index: usize,
     pub format_literal_address: u64,
     pub format_consumed_argument_count: usize,
-    pub total_argument_count: usize,
+}
+
+/// The tail a callee's loop bound allows, read off the constant the call passes for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TailCountEvidence {
+    pub bound: r2source::SourceTailCount,
+    pub tail_arguments: usize,
 }
 
 /// Why a variadic callsite could not prove and project its own argument list.
@@ -634,6 +663,10 @@ pub enum VariadicCallsiteArgumentCountRefusal {
     /// The format consumes a floating operand, which the convention carries in
     /// its floating sequence rather than the integer one this recovery walks.
     FloatingVariadicArgument,
+    /// The callee's loop bounds its tail by a parameter the call does not carry.
+    CountArgumentUnavailable,
+    /// The callee's loop bounds its tail by a parameter this call passes no constant for.
+    CountArgumentNotConstant,
 }
 
 impl VariadicCallsiteArgumentCountRefusal {
@@ -648,6 +681,8 @@ impl VariadicCallsiteArgumentCountRefusal {
             Self::InsufficientRegisterArgumentCarriers => "insufficient_register_argument_carriers",
             Self::UnresolvedArgumentCarrier => "unresolved_argument_carrier",
             Self::FloatingVariadicArgument => "floating_variadic_argument",
+            Self::CountArgumentUnavailable => "count_argument_unavailable",
+            Self::CountArgumentNotConstant => "count_argument_not_constant",
         }
     }
 }
@@ -1468,6 +1503,8 @@ pub(crate) struct ObjectModelBuilder<'a> {
     pub(crate) evidenced_roots: BTreeSet<StackAddressRoot>,
     /// How far each evidenced root's indexed accesses reach.
     pub(crate) evidenced_spans: BTreeMap<StackAddressRoot, i64>,
+    /// `evidenced_spans` of the evidenced roots, to find the nearest one over a position.
+    covering: super::covering::CoveringSpans,
     /// The evidenced spans that took in another root.
     pub(crate) evidenced_absorbing: BTreeSet<StackAddressRoot>,
     /// How far a callee writes from each root it is handed.
@@ -1535,6 +1572,7 @@ impl<'a> ObjectModelBuilder<'a> {
             indexed_displacements: crate::dense::IdMap::default(),
             evidenced_roots: BTreeSet::new(),
             evidenced_spans: BTreeMap::new(),
+            covering: super::covering::CoveringSpans::default(),
             evidenced_absorbing: BTreeSet::new(),
             callee_write_spans: BTreeMap::new(),
             frame_boundaries: FrameBoundaries::default(),
@@ -1602,6 +1640,7 @@ impl<'a> ObjectModelBuilder<'a> {
                 &boundaries,
             );
             self.frame_boundaries = boundaries;
+            self.covering = super::covering::CoveringSpans::of(&evidenced.spans, &evidenced.roots);
             self.evidenced_roots = evidenced.roots;
             self.evidenced_spans = evidenced.spans;
             self.evidenced_absorbing = evidenced.absorbing;
@@ -1744,20 +1783,8 @@ impl<'a> ObjectModelBuilder<'a> {
                 // from; otherwise the address is its operand's object,
                 // displaced.
                 if interior.is_none() && !self.evidenced_roots.contains(&root) {
-                    // The nearest span below the root on its base first: spans are ordered by
-                    // (base, offset), so only those starting below it on that base are read.
-                    let floor = StackAddressRoot {
-                        base: root.base,
-                        offset: i64::MIN,
-                    };
-                    let containing = self
-                        .evidenced_spans
-                        .range(floor..root)
-                        .rev()
-                        .find(|(base, end)| {
-                            root.offset < **end && self.evidenced_roots.contains(*base)
-                        })
-                        .map(|(base, _)| *base);
+                    // The nearest evidenced span under the root that reaches it.
+                    let containing = self.covering.nearest_below(root, root.offset);
                     if let Some(container) = containing {
                         let object = self.ensure_stack_object(container);
                         self.interior_offsets
@@ -1919,28 +1946,14 @@ impl<'a> ObjectModelBuilder<'a> {
                     .lower_bound(index)
                     .and_then(|lower| i64::try_from(lower).ok())?;
                 let reached = position.offset.checked_add(first)?;
-                let (floor, at) = (
-                    StackAddressRoot {
-                        base: position.base,
-                        offset: i64::MIN,
-                    },
-                    StackAddressRoot {
-                        base: position.base,
-                        offset: reached,
-                    },
-                );
-                let container = self
-                    .evidenced_roots
-                    .range(floor..=at)
-                    .rev()
-                    .find(|root| {
-                        root.offset == reached
-                            || self
-                                .evidenced_spans
-                                .get(root)
-                                .is_some_and(|end| reached < *end)
-                    })
-                    .copied()?;
+                let at = StackAddressRoot {
+                    base: position.base,
+                    offset: reached,
+                };
+                let container = match self.evidenced_roots.contains(&at) {
+                    true => at,
+                    false => self.covering.nearest_below(at, reached)?,
+                };
                 Some((container, position.offset - container.offset))
             });
             let object = match contained {

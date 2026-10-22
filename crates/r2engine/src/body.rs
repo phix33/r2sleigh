@@ -203,6 +203,9 @@ pub enum UnresolvedReason {
     Relocated,
     /// The body reached [`BODY_INSTRUCTIONS`] before it closed (D18): no analysis reads it whole.
     Budget,
+    /// A dispatch arm starts inside the instruction decoded at `with`, or spans its start (audit W6): the walk
+    /// keeps the instruction it decoded first. A branch past a `lock` prefix is no arm and keeps both.
+    Overlaps { with: u64 },
 }
 
 /// How many instructions one body may hold: 8x the largest function the corpora hold (pumasim's
@@ -323,6 +326,23 @@ impl Trace {
         self.0.open(callee, disasm, program);
     }
 
+    /// The instructions at which the walk stopped for want of a dispatch's arms.
+    pub fn dispatches(&self) -> impl Iterator<Item = u64> + '_ {
+        let stops = self.0.unresolved.iter();
+        let stops = stops.filter(|stop| stop.reason == UnresolvedReason::IndirectBranch);
+        stops.map(|stop| stop.addr)
+    }
+
+    /// Continue through the arms of dispatches, by the instruction making each, visiting only what is not yet decoded.
+    pub fn dispatch(
+        &mut self,
+        arms: &BTreeMap<u64, Vec<u64>>,
+        disasm: &Disassembler,
+        program: &dyn Program,
+    ) {
+        self.0.follow(arms, disasm, program);
+    }
+
     /// What the walk reached since it was last asked.
     pub fn reached(&mut self) -> Reached {
         std::mem::take(&mut self.0.reached)
@@ -424,11 +444,17 @@ struct Walk {
     /// The address of the instruction recorded last in this run.
     last: Option<u64>,
     leaders: BTreeSet<u64>,
+    /// The targets a dispatch's table names, whose starts are only as proven as the table's bound.
+    arms: BTreeSet<u64>,
+    /// The targets a branch names: a start the instruction itself states.
+    direct: BTreeSet<u64>,
     calls: BTreeSet<u64>,
     loads: BTreeSet<u64>,
     tail_calls: BTreeSet<u64>,
     /// Each call through a slot the loader binds to an import and seals, by instruction: the slot.
     slot_calls: BTreeMap<u64, u64>,
+    /// The calls through a slot the program states never returns, by instruction.
+    halting: BTreeSet<u64>,
     falls_into: BTreeSet<u64>,
     /// Whether each address the lift states context for decodes in another context than this walk's.
     target_contexts: BTreeMap<u64, bool>,
@@ -463,10 +489,13 @@ impl Walk {
             lifted: lifting.then(BTreeMap::new),
             last: None,
             leaders: BTreeSet::from([entry]),
+            arms: BTreeSet::new(),
+            direct: BTreeSet::new(),
             calls: BTreeSet::new(),
             loads: BTreeSet::new(),
             tail_calls: BTreeSet::new(),
             slot_calls: BTreeMap::new(),
+            halting: BTreeSet::new(),
             falls_into: BTreeSet::new(),
             target_contexts: BTreeMap::new(),
             unresolved: Vec::new(),
@@ -498,6 +527,31 @@ impl Walk {
         self.run(pending, None, disasm, program);
     }
 
+    /// Go on through the arms of dispatches the walk stopped at, as a walk told them from the start would.
+    fn follow(
+        &mut self,
+        arms: &BTreeMap<u64, Vec<u64>>,
+        disasm: &Disassembler,
+        program: &dyn Program,
+    ) {
+        let mut pending = Vec::new();
+        for (&addr, targets) in arms.iter().filter(|(_, targets)| !targets.is_empty()) {
+            let stopped = |stop: &Unresolved| {
+                (stop.addr, stop.reason) == (addr, UnresolvedReason::IndirectBranch)
+            };
+            if !self.unresolved.iter().any(stopped) {
+                continue;
+            }
+            self.unresolved.retain(|stop| !stopped(stop));
+            self.dispatched.insert(addr, targets.clone());
+            for target in targets.iter().collect::<BTreeSet<_>>() {
+                self.arms.insert(*target);
+                self.transfer(*target, &mut pending, program);
+            }
+        }
+        self.run(pending, None, disasm, program);
+    }
+
     /// Walk on from `pending`; `previous` is the lift recorded last where `lifted` keeps none.
     fn run(
         &mut self,
@@ -506,24 +560,74 @@ impl Walk {
         disasm: &Disassembler,
         program: &dyn Program,
     ) {
-        while let Some(addr) = pending.pop() {
+        // Arms wait for every start the instructions state, lowest first: an arm inside an instruction loses to it.
+        let mut held = BTreeSet::new();
+        loop {
+            let (addr, released) = match pending.pop() {
+                Some(addr) => (addr, false),
+                None => match held.pop_first() {
+                    Some(addr) => (addr, true),
+                    None => break,
+                },
+            };
             if self.decoded.contains_key(&addr) {
+                continue;
+            }
+            let arm = self.arms.contains(&addr) && !self.direct.contains(&addr);
+            if arm && !released {
+                held.insert(addr);
+                continue;
+            }
+            if arm && let Some(with) = self.inside(addr, 1) {
+                self.overlap(addr, with);
                 continue;
             }
             if self.decoded.len() >= BODY_INSTRUCTIONS {
                 self.stop(addr, UnresolvedReason::Budget);
                 break;
             }
-            if let Some(instruction) = self.decode(addr, disasm, program) {
-                let enters = enters_supervisor(&instruction.lifted.ops, disasm.arch_spec());
-                self.supervisor.extend(enters.then_some(addr));
-                let (successors, kept) = self.record(instruction, previous.as_ref(), program);
-                pending.extend(successors);
-                previous = kept;
+            let Some(instruction) = self.decode(addr, disasm, program) else {
+                continue;
+            };
+            let end = u64::from(instruction.lifted.size) - 1;
+            if arm && let Some(with) = self.inside(addr + 1, end) {
+                self.overlap(addr, with);
+                continue;
             }
+            let enters = enters_supervisor(&instruction.lifted.ops, disasm.arch_spec());
+            self.supervisor.extend(enters.then_some(addr));
+            let (successors, kept) = self.record(instruction, previous.as_ref(), program);
+            pending.extend(successors);
+            previous = kept;
         }
         // A resumed walk starts after a call, not after the lift this run recorded last.
         self.last = None;
+    }
+
+    /// The start of a decoded instruction sharing a byte with `[at, at + len)` that does not begin at `at`'s
+    /// instruction. `O(log n)`.
+    fn inside(&self, at: u64, len: u64) -> Option<u64> {
+        let before = (self.decoded.range(..at).next_back())
+            .filter(|(start, size)| *start + u64::from(**size) > at)
+            .map(|(start, _)| *start);
+        before.or_else(|| {
+            self.decoded
+                .range(at..at + len)
+                .next()
+                .map(|(start, _)| *start)
+        })
+    }
+
+    /// Refuse an instruction that overlaps one decoded, once per pair.
+    fn overlap(&mut self, addr: u64, with: u64) {
+        let reason = UnresolvedReason::Overlaps { with };
+        if !self
+            .unresolved
+            .iter()
+            .any(|stop| (stop.addr, stop.reason) == (addr, reason))
+        {
+            self.stop(addr, reason);
+        }
     }
 
     /// Decode one instruction, or record why control stops here.
@@ -634,6 +738,12 @@ impl Walk {
         successors.push(target);
     }
 
+    /// Follow a branch's target, a start the instruction states.
+    fn branch(&mut self, target: u64, successors: &mut Vec<u64>, program: &dyn Program) {
+        self.direct.insert(target);
+        self.transfer(target, successors, program);
+    }
+
     /// Continue to the address after an instruction, or run on into the function that begins there.
     fn continues(&mut self, next: Option<u64>, successors: &mut Vec<u64>, program: &dyn Program) {
         let Some(next) = next else {
@@ -672,7 +782,7 @@ impl Walk {
             BlockTerminator::Fallthrough { next: after } => {
                 self.continues(Some(after), &mut successors, program)
             }
-            BlockTerminator::Branch { target } => self.transfer(target, &mut successors, program),
+            BlockTerminator::Branch { target } => self.branch(target, &mut successors, program),
             // The arm that leaves is a return or an indirect transfer, either of which may hand control back.
             BlockTerminator::ConditionalExit { next: after } => {
                 self.reached.leaves = true;
@@ -682,8 +792,8 @@ impl Walk {
                 true_target,
                 false_target,
             } => {
-                self.transfer(true_target, &mut successors, program);
-                self.transfer(false_target, &mut successors, program);
+                self.branch(true_target, &mut successors, program);
+                self.branch(false_target, &mut successors, program);
             }
             BlockTerminator::Call {
                 target,
@@ -724,6 +834,8 @@ impl Walk {
                 }
                 if through.is_none_or(|slot| program.returns_through(slot)) {
                     self.continues(fallthrough, &mut successors, program)
+                } else {
+                    self.halting.insert(addr);
                 }
             }
             // A switch is an indirect branch through a table, so it is one
@@ -814,6 +926,7 @@ impl Walk {
             return;
         };
         for target in arms.into_iter().collect::<BTreeSet<_>>() {
+            self.arms.insert(target);
             self.transfer(target, successors, program);
         }
     }
@@ -829,11 +942,9 @@ impl Walk {
 
     /// Gather the decoded instructions into blocks, each ending where control leaves, a leader begins, a hole opens or a fallthrough is closed.
     fn into_body(self) -> Body {
-        let closed = self
-            .gated
-            .values()
-            .flatten()
+        let closed = (self.gated.values().flatten())
             .map(|(call, _)| *call)
+            .chain(self.halting.iter().copied())
             .collect::<BTreeSet<_>>();
         let link = self.link.as_ref();
         let mut blocks: Vec<BodyBlock> = Vec::new();

@@ -319,6 +319,82 @@ fn aarch64_dup_and_sbfx_retain_proven_width_changes() {
     )));
 }
 
+/// Each word is spelled as the Arm ARM prefers it; the pairs at a precondition's edge are the ones that differ.
+#[cfg(feature = "arm")]
+#[test]
+fn aarch64_listing_spells_the_preferred_alias_at_each_precondition_boundary() {
+    let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::Aarch64Le)
+        .expect("trusted AArch64 specification");
+    let bitfield = |sf: u32, opc: u32, immr: u32, imms: u32, rn: u32| {
+        (sf << 31)
+            | (opc << 29)
+            | (0x26 << 23)
+            | (sf << 22)
+            | (immr << 16)
+            | (imms << 10)
+            | (rn << 5)
+            | 1
+    };
+    let words = [
+        // BFM: imms < immr is BFI, or BFC from the zero register; imms >= immr is BFXIL, never BFC.
+        (0x331a_65cc, "bfi w12, w14, 0x6, 0x1a"),
+        (bitfield(0, 1, 1, 0, 2), "bfi w1, w2, 0x1f, 0x1"),
+        (bitfield(1, 1, 1, 0, 2), "bfi x1, x2, 0x3f, 0x1"),
+        (bitfield(0, 1, 1, 1, 2), "bfxil w1, w2, 0x1, 0x1"),
+        (bitfield(0, 1, 1, 0, 31), "bfc w1, 0x1f, 0x1"),
+        (bitfield(0, 1, 0, 0, 31), "bfxil w1, wzr, 0x0, 0x1"),
+        (bitfield(0, 2, 2, 0, 2), "ubfiz w1, w2, 0x1e, 0x1"),
+        // UBFM and SBFM: the extract, insert, shift and lsl/lsr forms Sleigh already spells (boundary: imms + 1 == immr is lsl, imms == 31 is lsr).
+        (bitfield(0, 2, 1, 3, 2), "ubfx w1, w2, 0x1, 0x3"),
+        (bitfield(0, 0, 1, 3, 2), "sbfx w1, w2, 0x1, 0x3"),
+        (bitfield(0, 0, 2, 0, 2), "sbfiz w1, w2, 0x1e, 0x1"),
+        (bitfield(0, 2, 3, 2, 2), "lsl w1, w2, 0x1d"),
+        (bitfield(0, 2, 1, 31, 2), "lsr w1, w2, 0x1"),
+        (bitfield(0, 0, 1, 31, 2), "asr w1, w2, 0x1"),
+        // ADDS, ANDS and ORN with a zero register are CMN, TST and MVN; a live register keeps the base mnemonic.
+        (0x2b02_003f, "cmn w1, w2"),
+        (0x2b02_0021, "adds w1, w1, w2"),
+        (0x6a02_003f, "tst w1, w2"),
+        (0x6a02_0020, "ands w0, w1, w2"),
+        (0x2a22_03e1, "mvn w1, w2"),
+        (0x2a22_0021, "orn w1, w1, w2"),
+        (0x6b02_003f, "cmp w1, w2"),
+        // SUBS with both Rd and Rn the zero register is CMP; NEGS needs a live Rd.
+        (0xeb13_0fff, "cmp xzr, x19, lsl 0x3"),
+        (0x6b01_03e1, "negs w1, w1"),
+        (0x4b01_03e1, "neg w1, w1"),
+        // MOV (register) is ORR with no shift.
+        (0x2a02_03e1, "mov w1, w2"),
+        (0x2a02_0fe1, "orr w1, wzr, w2, lsl 0x3"),
+        // MOV (bitmask immediate) is ORR unless a single MOVZ or MOVN writes the value.
+        (0x3200_07e1, "orr w1, wzr, 0x3"),
+        (0x3200_03e1, "orr w1, wzr, 0x1"),
+        (0x3203_1fe1, "mov w1, 0xe000001f"),
+        // MOV (wide immediate) is MOVZ or MOVN unless it would assemble to another encoding.
+        (0x5280_0001, "mov w1, 0x0"),
+        (0x52a0_0001, "movz w1, 0x0, lsl 0x10"),
+        (0x1280_0001, "mov w1, 0xffffffff"),
+        (0x12a0_0001, "movn w1, 0x0, lsl 0x10"),
+        (0x129f_ffe1, "movn w1, 0xffff"),
+        (0x92a0_0001, "movn x1, 0x0, lsl 0x10"),
+        // USHLL and SSHLL by zero are Sleigh's UXTL and SXTL already; any other shift stays.
+        (0x0f08_a441, "sxtl v1.8h, v2.8b"),
+        (0x2f09_a441, "ushll v1.8h, v2.8b, 0x1"),
+        // The carry conditions are HS and LO, where Sleigh writes CS and CC.
+        (0x5400_0022, "b.hs 0x1004"),
+        (0x5400_0023, "b.lo 0x1004"),
+        (0x5400_0021, "b.ne 0x1004"),
+        (0x1a81_2021, "csel w1, w1, w1, hs"),
+        (0x1a9f_27e1, "cset w1, lo"),
+    ];
+    for (word, expected) in words {
+        let decoded = disassembler
+            .decode(&padded_instruction(u32::to_le_bytes(word)), 0x1000, None)
+            .unwrap_or_else(|error| panic!("{word:#010x}: {error}"));
+        assert_eq!(decoded.syntax.text(), expected, "{word:#010x}");
+    }
+}
+
 #[cfg(feature = "x86")]
 #[test]
 fn x86_byte_register_writes_do_not_invent_full_carrier_zero_extensions() {
@@ -839,7 +915,7 @@ fn riscv_atomic_bytes_retain_only_canonical_sleigh_semantics() {
     const ADDR: u64 = 0x420000;
 
     let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::RiscV64Gc)
-        .expect("trusted RV64GC disassembler");
+        .expect("trusted RV64 disassembler");
     for (index, (bytes, expected_token)) in [
         (FENCE_IORW_IORW, "fence"),
         (LR_W_A0_A1, "lr.w"),
@@ -993,14 +1069,14 @@ fn a_packed_extension_of_any_other_shape_keeps_its_call_other() {
     let xmm1 = register_varnode(declared_register_storage(disassembler.arch_spec(), "XMM1"));
     let four = Varnode::unique(0x40, 4);
     let expanded = |userop: u32, output: &Varnode, inputs: &[Varnode]| {
-        disassembler.expand_user_operation(
-            R2ILOp::CallOther {
-                userop,
-                output: Some(output.clone()),
-                inputs: inputs.to_vec(),
-            },
-            0x1000,
-        )
+        let op = R2ILOp::CallOther {
+            userop,
+            output: Some(output.clone()),
+            inputs: inputs.to_vec(),
+        };
+        disassembler
+            .expand_user_operation(&op, 0x1000)
+            .unwrap_or_else(|| vec![op])
     };
     let keeps_call_other =
         |ops: &[R2ILOp]| ops.len() == 1 && matches!(ops[0], R2ILOp::CallOther { .. });
@@ -1471,11 +1547,32 @@ fn a_windows_aarch64_machine_carries_the_windows_compiler_specification() {
         windows.compiler_spec_of("windows"),
         Some(sleigh_config::processor_aarch64::CSPEC_AARCH64_WIN)
     );
-    let usual = embedded_machine("aarch64").expect("AppleSilicon");
-    assert_eq!(usual.compiler_spec_of("windows"), None);
     // Both languages name Go's toolchain.
-    assert!(usual.compiler_spec_of("golang").is_some());
     assert!(windows.compiler_spec_of("golang").is_some());
+}
+
+/// The AppleSilicon decoder runs under v8A's compilers: since GP-3139 its own default is Apple's
+/// variadic convention (AARCH64_apple.cspec), which an ELF's toolchain does not follow.
+#[cfg(feature = "arm")]
+#[test]
+fn an_aarch64_machine_carries_the_v8a_compiler_specifications() {
+    let usual = embedded_machine("aarch64").expect("AppleSilicon");
+    assert_eq!(
+        usual.compiler_spec,
+        sleigh_config::processor_aarch64::CSPEC_AARCH64
+    );
+    assert_ne!(
+        usual.compiler_spec,
+        sleigh_config::processor_aarch64::CSPEC_AARCH64_APPLE
+    );
+    assert!(usual.compiler_spec_of("golang").is_some());
+    // Apple's is there for a Mach-O to choose; v8A, a PE's language, names none.
+    assert_eq!(
+        usual.compiler_spec_of("apple"),
+        Some(sleigh_config::processor_aarch64::CSPEC_AARCH64_APPLE)
+    );
+    let v8a = embedded_program_machine("aarch64", ByteOrder::LITTLE, true).expect("v8A");
+    assert_eq!(v8a.compiler_spec_of("apple"), None);
 }
 
 /// The walk's machine and the trusted lift read one parse of the specification on a thread.

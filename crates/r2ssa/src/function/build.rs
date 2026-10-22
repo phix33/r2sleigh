@@ -33,7 +33,10 @@ impl SSAFunction {
             supervisor_calls: BTreeSet::new(),
             promoted_slots: std::collections::BTreeSet::new(),
             compiler_inserted: crate::dense::IdSet::default(),
-            compiler_inserted_blocks: BTreeSet::new(),
+            compiler_inserted_blocks: BTreeMap::new(),
+            compiler_removed_edges: BTreeSet::new(),
+            decided_dead_blocks: BTreeMap::new(),
+            decided_dead_edges: BTreeSet::new(),
             premises: BTreeSet::new(),
             assumed_exits: super::AssumedExits::default(),
             stack_pointer_carrier: None,
@@ -64,7 +67,7 @@ impl SSAFunction {
         let func = Self::from_blocks_raw(blocks, arch)?;
         // Constructor path applies SCCP by default while keeping legacy SSA consumers stable.
         let cfg = crate::optimize::OptimizationConfig {
-            enable_sccp: true,
+            sccp: crate::optimize::SccpMode::Propagate,
             enable_inst_combine: false,
             preserve_memory_reads: false,
         };
@@ -250,7 +253,7 @@ impl SSAFunction {
             control,
         )?;
         let cfg = crate::optimize::OptimizationConfig {
-            enable_sccp: true,
+            sccp: crate::optimize::SccpMode::Propagate,
             enable_inst_combine: false,
             preserve_memory_reads: true,
         };
@@ -549,7 +552,10 @@ impl SSAFunction {
                 .unwrap_or_default(),
             promoted_slots: std::collections::BTreeSet::new(),
             compiler_inserted: crate::dense::IdSet::default(),
-            compiler_inserted_blocks: BTreeSet::new(),
+            compiler_inserted_blocks: BTreeMap::new(),
+            compiler_removed_edges: BTreeSet::new(),
+            decided_dead_blocks: BTreeMap::new(),
+            decided_dead_edges: BTreeSet::new(),
             premises: BTreeSet::new(),
             assumed_exits: super::AssumedExits::default(),
             stack_pointer_carrier: None,

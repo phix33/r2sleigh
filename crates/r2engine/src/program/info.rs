@@ -33,7 +33,7 @@ pub struct FunctionInfo {
     /// Whether control never comes back from it, and what that takes for granted: nothing where
     /// the whole program proves it, a premise where a runtime model says it. `None` where it may.
     pub noreturn: Option<std::collections::BTreeSet<r2source::Premise>>,
-    /// Why there is no analysis, where there is none: the blocks are then the plain walk's, and
+    /// Why there is no analysis, where there is none: the blocks are then the walk's, and
     /// the calls, convention, parameters, locals and return are unknown, not empty (ROADMAP D29).
     pub refused: Option<crate::native::NativeRefusal>,
 }
@@ -111,7 +111,7 @@ impl FunctionInfo {
         }
     }
 
-    /// A function whose analysis refused: the plain walk's blocks, as `afb` lists them, and why.
+    /// A function whose analysis refused: the walk's blocks, as `afb` lists them, and why.
     pub(crate) fn refused(
         entry: u64,
         walked: &[super::GraphBlock],
@@ -196,7 +196,8 @@ impl FunctionInfo {
     }
 }
 
-/// Every block with bytes, and the instructions whose spans start inside it.
+/// Every block with bytes, the blocks a decided check or branch removed among them, and the instructions
+/// whose spans start inside it.
 fn blocks(artifact: &r2ssa::SsaArtifact) -> Vec<Block> {
     let function = artifact.function();
     let starts = artifact
@@ -205,17 +206,24 @@ fn blocks(artifact: &r2ssa::SsaArtifact) -> Vec<Block> {
         .values()
         .map(|span| span.instruction_addr())
         .collect::<BTreeSet<_>>();
-    let mut blocks = (artifact.graph().blocks.iter())
-        .filter(|block| block.size > 0)
-        .map(|block| {
-            let end = block.addr + u64::from(block.size);
-            Block {
-                addr: block.addr,
-                size: u64::from(block.size),
-                instructions: starts.range(block.addr..end).count(),
-                successors: function.successors(block.addr).len(),
-            }
-        })
+    let removed = (function.compiler_removed_edges().iter())
+        .chain(function.decided_dead_edges())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let block = |addr: u64, size: u32| {
+        let edges = removed.range((addr, 0)..=(addr, u64::MAX)).count();
+        Block {
+            addr,
+            size: u64::from(size),
+            instructions: starts.range(addr..addr + u64::from(size)).count(),
+            successors: function.successors(addr).len() + edges,
+        }
+    };
+    let graph = (artifact.graph().blocks.iter()).map(|held| (held.addr, held.size));
+    let gone = (function.compiler_inserted_blocks().iter()).chain(function.decided_dead_blocks());
+    let mut blocks = (graph.chain(gone.map(|(addr, size)| (*addr, *size))))
+        .filter(|(_, size)| *size > 0)
+        .map(|(addr, size)| block(addr, size))
         .collect::<Vec<_>>();
     blocks.sort_unstable_by_key(|block| block.addr);
     blocks

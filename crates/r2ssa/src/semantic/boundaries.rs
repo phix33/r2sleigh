@@ -19,7 +19,10 @@ pub(crate) fn variadic_callsite_argument_count(
     forwarding: &FormatForwardingLookup<'_>,
 ) -> Result<VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal> {
     let Some(parameter_rule) = interface.format_parameter_rule() else {
-        return Err(VariadicCallsiteArgumentCountRefusal::MissingFormatParameter);
+        let bound = (interface.exact_callee_interface())
+            .and_then(r2source::SourceFunctionInterface::tail_count)
+            .ok_or(VariadicCallsiteArgumentCountRefusal::MissingFormatParameter)?;
+        return counted_tail_argument_count(graph, prep, interface, fixed_arguments, bound);
     };
     let parameter_index = parameter_rule.parameter_index();
     let format_argument_index = usize::try_from(parameter_index)
@@ -110,11 +113,53 @@ pub(crate) fn variadic_callsite_argument_count(
         .checked_add(format_consumed_argument_count)
         .ok_or(VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
     Ok(VariadicCallsiteArgumentCountEvidence {
-        parameter_rule,
-        merged_literals: false,
-        format_argument_index,
-        format_literal_address,
-        format_consumed_argument_count,
+        basis: VariadicCountBasis::Format(FormatCountEvidence {
+            parameter_rule,
+            merged_literals: false,
+            format_argument_index,
+            format_literal_address,
+            format_consumed_argument_count,
+        }),
+        total_argument_count,
+    })
+}
+
+/// A variadic call's count from the constant it passes for the parameter its callee's loop bounds
+/// its tail by (ADR "Count-driven tail"); any other count stays a counted residual.
+fn counted_tail_argument_count(
+    graph: &SsaGraph,
+    prep: Option<&crate::DecompilePrepFacts>,
+    interface: &r2source::SourceCallSiteInterface,
+    fixed_arguments: &[Option<SourceCallArgumentFact>],
+    bound: r2source::SourceTailCount,
+) -> Result<VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal> {
+    // A tail this long is no call a count of constants places; the carriers would not be there.
+    const LONGEST_TAIL: usize = 1024;
+    let index = usize::try_from(bound.parameter_index)
+        .map_err(|_| VariadicCallsiteArgumentCountRefusal::CountArgumentUnavailable)?;
+    let argument = fixed_arguments
+        .get(index)
+        .and_then(Option::as_ref)
+        .ok_or(VariadicCallsiteArgumentCountRefusal::CountArgumentUnavailable)?;
+    let SourceCallArgumentValue::Value(value) = argument.value else {
+        return Err(VariadicCallsiteArgumentCountRefusal::CountArgumentNotConstant);
+    };
+    let bits = resolve_const_value(graph, prep, value)
+        .ok_or(VariadicCallsiteArgumentCountRefusal::CountArgumentNotConstant)?;
+    let tail_arguments = bound
+        .bound(bits)
+        .filter(|tail| *tail <= LONGEST_TAIL)
+        .ok_or(VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
+    let total_argument_count = interface
+        .arguments()
+        .len()
+        .checked_add(tail_arguments)
+        .ok_or(VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
+    Ok(VariadicCallsiteArgumentCountEvidence {
+        basis: VariadicCountBasis::Count(TailCountEvidence {
+            bound,
+            tail_arguments,
+        }),
         total_argument_count,
     })
 }
@@ -406,11 +451,13 @@ pub(crate) fn merged_format_literal_argument_count(
     // One literal reached through copies is one literal, and saying it was a
     // merge would claim a proof this call did not need.
     Ok(VariadicCallsiteArgumentCountEvidence {
-        parameter_rule,
-        merged_literals: addresses.len() > 1,
-        format_argument_index,
-        format_literal_address,
-        format_consumed_argument_count,
+        basis: VariadicCountBasis::Format(FormatCountEvidence {
+            parameter_rule,
+            merged_literals: addresses.len() > 1,
+            format_argument_index,
+            format_literal_address,
+            format_consumed_argument_count,
+        }),
         total_argument_count,
     })
 }
@@ -684,9 +731,7 @@ pub(crate) fn reaching_stack_slot_value(
                 }
                 return Some(src);
             }
-            SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::CallOther { .. }
-                if !query.promoted =>
-            {
+            _ if (op.is_call() || matches!(op, SSAOp::CallOther { .. })) && !query.promoted => {
                 r2il::refusal_evidence!(
                     "call-argument-stack-store",
                     "({block_addr:#x}) an earlier call stands between the argument slot at {} and the call",
@@ -783,6 +828,30 @@ fn body_writes(graph: &SsaGraph, slot: CanonicalStorageId) -> bool {
     })
 }
 
+/// The merges that can hand a call what this function was handed: the phis an arrival reaches
+/// through merges alone. Such a value is no write the body made. `O(values + merge inputs)`.
+fn merges_of_arrivals(graph: &SsaGraph) -> crate::dense::IdSet<ValueId> {
+    let mut merges = crate::dense::IdSet::new(graph.values.len());
+    let mut pending = (graph.values.iter())
+        .map(|value| value.id)
+        .filter(|value| !graph.written_by_body(*value))
+        .collect::<Vec<_>>();
+    while let Some(value) = pending.pop() {
+        for site in graph.use_sites(value) {
+            let Some(merge) = graph.inst(site.inst) else {
+                continue;
+            };
+            if matches!(merge.payload, crate::graph::InstPayload::Phi { .. })
+                && let Some(output) = merge.output
+                && merges.insert(output)
+            {
+                pending.push(output);
+            }
+        }
+    }
+    merges
+}
+
 /// The arity a call takes from the convention when no prototype describes it: exactly what its
 /// callee's body states, or else the argument registers this body provably wrote before the call,
 /// never proven past a floor (ROADMAP P7); and the result register where it is read.
@@ -797,6 +866,7 @@ pub(crate) fn convention_call_boundary(
     arity: Option<crate::SourceArity>,
     entry_values: &BTreeMap<CanonicalStorageId, Option<ValueId>>,
     written_anywhere: &mut BTreeMap<CanonicalStorageId, bool>,
+    arrival_merges: &crate::dense::IdSet<ValueId>,
     mut stack_pointer: Option<&mut ReachingStorage<'_>>,
 ) -> Result<ConventionCallBoundary, CallBoundaryRefusal> {
     let convention =
@@ -940,7 +1010,10 @@ pub(crate) fn convention_call_boundary(
                 }
                 break;
             }
-            Some(ReachingAbiState::Value(value)) if graph.written_by_body(value) => {
+            // A merge of the arrival with a write is not provably written before the call.
+            Some(ReachingAbiState::Value(value))
+                if graph.written_by_body(value) && !arrival_merges.contains(value) =>
+            {
                 SourceCallArgumentValue::Value(value)
             }
             // What this body arrived with: the call may read it, and only its callee says whether.
@@ -1237,6 +1310,7 @@ pub(crate) fn collect_source_boundary_facts(
 
     // Whether the body writes each argument register an unseen slot asks of, found once per register.
     let mut written_anywhere = BTreeMap::new();
+    let arrival_merges = merges_of_arrivals(graph);
     for call_site in call_sites.by_id.values() {
         let mut boundary = SourceCallBoundaryFact {
             call_site: call_site.id,
@@ -1510,6 +1584,7 @@ pub(crate) fn collect_source_boundary_facts(
                 stated.map(|statement| statement.arity),
                 &entry_values,
                 &mut written_anywhere,
+                &arrival_merges,
                 stack_pointer_states.as_mut(),
             );
             // One record of what the fallback was asked and what it answered.
@@ -2206,7 +2281,7 @@ pub(crate) fn storage_is_untouched_on_all_predecessor_paths(
             // definition checked for overlap below; the call itself touches
             // only the carrier the transfer moves. A user operation writes only its named output.
             if matches!(op, SSAOp::Return { .. })
-                || (matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
+                || (op.is_call()
                     && transfer_carrier
                         .is_some_and(|carrier| register_storages_overlap(carrier, storage)))
             {
@@ -2367,7 +2442,7 @@ mod tests {
             .expect("the guard's read");
         let mut inserted = crate::dense::IdSet::default();
         inserted.insert(load);
-        function.record_compiler_inserted(inserted, BTreeSet::new());
+        function.record_compiler_inserted(inserted, BTreeMap::new(), BTreeSet::new());
         let sealed = crate::function::Lifted::new(function)
             .validate()
             .expect("it validates")

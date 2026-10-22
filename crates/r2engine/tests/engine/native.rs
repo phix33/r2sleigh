@@ -95,7 +95,14 @@ impl Machine {
                 compiler,
             }
         };
-        let default = under(platform, embedded.compiler_spec);
+        // A Mach-O runs under the language's Apple compiler where it names one, as the engine picks it.
+        let toolchain = match platform {
+            Platform::Darwin => embedded
+                .compiler_spec_of("apple")
+                .unwrap_or(embedded.compiler_spec),
+            _ => embedded.compiler_spec,
+        };
+        let default = under(platform, toolchain);
         let name = default.convention.name;
         let mut conventions = BTreeMap::from([(name, default)]);
         if let Some(windows) = embedded.compiler_spec_of("windows") {
@@ -1738,6 +1745,89 @@ fn an_atomic_access_with_no_typed_statement_prints_no_plain_store() {
     assert!(!output.contains("r2sleigh_atomic"), "{output}");
 }
 
+/// A general-register fixed-point conversion scales by 2^fbits as an IEEE constant, 2^63 and 2^64
+/// too, and `fcvtzu` saturates to its destination instead of range-checking as a signed value.
+#[test]
+fn a_general_register_fixed_point_conversion_scales_by_its_full_fraction_width() {
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let ret = [0xc0, 0x03, 0x5f, 0xd6];
+    let f64_scale = |bits: &str| format!("r2sleigh_float_from_bits_64((uint64_t)0x{bits}U)");
+    let mut failures = Vec::new();
+    for (name, bytes, scale, present, absent) in [
+        // fcvtzs x0, d0, #64; ret
+        (
+            "fcvtzs_x_64",
+            vec![0x00, 0x00, 0x58, 0x9e],
+            f64_scale("43f0000000000000"),
+            "",
+            "",
+        ),
+        // fcvtzu w0, d0, #32; ret: all ones past 2^32, not the signed 32-bit range guard
+        (
+            "fcvtzu_w_32",
+            vec![0x00, 0x80, 0x59, 0x1e],
+            f64_scale("41f0000000000000"),
+            "* (uint64_t)0xffffffffU",
+            "2147483648.0",
+        ),
+        // fcvtzu x0, d0, #64; ret: all ones past 2^64
+        (
+            "fcvtzu_x_64",
+            vec![0x00, 0x00, 0x59, 0x9e],
+            f64_scale("43f0000000000000"),
+            "* (uint64_t)-0x1",
+            "",
+        ),
+        // scvtf d0, x0, #63; str d0, [x1]; ret
+        (
+            "scvtf_d_63",
+            vec![0x00, 0x04, 0x42, 0x9e, 0x20, 0x00, 0x00, 0xfd],
+            f64_scale("43e0000000000000"),
+            "",
+            "",
+        ),
+        // ucvtf d0, x0, #64; str d0, [x1]; ret
+        (
+            "ucvtf_d_64",
+            vec![0x00, 0x00, 0x43, 0x9e, 0x20, 0x00, 0x00, 0xfd],
+            f64_scale("43f0000000000000"),
+            "",
+            "",
+        ),
+        // scvtf s0, w0, #32; str s0, [x1]; ret
+        (
+            "scvtf_s_32",
+            vec![0x00, 0x80, 0x02, 0x1e, 0x20, 0x00, 0x00, 0xbd],
+            "r2sleigh_float_from_bits_32((uint32_t)0x4f800000U)".to_string(),
+            "",
+            "",
+        ),
+        // fcvtzs w0, d0, #16; ret: right before, only its scale was an `int2float` of an integer
+        (
+            "fcvtzs_w_16",
+            vec![0x00, 0xc0, 0x58, 0x1e],
+            f64_scale("40f0000000000000"),
+            "",
+            "",
+        ),
+    ] {
+        let program = Fixture {
+            bytes: [&bytes[..], &ret].concat(),
+            name,
+        };
+        let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+        let output = response.output.text();
+        let missing = [&scale[..], present]
+            .into_iter()
+            .find(|text| !output.contains(text));
+        let found = (!absent.is_empty() && output.contains(absent)).then_some(absent);
+        if missing.is_some() || found.is_some() {
+            failures.push(format!("{name}: missing {missing:?}, found {found:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 /// `dmb` is a user operation with no output, and p-code says it writes nothing else: the value
 /// before it is returned, and the barrier itself is a gap by its name.
 #[test]
@@ -2573,6 +2663,22 @@ fn an_entry_with_two_latches_merges_the_caller_and_both_latches() {
     return 0;
 }"#,
     );
+}
+
+/// A latch that leaves a carried value as it is has nothing to copy for it: the merge keeps its
+/// variable, and the text assigns a variable to itself nowhere (doc/adr-decompiler-rewrite.md, "Merges").
+#[test]
+fn a_latch_that_leaves_a_carried_value_copies_nothing() {
+    let text = rendered(ENTRY_LOOP_TWO_LATCHES, "two_latches");
+    let own: Vec<&str> = (text.lines().map(str::trim))
+        .filter(|line| {
+            let assigned = line
+                .strip_suffix(';')
+                .and_then(|line| line.split_once(" = "));
+            assigned.is_some_and(|(name, value)| name == value)
+        })
+        .collect();
+    assert!(own.is_empty(), "{own:?} in\n{text}");
 }
 
 /// Mutual tail recursion walked into one body is a loop through the entry,
@@ -4903,6 +5009,143 @@ fn a_check_whose_failure_returns_is_not_decided() {
     assert!(!output.contains("compiler-inserted"), "{output}");
 }
 
+/// A fixture whose program states that the pointer held at one slot is a function that never returns.
+struct HaltingSlot {
+    fixture: Fixture,
+    slot: u64,
+}
+
+impl r2engine::body::Program for HaltingSlot {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        self.fixture.read(vaddr, max)
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        self.fixture.region(vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        self.fixture.is_entry(vaddr)
+    }
+
+    fn returns_through(&self, slot: u64) -> bool {
+        slot != self.slot
+    }
+}
+
+impl Program for HaltingSlot {
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        self.fixture.holds_static_data(vaddr)
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        self.fixture.extents()
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.fixture.name_at(vaddr)
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        self.fixture.import_at(vaddr)
+    }
+}
+
+/// `CANARY_CHECKED` with the failure called through a slot, as `-fno-plt` calls `__stack_chk_fail`.
+const CANARY_CHECKED_THROUGH_A_SLOT: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // 1004 mov rax, fs:[0x28]
+    0x48, 0x89, 0x44, 0x24, 0x08, // 100d mov [rsp+8], rax
+    0x31, 0xc0, // 1012 xor eax, eax
+    0x48, 0x8b, 0x54, 0x24, 0x08, // 1014 mov rdx, [rsp+8]
+    0x64, 0x48, 0x2b, 0x14, 0x25, 0x28, 0x00, 0x00, 0x00, // 1019 sub rdx, fs:[0x28]
+    0x75, 0x05, // 1022 jne 0x1029
+    0x48, 0x83, 0xc4, 0x18, // 1024 add rsp, 0x18
+    0xc3, // 1028 ret
+    0xff, 0x15, 0x11, 0x00, 0x00, 0x00, // 1029 call [rip+0x11], the slot at 0x1040
+    0xc3, // 102f ret, reached only if the slot's function comes back
+];
+
+/// The failure path is a call through a slot the program says never returns, which is as much a
+/// call that does not come back as a direct one: the check is decided the same.
+#[test]
+fn a_stack_protector_check_whose_failure_calls_through_a_slot_is_decided() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = HaltingSlot {
+        fixture: Fixture {
+            bytes: CANARY_CHECKED_THROUGH_A_SLOT.to_vec(),
+            name: "canary_through_a_slot",
+        },
+        slot: 0x1040,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(thread_pointer_versions(output).is_empty(), "{output}");
+    assert!(output.contains("return 0;"), "{output}");
+    assert!(
+        output.contains("compiler-inserted (assuming ub-free)"),
+        "{output}"
+    );
+    // A slot the program says nothing about may come back, and then nothing proves a protector.
+    let silent = Fixture {
+        bytes: CANARY_CHECKED_THROUGH_A_SLOT.to_vec(),
+        name: "canary_through_a_slot",
+    };
+    let response = decompile(&machine.target(), &silent, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("compiler-inserted"), "{output}");
+}
+
+/// `CANARY_CHECKED` with the failure path `call`, then `jmp rax`: the call may come back and the
+/// block's only exit is the jump, so no call ends it and nothing proves a protector.
+fn check_failing_through_a_call_then_a_jump(call: &[u8], name: &'static str) {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let mut bytes = CANARY_CHECKED_THROUGH_A_SLOT[..0x29].to_vec();
+    bytes.extend(call);
+    bytes.extend([0xff, 0xe0]); // jmp rax
+    let response = decompile(&machine.target(), &Fixture { bytes, name }, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("compiler-inserted"), "{output}");
+}
+
+#[test]
+fn a_check_whose_failure_calls_through_a_slot_and_then_jumps_is_not_decided() {
+    check_failing_through_a_call_then_a_jump(&[0xff, 0x15, 0x11, 0x00, 0x00, 0x00], "slot_jump");
+}
+
+#[test]
+fn a_check_whose_failure_calls_and_then_jumps_is_not_decided() {
+    check_failing_through_a_call_then_a_jump(&[0xe8, 0x0c, 0x00, 0x00, 0x00], "call_jump");
+}
+
+/// `if (edi == 0) goto done; call [slot]; done: ret`, the slot at 0x1040.
+const CALL_THROUGH_A_SLOT_BEFORE_A_JOIN: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x06, // 1002 je 0x100a
+    0xff, 0x15, 0x36, 0x00, 0x00, 0x00, // 1004 call [rip+0x36], the slot at 0x1040
+    0xc3, // 100a ret, which the jump reaches
+];
+
+/// The program states the slot's function never returns, so the join after the call is reached
+/// only by the jump: nothing returns a value on the call's path.
+#[test]
+fn a_call_through_a_halting_slot_has_no_edge_to_the_join_after_it() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = HaltingSlot {
+        fixture: Fixture {
+            bytes: CALL_THROUGH_A_SLOT_BEFORE_A_JOIN.to_vec(),
+            name: "halting_slot_before_join",
+        },
+        slot: 0x1040,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(!output.contains("residual_u64"), "{output}");
+    assert_eq!(output.matches("return").count(), 1, "{output}");
+}
+
 /// `mul_div` from `tests/gold/review.c` at gcc -O0: `a * 7 / b + a % b`, with
 /// `a` and `b` spilled to the frame and reloaded for each division.
 const DIVIDE_AFTER_RELOAD: &[u8] = &[
@@ -5659,10 +5902,11 @@ fn a_store_a_read_at_an_unbounded_index_may_reach_is_rendered() {
         0x0f, 0xb6, 0x44, 0x14, 0xb0, // 0x100c movzx eax, byte [rsp+rdx-0x50]
         0x01, 0xc1, // 0x1011 add ecx, eax
         0x48, 0x83, 0xc2, 0x01, // 0x1013 add rdx, 1
-        0x48, 0x83, 0xfa, 0x09, // 0x1017 cmp rdx, 9
-        0x75, 0xef, // 0x101b jne 0x100c
-        0x89, 0xc8, // 0x101d mov eax, ecx
-        0xc3, // 0x101f ret
+        0x48, 0x39,
+        0xf2, // 0x1017 cmp rdx, rsi: against 9 the constants end the loop after one pass
+        0x75, 0xf0, // 0x101a jne 0x100c
+        0x89, 0xc8, // 0x101c mov eax, ecx
+        0xc3, // 0x101e ret
     ];
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
@@ -5806,6 +6050,24 @@ fn microsoft_x64_states_four_positional_register_pairs() {
         r2engine::native::prepared(&machine.under("amd64"), &program, BASE).expect("prepared");
     let slots = (prepared.artifact().machine_context().convention_slots()).expect("slots");
     assert!(!slots.shared_positions());
+}
+
+/// Apple's arm64 sends every variadic argument to the stack because its compiler specification
+/// says so; the usual AAPCS64 specification does not, and the platform's convention is no owner.
+#[test]
+fn an_arm64_variadic_tail_is_on_the_stack_where_the_compiler_specification_says() {
+    let ret = Fixture {
+        bytes: 0xd65f_03c0u32.to_le_bytes().to_vec(),
+        name: "f",
+    };
+    let on_stack = |platform| {
+        let machine = Machine::on("aarch64", "aarch64", 64, platform);
+        let prepared = r2engine::native::prepared(&machine.target(), &ret, BASE).expect("prepared");
+        let slots = (prepared.artifact().machine_context().convention_slots()).expect("slots");
+        slots.variadic_tail_on_stack()
+    };
+    assert!(on_stack(Platform::Darwin));
+    assert!(!on_stack(Platform::Linux));
 }
 
 /// `ldexpf(0.0f, 3)` under Microsoft x64, the stub at 0x1010.
@@ -6028,12 +6290,25 @@ fn a_signed_divide_of_the_most_negative_value_by_minus_one_is_not_a_c_division()
 /// Staged renders `bytes` (padded for the lifter) with every obligation accounted: no refusal and
 /// no unaccounted obligation in the proof line. The rendered text.
 fn sited_staged(arch: &str, name: &'static str, bytes: &[u8]) -> String {
+    let bytes = [bytes, &[0x90; 16]].concat();
+    sited(arch, &Fixture { bytes, name })
+}
+
+/// `sited_staged` for a program that states the function at `halts` never returns.
+fn sited_staged_halting(arch: &str, name: &'static str, bytes: &[u8], halts: u64) -> String {
+    let bytes = [bytes, &[0x90; 16]].concat();
+    sited(
+        arch,
+        &Halting {
+            fixture: Fixture { bytes, name },
+            halts,
+        },
+    )
+}
+
+fn sited(arch: &str, program: &dyn Program) -> String {
     let machine = Machine::on(arch, arch, 64, Platform::Linux);
-    let program = Fixture {
-        bytes: [bytes, &[0x90; 16]].concat(),
-        name,
-    };
-    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let response = decompile(&machine.target(), program, BASE).expect("decompile");
     let text = response.output.text().to_owned();
     assert!(!text.contains("r2sleigh refused"), "{text}");
     let proof = (text.lines())
@@ -6109,7 +6384,8 @@ const EDGE_COPY_GAP: &[u8] = &[
 
 #[test]
 fn a_phi_copy_written_as_an_edge_gap_is_that_merges_site() {
-    let text = sited_staged("x86-64", "shape_byte_indexed_buffer", EDGE_COPY_GAP);
+    // The protector's failure is `call 0x230`, which the program states never returns.
+    let text = sited_staged_halting("x86-64", "shape_byte_indexed_buffer", EDGE_COPY_GAP, 0x230);
     assert!(text.contains("ValuesNotRendered"), "{text}");
 }
 
@@ -6628,4 +6904,98 @@ fn a_load_of_bytes_a_conditional_store_writes_is_not_read_only() {
     let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
     assert!(!output.contains("0x11223344"), "{output}");
+}
+
+/// `mov eax, 0; test rax, rax; je; call rax`, a weak undefined reference the linker made 0: the
+/// guard is decided, so the call under it is no obligation (audit D13, P5).
+#[test]
+fn a_call_under_a_guard_the_constants_decide_is_no_call_to_zero() {
+    let rendered = rendered(
+        &[
+            0xb8, 0x00, 0x00, 0x00, 0x00, // 1000 mov eax, 0
+            0x48, 0x85, 0xc0, // 1005 test rax, rax
+            0x74, 0x02, // 1008 je 0x100c
+            0xff, 0xd0, // 100a call rax
+            0xc3, // 100c ret
+            0x90, 0x90, 0x90, // 100d padding
+        ],
+        "weak_guard",
+    );
+    for absent in ["fcn_0", "1U", "r2sleigh_residual", "r2dec gap"] {
+        assert!(!rendered.contains(absent), "{absent}:\n{rendered}");
+    }
+}
+
+/// `test rdi, rdi; je skip; call 0; skip: mov rsi, rsp; call callee`: the guard is a parameter, so
+/// the call to an unmapped target stays, and the stack pointer merging past it is still the frame.
+#[test]
+fn a_stack_pointer_merged_past_a_call_to_nowhere_is_the_frame_argument_it_is() {
+    let rendered = rendered(
+        &[
+            0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+            0x48, 0x85, 0xff, // 1004 test rdi, rdi
+            0x74, 0x05, // 1007 je 0x100e
+            0xe8, 0xf2, 0xef, 0xff, 0xff, // 1009 call 0
+            0xbf, 0x00, 0x10, 0x00, 0x00, // 100e mov edi, 0x1000
+            0x48, 0x89, 0xe6, // 1013 mov rsi, rsp
+            0x48, 0xc7, 0x04, 0x24, 0x00, 0x00, 0x00, 0x00, // 1016 mov qword [rsp], 0
+            0xe8, 0x0d, 0x00, 0x00, 0x00, // 101e call 0x1030
+            0x48, 0x83, 0xc4, 0x18, // 1023 add rsp, 0x18
+            0xc3, // 1027 ret
+            0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1028 padding
+            0x48, 0x8b, 0x06, // 1030 mov rax, [rsi]
+            0x48, 0x01, 0xf8, // 1033 add rax, rdi
+            0xc3, // 1036 ret
+        ],
+        "frame_past_a_missing_call",
+    );
+    assert!(!rendered.contains("r2sleigh refused"), "{rendered}");
+    assert!(
+        rendered.contains("fcn_1030(0x1000, (uint64_t)(frame + 16U))"),
+        "{rendered}"
+    );
+}
+
+/// glibc's `__run_exit_handlers`: registers its loop writes only on some paths, merged with their
+/// arrival before an indirect call, are no count of that call's arguments, so the formals stay three.
+#[test]
+fn registers_written_on_one_path_before_an_unknown_call_are_no_parameters() {
+    let rendered = rendered(
+        &[
+            0x41, 0x55, 0x41, 0x54, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x55, 0x53, 0x48, 0x89, 0xf5,
+            0x89, 0xfb, 0x41, 0x89, 0xd4, 0x48, 0x83, 0xec, 0x08, 0x48, 0x85, 0xc0, 0x74, 0x05,
+            0xe8, 0xbf, 0x97, 0xbf, 0xff, 0x4c, 0x8b, 0x6d, 0x00, 0x4d, 0x85, 0xed, 0x74, 0x5a,
+            0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00, 0x49, 0x8b, 0x45, 0x08, 0x48, 0x89, 0xc2, 0x48,
+            0xc1, 0xe2, 0x05, 0x48, 0x85, 0xc0, 0x49, 0x8d, 0x4c, 0x15, 0xf0, 0x74, 0x2e, 0x48,
+            0x83, 0xe8, 0x01, 0x49, 0x89, 0x45, 0x08, 0x48, 0x8b, 0x11, 0x48, 0x83, 0xfa, 0x03,
+            0x0f, 0x84, 0xb6, 0x00, 0x00, 0x00, 0x48, 0x83, 0xfa, 0x04, 0x0f, 0x84, 0x7c, 0x00,
+            0x00, 0x00, 0x48, 0x83, 0xfa, 0x02, 0x74, 0x46, 0x48, 0x83, 0xe9, 0x20, 0x48, 0x85,
+            0xc0, 0x75, 0xd2, 0x49, 0x8b, 0x45, 0x00, 0x48, 0x85, 0xc0, 0x48, 0x89, 0x45, 0x00,
+            0x0f, 0x85, 0xa9, 0x00, 0x00, 0x00, 0x45, 0x84, 0xe4, 0x74, 0x20, 0xb8, 0x48, 0x6b,
+            0x4a, 0x00, 0x48, 0x3d, 0x50, 0x6b, 0x4a, 0x00, 0x73, 0x13, 0x48, 0x89, 0xc5, 0xff,
+            0x55, 0x00, 0x48, 0x83, 0xc5, 0x08, 0x48, 0x81, 0xfd, 0x50, 0x6b, 0x4a, 0x00, 0x72,
+            0xf0, 0x89, 0xdf, 0xe8, 0x40, 0xa4, 0x02, 0x00, 0x48, 0xc1, 0xe0, 0x05, 0x89, 0xdf,
+            0x49, 0x8d, 0x54, 0x05, 0x10, 0x48, 0x8b, 0x42, 0x08, 0x48, 0x8b, 0x72, 0x10, 0x48,
+            0xc1, 0xc8, 0x11, 0x64, 0x48, 0x33, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, 0xff, 0xd0,
+            0xe9, 0x59, 0xff, 0xff, 0xff, 0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x48, 0xc1, 0xe0, 0x05, 0x89, 0xde, 0x49, 0x8d, 0x54, 0x05, 0x10, 0x48, 0x8b, 0x42,
+            0x08, 0x48, 0x8b, 0x7a, 0x10, 0x48, 0xc1, 0xc8, 0x11, 0x64, 0x48, 0x33, 0x04, 0x25,
+            0x30, 0x00, 0x00, 0x00, 0xff, 0xd0, 0xe9, 0x29, 0xff, 0xff, 0xff, 0x66, 0x0f, 0x1f,
+            0x84, 0x00, 0x00, 0x00, 0x00, 0x00, 0x48, 0xc1, 0xe0, 0x05, 0x49, 0x8b, 0x44, 0x05,
+            0x18, 0x48, 0xc1, 0xc8, 0x11, 0x64, 0x48, 0x33, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00,
+            0xff, 0xd0, 0xe9, 0x03, 0xff, 0xff, 0xff, 0x4c, 0x89, 0xef, 0xe8, 0xfb, 0xb8, 0x00,
+            0x00, 0xe9, 0xe7, 0xfe, 0xff, 0xff,
+        ],
+        "run_exit_handlers",
+    );
+    assert!(
+        rendered.signature.contains("arg2)"),
+        "{}",
+        rendered.signature
+    );
+    assert!(
+        !rendered.signature.contains("arg3"),
+        "{}",
+        rendered.signature
+    );
 }

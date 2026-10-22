@@ -141,6 +141,42 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: python3 scripts/spec_evidence.py --base "$BASE"
 
+  # ── A change adds or lengthens no run of more than two `//` lines (AGENTS.md, Comments) ──
+  #
+  # `long_comments` in the structure report counts the total, which a run lengthened by one line
+  # does not move; this grades the diff against the pull request's base (its parent, in a stack).
+  comment-runs:
+    name: Comments stay one or two lines
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: The gate's own tests
+        run: python3 scripts/test_comment_runs.py
+      - name: No run is added or lengthened
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: python3 scripts/comment_runs.py --base "$BASE"
+
+  # ── Every baseline source is in an equivalence shard (ROADMAP D43) ──
+  #
+  # A source with baseline records and no shard in either matrix is never graded (#292's
+  # `atomics.c`). It reads the tree alone, so it needs no history.
+  check-shards:
+    name: Baseline sources are in shards
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: The gate's own tests
+        run: python3 scripts/test_check_shards.py
+      - name: Every baseline source is in a shard, every shard source has records
+        run: python3 scripts/check_shards.py
+
   # ── The repository's own lints (tools/dylints/r2sleigh_lints) ──────
   #
   # A crate that has cleared a rule denies it at its root, so a new
@@ -249,9 +285,12 @@ jobs:
       - name: Harness contracts
         run: |
           python3 scripts/test_certify_render.py
+          python3 scripts/test_check_shards.py
+          python3 scripts/test_stack_tip.py
           python3 scripts/test_census.py
           python3 scripts/test_diff_r2.py
           python3 scripts/test_spec_evidence.py
+          python3 scripts/test_upstream_drift.py
           python3 -m unittest tests/test_no_plugin.py
           python3 -m unittest discover -s tests/decbench -p 'test_*.py'
       - name: A rendering may not read what nothing wrote
@@ -470,7 +509,8 @@ jobs:
           tests/equiv/bounded.sh 300 \
             test_equiv.AnswerStatusTests test_equiv.BatchTests test_equiv.BuildTests \
             test_equiv.ClassifyTests test_equiv.CompilerVerdictTests \
-            test_equiv.ContractTests test_equiv.DwarfTests test_equiv.RatchetTests
+            test_equiv.ContractTests test_equiv.CostTests test_equiv.DwarfTests \
+            test_equiv.RatchetTests
 
   # ── Equivalence ratchet ─────────────────────────────────────────────
   #

@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 
 use r2il::{R2ILOp, SpaceId, Varnode};
 
+use crate::plan::Plan;
+
 /// A validated view of operands from a libsla P-code instruction.
 pub trait PcodeSource {
     /// Get the output varnode, if any.
@@ -33,6 +35,8 @@ pub enum TranslateError {
     InvalidSpace(u64),
     /// A unique read or written across the bytes of more than one write.
     UniqueStraddles(Varnode),
+    /// A load from the const space, whose value is its address, into a different width.
+    ConstLoadWidth(Varnode, Varnode),
 }
 
 impl std::fmt::Display for TranslateError {
@@ -47,6 +51,11 @@ impl std::fmt::Display for TranslateError {
                 f,
                 "unique {:#x}:{} straddles the temporaries the instruction wrote",
                 node.offset, node.size
+            ),
+            TranslateError::ConstLoadWidth(dst, addr) => write!(
+                f,
+                "load of {} bytes from const space at an address of {} bytes",
+                dst.size, addr.size
             ),
         }
     }
@@ -104,6 +113,14 @@ pub fn translate_load<S: PcodeSource>(source: &S) -> Result<R2ILOp> {
     let space = source
         .space_from_index(space_idx)
         .ok_or(TranslateError::InvalidSpace(space_idx))?;
+    // The const space holds each address as its own value (Sleigh's `export *[const]:n local`), so
+    // reading it is a copy; a width the copy cannot state is refused.
+    if space == SpaceId::Const {
+        return match dst.size == addr.size {
+            true => Ok(R2ILOp::Copy { dst, src: addr }),
+            false => Err(TranslateError::ConstLoadWidth(dst, addr)),
+        };
+    }
     Ok(R2ILOp::Load { dst, space, addr })
 }
 
@@ -158,10 +175,9 @@ pub fn translate_ptradd<S: PcodeSource>(source: &S) -> Result<R2ILOp> {
 /// A zero written to a register range no integer is as wide as (AArch64's `zext_zb` writes
 /// `reg[8,56] = 0`) as the aligned power-of-two pieces it covers: the same bytes, the same zeros.
 pub fn split_odd_register_zeroes(ops: Vec<R2ILOp>) -> Vec<R2ILOp> {
-    let mut out = Vec::with_capacity(ops.len());
-    for op in ops {
-        let R2ILOp::Copy { dst, src } = &op else {
-            out.push(op);
+    let mut plan = Plan::new();
+    for (index, op) in ops.iter().enumerate() {
+        let R2ILOp::Copy { dst, src } = op else {
             continue;
         };
         if dst.space != SpaceId::Register
@@ -169,26 +185,27 @@ pub fn split_odd_register_zeroes(ops: Vec<R2ILOp>) -> Vec<R2ILOp> {
             || src.offset != 0
             || dst.size.is_power_of_two()
         {
-            out.push(op);
             continue;
         }
         let (mut at, end) = (dst.offset, dst.offset.saturating_add(u64::from(dst.size)));
+        let mut pieces = Vec::new();
         while at < end {
             let aligned = 1u64 << at.trailing_zeros().min(3);
             let piece = aligned.min(1u64 << (end - at).ilog2());
             let size = u32::try_from(piece).expect("at most eight bytes");
-            out.push(R2ILOp::Copy {
+            pieces.push(R2ILOp::Copy {
                 dst: Varnode::register(at, size),
                 src: Varnode::constant(0, size),
             });
             at += piece;
         }
+        plan.expand(index, pieces);
     }
-    out
+    plan.apply(ops)
 }
 
-/// Read each unique where it was written (gotcha 2), though GP-5581 reads a truncated one in place:
-/// a piece of a live write becomes its `Subpiece`; a straddle refuses; an unwritten read stays.
+/// Read each unique where it was written (gotcha 2), GP-5581's pieces in place: a piece read is its
+/// `Subpiece`, one written is inserted into its holder, a straddle refuses, an unwritten read stays.
 pub fn whole_unique_reads(
     ops: Vec<R2ILOp>,
     big_endian: bool,
@@ -196,14 +213,8 @@ pub fn whole_unique_reads(
 ) -> Result<Vec<R2ILOp>> {
     // Live writes by first byte; they never overlap, so the one before a read is its only holder.
     let mut live: BTreeMap<u64, u32> = BTreeMap::new();
-    let mut out = Vec::with_capacity(ops.len());
-    // Where each operation's expansion begins, and where the operation itself lands.
-    let (mut starts, mut at) = (
-        Vec::with_capacity(ops.len() + 1),
-        Vec::with_capacity(ops.len()),
-    );
-    for mut op in ops {
-        starts.push(out.len());
+    let mut plan = Plan::new();
+    for (index, op) in ops.iter().enumerate() {
         let mut pieces: Vec<(Varnode, Varnode, u32)> = Vec::new();
         for read in op
             .inputs()
@@ -216,18 +227,26 @@ pub fn whole_unique_reads(
                 pieces.push((read.clone(), holder, shift));
             }
         }
-        op = take_pieces(op, pieces, &mut out, next_temp);
+        let mut placed =
+            (!pieces.is_empty()).then(|| take_pieces(&mut plan, index, op, pieces, next_temp));
         if let Some(output) = op.output().filter(|v| v.space == SpaceId::Unique) {
-            note_write(&mut live, output)?;
+            match holder_of(&live, output, big_endian) {
+                Ok(Some((holder, shift))) => {
+                    let piece = Varnode::unique(*next_temp, output.size);
+                    *next_temp += u64::from(output.size).max(1);
+                    let mut op = placed.take().unwrap_or_else(|| op.clone());
+                    *op.output_mut().expect("a unique output") = piece.clone();
+                    placed = Some(op);
+                    plan.insert_after(index, insert_piece(piece, holder, shift, next_temp));
+                }
+                _ => note_write(&mut live, output)?,
+            }
         }
-        at.push(out.len());
-        out.push(op);
+        if let Some(op) = placed {
+            plan.replace(index, op);
+        }
     }
-    starts.push(out.len());
-    if out.len() + 1 != starts.len() {
-        relabel_local_branches(&mut out, &at, &starts);
-    }
-    Ok(out)
+    Ok(plan.apply(ops))
 }
 
 /// The live write holding `read` strictly inside it, and the piece's offset from its low end.
@@ -264,34 +283,86 @@ fn holder_of(
     Ok(Some((Varnode::unique(start, size), shift)))
 }
 
-/// A copy of one piece is the `SUBPIECE` GP-5581 folded; any other read takes its piece first.
+/// The operation reading pieces: a copy of one is the `SUBPIECE` GP-5581 folded, any other takes
+/// its pieces first.
 fn take_pieces(
-    op: R2ILOp,
+    plan: &mut Plan,
+    index: usize,
+    op: &R2ILOp,
     pieces: Vec<(Varnode, Varnode, u32)>,
-    out: &mut Vec<R2ILOp>,
     next_temp: &mut u64,
 ) -> R2ILOp {
-    if let (R2ILOp::Copy { dst, .. }, [(_, src, offset)]) = (&op, pieces.as_slice()) {
+    if let (R2ILOp::Copy { dst, .. }, [(_, src, offset)]) = (op, pieces.as_slice()) {
         return R2ILOp::Subpiece {
             dst: dst.clone(),
             src: src.clone(),
             offset: *offset,
         };
     }
-    let mut op = op;
+    let mut op = op.clone();
     for (read, src, offset) in pieces {
         let piece = Varnode::unique(*next_temp, read.size);
         *next_temp += u64::from(read.size).max(1);
-        out.push(R2ILOp::Subpiece {
-            dst: piece.clone(),
-            src,
-            offset,
-        });
+        plan.insert_before(
+            index,
+            [R2ILOp::Subpiece {
+                dst: piece.clone(),
+                src,
+                offset,
+            }],
+        );
         for input in op.inputs_mut().into_iter().filter(|input| **input == read) {
             *input = piece.clone();
         }
     }
     op
+}
+
+/// `holder` with its bytes from `shift` replaced by `piece`: a write GP-5581 made to a piece in
+/// place, rebuilt as the holder's bytes above it, the piece and the bytes below it.
+fn insert_piece(piece: Varnode, holder: Varnode, shift: u32, next_temp: &mut u64) -> Vec<R2ILOp> {
+    let mut temp = |size: u32| {
+        let node = Varnode::unique(*next_temp, size);
+        *next_temp += u64::from(size);
+        node
+    };
+    let mut ops = Vec::with_capacity(4);
+    let above = holder.size - shift - piece.size;
+    let mut value = piece;
+    if above > 0 {
+        let high = temp(above);
+        ops.push(R2ILOp::Subpiece {
+            dst: high.clone(),
+            src: holder.clone(),
+            offset: shift + value.size,
+        });
+        let joined = temp(above + value.size);
+        ops.push(R2ILOp::Piece {
+            dst: joined.clone(),
+            hi: high,
+            lo: value,
+        });
+        value = joined;
+    }
+    if shift > 0 {
+        let low = temp(shift);
+        ops.push(R2ILOp::Subpiece {
+            dst: low.clone(),
+            src: holder.clone(),
+            offset: 0,
+        });
+        ops.push(R2ILOp::Piece {
+            dst: holder,
+            hi: value,
+            lo: low,
+        });
+    } else {
+        ops.push(R2ILOp::Copy {
+            dst: holder,
+            src: value,
+        });
+    }
+    ops
 }
 
 /// Record a unique write; one overlapping a live write it does not replace exactly refuses.
@@ -312,106 +383,91 @@ fn note_write(live: &mut BTreeMap<u64, u32>, output: &Varnode) -> Result<()> {
     }
 }
 
-/// Keep each P-code-relative label on the operation it named after operations were inserted;
-/// a label naming operation `t` now names the start of `t`'s expansion, which computes its reads.
-fn relabel_local_branches(out: &mut [R2ILOp], at: &[usize], starts: &[usize]) {
-    for (old, &new) in at.iter().enumerate() {
-        let (R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. }) = &mut out[new] else {
-            continue;
-        };
-        if target.space != SpaceId::Const || !(1..=8).contains(&target.size) {
-            continue;
-        }
-        let shift = 64 - 8 * target.size;
-        let relative = ((target.offset << shift) as i64) >> shift;
-        let named = old.checked_add_signed(relative as isize);
-        let Some(&label) = named.and_then(|named| starts.get(named)) else {
-            continue;
-        };
-        target.offset = ((label as i64 - new as i64) as u64) & (u64::MAX >> shift);
+/// A copy between ram and anything else is one `Load` or `Store`, which needs no temporary.
+fn copy_through_memory(op: &R2ILOp, address_size: u32) -> Option<R2ILOp> {
+    let R2ILOp::Copy { dst, src } = op else {
+        return None;
+    };
+    let at = |node: &Varnode| Varnode::constant(node.offset, address_size);
+    match (src.space, dst.space) {
+        (SpaceId::Ram, space) if space != SpaceId::Ram => Some(R2ILOp::Load {
+            dst: dst.clone(),
+            space: SpaceId::Ram,
+            addr: at(src),
+        }),
+        (space, SpaceId::Ram) if space != SpaceId::Ram => Some(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: at(dst),
+            val: src.clone(),
+        }),
+        _ => None,
     }
 }
 
-/// Each ram operand at a constant address as an explicit Load or Store, a direct transfer's target excepted;
-/// a local label keeps naming its operation (`relabel_local_branches`). Why: doc/adr-verified-layers.md D34.
+/// Each ram operand at a constant address as an explicit Load or Store, a direct transfer's target
+/// excepted. Why: doc/adr-verified-layers.md D34.
 pub fn canonicalize_memory_operands(
     ops: Vec<R2ILOp>,
     address_size: u32,
     next_temp: &mut u64,
 ) -> Vec<R2ILOp> {
-    let mut out = Vec::with_capacity(ops.len());
+    let mut plan = Plan::new();
     let mut temp = |size: u32| {
         let node = Varnode::unique(*next_temp, size);
         *next_temp += u64::from(size).max(1);
         node
     };
-    let (mut starts, mut at) = (
-        Vec::with_capacity(ops.len() + 1),
-        Vec::with_capacity(ops.len()),
-    );
-    for mut op in ops {
-        starts.push(out.len());
-        match &op {
-            R2ILOp::Copy { dst, src } if src.space == SpaceId::Ram && dst.space != SpaceId::Ram => {
-                at.push(out.len());
-                out.push(R2ILOp::Load {
-                    dst: dst.clone(),
-                    space: SpaceId::Ram,
-                    addr: Varnode::constant(src.offset, address_size),
-                });
-                continue;
-            }
-            R2ILOp::Copy { dst, src } if dst.space == SpaceId::Ram && src.space != SpaceId::Ram => {
-                at.push(out.len());
-                out.push(R2ILOp::Store {
-                    space: SpaceId::Ram,
-                    addr: Varnode::constant(dst.offset, address_size),
-                    val: src.clone(),
-                });
-                continue;
-            }
-            _ => {}
+    let at = |node: u64| Varnode::constant(node, address_size);
+    let in_ram = |node: &Varnode| node.space == SpaceId::Ram;
+    for (index, op) in ops.iter().enumerate() {
+        if let Some(access) = copy_through_memory(op, address_size) {
+            plan.replace(index, access);
+            continue;
         }
+        if !op.output().is_some_and(in_ram) && !op.inputs().into_iter().any(in_ram) {
+            continue;
+        }
+        let mut op = op.clone();
+        let mut touched = false;
         let code_target = op
             .transfer()
             .filter(|transfer| transfer.direct)
             .map(|transfer| transfer.target.clone());
         for input in op.inputs_mut() {
-            if input.space != SpaceId::Ram || code_target.as_ref() == Some(&*input) {
+            if !in_ram(input) || code_target.as_ref() == Some(&*input) {
                 continue;
             }
+            touched = true;
             let loaded = temp(input.size);
-            out.push(R2ILOp::Load {
-                dst: loaded.clone(),
-                space: SpaceId::Ram,
-                addr: Varnode::constant(input.offset, address_size),
-            });
+            plan.insert_before(
+                index,
+                [R2ILOp::Load {
+                    dst: loaded.clone(),
+                    space: SpaceId::Ram,
+                    addr: at(input.offset),
+                }],
+            );
             *input = loaded;
         }
-        let written = op
-            .output_mut()
-            .filter(|output| output.space == SpaceId::Ram)
-            .map(|output| {
-                let address = output.offset;
-                let value = temp(output.size);
-                *output = value.clone();
-                (address, value)
-            });
-        at.push(out.len());
-        out.push(op);
-        if let Some((address, val)) = written {
-            out.push(R2ILOp::Store {
-                space: SpaceId::Ram,
-                addr: Varnode::constant(address, address_size),
-                val,
-            });
+        if let Some(output) = op.output_mut().filter(|output| in_ram(output)) {
+            touched = true;
+            let address = output.offset;
+            let val = temp(output.size);
+            *output = val.clone();
+            plan.insert_after(
+                index,
+                [R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr: at(address),
+                    val,
+                }],
+            );
+        }
+        if touched {
+            plan.replace(index, op);
         }
     }
-    starts.push(out.len());
-    if out.len() + 1 != starts.len() {
-        relabel_local_branches(&mut out, &at, &starts);
-    }
-    out
+    plan.apply(ops)
 }
 
 /// A plain load of an address this instruction already loaded or stored, nothing written to the address,
@@ -428,31 +484,30 @@ pub fn forward_repeated_loads(ops: Vec<R2ILOp>) -> Vec<R2ILOp> {
     }
     // Each (space, address, size) whose value a varnode still holds.
     let mut held: Vec<(SpaceId, Varnode, Varnode)> = Vec::new();
-    let mut out = Vec::with_capacity(ops.len());
-    for op in ops {
+    let mut plan = Plan::new();
+    for (index, op) in ops.iter().enumerate() {
         match op {
             R2ILOp::Load { dst, space, addr } => {
-                out.extend(forward_load(&mut held, dst, space, addr))
+                match forward_load(&mut held, dst.clone(), *space, addr.clone()) {
+                    None => plan.remove(index),
+                    Some(R2ILOp::Load { .. }) => {}
+                    Some(copy) => plan.replace(index, copy),
+                }
             }
             R2ILOp::Store { space, addr, val } => {
                 // Another address may be the same bytes, so only this store's value stays known.
                 held.clear();
-                held.push((space, addr.clone(), val.clone()));
-                out.push(R2ILOp::Store { space, addr, val });
+                held.push((*space, addr.clone(), val.clone()));
             }
             op if op.is_speculatable_value() => {
                 if let Some(written) = op.output() {
                     forget(&mut held, written);
                 }
-                out.push(op);
             }
-            op => {
-                held.clear();
-                out.push(op);
-            }
+            _ => held.clear(),
         }
     }
-    out
+    plan.apply(ops)
 }
 
 /// One load where `held` may already know its value: the load, a copy of the value, or nothing.
@@ -721,6 +776,69 @@ mod tests {
         ));
         assert!(matches!(
             pieces(vec![write(0x80), write(0x82)], false),
+            Err(TranslateError::UniqueStraddles(_))
+        ));
+    }
+
+    /// GP-7027's MOVBE: `dest[8,8] = ..` into a live `dest:4` rebuilds `dest` around the byte.
+    #[test]
+    fn a_piece_written_into_a_write_is_inserted_into_it() {
+        let dest = Varnode::unique(0x80, 4);
+        let writes = vec![
+            R2ILOp::Copy {
+                dst: dest.clone(),
+                src: Varnode::constant(0x1122_3344, 4),
+            },
+            R2ILOp::Copy {
+                dst: Varnode::unique(0x81, 1),
+                src: Varnode::register(0, 1),
+            },
+            R2ILOp::Copy {
+                dst: Varnode::register(0x20, 4),
+                src: dest.clone(),
+            },
+        ];
+        // Byte 0x81 is one above the low end little-endian, two above it big-endian.
+        for (big_endian, shift) in [(false, 1), (true, 2)] {
+            let ops = pieces(writes.clone(), big_endian).expect("a piece inside one write");
+            let [
+                _,
+                R2ILOp::Copy { dst: piece, .. },
+                R2ILOp::Subpiece {
+                    src: above,
+                    offset: high,
+                    ..
+                },
+                R2ILOp::Piece { lo, .. },
+                R2ILOp::Subpiece {
+                    src: below,
+                    offset: 0,
+                    dst: low,
+                },
+                R2ILOp::Piece {
+                    dst, lo: low_again, ..
+                },
+                R2ILOp::Copy { src: read, .. },
+            ] = ops.as_slice()
+            else {
+                panic!("{ops:?}");
+            };
+            assert_eq!((*high, low.size), (shift + 1, shift));
+            assert_eq!((lo, low_again), (piece, low));
+            assert_eq!((above, below, dst, read), (&dest, &dest, &dest, &dest));
+        }
+        let overlapping = vec![
+            R2ILOp::Copy {
+                dst: dest,
+                src: Varnode::constant(0, 4),
+            },
+            R2ILOp::Copy {
+                dst: Varnode::unique(0x83, 2),
+                src: Varnode::constant(0, 2),
+            },
+        ];
+        assert!(matches!(
+            pieces(overlapping, false),
             Err(TranslateError::UniqueStraddles(_))
         ));
     }
