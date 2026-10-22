@@ -73,8 +73,10 @@ with `r2types`.
   `worse` decide shipping: a change flipping 400 functions each way moves the total by zero.
   Layout work also records layout F1 and nesting F1, because `type_match` cannot see
   structures.
-- A pinned project list splits mining from reporting. The report prints both columns, and
-  a PR citing a held-out regression is rejected (AGENTS.md: tests must not train the
+- A pinned project list splits mining from reporting. The mining column gates a PR. The
+  held-out column is printed by the nightly and at an item's exit, never per PR, and a
+  held-out regression opens an investigation instead of rejecting a change. The list is
+  re-pinned once it has been read to decide a change (AGENTS.md: tests must not train the
   engine).
 - Gate: `report_decbench.py` prints the split and the improved and worse counts; a PR with
   `worse > 0` states each function's cause.
