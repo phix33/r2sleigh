@@ -173,15 +173,15 @@ struct Named {
 }
 
 impl Named {
-    /// Forget a computed number the program does not map, whatever it moves with, and one left in a
-    /// register no operand of the instruction names: the machine's own bookkeeping, like x87's
-    /// instruction pointer, is no result.
+    /// Forget a computed number that is null or unmapped, whatever it moves with, and one left in a register
+    /// no operand names: x87's instruction pointer is the machine's bookkeeping, no result.
     fn keep_named(&mut self, memory: &Memory<'_>, spelled: Option<&[CanonicalStorageId]>) {
         let named = |output: &Varnode| {
             spelled.is_none_or(|spelled| spelled.iter().any(|register| holds(register, output)))
         };
-        let kept = (self.computed.as_ref())
-            .is_none_or(|computed| memory.maps(computed.value) && named(&computed.output));
+        let kept = (self.computed.as_ref()).is_none_or(|computed| {
+            computed.value != 0 && memory.maps(computed.value) && named(&computed.output)
+        });
         if !kept {
             self.computed = None;
         }

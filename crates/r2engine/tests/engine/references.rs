@@ -349,6 +349,20 @@ fn a_register_an_unstated_instruction_does_not_write_still_folds_past_it() {
     );
 }
 
+/// `lea rdx, [rip - 0x1007]; ret`: a weak reference the linker resolved to null, folded through the program counter.
+const NULL_BY_PC: &[u8] = &[0x48, 0x8d, 0x15, 0xf9, 0xef, 0xff, 0xff, 0xc3];
+
+#[test]
+fn a_pc_relative_number_that_folds_to_zero_is_no_address_whatever_is_mapped_there() {
+    // The header is mapped at 0, so the image reads there; the number moves with the program, yet NULL is no address.
+    let literal = Literal::of_code(NULL_BY_PC, &[("weak", BASE, 8)]).with_header(0x10);
+    let index = OpenProgram::of(literal)
+        .references()
+        .expect("the index builds")
+        .value;
+    assert_eq!(listed(index.facts()), []);
+}
+
 /// `left`: `test edi, edi; je tail; mov eax, 1; ret`; `tail`: `call leaf; ret`; `right`: `jmp tail`; `leaf`: `mov eax, 2; ret`.
 const SHARED: &[u8] = &[
     0x85, 0xff, // 0x1000 test edi, edi
