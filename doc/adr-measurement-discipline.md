@@ -100,7 +100,9 @@ with `r2types`.
 
 **D50. Batch decompilation is parallel and byte-identical.** Owner: `r2engine`; `r2s`
 writes the files.
-- A pool schedules longest functions first, runs callees before callers, enforces a budget
+- A pool schedules the condensation of the call graph callee
+  first, longest first among those ready, with each recursive component one task solved by
+  `r2ssa::fixpoint` in ascending address order, enforces a budget
   and a memory stop per function (a refusal that names the limit, never partial C), and
   merges results by position.
 - Gate: output is byte-identical for one worker and eight on the census set, with no

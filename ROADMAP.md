@@ -107,7 +107,7 @@ Decisions
 | D47 | A type or layout change records `improved` and `worse` per project beside the perfect count, layout and nesting F1 for structures, and a pinned project list splits mining from reporting: the mining column gates a PR, the held-out column is nightly and exit only and a regression there opens an investigation | GT, T |
 | D48 | The census audits its own hunks: a per-feature script classifies a moved hunk and clears it alone only where it checks equivalence, every semantic class is read by a human, and a bless needs zero unclassified hunks | GT, first |
 | D49 | Every refusal and residual cause has a catalog row (symptom, closing fact, owner) that feeds `?` help; a test fails on a cause with no row | RF |
-| D50 | Batch decompilation is a deterministic pool (longest first, callees first, per-function budget and memory stop, positional merge): one worker and eight give byte-identical output | LX, after the cost path |
+| D50 | Batch decompilation is a deterministic pool (longest first, the call graph's condensation callee first with a recursive component one task in address order, per-function budget and memory stop, positional merge): one worker and eight give byte-identical output | LX, after the cost path |
 
 The Sleigh crates (`libsla`, `libsla-sys`, `sleigh-config`) are vendored (`vendor/`).
 
