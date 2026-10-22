@@ -138,9 +138,8 @@ fn a_loop_that_tests_after_its_body_is_a_do_while_with_its_merge_copies_before_t
     );
 }
 
-/// `test edi, edi; je skip; xor eax, eax; body: mov edx, eax; inc eax; cmp eax, edi; jne body;
-/// mov eax, edx; ret; skip: xor eax, eax; ret`: the code after the loop wants the counter as the
-/// last iteration began it.
+/// `test edi, edi; je skip; xor eax, eax; body: mov edx, eax; inc eax; cmp eax, edi; jne body; mov eax, edx;
+/// ret; skip: xor eax, eax; ret`: the code after the loop wants the counter as the last iteration began it.
 const LAST_BEGUN: &[u8] = &[
     0x85, 0xff, 0x74, 0x0d, 0x31, 0xc0, 0x89, 0xc2, 0xff, 0xc0, 0x39, 0xf8, 0x75, 0xf8, 0x89, 0xd0,
     0xc3, 0x31, 0xc0, 0xc3,

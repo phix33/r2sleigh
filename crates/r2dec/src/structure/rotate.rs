@@ -101,10 +101,7 @@ fn build(body: CStmt, shape: Shape) -> CStmt {
             body: Box::new(stay),
         },
     };
-    CStmt::Observed {
-        ids,
-        stmt: Box::new(looped),
-    }
+    CStmt::observe_all(ids.iter(), looped)
 }
 
 /// The statements of a body that do something: no empty statement, and blocks looked through.

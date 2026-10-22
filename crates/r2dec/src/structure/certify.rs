@@ -1144,47 +1144,157 @@ fn switch_edges_agree(rendered: &[(Target, EdgeLabel)], expected: &[(Target, Edg
     })
 }
 
-/// The edges a chain's head has: each exit of the blocks the test names, labelled by the side
-/// of the test that reaches it.
-fn chain_exits(
+/// The CFG as a written chain's blocks are read from it.
+struct CfgMachine<'a> {
+    cfg: &'a CFG,
+    contract: &'a dyn Fn(u64) -> Target,
+    inert: &'a dyn Fn(u64) -> bool,
+}
+
+impl super::condition::Machine for CfgMachine<'_> {
+    type Exit = Target;
+
+    fn successors(&self, block: u64) -> Option<(u64, u64)> {
+        match self.cfg.get_block(block).map(|block| &block.terminator) {
+            Some(BlockTerminator::ConditionalBranch {
+                true_target,
+                false_target,
+            }) if true_target != false_target => Some((*true_target, *false_target)),
+            _ => None,
+        }
+    }
+
+    fn arrives(&self, target: u64) -> Target {
+        (self.contract)(target)
+    }
+
+    fn inert(&self, block: u64) -> bool {
+        (self.inert)(block)
+    }
+
+    fn entered_from_outside(&self, block: u64, chain: &BTreeSet<u64>) -> bool {
+        (self.cfg.predecessors(block).into_iter()).any(|pred| !chain.contains(&pred))
+    }
+}
+
+/// What a chain test makes of the occurrences it heads: their edges, the occurrences that were
+/// refused, and the blocks the tests are written through.
+#[derive(Default)]
+struct ChainReading {
+    edges: BTreeMap<usize, Vec<(Target, EdgeLabel)>>,
+    faulted: BTreeSet<usize>,
+    members: BTreeSet<u64>,
+}
+
+/// A test written as a chain stands for the blocks it tests: its head's edges are the chain's
+/// exits, and the blocks past the head are written nowhere else.
+fn read_chains(
+    occurrences: &[Occurrence],
+    chains: &BTreeMap<usize, super::condition::Written>,
+    count: &BTreeMap<u64, usize>,
+    machine: &CfgMachine<'_>,
+    violations: &mut Vec<Violation>,
+) -> ChainReading {
+    let mut reading = ChainReading::default();
+    for (index, written) in chains {
+        let head = occurrences[*index].block;
+        match super::condition::exits(head, written, machine) {
+            Ok(exits) => {
+                let mut edges: Vec<_> = (exits.into_iter())
+                    .map(|(target, true_side)| match true_side {
+                        true => (target, EdgeLabel::True),
+                        false => (target, EdgeLabel::False),
+                    })
+                    .collect();
+                edges.sort();
+                reading.edges.insert(*index, edges);
+            }
+            Err(fault) => {
+                reading.faulted.insert(*index);
+                violations.push(Violation::Chain { block: head, fault });
+            }
+        }
+        for member in written.blocks.iter().skip(1) {
+            reading.members.insert(*member);
+            if count.contains_key(member) {
+                violations.push(Violation::Chain {
+                    block: head,
+                    fault: super::condition::ChainFault::Rendered { block: *member },
+                });
+            }
+        }
+    }
+    reading
+}
+
+/// How one occurrence's edges stand against the ones its block (or its chain) expects.
+enum Judgement {
+    Agrees,
+    /// Every label swapped, which a plain test reads as the text negating it.
+    Inverted,
+    Violates(Violation),
+}
+
+/// Compare an occurrence with `expected`. A chain's test says which exit it takes, so for it
+/// (`exact`) no inversion or conversion is read into the arms.
+fn judge(
     cfg: &CFG,
-    head: u64,
-    written: &super::condition::Written,
-    contract: &dyn Fn(u64) -> Target,
-    inert: &dyn Fn(u64) -> bool,
-) -> Result<Vec<(Target, EdgeLabel)>, super::condition::ChainFault> {
-    let successors = |addr: u64| match cfg.get_block(addr).map(|block| &block.terminator) {
-        Some(BlockTerminator::ConditionalBranch {
-            true_target,
-            false_target,
-        }) if true_target != false_target => Some((*true_target, *false_target)),
-        _ => None,
-    };
-    let entered_from_outside = |addr: u64, chain: &BTreeSet<u64>| {
-        cfg.predecessors(addr)
-            .into_iter()
-            .any(|pred| !chain.contains(&pred))
-    };
-    let exits = super::condition::exits(
-        head,
-        written,
-        &successors,
-        contract,
-        inert,
-        &entered_from_outside,
-    )?;
-    let mut edges: Vec<_> = exits
-        .into_iter()
-        .map(|(target, true_side)| {
-            let label = match true_side {
-                true => EdgeLabel::True,
-                false => EdgeLabel::False,
-            };
-            (target, label)
-        })
-        .collect();
-    edges.sort();
-    Ok(edges)
+    occurrence: &Occurrence,
+    expected: Vec<(Target, EdgeLabel)>,
+    exact: bool,
+) -> Judgement {
+    let block = occurrence.block;
+    let mut rendered = occurrence.edges.clone();
+    rendered.sort();
+    if rendered.is_empty() {
+        let continues = (expected.iter()).any(|(target, _)| matches!(target, Target::Block(_)));
+        return match (continues, occurrence.returned) {
+            (false, _) => Judgement::Agrees,
+            (true, true) => Judgement::Violates(Violation::ReturnWhereMachineContinues { block }),
+            (true, false) => Judgement::Violates(Violation::FallsOffEnd { block }),
+        };
+    }
+    if rendered == expected {
+        return Judgement::Agrees;
+    }
+    if !exact {
+        let mut swapped: Vec<_> = (rendered.iter())
+            .map(|(target, label)| (*target, label.inverted()))
+            .collect();
+        swapped.sort();
+        if swapped == expected {
+            return Judgement::Inverted;
+        }
+        if switch_edges_agree(&rendered, &expected)
+            || converted_conditional_agrees(&rendered, &expected)
+        {
+            return Judgement::Agrees;
+        }
+    }
+    let terminator = cfg.get_block(block).map(|block| &block.terminator);
+    Judgement::Violates(match terminator {
+        Some(
+            BlockTerminator::None
+            | BlockTerminator::Call {
+                fallthrough: None, ..
+            }
+            | BlockTerminator::IndirectCall { fallthrough: None },
+        ) if !exact => Violation::TerminalFallthrough {
+            block,
+            to: rendered[0].0,
+        },
+        Some(BlockTerminator::IndirectBranch) if expected.is_empty() && !exact => {
+            Violation::UnresolvedIndirect {
+                block,
+                to: rendered[0].0,
+            }
+        }
+        _ => Violation::EdgeMismatch {
+            block,
+            rendered,
+            expected,
+        },
+    })
 }
 
 /// Read the body back as a control graph and compare it with the CFG.
@@ -1265,112 +1375,31 @@ pub(crate) fn certify<R: Into<StatementRole>>(
         violations.push(Violation::EntryNotFirst { first: first_block });
     }
 
-    // A test written as a chain stands for the blocks it tests: its head's edges are the
-    // chain's exits, and the blocks past the head are written nowhere else.
-    let mut chain_members = BTreeSet::new();
-    let mut chain_edges = BTreeMap::<usize, Vec<(Target, EdgeLabel)>>::new();
-    let mut chain_faulted = BTreeSet::new();
-    for (index, written) in &chains {
-        let head = occurrences[*index].block;
-        match chain_exits(cfg, head, written, &contract, inert) {
-            Ok(edges) => {
-                chain_edges.insert(*index, edges);
-            }
-            Err(fault) => {
-                chain_faulted.insert(*index);
-                violations.push(Violation::Chain { block: head, fault });
-            }
-        }
-        for member in written.blocks.iter().skip(1) {
-            chain_members.insert(*member);
-            if count.contains_key(member) {
-                violations.push(Violation::Chain {
-                    block: head,
-                    fault: super::condition::ChainFault::Rendered { block: *member },
-                });
-            }
-        }
-    }
+    let machine = CfgMachine {
+        cfg,
+        contract: &contract,
+        inert,
+    };
+    let ChainReading {
+        edges: chain_edges,
+        faulted: chain_faulted,
+        members: chain_members,
+    } = read_chains(&occurrences, &chains, &count, &machine, &mut violations);
 
     let mut inversions = 0;
     for (index, occurrence) in occurrences.iter().enumerate() {
-        let block = occurrence.block;
         if chain_faulted.contains(&index) {
             continue;
         }
-        let expected = match chain_edges.get(&index) {
-            Some(edges) => edges.clone(),
-            None => expected_edges(cfg, block, &contract),
+        let (expected, exact) = match chain_edges.get(&index) {
+            Some(edges) => (edges.clone(), true),
+            None => (expected_edges(cfg, occurrence.block, &contract), false),
         };
-        let inside: Vec<_> = expected
-            .iter()
-            .filter(|(target, _)| matches!(target, Target::Block(_)))
-            .cloned()
-            .collect();
-        let mut rendered = occurrence.edges.clone();
-        rendered.sort();
-        if rendered.is_empty() {
-            if inside.is_empty() {
-                continue;
-            }
-            violations.push(if occurrence.returned {
-                Violation::ReturnWhereMachineContinues { block }
-            } else {
-                Violation::FallsOffEnd { block }
-            });
-            continue;
+        match judge(cfg, occurrence, expected, exact) {
+            Judgement::Agrees => {}
+            Judgement::Inverted => inversions += 1,
+            Judgement::Violates(violation) => violations.push(violation),
         }
-        if rendered == expected {
-            continue;
-        }
-        // The chain's test says which exit it takes, so no inversion is read into its arms.
-        if chain_edges.contains_key(&index) {
-            violations.push(Violation::EdgeMismatch {
-                block,
-                rendered,
-                expected,
-            });
-            continue;
-        }
-        let mut swapped: Vec<_> = rendered
-            .iter()
-            .map(|(target, label)| (*target, label.inverted()))
-            .collect();
-        swapped.sort();
-        if swapped == expected {
-            inversions += 1;
-            continue;
-        }
-        if switch_edges_agree(&rendered, &expected) {
-            continue;
-        }
-        if converted_conditional_agrees(&rendered, &expected) {
-            continue;
-        }
-        let terminator = cfg.get_block(block).map(|block| &block.terminator);
-        violations.push(match terminator {
-            Some(
-                BlockTerminator::None
-                | BlockTerminator::Call {
-                    fallthrough: None, ..
-                }
-                | BlockTerminator::IndirectCall { fallthrough: None },
-            ) => Violation::TerminalFallthrough {
-                block,
-                to: rendered[0].0,
-            },
-            Some(BlockTerminator::IndirectBranch) if expected.is_empty() => {
-                Violation::UnresolvedIndirect {
-                    block,
-                    to: rendered[0].0,
-                }
-            }
-            _ => Violation::EdgeMismatch {
-                block,
-                rendered,
-                expected,
-            },
-        });
     }
 
     let mut contracted = contracted.into_inner();
@@ -1450,18 +1479,6 @@ mod tests {
         labels: &[(&str, u64)],
         selects: &[RenderObservationId],
     ) -> ControlCertificate {
-        run_inert(body, cfg, entry, labels, selects, &|_| true)
-    }
-
-    /// The certificate where `inert` says which blocks owe the program nothing but their branch.
-    fn run_inert(
-        body: CStmt,
-        cfg: &CFG,
-        entry: u64,
-        labels: &[(&str, u64)],
-        selects: &[RenderObservationId],
-        inert: &dyn Fn(u64) -> bool,
-    ) -> ControlCertificate {
         let block_of = |id: RenderObservationId| Some(u64::from(id.index()));
         let label_block = |name: &str| {
             labels
@@ -1480,6 +1497,27 @@ mod tests {
                 true => StatementRole::Selects,
                 false => StatementRole::Plain,
             },
+            &|_| true,
+        )
+    }
+
+    /// The certificate where `inert` says which blocks owe the program nothing but their branch.
+    fn run_inert(
+        body: CStmt,
+        cfg: &CFG,
+        entry: u64,
+        inert: &dyn Fn(u64) -> bool,
+    ) -> ControlCertificate {
+        let block_of = |id: RenderObservationId| Some(u64::from(id.index()));
+        let label_block = |name: &str| (name == "L").then_some(0x40);
+        certify(
+            &body,
+            cfg,
+            &DomTree::compute(cfg),
+            entry,
+            &block_of,
+            &label_block,
+            &|_| StatementRole::Plain,
             inert,
         )
     }
@@ -2061,9 +2099,7 @@ mod tests {
                     _ => None,
                 })
         };
-        let owes = run_inert(body(), &chain_cfg(), 0x10, &[("L", 0x40)], &[], &|block| {
-            block != 0x20
-        });
+        let owes = run_inert(body(), &chain_cfg(), 0x10, &|block| block != 0x20);
         assert_eq!(fault(&owes), Some(ChainFault::NotInert { block: 0x20 }));
         // 0x50 also reaches 0x20.
         let entered = cfg(

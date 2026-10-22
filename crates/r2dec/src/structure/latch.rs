@@ -139,10 +139,10 @@ fn moved(body: CStmt, stay_is_true: bool) -> CStmt {
         true => (CStmt::Empty, leave),
         false => (leave, CStmt::Empty),
     };
-    stmts.push(CStmt::Observed {
-        ids,
-        stmt: Box::new(CStmt::if_stmt(cond, on_true, Some(on_false))),
-    });
+    stmts.push(CStmt::observe_all(
+        ids.iter(),
+        CStmt::if_stmt(cond, on_true, Some(on_false)),
+    ));
     CStmt::Block(stmts)
 }
 
@@ -260,7 +260,7 @@ mod tests {
         let test = CExpr::binary(BinaryOp::Ne, a.clone(), n);
         let root = forever(vec![
             work(0x20),
-            latch(test, vec![assign(&x, a.clone()), CStmt::Continue]),
+            latch(test, vec![assign(&x, a), CStmt::Continue]),
         ]);
         let (stmts, count) = body_after(root);
         assert_eq!(count, 1);

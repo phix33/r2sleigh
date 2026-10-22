@@ -91,42 +91,7 @@ pub fn render(
         .as_ref()
         .map(values::Values::never_returning)
         .unwrap_or_default();
-    let unselected = std::collections::BTreeSet::new();
-    // D1.1: SD's stages. Each is kept only while the control certificate still holds (ADR §5).
-    let certified = |stmt: &CStmt, blocks: &[u64]| {
-        let role = |stmt: &CStmt| statement_role(stmt, &never_return, &unselected);
-        let certificate = control_certificate(input, stmt, blocks, &labels, &role);
-        match certificate.ok() {
-            true => Ok(()),
-            false => Err(format!(
-                "{certificate} {:?}",
-                certificate.violations.first()
-            )),
-        }
-    };
-    let body = stage(
-        "condition chains",
-        CStmt::Block(body),
-        &mut marks,
-        &certified,
-        |body, marks| {
-            let inert = |addr: u64| owes_only_its_branch(input, addr);
-            crate::structure::condition::collapse(body, marks, &inert).collapsed != 0
-        },
-    );
-    // The readability rewrites below copy a block's text as a new occurrence of that block.
-    let mut fresh = |stmt: &CStmt| {
-        control::remint(stmt, &mut |id| {
-            crate::structure::condition::Marks::copy_of(&mut marks, id)
-        })
-    };
-    let body = crate::structure::shape::shape(&mut fresh, body);
-    let body = stage("latch copies", body, &mut marks, &certified, |body, _| {
-        crate::structure::latch::hoist(body) != 0
-    });
-    let mut body = stage("loop rotation", body, &mut marks, &certified, |body, _| {
-        crate::structure::rotate::rotate(body) != 0
-    });
+    let mut body = structured(input, body, &labels, &never_return, &mut marks);
     let BlockMarks { blocks, addresses } = marks;
     let selections = select(&c, &mut body, &|id| {
         blocks.get(id.index() as usize).copied()
@@ -207,6 +172,53 @@ fn ready_with_carriers(c: CFunction, tags: &tags::Tags) -> crate::codegen::Emiss
     );
     ready.set_bitvector_helpers(helpers);
     ready
+}
+
+/// D1.1: SD's stages over the placed body, each kept only while the control certificate still holds
+/// (ADR §5): condition chains, `shape`, the latch's copies, and loop rotation.
+fn structured(
+    input: &RenderInput<'_>,
+    body: Vec<CStmt>,
+    labels: &BTreeMap<u64, String>,
+    never_return: &std::collections::BTreeSet<String>,
+    marks: &mut BlockMarks,
+) -> CStmt {
+    let unselected = std::collections::BTreeSet::new();
+    let certified = |stmt: &CStmt, blocks: &[u64]| {
+        let role = |stmt: &CStmt| statement_role(stmt, never_return, &unselected);
+        let certificate = control_certificate(input, stmt, blocks, labels, &role);
+        match certificate.ok() {
+            true => Ok(()),
+            false => Err(format!(
+                "{certificate} {:?}",
+                certificate.violations.first()
+            )),
+        }
+    };
+    let chains = |body: &mut CStmt, marks: &mut BlockMarks| {
+        let inert = |addr: u64| owes_only_its_branch(input, addr);
+        crate::structure::condition::collapse(body, marks, &inert).collapsed != 0
+    };
+    let body = stage(
+        "condition chains",
+        CStmt::Block(body),
+        marks,
+        &certified,
+        chains,
+    );
+    // The readability rewrites below copy a block's text as a new occurrence of that block.
+    let mut fresh = |stmt: &CStmt| {
+        control::remint(stmt, &mut |id| {
+            crate::structure::condition::Marks::copy_of(marks, id)
+        })
+    };
+    let body = crate::structure::shape::shape(&mut fresh, body);
+    let body = stage("latch copies", body, marks, &certified, |body, _| {
+        crate::structure::latch::hoist(body) != 0
+    });
+    stage("loop rotation", body, marks, &certified, |body, _| {
+        crate::structure::rotate::rotate(body) != 0
+    })
 }
 
 /// SD's §3 certificate over a body.

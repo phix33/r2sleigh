@@ -505,65 +505,66 @@ fn read_into(
     }
 }
 
-/// The exits a written chain has in the CFG, each labelled by the side of the test that reaches it;
-/// `successors` are a block's `(true, false)` targets and `exit_of` names where a target arrives.
-pub(crate) fn exits<T: Copy + PartialEq>(
+/// The machine's side of a written chain, as the certificate reads it from the CFG.
+pub(crate) trait Machine {
+    /// Where an edge out of the chain arrives; two edges to one place are one exit.
+    type Exit: Copy + PartialEq;
+    /// A block's `(true, false)` targets, when it ends in a two-way branch.
+    fn successors(&self, block: u64) -> Option<(u64, u64)>;
+    fn arrives(&self, target: u64) -> Self::Exit;
+    /// r2ssa's statement that a block owes the program nothing but its branch.
+    fn inert(&self, block: u64) -> bool;
+    fn entered_from_outside(&self, block: u64, chain: &BTreeSet<u64>) -> bool;
+}
+
+/// The exits a written chain has in the CFG, each labelled by the side of the test that reaches it.
+pub(crate) fn exits<M: Machine>(
     head: u64,
     written: &Written,
-    successors: &dyn Fn(u64) -> Option<(u64, u64)>,
-    exit_of: &dyn Fn(u64) -> T,
-    inert: &dyn Fn(u64) -> bool,
-    entered_from_outside: &dyn Fn(u64, &BTreeSet<u64>) -> bool,
-) -> Result<[(T, bool); 2], ChainFault> {
+    machine: &M,
+) -> Result<[(M::Exit, bool); 2], ChainFault> {
     let blocks = &written.blocks;
     let members: BTreeSet<u64> = blocks.iter().copied().collect();
     if members.len() != blocks.len() || blocks.first() != Some(&head) {
         return Err(ChainFault::Shape);
     }
-    let mut targets: Vec<T> = Vec::new();
-    let mut exit = |target: u64| {
-        let arrived = exit_of(target);
-        let at = targets.iter().position(|held| *held == arrived);
-        Edge::Exit(at.unwrap_or_else(|| {
-            targets.push(arrived);
-            targets.len() - 1
-        }))
-    };
+    let mut targets: Vec<M::Exit> = Vec::new();
     let mut nodes = Vec::new();
     for (index, block) in blocks.iter().enumerate() {
         let (on_true, on_false) =
-            successors(*block).ok_or(ChainFault::NotConditional { block: *block })?;
-        if index > 0 {
-            if !inert(*block) {
-                return Err(ChainFault::NotInert { block: *block });
-            }
-            if entered_from_outside(*block, &members) {
-                return Err(ChainFault::Outside { block: *block });
-            }
+            (machine.successors(*block)).ok_or(ChainFault::NotConditional { block: *block })?;
+        if index > 0 && !machine.inert(*block) {
+            return Err(ChainFault::NotInert { block: *block });
+        }
+        if index > 0 && machine.entered_from_outside(*block, &members) {
+            return Err(ChainFault::Outside { block: *block });
         }
         let mut edge = |target: u64| match blocks.iter().position(|member| *member == target) {
             Some(at) => Edge::Node(at),
-            None => exit(target),
+            None => Edge::Exit(exit_index(&mut targets, machine.arrives(target))),
         };
         let (on_true, on_false) = (edge(on_true), edge(on_false));
         nodes.push((on_true, on_false));
     }
-    if targets.len() > 2 {
+    let [first, second] = targets[..] else {
         return Err(ChainFault::ExitCount {
             found: targets.len(),
         });
-    }
-    let dag = Dag {
-        nodes,
-        exits: targets.len(),
     };
+    let dag = Dag { nodes, exits: 2 };
     let first_is_true = verify(&dag, &written.formula, 0)?;
-    match targets.as_slice() {
-        [first, second] => Ok([(*first, first_is_true), (*second, !first_is_true)]),
-        _ => Err(ChainFault::ExitCount {
-            found: targets.len(),
-        }),
-    }
+    Ok([(first, first_is_true), (second, !first_is_true)])
+}
+
+/// The place of `arrived` among the exits seen so far, which it joins when it is new.
+fn exit_index<T: PartialEq>(targets: &mut Vec<T>, arrived: T) -> usize {
+    targets
+        .iter()
+        .position(|held| *held == arrived)
+        .unwrap_or_else(|| {
+            targets.push(arrived);
+            targets.len() - 1
+        })
 }
 
 /// What the collapse reads of the markers the tree carries, and the copies it asks for.
@@ -1042,24 +1043,7 @@ impl<'s> Explore<'s> {
     /// Where one arm of a test leads.
     fn edge(&mut self, arm: &'s CStmt) -> Result<Edge, ChainFault> {
         match sole(arm) {
-            CStmt::Goto(label) => {
-                if let Some(held) = self.shared.get_mut(label.as_str()) {
-                    held.1 += 1;
-                    return Ok(Edge::Node(held.0));
-                }
-                let region =
-                    (self.regions.get(label.as_str()).copied()).filter(|at| *at > self.after);
-                if let Some(index) = region {
-                    let stmts = self.stmts;
-                    let CStmt::Block(held) = &stmts[index] else {
-                        return Err(ChainFault::Shape);
-                    };
-                    let node = self.test_at(&held[1], Some(index))?;
-                    self.shared.insert(label.as_str(), (node, 1));
-                    return Ok(Edge::Node(node));
-                }
-                Ok(self.exit(Exit::Goto(label.as_str())))
-            }
+            CStmt::Goto(label) => self.jump(label),
             CStmt::Continue => Ok(self.exit(Exit::Continue)),
             inner => match test_block(inner, self.marks) {
                 Some(block) if (self.inert)(block) => Ok(Edge::Node(self.test_at(inner, None)?)),
@@ -1069,6 +1053,25 @@ impl<'s> Explore<'s> {
                 }
             },
         }
+    }
+
+    /// Where a `goto` leads: the test of a region the chain consumes, or an exit.
+    fn jump(&mut self, label: &'s str) -> Result<Edge, ChainFault> {
+        if let Some(held) = self.shared.get_mut(label) {
+            held.1 += 1;
+            return Ok(Edge::Node(held.0));
+        }
+        let region = (self.regions.get(label).copied()).filter(|at| *at > self.after);
+        let Some(index) = region else {
+            return Ok(self.exit(Exit::Goto(label)));
+        };
+        let stmts = self.stmts;
+        let CStmt::Block(held) = &stmts[index] else {
+            return Err(ChainFault::Shape);
+        };
+        let node = self.test_at(&held[1], Some(index))?;
+        self.shared.insert(label, (node, 1));
+        Ok(Edge::Node(node))
     }
 
     fn exit(&mut self, exit: Exit<'s>) -> Edge {
@@ -1326,22 +1329,23 @@ mod tests {
     }
 
     /// The test of the first statement as text, markers shown as `[block:...]`.
-    fn test_text(stmt: &CStmt, marks: &Fixture) -> String {
-        fn text(e: &CExpr, marks: &Fixture) -> String {
-            match e {
-                CExpr::Observed { ids, expr } => {
-                    let blocks: Vec<_> = ids.iter().filter_map(|id| marks.block_of(id)).collect();
-                    format!("[{blocks:?}:{}]", text(expr, marks))
-                }
-                CExpr::IntLit(value) => format!("{value:#x}"),
-                CExpr::Unary { operand, .. } => format!("!{}", text(operand, marks)),
-                CExpr::Binary { op, left, right } => {
-                    let sign = if *op == BinaryOp::And { "&&" } else { "||" };
-                    format!("({} {sign} {})", text(left, marks), text(right, marks))
-                }
-                _ => "?".to_owned(),
+    fn text(e: &CExpr, marks: &Fixture) -> String {
+        match e {
+            CExpr::Observed { ids, expr } => {
+                let blocks: Vec<_> = ids.iter().filter_map(|id| marks.block_of(id)).collect();
+                format!("[{blocks:?}:{}]", text(expr, marks))
             }
+            CExpr::IntLit(value) => format!("{value:#x}"),
+            CExpr::Unary { operand, .. } => format!("!{}", text(operand, marks)),
+            CExpr::Binary { op, left, right } => {
+                let sign = if *op == BinaryOp::And { "&&" } else { "||" };
+                format!("({} {sign} {})", text(left, marks), text(right, marks))
+            }
+            _ => "?".to_owned(),
         }
+    }
+
+    fn test_text(stmt: &CStmt, marks: &Fixture) -> String {
         match stmt.unobserved() {
             CStmt::If { cond, .. } => text(cond, marks),
             other => panic!("not an if: {other:?}"),
