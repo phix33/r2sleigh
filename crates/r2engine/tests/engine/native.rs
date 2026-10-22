@@ -6803,9 +6803,17 @@ fn merges_rax_at(artifact: &r2ssa::SsaArtifact, block: u64) -> bool {
 /// Whether a `rax` the C assigns before its loop is assigned again inside it: the value the
 /// back edge carries, rather than the one the loop was entered with on every pass.
 fn loop_carries_rax(output: &str) -> bool {
-    let Some((before, inside)) = output.split_once("for (; ; ) {") else {
+    let opens = |line: &str| {
+        let line = line.trim();
+        line == "for (; ; ) {"
+            || line == "do {"
+            || (line.starts_with("while (") && line.ends_with(") {"))
+    };
+    let Some(at) = output.lines().position(opens) else {
         return false;
     };
+    let lines: Vec<&str> = output.lines().collect();
+    let (before, inside) = (lines[..at].join("\n"), lines[at + 1..].join("\n"));
     let assigned = |text: &str| {
         text.lines()
             .filter_map(|line| line.trim_start().split_once(" = ").map(|(name, _)| name))
@@ -6813,7 +6821,7 @@ fn loop_carries_rax(output: &str) -> bool {
             .map(str::to_owned)
             .collect::<BTreeSet<_>>()
     };
-    !assigned(before).is_disjoint(&assigned(inside))
+    !assigned(&before).is_disjoint(&assigned(&inside))
 }
 
 /// A loop that writes its accumulator only by `cmpxchg`'s or `cmovcc`'s `SELECT` carries it to its

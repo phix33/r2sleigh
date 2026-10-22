@@ -115,3 +115,51 @@ fn a_loop_that_tests_before_its_body_is_a_while() {
         .expect("a loop");
     assert!(test.contains('<'), "{c}");
 }
+
+/// `test edi, edi; je skip; xor eax, eax; body: inc eax; cmp eax, edi; jne body; ret; skip: xor eax, eax; ret`
+const COUNT_TO: &[u8] = &[
+    0x85, 0xff, 0x74, 0x09, 0x31, 0xc0, 0xff, 0xc0, 0x39, 0xf8, 0x75, 0xfa, 0xc3, 0x31, 0xc0, 0xc3,
+];
+
+#[test]
+fn a_loop_that_tests_after_its_body_is_a_do_while_with_its_merge_copies_before_the_test() {
+    let c = c_of(COUNT_TO);
+    assert_eq!(c.matches("do {").count(), 1, "{c}");
+    assert!(!c.contains("for (; ; )") && !c.contains("break"), "{c}");
+    // The copy that carries the counter round the loop is written before the test reads the next value.
+    let lines: Vec<&str> = c.lines().map(str::trim).collect();
+    let end = lines
+        .iter()
+        .position(|line| line.starts_with("} while ("))
+        .expect("a do-while");
+    assert!(
+        lines[end - 1].contains(" = ") && !lines[end - 1].contains("if"),
+        "{c}"
+    );
+}
+
+/// `test edi, edi; je skip; xor eax, eax; body: mov edx, eax; inc eax; cmp eax, edi; jne body;
+/// mov eax, edx; ret; skip: xor eax, eax; ret`: the code after the loop wants the counter as the
+/// last iteration began it.
+const LAST_BEGUN: &[u8] = &[
+    0x85, 0xff, 0x74, 0x0d, 0x31, 0xc0, 0x89, 0xc2, 0xff, 0xc0, 0x39, 0xf8, 0x75, 0xf8, 0x89, 0xd0,
+    0xc3, 0x31, 0xc0, 0xc3,
+];
+
+#[test]
+fn what_the_code_after_a_loop_reads_is_not_what_the_hoisted_copy_writes() {
+    // The result is the counter as the last iteration began it, which the text keeps in a variable
+    // of its own, so the copy of the next value may still be written before the test.
+    let c = c_of(LAST_BEGUN);
+    let lines: Vec<&str> = c.lines().map(str::trim).collect();
+    let end = lines
+        .iter()
+        .position(|line| line.starts_with("} while ("))
+        .expect("a do-while");
+    let copied = lines[end - 1].split(" = ").next().expect("a copy");
+    let returned = lines
+        .iter()
+        .find(|line| line.starts_with("return (uint32_t)"))
+        .expect("a return of the loop's value");
+    assert!(!returned.contains(copied), "{c}");
+}

@@ -197,7 +197,7 @@ double loop_sum(const double* v, int32_t n)
     struct r2sleigh_bits_256 z0_27;
     struct r2sleigh_bits_256 z0_28;
 
-    /* r2dec proof: no individual construct is marked; 91 source obligations: 91 rendered, 0 elided, 0 refused; 60 statements rendered */
+    /* r2dec proof: no individual construct is marked; 91 source obligations: 91 rendered, 0 elided, 0 refused; 58 statements rendered */
     {
         if ((uint8_t)((int32_t)n < (int32_t)1U)) {
             return (double)r2sleigh_float_from_bits_64((uint64_t)0U);
@@ -212,7 +212,7 @@ double loop_sum(const double* v, int32_t n)
                 x10_2 = (uint64_t)((uint64_t)v + (uint64_t)16U);
                 x11_2 = (uint64_t)((uint64_t)x8_1 & (uint64_t)0x7ffffffcU);
                 z0_5 = z0_4;
-                for (; ; ) {
+                do {
                     tmp_1010598_0_1 = (uint64_t)((uint64_t)x10_2 - (uint64_t)16U);
                     tmp_lane_1010598_1_0_1 = r2sleigh_load_u128((void*)tmp_1010598_0_1);
                     tmp_1010598_8_1 = (uint64_t)((uint64_t)tmp_1010598_0_1 + (uint64_t)16U);
@@ -228,14 +228,10 @@ double loop_sum(const double* v, int32_t n)
                     z0_19 = r2sleigh_bits_insert_256_64(z0_18, (uint64_t)0U, 64U);
                     z0_20 = r2sleigh_bits_insert_256_64(z0_19, (uint64_t)0U, 128U);
                     z0_21 = r2sleigh_bits_insert_256_64(z0_20, (uint64_t)0U, 192U);
-                    if ((uint8_t)((uint64_t)tmp_101059c_8_1 != (uint64_t)0U)) {
-                        x10_2 = (uint64_t)((uint64_t)x10_2 + (uint64_t)32U);
-                        x11_2 = tmp_101059c_8_1;
-                        z0_5 = z0_21;
-                    } else {
-                        break;
-                    }
-                }
+                    x10_2 = (uint64_t)((uint64_t)x10_2 + (uint64_t)32U);
+                    x11_2 = tmp_101059c_8_1;
+                    z0_5 = z0_21;
+                } while ((uint8_t)((uint64_t)tmp_101059c_8_1 != (uint64_t)0U));
                 {
                     if ((uint8_t)((uint64_t)x9_2 == (uint64_t)x8_1)) {
                         z0_28 = z0_21;

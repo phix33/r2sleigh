@@ -108,7 +108,7 @@ fn build(body: CStmt, shape: Shape) -> CStmt {
 }
 
 /// The statements of a body that do something: no empty statement, and blocks looked through.
-fn live(stmt: &CStmt) -> Vec<&CStmt> {
+pub(super) fn live(stmt: &CStmt) -> Vec<&CStmt> {
     match stmt {
         CStmt::Block(stmts) => stmts.iter().flat_map(live).collect(),
         CStmt::Empty => Vec::new(),
@@ -117,7 +117,7 @@ fn live(stmt: &CStmt) -> Vec<&CStmt> {
 }
 
 /// [`live`], moving the statements out.
-fn flatten(stmt: CStmt, into: &mut Vec<CStmt>) {
+pub(super) fn flatten(stmt: CStmt, into: &mut Vec<CStmt>) {
     match stmt {
         CStmt::Block(stmts) => stmts.into_iter().for_each(|stmt| flatten(stmt, into)),
         CStmt::Empty => {}
@@ -126,7 +126,7 @@ fn flatten(stmt: CStmt, into: &mut Vec<CStmt>) {
 }
 
 /// A marked `if` with both arms: its test and arms.
-fn parts(stmt: &CStmt) -> Option<(&CExpr, &CStmt, &CStmt)> {
+pub(super) fn parts(stmt: &CStmt) -> Option<(&CExpr, &CStmt, &CStmt)> {
     let CStmt::Observed { stmt: inner, .. } = stmt else {
         return None;
     };
@@ -142,17 +142,17 @@ fn parts(stmt: &CStmt) -> Option<(&CExpr, &CStmt, &CStmt)> {
 }
 
 /// Whether an arm is a `break` and nothing else.
-fn is_break(arm: &CStmt) -> bool {
+pub(super) fn is_break(arm: &CStmt) -> bool {
     matches!(live(arm).as_slice(), [CStmt::Break])
 }
 
 /// Whether an arm does nothing: it falls to the top of the loop on its own, or says `continue`.
-fn is_empty(arm: &CStmt) -> bool {
+pub(super) fn is_empty(arm: &CStmt) -> bool {
     matches!(live(arm).as_slice(), [] | [CStmt::Continue])
 }
 
 /// Whether `stmt` has a `continue` for the loop around it: those of a loop inside it are its own.
-fn continues(stmt: &CStmt) -> bool {
+pub(super) fn continues(stmt: &CStmt) -> bool {
     match stmt {
         CStmt::Continue => true,
         CStmt::Observed { stmt, .. } => continues(stmt),

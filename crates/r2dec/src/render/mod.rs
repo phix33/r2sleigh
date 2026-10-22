@@ -121,6 +121,9 @@ pub fn render(
         })
     };
     let body = crate::structure::shape::shape(&mut fresh, body);
+    let body = stage("latch copies", body, &mut marks, &certified, |body, _| {
+        crate::structure::latch::hoist(body) != 0
+    });
     let mut body = stage("loop rotation", body, &mut marks, &certified, |body, _| {
         crate::structure::rotate::rotate(body) != 0
     });

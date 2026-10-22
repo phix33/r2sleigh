@@ -137,7 +137,7 @@ double loop_sum(const double* v, int32_t n)
     __uint128_t xmm0_17;
     __uint128_t xmm0_18;
 
-    /* r2dec proof: no individual construct is marked; 138 source obligations: 126 rendered, 12 elided, 0 refused; 65 statements rendered */
+    /* r2dec proof: no individual construct is marked; 138 source obligations: 126 rendered, 12 elided, 0 refused; 63 statements rendered */
     {
         tmp_1001574_0_1 = (uint32_t)n;
         if ((uint8_t)((int32_t)tmp_1001574_0_1 <= (int32_t)0U)) {
@@ -150,7 +150,7 @@ double loop_sum(const double* v, int32_t n)
                 xmm0_3 = (__uint128_t)(((__uint128_t)0U & (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0U)) | ((__uint128_t)(uint64_t)0U & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffffffffffULL)) << 0U);
                 rcx_3 = 0;
                 xmm0_5 = (__uint128_t)(((__uint128_t)xmm0_3 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffffffffffULL)) | ((__uint128_t)(uint64_t)0U & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffffffffffULL)) << 64U);
-                for (; ; ) {
+                do {
                     tmp_10015a0_10_1 = r2sleigh_load_u64((void*)((uint64_t)v + (uint64_t)rcx_3 * 8U));
                     tmp_lane_10015a0_3_0_1 = (uint64_t)((__uint128_t)xmm0_5 >> 0U);
                     tmp_lane_10015a0_3_1_1 = r2sleigh_float_from_bits_64(tmp_lane_10015a0_3_0_1) + r2sleigh_float_from_bits_64(tmp_10015a0_10_1);
@@ -177,13 +177,9 @@ double loop_sum(const double* v, int32_t n)
                     tmp_lane_10015c9_4_1_1 = tmp_lane_10015c3_4_1_1 + r2sleigh_float_from_bits_64(tmp_10015c9_18_1);
                     xmm0_13 = (__uint128_t)(((__uint128_t)xmm0_12 & (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0U)) | ((__uint128_t)r2sleigh_float_to_bits_64(tmp_lane_10015c9_4_1_1) & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffffffffffULL)) << 0U);
                     rcx_4 = (uint64_t)((uint64_t)rcx_3 + (uint64_t)8U);
-                    if ((uint8_t)((uint64_t)rdx_2 != (uint64_t)rcx_4)) {
-                        rcx_3 = rcx_4;
-                        xmm0_5 = xmm0_13;
-                    } else {
-                        break;
-                    }
-                }
+                    rcx_3 = rcx_4;
+                    xmm0_5 = xmm0_13;
+                } while ((uint8_t)((uint64_t)rdx_2 != (uint64_t)rcx_4));
                 {
                     if ((uint8_t)((uint64_t)rax_2 == (uint64_t)0U)) {
                         xmm0_17 = xmm0_13;
