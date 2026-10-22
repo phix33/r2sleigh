@@ -207,27 +207,29 @@ impl<'f> Placement<'f> {
         let loops = self.exits.keys().copied().collect::<Vec<_>>();
         for index in loops {
             let mut broken_to = false;
-            let kept = std::mem::take(self.exits.entry(index).or_default())
-                .into_iter()
-                .filter(|exit| {
-                    let from = self.dom.idom(*exit);
-                    let sole = !self.merge.contains(exit) && closed.contains(exit);
-                    let one_level =
-                        from.is_some_and(|from| self.innermost_loop(from) == Some(index));
-                    match sole && !(one_level && !broken_to) {
-                        true => {
-                            self.inlined.insert(*exit);
-                            false
-                        }
-                        false => {
-                            broken_to = true;
-                            true
-                        }
-                    }
-                })
-                .collect();
+            let listed = std::mem::take(self.exits.entry(index).or_default());
+            let (kept, inlined): (Vec<u64>, Vec<u64>) = (listed.into_iter())
+                .partition(|exit| self.stays_after(index, *exit, closed, &mut broken_to));
+            self.inlined.extend(inlined);
             self.exits.insert(index, kept);
         }
+    }
+
+    /// Whether `exit` stays after loop `index`: it has a second way in, or a subtree an edge
+    /// leaves, or `break` reaches it as the first such exit of the one loop its edge leaves.
+    fn stays_after(
+        &self,
+        index: usize,
+        exit: u64,
+        closed: &HashSet<u64>,
+        broken: &mut bool,
+    ) -> bool {
+        let sole = !self.merge.contains(&exit) && closed.contains(&exit);
+        let one_level =
+            (self.dom.idom(exit)).is_some_and(|from| self.innermost_loop(from) == Some(index));
+        let stays = !sole || (one_level && !*broken);
+        *broken |= stays;
+        stays
     }
 }
 
