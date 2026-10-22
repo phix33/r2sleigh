@@ -755,7 +755,7 @@ int32_t find(const int32_t* v, int32_t n, int32_t key)
     uint64_t rax_14;
     _Alignas(16) uint8_t frame[40];
 
-    /* r2dec proof: no individual construct is marked; 58 source obligations: 44 rendered, 14 elided, 0 refused; 24 statements rendered */
+    /* r2dec proof: no individual construct is marked; 58 source obligations: 44 rendered, 14 elided, 0 refused; 20 statements rendered */
     {
         r2sleigh_store_u32((void*)(uint64_t)(frame + 28U), (uint32_t)0U);
         for (; ; ) {
@@ -767,35 +767,23 @@ int32_t find(const int32_t* v, int32_t n, int32_t key)
                     tmp_14f0_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 28U));
                     tmp_1504_0_1 = r2sleigh_load_u32((void*)((uint64_t)v + (uint64_t)(int32_t)tmp_14f0_8_1 * 4U));
                     if ((uint8_t)((int32_t)key < (int32_t)tmp_1504_0_1)) {
-                        goto L2;
+                        rax_14 = (uint64_t)0xffffffffU;
+                        return (int32_t)rax_14;
                     } else {
                         tmp_150b_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 28U));
                         r2sleigh_store_u32((void*)(uint64_t)(frame + 28U), (uint32_t)((uint32_t)tmp_150b_8_1 + (uint32_t)1U));
                     }
                 } else {
-                    goto L0;
+                    tmp_14eb_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 28U));
+                    rax_14 = (uint64_t)(uint32_t)tmp_14eb_8_1;
+                    return (int32_t)rax_14;
                 }
             } else {
                 break;
             }
         }
         {
-            goto L3;
-        }
-        {
-L0: ;
-            tmp_14eb_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 28U));
-            rax_14 = (uint64_t)(uint32_t)tmp_14eb_8_1;
-            return (int32_t)rax_14;
-        }
-        {
-L2: ;
-        }
-        {
-L3: ;
             rax_14 = (uint64_t)0xffffffffU;
-        }
-        {
             return (int32_t)rax_14;
         }
     }

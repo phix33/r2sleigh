@@ -310,13 +310,14 @@ uint32_t _table_walk(uint64_t arg0, uint8_t* arg1)
     uint64_t x8_30;
     uint32_t stack_m4_1;
 
-    /* r2dec proof: no individual construct is marked; 120 source obligations: 117 rendered, 3 elided, 0 refused; 39 statements rendered */
+    /* r2dec proof: no individual construct is marked; 120 source obligations: 117 rendered, 3 elided, 0 refused; 37 statements rendered */
     {
         stack_m40_1 = arg0;
         stack_m28_1 = 0;
         for (; ; ) {
             if ((uint8_t)((uint64_t)stack_m40_1 == (uint64_t)0U)) {
-                goto L6;
+                stack_m4_1 = (uint32_t)((uint32_t)0U - (uint32_t)stack_m28_1);
+                return (uint32_t)stack_m4_1;
             } else {
                 {
                     stack_m28_3 = (uint32_t)((uint32_t)stack_m28_1 + (uint32_t)1U);
@@ -394,13 +395,6 @@ uint32_t _table_walk(uint64_t arg0, uint8_t* arg1)
                 return (uint32_t)stack_m4_1;
             }
         }
-        {
-L6: ;
-            stack_m4_1 = (uint32_t)((uint32_t)0U - (uint32_t)stack_m28_1);
-        }
-        {
-            return (uint32_t)stack_m4_1;
-        }
     }
 }
 
@@ -433,7 +427,7 @@ uint32_t _state_machine(uint8_t* arg0)
     uint32_t stack_m20_7;
     uint32_t stack_m4_1;
 
-    /* r2dec proof: no individual construct is marked; 216 source obligations: 213 rendered, 3 elided, 0 refused; 84 statements rendered */
+    /* r2dec proof: no individual construct is marked; 216 source obligations: 213 rendered, 3 elided, 0 refused; 77 statements rendered */
     {
         stack_m32_1 = 0;
         stack_m24_1 = 0;
@@ -441,7 +435,8 @@ uint32_t _state_machine(uint8_t* arg0)
         for (; ; ) {
             tmp_100000ac0_18_1 = r2sleigh_load_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m32_1 * 1U));
             if ((uint8_t)((uint32_t)(int8_t)tmp_100000ac0_18_1 == (uint32_t)0U)) {
-                goto L16;
+                stack_m4_1 = (uint32_t)((uint32_t)stack_m24_1 + (uint32_t)stack_m20_1);
+                return (uint32_t)stack_m4_1;
             } else {
                 {
                     tmp_100000ad8_8_1 = r2sleigh_load_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m32_1 * 1U));
@@ -458,11 +453,13 @@ uint32_t _state_machine(uint8_t* arg0)
                         {
                             if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_100000ad8_8_1 >> 0U) != (uint32_t)95U)) {
                                 if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_100000ad8_8_1 >> 0U) < (int32_t)48U)) {
-                                    goto L2;
+                                    stack_m4_1 = (uint32_t)((uint32_t)0xffffff9cU - (uint32_t)((uint64_t)stack_m32_1 >> 0U));
+                                    return (uint32_t)stack_m4_1;
                                 } else {
                                     {
                                         if ((uint8_t)((int32_t)57U < (int32_t)((uint64_t)(uint8_t)tmp_100000ad8_8_1 >> 0U))) {
-                                            goto L2;
+                                            stack_m4_1 = (uint32_t)((uint32_t)0xffffff9cU - (uint32_t)((uint64_t)stack_m32_1 >> 0U));
+                                            return (uint32_t)stack_m4_1;
                                         } else {
                                             {
                                                 stack_m24_9 = (uint32_t)((uint32_t)stack_m24_1 - (uint32_t)5U);
@@ -518,7 +515,8 @@ L3: ;
                                         {
                                             if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_100000ad8_8_1 >> 0U) == (uint32_t)95U)) {
                                             } else {
-                                                goto L6;
+                                                stack_m4_1 = (uint32_t)((uint32_t)0xffffff38U - (uint32_t)((uint64_t)stack_m32_1 >> 0U));
+                                                return (uint32_t)stack_m4_1;
                                             }
                                         }
                                         {
@@ -548,13 +546,15 @@ L9: ;
                                         if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_100000ad8_8_1 >> 0U) != (uint32_t)95U)) {
                                             if ((uint8_t)((uint32_t)((uint64_t)(uint8_t)tmp_100000ad8_8_1 >> 0U) != (uint32_t)45U)) {
                                                 if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_100000ad8_8_1 >> 0U) < (int32_t)48U)) {
-                                                    goto L11;
+                                                    stack_m4_1 = (uint32_t)((uint32_t)0xfffffed4U - (uint32_t)((uint64_t)stack_m32_1 >> 0U));
+                                                    return (uint32_t)stack_m4_1;
                                                 } else {
                                                     {
                                                         if ((uint8_t)((int32_t)((uint64_t)(uint8_t)tmp_100000ad8_8_1 >> 0U) <= (int32_t)57U)) {
                                                             stack_m20_5 = stack_m20_1;
                                                         } else {
-                                                            goto L10;
+                                                            stack_m4_1 = (uint32_t)((uint32_t)0xfffffed4U - (uint32_t)((uint64_t)stack_m32_1 >> 0U));
+                                                            return (uint32_t)stack_m4_1;
                                                         }
                                                     }
                                                 }
@@ -604,33 +604,6 @@ L9: ;
                 stack_m4_1 = (uint32_t)((uint32_t)0xfffffe70U - (uint32_t)((uint64_t)stack_m32_1 >> 0U));
                 return (uint32_t)stack_m4_1;
             }
-        }
-        {
-L10: ;
-        }
-        {
-L11: ;
-            stack_m4_1 = (uint32_t)((uint32_t)0xfffffed4U - (uint32_t)((uint64_t)stack_m32_1 >> 0U));
-            return (uint32_t)stack_m4_1;
-        }
-        {
-L6: ;
-            {
-                stack_m4_1 = (uint32_t)((uint32_t)0xffffff38U - (uint32_t)((uint64_t)stack_m32_1 >> 0U));
-                return (uint32_t)stack_m4_1;
-            }
-        }
-        {
-L2: ;
-            stack_m4_1 = (uint32_t)((uint32_t)0xffffff9cU - (uint32_t)((uint64_t)stack_m32_1 >> 0U));
-            return (uint32_t)stack_m4_1;
-        }
-        {
-L16: ;
-            stack_m4_1 = (uint32_t)((uint32_t)stack_m24_1 + (uint32_t)stack_m20_1);
-        }
-        {
-            return (uint32_t)stack_m4_1;
         }
     }
 }

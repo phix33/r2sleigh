@@ -1,7 +1,7 @@
 //! Terminal tails, `doc/adr-structure-dominator-tree.md` §5: a block with no way on is copied to
 //! the sites that reach it; a copy keeps its empty out-edge set, so the certificate reads it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::shape::{Evidence, Occurrences};
 use crate::ast::CStmt;
@@ -9,22 +9,23 @@ use crate::ast::CStmt;
 /// The most statements a block may have to be read as a tail.
 const TAIL_LIMIT: usize = 4;
 
-/// A `goto` to a terminal block of at most [`TAIL_LIMIT`] statements becomes a copy of it; then a
+/// A `goto` to a terminal run of at most [`TAIL_LIMIT`] statements becomes a copy of it; then a
 /// `return` of a merge of distinct values is copied into the arms falling to it. O(tree + copies).
 pub(super) fn inline_tails(occ: &mut Occurrences, ev: &Evidence<'_>, stmt: &mut CStmt) {
-    let mut tails = BTreeMap::new();
+    let mut runs = BTreeMap::new();
     each_sequence(stmt, &mut |seq| {
-        for item in seq.iter() {
-            if let CStmt::Block(items) = item
-                && let Some((Some(label), tail)) = parse(items, ev)
-            {
-                tails.insert(label, tail);
+        for at in 0..seq.len() {
+            if let Some((label, run)) = run_at(seq, at, ev) {
+                runs.insert(label, run);
             }
         }
     });
+    let tails = resolve(&runs);
     if !tails.is_empty() {
         replace_gotos(occ, &tails, stmt);
-        each_sequence(stmt, &mut |seq| remove_dead_tails(&tails, ev, seq));
+        let mut named = BTreeSet::new();
+        super::shape::collect_gotos(stmt, &mut named);
+        each_sequence(stmt, &mut |seq| remove_dead(&runs, &tails, &named, ev, seq));
         super::shape::drop_unreferenced_labels(stmt);
     }
     join_returns(occ, ev, stmt);
@@ -72,44 +73,96 @@ fn each_sequence(stmt: &mut CStmt, visit: &mut dyn FnMut(&mut Vec<CStmt>)) {
     }
 }
 
-/// The label and statements of a block with no way on: expressions, the last a `return` or a call
-/// that never returns, none a residual or gap (a copy would be a second site of the same cell).
-fn parse(items: &[CStmt], ev: &Evidence<'_>) -> Option<(Option<String>, Vec<CStmt>)> {
-    let mut label = None;
-    let mut stmts = Vec::new();
-    gather(items, &mut label, &mut stmts).then_some(())?;
-    let live = stmts
-        .iter()
-        .map(CStmt::unobserved)
-        .filter(|stmt| !matches!(stmt, CStmt::Empty))
-        .collect::<Vec<_>>();
-    let (last, before) = live.split_last()?;
-    let ends = |stmt: &CStmt| match stmt {
-        CStmt::Return(_) => true,
-        CStmt::Expr(_) => (ev.never_returns)(stmt),
-        _ => false,
-    };
-    (live.len() <= TAIL_LIMIT && ends(last) && !before.iter().any(|stmt| ends(stmt)))
-        .then_some((label, stmts))
+/// How one block's text ended: it falls on, it ends control, or it jumps.
+enum Ended {
+    On,
+    Terminal,
+    Goto(String),
 }
 
-fn gather(items: &[CStmt], label: &mut Option<String>, out: &mut Vec<CStmt>) -> bool {
-    // Markers of empty statements are kept with the text but are not counted by the limit.
-    items.iter().all(|item| {
-        out.len() <= 2 * TAIL_LIMIT
-            && match item {
-                CStmt::Label(name) if out.is_empty() && label.is_none() => {
-                    *label = Some(name.clone());
-                    true
-                }
-                CStmt::Empty | CStmt::Comment(_) => true,
-                CStmt::Block(inner) => gather(inner, label, out),
-                other => {
-                    out.push(other.clone());
-                    copyable(other.unobserved())
-                }
+/// How a run of statements from a label ends.
+enum End {
+    Terminal,
+    Goto(String),
+}
+
+/// The statements from a label to a `return`, a call that never returns, or a `goto`, and the
+/// sibling blocks they run through.
+struct Run {
+    stmts: Vec<CStmt>,
+    end: End,
+    span: usize,
+}
+
+fn live(stmts: &[CStmt]) -> usize {
+    (stmts.iter())
+        .filter(|stmt| !matches!(stmt.unobserved(), CStmt::Empty))
+        .count()
+}
+
+/// The run from the labelled block `seq[at]` through the blocks the text falls into: plain
+/// expressions, no residual or gap (a copy would be a second site of the same cell).
+fn run_at(seq: &[CStmt], at: usize, ev: &Evidence<'_>) -> Option<(String, Run)> {
+    let CStmt::Block(items) = &seq[at] else {
+        return None;
+    };
+    let (mut label, mut stmts) = (None, Vec::new());
+    let mut ended = gather(items, &mut label, &mut false, &mut stmts, ev)?;
+    let label = label?;
+    let mut span = 1;
+    let end = loop {
+        match ended {
+            Ended::Terminal => break End::Terminal,
+            Ended::Goto(next) => break End::Goto(next),
+            Ended::On => {}
+        }
+        match seq.get(at + span)? {
+            CStmt::Block(items) => {
+                ended = gather(items, &mut None, &mut false, &mut stmts, ev)?;
             }
-    })
+            next if blank(next) => {}
+            _ => return None,
+        }
+        span += 1;
+    };
+    (live(&stmts) <= TAIL_LIMIT).then_some((label, Run { stmts, end, span }))
+}
+
+/// One block's statements into `out`: its label if it starts with one, how its text ended;
+/// `None` where it holds anything but plain expressions, or goes on after it ended.
+fn gather(
+    items: &[CStmt],
+    label: &mut Option<String>,
+    started: &mut bool,
+    out: &mut Vec<CStmt>,
+    ev: &Evidence<'_>,
+) -> Option<Ended> {
+    let mut ended = Ended::On;
+    for item in items {
+        // Markers of empty statements are kept with the text but are not counted by the limit.
+        let ends_early = !matches!(ended, Ended::On) && !blank(item);
+        if out.len() > 2 * TAIL_LIMIT || ends_early {
+            return None;
+        }
+        match item {
+            CStmt::Label(name) if !*started && label.is_none() => *label = Some(name.clone()),
+            CStmt::Empty | CStmt::Comment(_) => {}
+            CStmt::Goto(name) => {
+                *started = true;
+                ended = Ended::Goto(name.clone());
+            }
+            CStmt::Block(inner) => match gather(inner, label, started, out, ev)? {
+                Ended::On => {}
+                inner_end => ended = inner_end,
+            },
+            other => {
+                *started = true;
+                ended = plain(other.unobserved(), ev)?;
+                out.push(other.clone());
+            }
+        }
+    }
+    Some(ended)
 }
 
 /// Whether a leaf statement may be written at a second site: plain text that evaluates no
@@ -120,6 +173,65 @@ pub(super) fn copyable(stmt: &CStmt) -> bool {
         CStmt::Return(value) => !value.as_ref().is_some_and(crate::prelude::holds_residual),
         CStmt::Empty | CStmt::Comment(_) => true,
         _ => false,
+    }
+}
+
+/// How a copyable statement ends control, or `None` for one that is not.
+fn plain(stmt: &CStmt, ev: &Evidence<'_>) -> Option<Ended> {
+    match stmt {
+        _ if !copyable(stmt) => None,
+        CStmt::Expr(_) if (ev.never_returns)(stmt) => Some(Ended::Terminal),
+        CStmt::Expr(_) | CStmt::Empty => Some(Ended::On),
+        CStmt::Return(_) => Some(Ended::Terminal),
+        _ => None,
+    }
+}
+
+/// Each run that ends control, in full: a run that ends in a jump takes the run it jumps to, if
+/// that has one and the whole is within the limit. A cycle of jumps has none.
+fn resolve(runs: &BTreeMap<String, Run>) -> BTreeMap<String, Vec<CStmt>> {
+    let mut done = BTreeMap::<String, Vec<CStmt>>::new();
+    for start in runs.keys() {
+        if done.contains_key(start) {
+            continue;
+        }
+        let mut path = vec![start];
+        let mut seen = BTreeSet::from([start]);
+        let mut rest = loop {
+            let Some(last) = path.last().and_then(|label| runs.get(*label)) else {
+                break None;
+            };
+            match &last.end {
+                End::Terminal => break Some(Vec::new()),
+                End::Goto(next) => match done.get(next) {
+                    Some(tail) => break Some(tail.clone()),
+                    None if runs.contains_key(next) && seen.insert(next) => path.push(next),
+                    None => break None,
+                },
+            }
+        };
+        for label in path.into_iter().rev() {
+            let Some(after) = rest.take() else { break };
+            let mut stmts = runs[label].stmts.clone();
+            stmts.extend(after);
+            if live(&stmts) > TAIL_LIMIT {
+                break;
+            }
+            rest = Some(stmts.clone());
+            done.insert(label.clone(), stmts);
+        }
+    }
+    done
+}
+
+/// The label a block starts with.
+fn leading_label(stmt: &CStmt) -> Option<&str> {
+    let CStmt::Block(items) = stmt else {
+        return None;
+    };
+    match items.iter().find(|item| !blank(item)) {
+        Some(CStmt::Label(name)) => Some(name),
+        _ => None,
     }
 }
 
@@ -206,24 +318,41 @@ fn replace_in_sequence(
     }
 }
 
-/// A tail that every jump to has been copied from, and that the statement before it cannot
-/// complete into, is reached by nothing and goes.
-fn remove_dead_tails(
+/// A tail every jump to which has been copied, and that the statement before it cannot complete
+/// into, is reached by nothing and goes with the blocks it ran through, unless a `goto` names one.
+fn remove_dead(
+    runs: &BTreeMap<String, Run>,
     tails: &BTreeMap<String, Vec<CStmt>>,
+    named: &BTreeSet<String>,
     ev: &Evidence<'_>,
     seq: &mut Vec<CStmt>,
 ) {
-    let mut at = 0;
+    let mut at = 1;
     while at < seq.len() {
-        let was_tail = matches!(&seq[at], CStmt::Block(items)
-            if parse(items, ev).is_some_and(|(label, _)| label.is_some_and(|l| tails.contains_key(&l))));
+        let entry = leading_label(&seq[at])
+            .filter(|label| tails.contains_key(*label) && !named.contains(*label));
         let before = seq[..at].iter().rev().find(|stmt| !blank(stmt));
-        match (was_tail, before) {
-            (true, Some(before)) if !completes(before, ev) => {
-                seq.remove(at);
-            }
-            _ => at += 1,
+        let dead = entry.filter(|_| before.is_some_and(|before| !completes(before, ev)));
+        match dead {
+            Some(label) => remove_run(seq, at, runs[label].span, named),
+            None => at += 1,
         }
+    }
+}
+
+/// `seq[at]` and, of the `span - 1` blocks after it its run ran through, those no `goto` names.
+fn remove_run(seq: &mut Vec<CStmt>, at: usize, span: usize, named: &BTreeSet<String>) {
+    seq.remove(at);
+    for _ in 1..span {
+        let free = |next: &CStmt| match next {
+            CStmt::Empty | CStmt::Comment(_) => true,
+            CStmt::Block(_) => leading_label(next).is_none_or(|label| !named.contains(label)),
+            _ => false,
+        };
+        if !seq.get(at).is_some_and(free) {
+            break;
+        }
+        seq.remove(at);
     }
 }
 
@@ -301,9 +430,8 @@ fn guarded_return(occ: &Occurrences, ev: &Evidence<'_>, stmt: &CStmt) -> Option<
     let CStmt::Block(items) = stmt else {
         return None;
     };
-    let (None, stmts) = parse(items, ev)? else {
-        return None;
-    };
+    let (mut label, mut stmts) = (None, Vec::new());
+    let ended = gather(items, &mut label, &mut false, &mut stmts, ev)?;
     let [only] = stmts
         .iter()
         .filter(|stmt| !matches!(stmt.unobserved(), CStmt::Empty))
@@ -316,7 +444,8 @@ fn guarded_return(occ: &Occurrences, ev: &Evidence<'_>, stmt: &CStmt) -> Option<
         .iter()
         .filter_map(|id| occ.block_of(*id))
         .any(|block| (ev.distinct_return)(block));
-    (returns_value && distinct).then_some(stmts)
+    (label.is_none() && matches!(ended, Ended::Terminal) && returns_value && distinct)
+        .then_some(stmts)
 }
 
 /// How many arm ends of `stmt` complete into what follows it; `None` where an arm ends in a
@@ -672,6 +801,13 @@ mod tests {
 
     /// The tree placement writes for it: `tail` is the text of 0x50 after its label.
     fn loop_tree(tail: Vec<CStmt>) -> CStmt {
+        let mut shared = vec![label("L50")];
+        shared.extend(tail);
+        loop_tree_after(vec![block(shared)])
+    }
+
+    /// The same loop with `after` as the blocks written after the first exit.
+    fn loop_tree_after(after: Vec<CStmt>) -> CStmt {
         let latch = at(
             0x35,
             CStmt::if_stmt(cond(), CStmt::Continue, Some(goto("L50"))),
@@ -687,9 +823,7 @@ mod tests {
             at(0x20, expr()),
             at(0x20, branching(inner, goto("L40"))),
         ]);
-        let mut shared = vec![label("L50")];
-        shared.extend(tail);
-        block(vec![
+        let mut body = vec![
             at(0x10, expr()),
             CStmt::For {
                 init: None,
@@ -698,8 +832,9 @@ mod tests {
                 body: Box::new(header),
             },
             block(vec![label("L40"), at(0x40, ret(1))]),
-            block(shared),
-        ])
+        ];
+        body.extend(after);
+        block(body)
     }
 
     const LOOP_LABELS: [(&str, u64); 2] = [("L40", 0x40), ("L50", 0x50)];
@@ -798,6 +933,95 @@ mod tests {
         let (body, certificate) = shaped(body, &cfg, &[("L50", 0x50)], &[]);
         assert!(certificate.ok(), "{certificate}");
         assert_eq!((returns(&body), gotos(&body), labels(&body)), (2, 0, 0));
+    }
+
+    /// The loop of [`loop_with_two_exits`] where 0x50 goes on to the return 0x55.
+    fn loop_with_an_exit_that_goes_on() -> CFG {
+        cfg(
+            0x10,
+            &[
+                (0x10, branch(0x20)),
+                (0x20, cond_branch(0x30, 0x40)),
+                (0x30, cond_branch(0x35, 0x50)),
+                (0x35, cond_branch(0x20, 0x50)),
+                (0x40, BlockTerminator::Return),
+                (0x50, branch(0x55)),
+                (0x55, BlockTerminator::Return),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_tail_runs_through_the_block_that_follows_it_and_both_go_with_the_last_jump() {
+        // `L50: x = 0;` falls into `return x;`, written as a block of its own.
+        let after = vec![
+            block(vec![label("L50"), at(0x50, expr())]),
+            block(vec![at(0x55, ret(7))]),
+        ];
+        let (body, certificate) = shaped(
+            loop_tree_after(after),
+            &loop_with_an_exit_that_goes_on(),
+            &LOOP_LABELS,
+            &[],
+        );
+        assert!(certificate.ok(), "{certificate}");
+        assert_eq!((returns(&body), gotos(&body), labels(&body)), (3, 0, 0));
+        assert_eq!(certificate.duplicated, vec![0x50, 0x55]);
+    }
+
+    #[test]
+    fn a_tail_that_jumps_to_a_tail_is_both() {
+        let after = vec![
+            block(vec![label("L50"), at(0x50, expr()), goto("L55")]),
+            block(vec![label("L55"), at(0x55, ret(7))]),
+        ];
+        let (body, certificate) = shaped(
+            loop_tree_after(after),
+            &loop_with_an_exit_that_goes_on(),
+            &[("L40", 0x40), ("L50", 0x50), ("L55", 0x55)],
+            &[],
+        );
+        assert!(certificate.ok(), "{certificate}");
+        assert_eq!((returns(&body), gotos(&body), labels(&body)), (3, 0, 0));
+    }
+
+    #[test]
+    fn tails_that_jump_round_a_cycle_are_not_tails() {
+        let after = vec![
+            block(vec![label("L50"), at(0x50, expr()), goto("L55")]),
+            block(vec![label("L55"), at(0x55, expr()), goto("L50")]),
+        ];
+        let (body, _) = shaped(
+            loop_tree_after(after),
+            &loop_with_an_exit_that_goes_on(),
+            &[("L40", 0x40), ("L50", 0x50), ("L55", 0x55)],
+            &[],
+        );
+        // Nothing was copied: the jump to the next block went, the three that remain stay.
+        assert_eq!((returns(&body), gotos(&body)), (1, 3));
+    }
+
+    #[test]
+    fn a_block_the_jump_skips_is_copied_to_the_arm_that_falls_before_the_return_is() {
+        // 0x10 jumps over 0x30 to the return 0x50, or falls into 0x30: the skipped block goes to
+        // the falling arm and the jump then reaches the next position, so the return stays one.
+        let cfg = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x50, 0x30)),
+                (0x30, branch(0x50)),
+                (0x50, BlockTerminator::Return),
+            ],
+        );
+        let body = block(vec![
+            at(0x10, expr()),
+            at(0x10, CStmt::if_stmt(cond(), goto("L50"), None)),
+            at(0x30, expr()),
+            block(vec![label("L50"), at(0x50, ret(7))]),
+        ]);
+        let (body, certificate) = shaped(body, &cfg, &[("L50", 0x50)], &[]);
+        assert!(certificate.ok(), "{certificate}");
+        assert_eq!((returns(&body), gotos(&body), labels(&body)), (1, 0, 0));
     }
 
     /// The leaf statements of `stmt` in text order, an expression or return of a literal as its value.
@@ -899,29 +1123,6 @@ mod tests {
         );
         assert!(certificate.ok(), "{certificate}");
         assert_eq!(texts(&body).iter().filter(|text| *text == "e60").count(), 2);
-    }
-
-    #[test]
-    fn a_block_the_jump_skips_is_copied_to_the_arm_that_falls_before_the_return_is() {
-        // 0x10 jumps over 0x30 to the return 0x50, or falls into 0x30: the skipped block goes to
-        // the falling arm and the jump then reaches the next position, so the return stays one.
-        let cfg = cfg(
-            0x10,
-            &[
-                (0x10, cond_branch(0x50, 0x30)),
-                (0x30, branch(0x50)),
-                (0x50, BlockTerminator::Return),
-            ],
-        );
-        let body = block(vec![
-            at(0x10, expr()),
-            at(0x10, CStmt::if_stmt(cond(), goto("L50"), None)),
-            at(0x30, expr()),
-            block(vec![label("L50"), at(0x50, ret(7))]),
-        ]);
-        let (body, certificate) = shaped(body, &cfg, &[("L50", 0x50)], &[]);
-        assert!(certificate.ok(), "{certificate}");
-        assert_eq!((returns(&body), gotos(&body), labels(&body)), (1, 0, 0));
     }
 
     #[test]
