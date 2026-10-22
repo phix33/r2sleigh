@@ -221,3 +221,20 @@ chain whose exit is a `continue` to its own head, which `exits` reads as an edge
 fault reverts every chain of the function (ROADMAP D58).
 Equivalence cells at risk: `branchy`, `hashes`, `shapes` and `values` at O0, O1 and O2 under both compilers (every
 function with a chain or a rotated loop).
+
+## 2026-10-23: what the chain and latch passes cost
+
+Review of #328 asked for both passes' bounds. Counted inside the passes on the 5,688 functions that reach the chain
+stage (bash, ls-toybox, pigz and libc-2.32.so, of the 6,144 `afl` lists) and on 0pack's 0x58e3d0 and 0x62ecf0 and
+fifty of pumasim's largest: 148,668 sequences, the longest 5,743 statements.
+
+**Condition chains: a sequence is indexed once.** Invariant: the statements a chain removes are the regions it
+consumes, and no position in a sequence moves while it is walked. Owner: `structure/condition.rs`. `Pass::sequence`
+read every statement again to find the regions after each chain (k chains in n statements read O(k·n), and
+`Vec::remove` shifted the tail for each region), so 200 sibling chains read 81,200 statements before and 1,200 now.
+The index is built once; a chain takes the labels it consumes out of it, their statements stay where they are, and one
+pass drops them when the sequence ends, so a sequence costs O(n) plus its chains' own text. Iteration stays ascending,
+since descending can change which chains collapse. On the corpus the claim was real and bounded: 1,365 sequences held
+a chain and none held two, so the re-reading was 9,011 of 885,426 statement reads (1.0%), at most 1,532 in one function
+(libc 0x97e10). A consumed region is skipped, not read for chains of its own (the old removal made that so;
+`a_consumed_region_is_not_read_for_chains_of_its_own` pins it).

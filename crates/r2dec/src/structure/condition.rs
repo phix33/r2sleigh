@@ -676,37 +676,54 @@ impl Pass<'_> {
         }
     }
 
+    /// Indexes the regions of a sequence once: a chain forgets the ones it consumes and their
+    /// statements stay until the sequence ends, so no position moves (ADR §5, 2026-10-23).
     fn sequence(&mut self, stmts: &mut Vec<CStmt>) {
         let mut regions = self.test_regions(stmts);
-        let mut at = 0;
-        while at < stmts.len() {
-            if self.chain_at(stmts, at, &regions) {
-                regions = self.test_regions(stmts);
+        let mut consumed = BTreeSet::new();
+        for at in 0..stmts.len() {
+            if consumed.contains(&at) {
+                continue;
             }
+            self.chain_at(stmts, at, &mut regions, &mut consumed);
             self.stmt(&mut stmts[at]);
-            at += 1;
+        }
+        if !consumed.is_empty() {
+            let mut index = 0;
+            stmts.retain(|_| {
+                index += 1;
+                !consumed.contains(&(index - 1))
+            });
         }
     }
 
     /// The labelled regions of a sequence that hold one test and nothing else, by label.
     fn test_regions(&self, stmts: &[CStmt]) -> Regions {
+        #[cfg(test)]
+        INDEXED.with(|read| read.set(read.get() + stmts.len()));
         let mut regions = Regions::new();
         for (index, stmt) in stmts.iter().enumerate() {
-            if let CStmt::Block(region) = stmt
-                && let [CStmt::Label(label), test] = region.as_slice()
+            if let Some((label, test)) = labelled_test(stmt)
                 && let Some(block) = test_block(test, &*self.marks)
                 && (self.inert)(block)
             {
-                regions.insert(label.clone(), index);
+                regions.insert(label.to_owned(), index);
             }
         }
         regions
     }
 
-    /// Write the chain headed by `stmts[at]` as one `if`, or record why it is not one.
-    fn chain_at(&mut self, stmts: &mut Vec<CStmt>, at: usize, regions: &Regions) -> bool {
+    /// Write the chain headed by `stmts[at]` as one `if`, or record why it is not one; the regions
+    /// it consumes leave `regions` and join `consumed`.
+    fn chain_at(
+        &mut self,
+        stmts: &mut [CStmt],
+        at: usize,
+        regions: &mut Regions,
+        consumed: &mut BTreeSet<usize>,
+    ) {
         let Some(head) = test_block(&stmts[at], &*self.marks) else {
-            return false;
+            return;
         };
         let explore = Explore {
             marks: &*self.marks,
@@ -721,7 +738,7 @@ impl Pass<'_> {
             removed: BTreeSet::new(),
         };
         let planned = match explore.run(&stmts[at]) {
-            Ok(explored) if explored.nodes.len() < 2 => return false,
+            Ok(explored) if explored.nodes.len() < 2 => return,
             Ok(explored) => explored.plan(&self.references),
             Err(fault) => Err(fault),
         };
@@ -735,16 +752,12 @@ impl Pass<'_> {
                 }
                 count_gotos(&written, &mut self.references, 1);
                 stmts[at] = written;
-                for removed in plan.removed.into_iter().rev() {
-                    stmts.remove(removed);
-                }
+                consume(stmts, plan.removed, regions, consumed);
                 self.report.collapsed += 1;
-                true
             }
             Err(fault) => {
                 r2il::refusal_evidence!("chain-refused", "{head:#x}: {fault}");
                 self.report.refused.push((head, fault));
-                false
             }
         }
     }
@@ -902,6 +915,38 @@ fn opposite(expr: &mut CExpr) -> bool {
 
 /// The labelled regions of a sequence that hold one test and nothing else, by label.
 type Regions = BTreeMap<String, usize>;
+
+/// Take the regions at `removed` out of the index; their statements stay until the sequence ends.
+fn consume(
+    stmts: &[CStmt],
+    removed: Vec<usize>,
+    regions: &mut Regions,
+    consumed: &mut BTreeSet<usize>,
+) {
+    for at in removed {
+        if let Some((label, _)) = labelled_test(&stmts[at]) {
+            regions.remove(label);
+        }
+        consumed.insert(at);
+    }
+}
+
+/// A block that holds a label and one statement: the label, and the statement.
+fn labelled_test(stmt: &CStmt) -> Option<(&str, &CStmt)> {
+    match stmt {
+        CStmt::Block(held) => match held.as_slice() {
+            [CStmt::Label(label), test] => Some((label, test)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The statements read, in this thread, to find the regions of a sequence.
+    static INDEXED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// The block a marked `if` with both arms is the test of.
 fn test_block(stmt: &CStmt, marks: &dyn Marks) -> Option<u64> {
@@ -1066,10 +1111,10 @@ impl<'s> Explore<'s> {
             return Ok(self.exit(Exit::Goto(label)));
         };
         let stmts = self.stmts;
-        let CStmt::Block(held) = &stmts[index] else {
+        let Some((_, test)) = labelled_test(&stmts[index]) else {
             return Err(ChainFault::Shape);
         };
-        let node = self.test_at(&held[1], Some(index))?;
+        let node = self.test_at(test, Some(index))?;
         self.shared.insert(label, (node, 1));
         Ok(Edge::Node(node))
     }
@@ -1639,6 +1684,98 @@ mod tests {
             respell_test(&mut kept);
             assert!(matches!(kept, CExpr::Unary { .. }), "{op:?}: {kept:?}");
         }
+    }
+
+    /// The statements read to find regions while `collapse` writes `chains` sibling chains, each with
+    /// a tail of its own, so that none of them removes a statement.
+    fn indexed_for(chains: u32) -> usize {
+        let mut stmts = Vec::new();
+        for chain in 0..chains {
+            let (head, second, taken, tail) =
+                (4 * chain + 1, 4 * chain + 2, 4 * chain + 3, 4 * chain + 4);
+            let label = format!("L{chain}");
+            stmts.push(test(
+                head,
+                region(test(second, body(taken), jump(&label))),
+                jump(&label),
+            ));
+            stmts.push(CStmt::Block(vec![CStmt::Label(label), body(tail)]));
+        }
+        let before = INDEXED.with(std::cell::Cell::get);
+        let (_, report, _) = run(stmts, &all_inert);
+        assert_eq!(report.collapsed, chains as usize, "{:?}", report.refused);
+        INDEXED.with(std::cell::Cell::get) - before
+    }
+
+    #[test]
+    fn the_regions_of_a_sequence_are_indexed_once_however_many_chains_it_holds() {
+        // Doubling the chains at most doubles the statements read; re-indexing after each chain
+        // would quadruple them.
+        let (few, many) = (indexed_for(100), indexed_for(200));
+        assert!(
+            many <= 2 * few,
+            "{few} statements read for 100 chains, {many} for 200"
+        );
+    }
+
+    #[test]
+    fn a_chain_that_consumes_a_region_leaves_the_regions_after_it_where_they_are() {
+        // Three heads in a row, each with the shared test it jumps to after it: (a || b) && c.
+        let chain = |head: u32, label: &'static str| {
+            [
+                test(
+                    head,
+                    jump(label),
+                    region(test(head + 1, jump(label), jump("Y"))),
+                ),
+                labelled(label, test(head + 2, body(head + 3), jump("Y"))),
+            ]
+        };
+        let mut stmts = Vec::new();
+        for (head, label) in [(0x10, "C1"), (0x20, "C2"), (0x30, "C3")] {
+            stmts.extend(chain(head, label));
+        }
+        stmts.push(CStmt::Block(vec![CStmt::Label("Y".to_owned()), body(0x60)]));
+        let (stmts, report, marks) = run(stmts, &all_inert);
+        assert_eq!(report.collapsed, 3, "{:?}", report.refused);
+        assert_eq!(
+            stmts.len(),
+            4,
+            "the three shared tests went with their chains"
+        );
+        for (at, head) in [(0, 0x10), (1, 0x20), (2, 0x30)] {
+            let expected = format!(
+                "(([[{a}]:{a:#x}] || [[{b}]:{b:#x}]) && [[{c}]:{c:#x}])",
+                a = head,
+                b = head + 1,
+                c = head + 2
+            );
+            assert_eq!(test_text(&stmts[at], &marks), expected);
+        }
+        assert!(
+            matches!(&stmts[3], CStmt::Block(held) if matches!(&held[0], CStmt::Label(y) if y == "Y"))
+        );
+    }
+
+    #[test]
+    fn a_consumed_region_is_not_read_for_chains_of_its_own() {
+        // The shared test holds a nested test, so its text would be a chain again if it were read.
+        let stmts = vec![
+            test(0x10, jump("C"), region(test(0x20, jump("C"), jump("Y")))),
+            labelled(
+                "C",
+                test(0x30, region(test(0x40, body(0x50), jump("Y"))), jump("Y")),
+            ),
+            CStmt::Block(vec![CStmt::Label("Y".to_owned()), body(0x60)]),
+        ];
+        let (stmts, report, marks) = run(stmts, &all_inert);
+        assert_eq!(report.collapsed, 1, "{:?}", report.refused);
+        assert_eq!(report.refused, []);
+        assert_eq!(stmts.len(), 2);
+        assert_eq!(
+            test_text(&stmts[0], &marks),
+            "((([[16]:0x10] || [[32]:0x20]) && [[48]:0x30]) && [[64]:0x40])"
+        );
     }
 
     #[test]
