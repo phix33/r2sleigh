@@ -379,6 +379,9 @@ impl Prover<'_> {
         only: &mut Option<ValueId>,
         order: Order,
     ) -> Option<Reach> {
+        if !self.words(a, b) {
+            return None;
+        }
         let (left, right) = (self.num(cursors, a, only)?, self.num(cursors, b, only)?);
         Some(match (left, right) {
             (Num::Const(a), Num::Const(b)) => {
@@ -412,7 +415,7 @@ impl Prover<'_> {
         (a, b): (ValueId, ValueId),
         only: &mut Option<ValueId>,
     ) -> Option<Reach> {
-        if self.size(a) != 4 {
+        if !self.words(a, b) {
             return None;
         }
         let (left, right) = (self.num(cursors, a, only)?, self.num(cursors, b, only)?);
@@ -435,6 +438,9 @@ impl Prover<'_> {
         only: &mut Option<ValueId>,
         sum: bool,
     ) -> Option<Reach> {
+        if !self.words(a, b) {
+            return None;
+        }
         let (left, right) = (self.num(cursors, a, only)?, self.num(cursors, b, only)?);
         let (moved, c) = match (left, right) {
             (Num::Of(k), Num::Const(c)) => (Some((k, false)), c),
@@ -454,6 +460,11 @@ impl Prover<'_> {
             }
         };
         Some(leaving.rotated(-k))
+    }
+
+    /// Both operands are 32 bits: a wider one holds the zero-extended cursor, whose signed value is not the cursor's.
+    fn words(&self, a: ValueId, b: ValueId) -> bool {
+        self.size(a) == 4 && self.size(b) == 4
     }
 
     /// A 32-bit operand as the cursor moved by a constant, a constant, or its sign bit: through
@@ -483,9 +494,11 @@ impl Prover<'_> {
             SSAOp::IntAdd { a, b, .. } => self.moved(cursors, (*a, *b), only, false),
             SSAOp::IntSub { a, b, .. } => self.moved(cursors, (*a, *b), only, true),
             SSAOp::IntRight { a, b, .. } | SSAOp::IntSRight { a, b, .. } => {
-                let top = u64::from(self.size(*a)) * 8 - 1;
+                if self.size(*a) != 4 {
+                    return None;
+                }
                 match (self.num(cursors, *a, only)?, self.constant(*b)) {
-                    (Num::Of(k), Some(by)) if by == top => Some(Num::Sign(k)),
+                    (Num::Of(k), Some(31)) => Some(Num::Sign(k)),
                     _ => None,
                 }
             }

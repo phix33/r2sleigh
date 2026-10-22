@@ -1185,6 +1185,19 @@ fn an_aarch64_second_step_that_can_run_proves_no_tail_at_gcc_o0() {
     leaves_the_tail_unproven(&vfold, Target::Aarch64);
 }
 
+/// `cmp x3, #0` where the stepped offset was compared as `cmp w3, #0`: the load zero-extends, so
+/// the 64-bit signed test is not the cursor's sign.
+#[test]
+fn an_aarch64_offset_compared_at_sixty_four_bits_proves_no_tail_at_gcc_o0() {
+    let vfold = edited(
+        A64_GCC_O0,
+        0xdc,
+        &[0x7f, 0x00, 0x00, 0x71],
+        &[0x7f, 0x00, 0x00, 0xf1],
+    );
+    leaves_the_tail_unproven(&vfold, Target::Aarch64);
+}
+
 /// The register path forms its address from the stepped offset it reloaded: trip `i` reads slot
 /// `i + 1`.
 #[test]
