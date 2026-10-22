@@ -30,10 +30,7 @@ pub(super) struct Run<'a> {
     pub windows: &'a [Option<Vec<u8>>],
 }
 
-/// Say what each line's own lift says, and what the run says about it.
-///
-/// An address an instruction forms, transfers to or accesses is claimed where it is formed, whatever
-/// the next instruction does with it (doc/adr-query-database.md, "Formed addresses").
+/// Say what each line's own lift says: an address it forms, transfers to or accesses is claimed where formed (doc/adr-query-database.md, "Formed addresses").
 /// This is the one place a number becomes an address claim, and `referenced` the one place a claim becomes a reference.
 pub(super) fn over_run(
     answered: &Answered<'_>,
@@ -412,9 +409,7 @@ fn scratch(space: SpaceId) -> bool {
 }
 
 /// The weakest support among the calls that take the number in a pointer parameter, followed through copies.
-///
-/// Ends when no storage holds the number, at a branch, or where the lookahead stops; each is a bounded
-/// step down the straight line, so it is linear in the lines read.
+/// It ends at a branch, when no storage holds the number, or where the lookahead stops: linear in the lines read.
 fn handed_to_pointer(
     lift: &r2il::R2ILBlock,
     after: &mut After<'_, '_, '_>,
