@@ -1174,12 +1174,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::shape_variadic_local": {
-   "cause": "[P7, W14] vfold is variadic (its va_start save area, W14), and no format literal counts the tail its calls pass, so each call is the counted residual VariadicCount(missing_format_parameter) where it passed every argument register before (slots this function never wrote). Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count (a summary, SM).",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_void gap:CallNotRendered",
-   "site": "crates/r2ssa/src/save_area.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::vfold": {
    "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
@@ -1296,12 +1291,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::shape_variadic_local": {
-   "cause": "[P7, W14] vfold is variadic (its va_start save area, W14), and no format literal counts the tail its calls pass, so each call is the counted residual VariadicCount(missing_format_parameter) where it passed every argument register before (slots this function never wrote). Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count (a summary, SM).",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_void gap:CallNotRendered",
-   "site": "crates/r2ssa/src/save_area.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::vfold": {
    "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
@@ -1324,12 +1314,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::main": {
-   "cause": "[P7, W14] The first trap is main's call to shape_variadic_local: that function hands its parameters only into vfold's variadic tail (vfold's va_start save area is its tail, W14), whose count no format literal proves, so its arity is a floor of 0 and this call, writing past it, is a counted Floor gap where it passed never-assigned residuals before. Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count, so vfold(1u, a) passes one (a summary, SM).",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_void gap:CallNotRendered",
-   "site": "crates/r2ssa/src/save_area.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::mixed_fold": {
    "cause": "[gate-limitation] An aggregate passed by value: AAPCS64 passes the 16-byte `struct mixed` in two consecutive x registers; spec.py marks every by-value aggregate unsupported.",
@@ -1420,12 +1405,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::shape_variadic_local": {
-   "cause": "[P7, W14] vfold is variadic (its va_start save area, W14), and no format literal counts the tail its calls pass, so each call is the counted residual VariadicCount(missing_format_parameter) where it passed every argument register before (slots this function never wrote). Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count (a summary, SM).",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_void gap:CallNotRendered",
-   "site": "crates/r2ssa/src/save_area.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O0::vfold": {
    "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",
@@ -1547,12 +1527,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_variadic_local": {
-   "cause": "[P7, W14] vfold is variadic (its va_start save area, W14), and no format literal counts the tail its calls pass, so each call is the counted residual VariadicCount(missing_format_parameter) where it passed every argument register before (slots this function never wrote). Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count (a summary, SM).",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_void gap:CallNotRendered",
-   "site": "crates/r2ssa/src/save_area.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::vfold": {
    "cause": "[#122] `vfold` is a variadic definition: the harness cannot call it without the count of its trailing arguments, so it is unsupported where legacy refused it.",
@@ -1575,12 +1550,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::main": {
-   "cause": "[P7, W14] shape_variadic and shape_variadic_local hand their unwritten argument registers on to a variadic callee whose va_start prologue saves every argument register, which recovery reads as parameters: the arity resolves to every register slot and main's call passes the slots it never wrote as never-assigned residuals. Closing fact: a register save area stated as a variadic tail (W14).",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_void gap:CallNotRendered",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::mixed_fold": {
    "cause": "[gate-limitation] An aggregate passed by value: AAPCS64 passes the 16-byte `struct mixed` in two consecutive x registers; spec.py marks every by-value aggregate unsupported.",
@@ -1674,12 +1644,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::shape_variadic_local": {
-   "cause": "[P7, W14] vfold is variadic (its va_start save area, W14), and no format literal counts the tail its calls pass, so each call is the counted residual VariadicCount(missing_format_parameter) where it passed every argument register before (slots this function never wrote). Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count (a summary, SM).",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_void gap:CallNotRendered",
-   "site": "crates/r2ssa/src/save_area.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::vfold": {
    "cause": "[gate-limitation] A variadic definition: the thunk cannot know how many trailing arguments the callee reads (spec.py).",

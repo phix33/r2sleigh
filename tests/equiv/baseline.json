@@ -1209,12 +1209,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::shape_variadic_local": {
-   "cause": "[P7, W14] vfold is variadic (its va_start save area, W14), and no format literal counts the tail its calls pass, so each call is the counted residual VariadicCount(missing_format_parameter) where it passed every argument register before (slots this function never wrote). Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count (a summary, SM).",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_void gap:CallNotRendered",
-   "site": "crates/r2ssa/src/save_area.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::vfold": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: a variadic definition. VERIFIED: the engine renders 6 fixed parameters (EDI_0, RSI_0..R9_0) and `__uint128_t stack_m88` for the save area, addressed as `(uint64_t)&stack_m88 - 96` and `+ 96`. Those are out-of-object pointers, which is UB in C. RAX_0 (AL) and XMM3_0 are read as residuals. The engine must lift first (P7), then the gate.",
@@ -1572,12 +1567,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_variadic_local": {
-   "cause": "[P7, W14] vfold is variadic (its va_start save area, W14), and no format literal counts the tail its calls pass, so each call is the counted residual VariadicCount(missing_format_parameter) where it passed every argument register before (slots this function never wrote). Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count (a summary, SM).",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_void gap:CallNotRendered",
-   "site": "crates/r2ssa/src/save_area.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O1::vfold": {
    "cause": "[gate-limitation (engine P7 first)] Gate limitation: a variadic definition. The engine renders 6 fixed parameters with residual AL/XMM reads. The engine must lift first (P7), then the gate.",
@@ -1694,12 +1684,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_variadic_local": {
-   "cause": "[P7, W14] vfold is variadic (its va_start save area, W14), and no format literal counts the tail its calls pass, so each call is the counted residual VariadicCount(missing_format_parameter) where it passed every argument register before (slots this function never wrote). Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count (a summary, SM).",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_void gap:CallNotRendered",
-   "site": "crates/r2ssa/src/save_area.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O2::vfold": {
    "cause": "[P7 variadic] The engine now renders vfold (4 counted residuals; the signature drops `count`), and the gate does not grade a variadic definition: the count of its trailing arguments is unknown. Refused before p1-identity.",
