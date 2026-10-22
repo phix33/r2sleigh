@@ -228,8 +228,9 @@ residual sites for one unproven cell; `tails::copyable` is asked of every copy, 
 two arms jump to it. That is the visible residual rule 8 prefers to a duplicated one, and the one case the tails'
 own held-out sweep ("no function gains a goto") did not see, since it ran before the rule reached the skipped-block
 copy. The equivalence gate on the stack's head holds all 828 baseline records on x86-64 (744 equal, 63
-residual-trap, 1 slow, 20 unsupported) and on AArch64 (750, 57, 1, 20) with none differing. Release `pdd` on the
-largest functions of 0pack and pumasim stays within 0.1% instructions retired and the same peak footprint.
+residual-trap, 1 slow, 20 unsupported) and on AArch64 (750, 57, 1, 20) with none differing. Release `pdd` (with `aa`, 2 runs) on the two named
+functions and the two largest others of each of 0pack and pumasim moves -0.16% to +0.10% instructions retired against
+the base, with peak RSS 191 to 303 MB in every build.
 
 **Kept costs.** The chains cost 0.2 mean GED and win none on the set they were measured on, and the latch's copies
 take 438 loops to `do-while` for 0.98 less mean GED at the price of 5 perfect (a single-block source `for` scores
