@@ -105,19 +105,22 @@ fn gather(items: &[CStmt], label: &mut Option<String>, out: &mut Vec<CStmt>) -> 
                 CStmt::Empty | CStmt::Comment(_) => true,
                 CStmt::Block(inner) => gather(inner, label, out),
                 other => {
-                    let plain = match other.unobserved() {
-                        CStmt::Expr(expr) => !crate::prelude::holds_residual(expr),
-                        CStmt::Return(value) => {
-                            !value.as_ref().is_some_and(crate::prelude::holds_residual)
-                        }
-                        CStmt::Empty => true,
-                        _ => false,
-                    };
                     out.push(other.clone());
-                    plain
+                    copyable(other.unobserved())
                 }
             }
     })
+}
+
+/// Whether a leaf statement may be written at a second site: plain text that evaluates no
+/// residual, since a residual is one unproven cell (ADR §5). Every pass that copies text asks it.
+pub(super) fn copyable(stmt: &CStmt) -> bool {
+    match stmt {
+        CStmt::Expr(expr) => !crate::prelude::holds_residual(expr),
+        CStmt::Return(value) => !value.as_ref().is_some_and(crate::prelude::holds_residual),
+        CStmt::Empty | CStmt::Comment(_) => true,
+        _ => false,
+    }
 }
 
 fn blank(stmt: &CStmt) -> bool {
@@ -770,13 +773,14 @@ mod tests {
 
     #[test]
     fn a_tail_the_text_above_falls_into_stays_beside_its_copies() {
-        // 0x20 jumps to the return 0x50 or goes on to 0x30, which falls into 0x50 as well.
+        // 0x20 jumps to the return 0x50 or goes on to 0x30, which reaches 0x50 by way of 0x40 or at once.
         let cfg = cfg(
             0x10,
             &[
                 (0x10, branch(0x20)),
                 (0x20, cond_branch(0x50, 0x30)),
-                (0x30, branch(0x50)),
+                (0x30, cond_branch(0x40, 0x50)),
+                (0x40, branch(0x50)),
                 (0x50, BlockTerminator::Return),
             ],
         );
@@ -785,6 +789,10 @@ mod tests {
             at(0x20, expr()),
             at(0x20, CStmt::if_stmt(cond(), goto("L50"), None)),
             at(0x30, expr()),
+            at(
+                0x30,
+                CStmt::if_stmt(cond(), block_of(vec![at(0x40, expr())]), None),
+            ),
             block(vec![label("L50"), at(0x50, ret(7))]),
         ]);
         let (body, certificate) = shaped(body, &cfg, &[("L50", 0x50)], &[]);
@@ -831,6 +839,89 @@ mod tests {
         let whole = texts.windows(3).filter(|run| run == &["e11", "e12", "r7"]);
         assert_eq!(whole.count(), 2, "{texts:?}");
         assert_eq!(texts.iter().filter(|text| *text == "e11").count(), 2);
+    }
+
+    /// 0x10 jumps to the return 0x50 or falls into 0x20, whose two arms fall into the skipped 0x60.
+    fn skipped_block_with_two_falling_arms() -> CFG {
+        cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x50, 0x20)),
+                (0x20, cond_branch(0x30, 0x40)),
+                (0x30, branch(0x60)),
+                (0x40, branch(0x60)),
+                (0x60, branch(0x50)),
+                (0x50, BlockTerminator::Return),
+            ],
+        )
+    }
+
+    fn skipped_by_a_jump(skipped: CStmt) -> CStmt {
+        let falling = block_of(vec![
+            at(0x20, expr()),
+            at(
+                0x20,
+                branching(
+                    block_of(vec![at(0x30, expr())]),
+                    block_of(vec![at(0x40, expr())]),
+                ),
+            ),
+        ]);
+        block(vec![
+            at(0x10, expr()),
+            at(0x10, branching(goto("L50"), falling)),
+            skipped,
+            block(vec![label("L50"), at(0x50, ret(7))]),
+        ])
+    }
+
+    #[test]
+    fn a_skipped_block_holding_a_residual_is_not_copied_to_the_arms_that_fall_to_it() {
+        let residual =
+            crate::prelude::residual(&CType::uint(64), ResidualCause::Gap).expect("a residual");
+        let cfg = skipped_block_with_two_falling_arms();
+        let held =
+            |stmt: &CStmt| matches!(stmt, CStmt::Expr(e) if crate::prelude::holds_residual(e));
+        let (body, certificate) = shaped(
+            skipped_by_a_jump(at(0x60, CStmt::Expr(residual))),
+            &cfg,
+            &[("L50", 0x50)],
+            &[],
+        );
+        assert!(certificate.ok(), "{certificate}");
+        assert_eq!(count(&body, &held), 1, "{body:?}");
+        // The same shape with nothing unproven in the skipped block is the copy the pass makes.
+        let (body, certificate) = shaped(
+            skipped_by_a_jump(at(0x60, copy(60))),
+            &cfg,
+            &[("L50", 0x50)],
+            &[],
+        );
+        assert!(certificate.ok(), "{certificate}");
+        assert_eq!(texts(&body).iter().filter(|text| *text == "e60").count(), 2);
+    }
+
+    #[test]
+    fn a_block_the_jump_skips_is_copied_to_the_arm_that_falls_before_the_return_is() {
+        // 0x10 jumps over 0x30 to the return 0x50, or falls into 0x30: the skipped block goes to
+        // the falling arm and the jump then reaches the next position, so the return stays one.
+        let cfg = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x50, 0x30)),
+                (0x30, branch(0x50)),
+                (0x50, BlockTerminator::Return),
+            ],
+        );
+        let body = block(vec![
+            at(0x10, expr()),
+            at(0x10, CStmt::if_stmt(cond(), goto("L50"), None)),
+            at(0x30, expr()),
+            block(vec![label("L50"), at(0x50, ret(7))]),
+        ]);
+        let (body, certificate) = shaped(body, &cfg, &[("L50", 0x50)], &[]);
+        assert!(certificate.ok(), "{certificate}");
+        assert_eq!((returns(&body), gotos(&body), labels(&body)), (1, 0, 0));
     }
 
     #[test]

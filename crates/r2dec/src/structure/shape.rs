@@ -105,8 +105,8 @@ pub(crate) struct Evidence<'a> {
     pub(crate) distinct_return: &'a dyn Fn(u64) -> bool,
 }
 
-/// The structural rewrites (ADR §5): jumps to the next position go, a terminal block is copied to
-/// the sites that reach it, a skipped block to the arms that fall to it; labels nothing names go.
+/// The structural rewrites (ADR §5): jumps to the next position go, a skipped block is copied to the
+/// arms that fall to it, a terminal block to the sites that reach it; labels nothing names go.
 pub(crate) fn shape(occ: &mut Occurrences, ev: &Evidence<'_>, stmt: CStmt) -> CStmt {
     let mut stmt = stmt;
     let scope = Scope {
@@ -114,12 +114,11 @@ pub(crate) fn shape(occ: &mut Occurrences, ev: &Evidence<'_>, stmt: CStmt) -> CS
     };
     shape_stmt(&mut stmt, Cont::Unknown, &scope);
     drop_unreferenced_labels(&mut stmt);
-    // A terminal block shows as a tail once the jumps to the next position have gone.
-    super::tails::inline_tails(occ, ev, &mut stmt);
+    // A skipped block is copied while the jumps over it stand, which a terminal block's copies replace.
+    duplicate_skipped_tails(occ, &mut stmt);
     shape_stmt(&mut stmt, Cont::Unknown, &scope);
     drop_unreferenced_labels(&mut stmt);
-    // A skipped block shows only once the jumps to it have gone.
-    duplicate_skipped_tails(occ, &mut stmt);
+    super::tails::inline_tails(occ, ev, &mut stmt);
     shape_stmt(&mut stmt, Cont::Unknown, &scope);
     drop_unreferenced_labels(&mut stmt);
     stmt
@@ -374,12 +373,12 @@ fn duplicate_in_sequence(occ: &mut Occurrences, stmts: &mut Vec<CStmt>) {
     }
 }
 
-/// One block's text, straight-line: statements only, no label or jump.
+/// One block's text, straight-line: statements only, no label or jump, and nothing unproven.
 fn is_plain_block(stmt: &CStmt) -> bool {
     match stmt {
         CStmt::Observed { stmt, .. } => is_plain_block(stmt),
         CStmt::Block(stmts) => stmts.iter().all(is_plain_block),
-        CStmt::Expr(_) | CStmt::Empty | CStmt::Comment(_) => true,
+        CStmt::Expr(_) | CStmt::Empty | CStmt::Comment(_) => super::tails::copyable(stmt),
         _ => false,
     }
 }
@@ -562,7 +561,7 @@ fn shape_stmt(stmt: &mut CStmt, next: Cont, scope: &Scope) {
     }
 }
 
-fn collect_gotos(stmt: &CStmt, into: &mut BTreeSet<String>) {
+pub(super) fn collect_gotos(stmt: &CStmt, into: &mut BTreeSet<String>) {
     match stmt {
         CStmt::Observed { stmt, .. } => collect_gotos(stmt, into),
         CStmt::Block(stmts) => stmts.iter().for_each(|stmt| collect_gotos(stmt, into)),
