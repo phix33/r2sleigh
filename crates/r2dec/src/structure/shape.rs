@@ -642,3 +642,58 @@ pub(super) fn drop_unreferenced_labels(stmt: &mut CStmt) {
     collect_gotos(stmt, &mut referenced);
     drop_labels(stmt, &referenced);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(index: usize) -> RenderObservationId {
+        RenderObservationId::from_dense_index(index)
+    }
+
+    /// Markers 0 and 1, for blocks 0x10 and 0x20 and their instructions 0x11 and 0x21.
+    fn marks() -> Occurrences {
+        Occurrences::new(vec![0x10, 0x20], vec![0x11, 0x21])
+    }
+
+    #[test]
+    fn a_copy_is_a_marker_of_its_own_for_the_same_block_and_instruction() {
+        let mut marks = marks();
+        let copy = marks.copy_of(id(1));
+        assert_ne!(copy, id(1));
+        assert_eq!((marks.block_of(copy), marks.issued()), (Some(0x20), 3));
+        assert_eq!(marks.into_addresses(), [0x11, 0x21, 0x21]);
+    }
+
+    #[test]
+    fn fresh_text_replaces_each_marker_it_carries_with_a_copy() {
+        let mut marks = marks();
+        let text = CStmt::Block(vec![
+            CStmt::observe_all([id(0)], CStmt::Break),
+            CStmt::observe_all([id(1)], CStmt::Break),
+        ]);
+        let CStmt::Block(copies) = marks.fresh(&text) else {
+            panic!("a block stays a block");
+        };
+        let ids: Vec<_> = copies
+            .iter()
+            .flat_map(|c| c.observation_ids().into_owned())
+            .collect();
+        assert_eq!(ids, [id(2), id(3)]);
+        let blocks: Vec<_> = ids.iter().map(|id| marks.block_of(*id)).collect();
+        assert_eq!(blocks, [Some(0x10), Some(0x20)]);
+        assert_eq!(marks.issued(), 4);
+    }
+
+    #[test]
+    fn a_retraction_forgets_the_markers_minted_after_it_and_their_instructions() {
+        let mut marks = marks();
+        let before = marks.issued();
+        let copy = marks.copy_of(id(0));
+        marks.copy_of(id(1));
+        marks.retract(before);
+        assert_eq!((marks.issued(), marks.block_of(copy)), (before, None));
+        assert_eq!(marks.block_of(id(1)), Some(0x20));
+        assert_eq!(marks.into_addresses(), [0x11, 0x21]);
+    }
+}

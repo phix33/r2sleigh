@@ -458,3 +458,48 @@ pub(crate) fn residual_function_for_render_boundary(func_name: &str, reason: &st
             sanitize_comment_text(reason)
         ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(index: usize) -> RenderObservationId {
+        RenderObservationId::from_dense_index(index)
+    }
+
+    /// Markers 0 and 1 for blocks 0x10 and 0x20, the second on the body's one statement.
+    fn start() -> (CStmt, Occurrences) {
+        let body = CStmt::observe_all([id(1)], CStmt::Break);
+        (body, Occurrences::new(vec![0x10, 0x20], vec![0x11, 0x21]))
+    }
+
+    /// A stage that writes a copy of the body under a marker of its own, and one more marker.
+    fn copies(body: &mut CStmt, marks: &mut Occurrences) -> bool {
+        *body = marks.fresh(body);
+        marks.copy_of(id(0));
+        true
+    }
+
+    #[test]
+    fn a_stage_that_breaks_the_certificate_leaves_neither_its_text_nor_its_markers() {
+        let (body, mut marks) = start();
+        let refuse = |_: &CStmt, _: &Occurrences| Err("broken".to_owned());
+        let kept = stage("copies", body.clone(), &mut marks, &refuse, copies);
+        assert_eq!(kept, body);
+        assert_eq!((marks.issued(), marks.block_of(id(1))), (2, Some(0x20)));
+        assert_eq!(marks.into_addresses(), [0x11, 0x21]);
+    }
+
+    #[test]
+    fn a_stage_that_keeps_the_certificate_keeps_its_text_and_its_markers() {
+        let (body, mut marks) = start();
+        let accept = |candidate: &CStmt, marks: &Occurrences| {
+            let copied = candidate.observation_ids().into_owned();
+            assert_eq!((copied.len(), marks.block_of(copied[0])), (1, Some(0x20)));
+            Ok(())
+        };
+        let kept = stage("copies", body, &mut marks, &accept, copies);
+        assert_eq!(kept.observation_ids().into_owned(), [id(2)]);
+        assert_eq!(marks.issued(), 4);
+    }
+}
