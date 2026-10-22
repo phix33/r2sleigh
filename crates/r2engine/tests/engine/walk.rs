@@ -177,6 +177,24 @@ fn an_arm_inside_a_decoded_instruction_is_refused_naming_both_starts() {
     );
 }
 
+/// The arms 0x1002, 0x1005 and 0x1010, where the second is `jmp 0x1005`: an instruction states the start the first guessed.
+const OVERLAP_STATED: &[u8] = &[
+    0xff, 0xe0, 0x48, 0x83, 0xc6, 0x20, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3,
+    0xeb, 0xf3,
+];
+
+#[test]
+fn an_arm_overlap_a_later_arm_states_directly_is_no_stop() {
+    let dispatched = BTreeMap::from([(BASE, vec![0x1002, 0x1005, 0x1010])]);
+    let body = lift_body(BASE, &x86_64(), &reader(OVERLAP_STATED), &dispatched).expect("body");
+    let starts: Vec<_> = body.blocks.iter().map(|block| block.lifted.addr).collect();
+    assert!(
+        starts.contains(&0x1005) && starts.contains(&0x1002),
+        "{starts:x?}"
+    );
+    assert!(body.unresolved.is_empty(), "{:?}", body.unresolved);
+}
+
 /// je +1; lock cmpxchg [rcx], rdx; ret: glibc's branch past the `lock` prefix runs the instruction both ways.
 const PAST_LOCK: &[u8] = &[0x74, 0x01, 0xf0, 0x48, 0x0f, 0xb1, 0x11, 0xc3];
 

@@ -345,7 +345,11 @@ impl Trace {
 
     /// What the walk reached since it was last asked.
     pub fn reached(&mut self) -> Reached {
-        std::mem::take(&mut self.0.reached)
+        let walk = &mut self.0;
+        let mut reached = std::mem::take(&mut walk.reached);
+        reached.leaves = std::mem::take(&mut walk.leaving) || walk.unresolved.len() > walk.asked;
+        walk.asked = walk.unresolved.len();
+        reached
     }
 
     /// Whether each address an instruction states context for decodes in another context than the walk's.
@@ -469,6 +473,10 @@ struct Walk {
     /// Where the last decode left the decoder's context, which the lifter keeps for the next one where it follows on.
     context: Option<Continuation>,
     reached: Reached,
+    /// Whether an operation since the last ask leaves; stops are counted from `unresolved` past `asked`.
+    leaving: bool,
+    /// How many of `unresolved` the last ask reported.
+    asked: usize,
 }
 
 impl Walk {
@@ -504,6 +512,8 @@ impl Walk {
             supervisor: BTreeSet::new(),
             context: None,
             reached: Reached::default(),
+            leaving: false,
+            asked: 0,
         };
         let Some(first) = walk.decode(entry, disasm, program) else {
             return Err(match walk.unresolved.last().map(|stop| stop.reason) {
@@ -542,7 +552,7 @@ impl Walk {
             if !self.unresolved.iter().any(stopped) {
                 continue;
             }
-            self.unresolved.retain(|stop| !stopped(stop));
+            self.retract(stopped);
             self.dispatched.insert(addr, targets.clone());
             for target in targets.iter().collect::<BTreeSet<_>>() {
                 self.arms.insert(*target);
@@ -722,7 +732,6 @@ impl Walk {
     fn stop(&mut self, addr: u64, reason: UnresolvedReason) -> Option<Instruction> {
         r2il::refusal_evidence!("body-walk", "stopping at {:#x}: {:?}", addr, reason);
         self.unresolved.push(Unresolved { addr, reason });
-        self.reached.leaves = true;
         None
     }
 
@@ -738,9 +747,29 @@ impl Walk {
         successors.push(target);
     }
 
+    /// Drop the overlap stops at `addr`: an instruction states a start there, so it is no arm's guess.
+    fn retract_overlaps(&mut self, addr: u64) {
+        self.retract(|stop| {
+            stop.addr == addr && matches!(stop.reason, UnresolvedReason::Overlaps { .. })
+        });
+    }
+
+    /// Drop the stops `gone` names, keeping `asked` the count of reported stops still held.
+    fn retract(&mut self, gone: impl Fn(&Unresolved) -> bool) {
+        let (mut index, asked) = (0, self.asked);
+        self.unresolved.retain(|stop| {
+            index += 1;
+            let drop = gone(stop);
+            self.asked -= usize::from(drop && index <= asked);
+            !drop
+        });
+    }
+
     /// Follow a branch's target, a start the instruction states.
     fn branch(&mut self, target: u64, successors: &mut Vec<u64>, program: &dyn Program) {
-        self.direct.insert(target);
+        if self.direct.insert(target) {
+            self.retract_overlaps(target);
+        }
         self.transfer(target, successors, program);
     }
 
@@ -785,7 +814,7 @@ impl Walk {
             BlockTerminator::Branch { target } => self.branch(target, &mut successors, program),
             // The arm that leaves is a return or an indirect transfer, either of which may hand control back.
             BlockTerminator::ConditionalExit { next: after } => {
-                self.reached.leaves = true;
+                self.leaving = true;
                 self.continues(Some(after), &mut successors, program)
             }
             BlockTerminator::ConditionalBranch {
@@ -844,7 +873,7 @@ impl Walk {
             BlockTerminator::IndirectBranch | BlockTerminator::Switch { .. } => {
                 self.dispatch(addr, next, &mut successors, program)
             }
-            BlockTerminator::Return => self.reached.leaves = true,
+            BlockTerminator::Return => self.leaving = true,
             // A trap has nowhere to go.
             BlockTerminator::None => {}
         }
