@@ -197,7 +197,7 @@ double loop_sum(const double* v, int32_t n)
     struct r2sleigh_bits_256 z0_27;
     struct r2sleigh_bits_256 z0_28;
 
-    /* r2dec proof: no individual construct is marked; 91 source obligations: 91 rendered, 0 elided, 0 refused; 58 statements rendered */
+    /* r2dec proof: no individual construct is marked; 91 source obligations: 91 rendered, 0 elided, 0 refused; 57 statements rendered */
     {
         if ((uint8_t)((int32_t)n < (int32_t)1U)) {
             return (double)r2sleigh_float_from_bits_64((uint64_t)0U);
@@ -235,7 +235,7 @@ double loop_sum(const double* v, int32_t n)
                 {
                     if ((uint8_t)((uint64_t)x9_2 == (uint64_t)x8_1)) {
                         z0_28 = z0_21;
-                        goto L2;
+                        return (double)r2sleigh_float_from_bits_64(r2sleigh_bits_extract_256_64(z0_28, 0U));
                     } else {
                         x9_3 = x9_2;
                         z0_22 = z0_21;
@@ -269,7 +269,6 @@ double loop_sum(const double* v, int32_t n)
                 }
             }
             {
-L2: ;
                 return (double)r2sleigh_float_from_bits_64(r2sleigh_bits_extract_256_64(z0_28, 0U));
             }
         }

@@ -137,7 +137,7 @@ double loop_sum(const double* v, int32_t n)
     __uint128_t xmm0_17;
     __uint128_t xmm0_18;
 
-    /* r2dec proof: no individual construct is marked; 138 source obligations: 126 rendered, 12 elided, 0 refused; 63 statements rendered */
+    /* r2dec proof: no individual construct is marked; 138 source obligations: 126 rendered, 12 elided, 0 refused; 62 statements rendered */
     {
         tmp_1001574_0_1 = (uint32_t)n;
         if ((uint8_t)((int32_t)tmp_1001574_0_1 <= (int32_t)0U)) {
@@ -183,7 +183,7 @@ double loop_sum(const double* v, int32_t n)
                 {
                     if ((uint8_t)((uint64_t)rax_2 == (uint64_t)0U)) {
                         xmm0_17 = xmm0_13;
-                        goto L2;
+                        return (double)r2sleigh_float_from_bits_64((uint64_t)xmm0_17);
                     } else {
                         rcx_5 = rcx_4;
                         xmm0_14 = xmm0_13;
@@ -214,7 +214,6 @@ double loop_sum(const double* v, int32_t n)
                 }
             }
             {
-L2: ;
                 return (double)r2sleigh_float_from_bits_64((uint64_t)xmm0_17);
             }
         }

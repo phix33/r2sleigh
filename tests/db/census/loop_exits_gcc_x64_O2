@@ -104,7 +104,7 @@ uint64_t skip_then_find(uint64_t arg0, uint32_t arg1, uint32_t arg2)
     uint8_t tmp_4010d0_8_1;
     uint32_t tmp_lane_4010b0_6_0_1;
 
-    /* r2dec proof: no individual construct is marked; 79 source obligations: 69 rendered, 10 elided, 0 refused; 28 statements rendered; 1 data object type refused */
+    /* r2dec proof: no individual construct is marked; 79 source obligations: 69 rendered, 10 elided, 0 refused; 26 statements rendered; 1 data object type refused */
     {
         rcx_2 = 0;
         rdi_1 = arg0;
@@ -129,17 +129,13 @@ uint64_t skip_then_find(uint64_t arg0, uint32_t arg1, uint32_t arg2)
             } else {
                 rax_3 = rax_1;
                 rdx_2 = rdi_1;
-                for (; ; ) {
-                    if ((uint8_t)((uint32_t)((uint64_t)rax_3 >> 0U) != (uint32_t)arg1)) {
-                        tmp_4010d0_8_1 = r2sleigh_load_u8((void*)(uint64_t)((uint64_t)rdx_2 + (uint64_t)1U));
-                        if ((uint8_t)((uint8_t)tmp_4010d0_8_1 == (uint8_t)0U)) {
-                            return 0;
-                        } else {
-                            rax_3 = (uint64_t)(uint32_t)(int8_t)tmp_4010d0_8_1;
-                            rdx_2 = (uint64_t)((uint64_t)rdx_2 + (uint64_t)1U);
-                        }
+                while ((uint8_t)((uint32_t)((uint64_t)rax_3 >> 0U) != (uint32_t)arg1)) {
+                    tmp_4010d0_8_1 = r2sleigh_load_u8((void*)(uint64_t)((uint64_t)rdx_2 + (uint64_t)1U));
+                    if ((uint8_t)((uint8_t)tmp_4010d0_8_1 == (uint8_t)0U)) {
+                        return 0;
                     } else {
-                        break;
+                        rax_3 = (uint64_t)(uint32_t)(int8_t)tmp_4010d0_8_1;
+                        rdx_2 = (uint64_t)((uint64_t)rdx_2 + (uint64_t)1U);
                     }
                 }
                 {

@@ -394,7 +394,7 @@ uint64_t _state_machine(uint8_t* arg0)
     uint64_t x11_3;
     uint64_t x0_9;
 
-    /* r2dec proof: no individual construct is marked; 154 source obligations: 150 rendered, 4 elided, 0 refused; 78 statements rendered */
+    /* r2dec proof: no individual construct is marked; 154 source obligations: 150 rendered, 4 elided, 0 refused; 71 statements rendered */
     {
         tmp_1000006c8_8_1 = r2sleigh_load_u8((void*)(uint64_t)arg0);
         x11_1 = (uint64_t)(uint8_t)tmp_1000006c8_8_1;
@@ -424,7 +424,9 @@ uint64_t _state_machine(uint8_t* arg0)
                             if ((uint8_t)((uint32_t)(uint8_t)r2sleigh_int_carry_32((uint32_t)tmp_10000078c_0_1, (uint32_t)11U) & (uint32_t)(uint8_t)((uint32_t)((uint32_t)tmp_10000078c_0_1 + (uint32_t)11U) != (uint32_t)0U))) {
                                 x8_3 = x8_2;
                             } else {
-                                goto L4;
+                                {
+                                    return (uint64_t)(uint32_t)((uint32_t)((uint64_t)x0_2 >> 0U) + (uint32_t)100U);
+                                }
                             }
                         }
                     }
@@ -452,7 +454,7 @@ uint64_t _state_machine(uint8_t* arg0)
                                         x8_4 = x8_2;
                                         goto L1;
                                     } else {
-                                        goto L5;
+                                        return (uint64_t)(uint32_t)((uint32_t)((uint64_t)x0_2 >> 0U) + (uint32_t)200U);
                                     }
                                 }
                             }
@@ -461,7 +463,7 @@ uint64_t _state_machine(uint8_t* arg0)
                         if ((uint8_t)((uint32_t)((uint64_t)x10_2 >> 0U) != (uint32_t)0U)) {
                             if ((uint8_t)((uint32_t)((uint64_t)x11_2 >> 0U) != (uint32_t)120U)) {
                                 x0_9 = x0_2;
-                                goto L7;
+                                return (uint64_t)x0_9;
                             } else {
                                 x10_4 = 0;
                                 x8_4 = x8_2;
@@ -503,7 +505,7 @@ L1: ;
                     tmp_1000006f0_8_1 = r2sleigh_load_u8((void*)x9_2);
                     x11_3 = (uint64_t)(uint8_t)tmp_1000006f0_8_1;
                     if ((uint8_t)((uint32_t)((uint64_t)x11_3 >> 0U) == (uint32_t)0U)) {
-                        goto L6;
+                        return (uint64_t)(uint32_t)((uint32_t)((uint64_t)x10_4 >> 0U) + (uint32_t)((uint64_t)x8_4 >> 0U));
                     } else {
                         x0_2 = (uint64_t)(uint32_t)((uint32_t)((uint64_t)x0_2 >> 0U) - (uint32_t)1U);
                         x10_2 = x10_4;
@@ -516,23 +518,8 @@ L1: ;
             {
                 return (uint64_t)(uint32_t)((uint32_t)((uint64_t)x0_2 >> 0U) + (uint32_t)0x12cU);
             }
-            {
-L5: ;
-                return (uint64_t)(uint32_t)((uint32_t)((uint64_t)x0_2 >> 0U) + (uint32_t)200U);
-            }
-            {
-L4: ;
-                {
-                    return (uint64_t)(uint32_t)((uint32_t)((uint64_t)x0_2 >> 0U) + (uint32_t)100U);
-                }
-            }
-            {
-L6: ;
-                return (uint64_t)(uint32_t)((uint32_t)((uint64_t)x10_4 >> 0U) + (uint32_t)((uint64_t)x8_4 >> 0U));
-            }
         }
         {
-L7: ;
             return (uint64_t)x0_9;
         }
     }
@@ -1708,7 +1695,7 @@ uint64_t _mem_scan2(uint64_t arg0, uint64_t arg1, uint32_t arg2, uint32_t arg3)
     uint64_t tmp_100000b28_8_1;
     uint64_t x8_16;
 
-    /* r2dec proof: no individual construct is marked; 1466 source obligations: 1463 rendered, 3 elided, 0 refused; 1092 statements rendered */
+    /* r2dec proof: no individual construct is marked; 1466 source obligations: 1463 rendered, 3 elided, 0 refused; 1091 statements rendered */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return 0;
@@ -2588,7 +2575,7 @@ uint64_t _mem_scan2(uint64_t arg0, uint64_t arg1, uint32_t arg2, uint32_t arg3)
                         x8_7 = (uint64_t)((uint64_t)tmp_lane_100000954_1_2_1 + (uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)tmp_lane_1000009d0_0_2_1 + (uint64_t)tmp_lane_100000960_0_2_1) + (uint64_t)tmp_lane_1000009d0_1_2_1) + (uint64_t)tmp_lane_100000960_1_2_1) + (uint64_t)tmp_lane_1000009a0_0_2_1) + (uint64_t)tmp_lane_100000930_0_2_1) + (uint64_t)tmp_lane_1000009a0_1_2_1) + (uint64_t)tmp_lane_100000930_1_2_1) + (uint64_t)tmp_lane_1000009e8_0_2_1) + (uint64_t)tmp_lane_10000097c_0_2_1) + (uint64_t)tmp_lane_1000009e8_1_2_1) + (uint64_t)tmp_lane_10000097c_1_2_1) + (uint64_t)tmp_lane_1000009b8_0_2_1) + (uint64_t)tmp_lane_100000948_0_2_1) + (uint64_t)tmp_lane_1000009b8_1_2_1) + (uint64_t)tmp_lane_100000948_1_2_1) + (uint64_t)tmp_lane_1000009dc_0_2_1) + (uint64_t)tmp_lane_10000096c_0_2_1) + (uint64_t)tmp_lane_1000009dc_1_2_1) + (uint64_t)tmp_lane_10000096c_1_2_1) + (uint64_t)tmp_lane_1000009ac_0_2_1) + (uint64_t)tmp_lane_10000093c_0_2_1) + (uint64_t)tmp_lane_1000009ac_1_2_1) + (uint64_t)tmp_lane_10000093c_1_2_1) + (uint64_t)tmp_lane_1000009f4_0_2_1) + (uint64_t)tmp_lane_100000a1c_0_1_1) + (uint64_t)tmp_lane_1000009f4_1_2_1) + (uint64_t)tmp_lane_100000a1c_1_1_1) + (uint64_t)tmp_lane_1000009c4_0_2_1) + (uint64_t)tmp_lane_100000954_0_2_1) + (uint64_t)tmp_lane_1000009c4_1_2_1));
                         if ((uint8_t)((uint64_t)((uint64_t)arg1 & (uint64_t)-0x20) == (uint64_t)arg1)) {
                             x8_16 = x8_7;
-                            goto L4;
+                            return (uint64_t)x8_16;
                         } else {
                             if ((uint8_t)((uint64_t)((uint64_t)arg1 & (uint64_t)24U) == (uint64_t)0U)) {
                                 x8_13 = x8_7;
@@ -2793,7 +2780,7 @@ uint64_t _mem_scan2(uint64_t arg0, uint64_t arg1, uint32_t arg2, uint32_t arg3)
                         x8_12 = (uint64_t)((uint64_t)tmp_lane_100000adc_1_2_1 + (uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)tmp_lane_100000ae8_0_2_1 + (uint64_t)tmp_lane_100000ae0_0_2_1) + (uint64_t)tmp_lane_100000ae8_1_2_1) + (uint64_t)tmp_lane_100000ae0_1_2_1) + (uint64_t)tmp_lane_100000ae4_0_2_1) + (uint64_t)tmp_lane_100000adc_0_2_1) + (uint64_t)tmp_lane_100000ae4_1_2_1));
                         if ((uint8_t)((uint64_t)((uint64_t)arg1 & (uint64_t)-0x8) == (uint64_t)arg1)) {
                             x8_16 = x8_12;
-                            goto L4;
+                            return (uint64_t)x8_16;
                         } else {
                             x8_13 = x8_12;
                             x9_6 = (uint64_t)((uint64_t)arg1 & (uint64_t)-0x8);
@@ -2825,7 +2812,6 @@ L3: ;
                 }
             }
             {
-L4: ;
                 return (uint64_t)x8_16;
             }
         }

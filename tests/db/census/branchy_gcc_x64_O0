@@ -272,17 +272,16 @@ uint64_t gate_three(uint32_t arg0, uint32_t arg1, uint32_t arg2)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 28 source obligations: 21 rendered, 7 elided, 0 refused; 4 statements rendered */
+    /* r2dec proof: no individual construct is marked; 28 source obligations: 21 rendered, 7 elided, 0 refused; 5 statements rendered */
     {
         if ((uint8_t)((uint32_t)arg0 == (uint32_t)7U) && (uint8_t)((uint32_t)arg1 == (uint32_t)14U) && (uint8_t)((uint32_t)arg2 == (uint32_t)21U)) {
             rax_3 = 1;
+            return (uint64_t)rax_3;
         } else {
             {
                 rax_3 = 0;
+                return (uint64_t)rax_3;
             }
-        }
-        {
-            return (uint64_t)rax_3;
         }
     }
 }
@@ -326,18 +325,17 @@ uint64_t paired_sum_diff(uint32_t arg0, uint32_t arg1)
     uint32_t tmp_lane_4011f3_7_0_1;
     uint64_t rax_7;
 
-    /* r2dec proof: no individual construct is marked; 25 source obligations: 18 rendered, 7 elided, 0 refused; 5 statements rendered; the result's second register is open: no call read decides it */
+    /* r2dec proof: no individual construct is marked; 25 source obligations: 18 rendered, 7 elided, 0 refused; 6 statements rendered; the result's second register is open: no call read decides it */
     {
         tmp_lane_4011f3_7_0_1 = (uint32_t)((uint32_t)arg0 - (uint32_t)arg1);
         if ((uint8_t)((uint32_t)((uint32_t)arg1 + (uint32_t)arg0) == (uint32_t)250U) && (uint8_t)((uint32_t)tmp_lane_4011f3_7_0_1 == (uint32_t)30U)) {
             rax_7 = 1;
+            return (uint64_t)rax_7;
         } else {
             {
                 rax_7 = 0;
+                return (uint64_t)rax_7;
             }
-        }
-        {
-            return (uint64_t)rax_7;
         }
     }
 }
@@ -356,18 +354,17 @@ uint64_t mask_probe(uint8_t arg0)
     uint32_t tmp_lane_40121e_1_0_1;
     uint64_t rax_7;
 
-    /* r2dec proof: no individual construct is marked; 27 source obligations: 20 rendered, 7 elided, 0 refused; 5 statements rendered */
+    /* r2dec proof: no individual construct is marked; 27 source obligations: 20 rendered, 7 elided, 0 refused; 6 statements rendered */
     {
         tmp_lane_40121e_1_0_1 = (uint32_t)((uint64_t)(uint8_t)arg0 >> 0U);
         if ((uint8_t)((uint32_t)((uint32_t)tmp_lane_40121e_1_0_1 & (uint32_t)192U) == (uint32_t)64U) && (uint8_t)((uint32_t)((uint32_t)tmp_lane_40121e_1_0_1 & (uint32_t)7U) == (uint32_t)5U)) {
             rax_7 = 1;
+            return (uint64_t)rax_7;
         } else {
             {
                 rax_7 = 0;
+                return (uint64_t)rax_7;
             }
-        }
-        {
-            return (uint64_t)rax_7;
         }
     }
 }
@@ -386,18 +383,17 @@ uint64_t bounded_fetch(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
     uint32_t tmp_401282_0_1;
     uint64_t rax_8;
 
-    /* r2dec proof: no individual construct is marked; 25 source obligations: 18 rendered, 7 elided, 0 refused; 5 statements rendered */
+    /* r2dec proof: no individual construct is marked; 25 source obligations: 18 rendered, 7 elided, 0 refused; 6 statements rendered */
     {
         if ((uint8_t)((int32_t)arg1 >= (int32_t)0U) && (uint8_t)((int32_t)arg1 < (int32_t)arg2)) {
             tmp_401282_0_1 = r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)(int32_t)arg1 * 4U));
             rax_8 = (uint64_t)(uint32_t)tmp_401282_0_1;
+            return (uint64_t)rax_8;
         } else {
             {
                 rax_8 = (uint64_t)0xffffffffU;
+                return (uint64_t)rax_8;
             }
-        }
-        {
-            return (uint64_t)rax_8;
         }
     }
 }
@@ -805,17 +801,16 @@ uint64_t and_chain(uint32_t arg0, uint32_t arg1)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 19 source obligations: 12 rendered, 7 elided, 0 refused; 4 statements rendered */
+    /* r2dec proof: no individual construct is marked; 19 source obligations: 12 rendered, 7 elided, 0 refused; 5 statements rendered */
     {
         if ((uint8_t)((uint32_t)arg0 != (uint32_t)0U) && (uint8_t)((uint32_t)arg1 != (uint32_t)0U)) {
             rax_3 = 1;
+            return (uint64_t)rax_3;
         } else {
             {
                 rax_3 = 0;
+                return (uint64_t)rax_3;
             }
-        }
-        {
-            return (uint64_t)rax_3;
         }
     }
 }
@@ -1017,19 +1012,19 @@ uint64_t bool_relay(uint32_t arg0, uint32_t arg1)
     uint32_t tmp_lane_401731_0_1_1;
     uint64_t rax_8;
 
-    /* r2dec proof: no individual construct is marked; 32 source obligations: 25 rendered, 7 elided, 0 refused; 11 statements rendered */
+    /* r2dec proof: no individual construct is marked; 32 source obligations: 25 rendered, 7 elided, 0 refused; 10 statements rendered */
     {
         tmp_lane_401724_0_1_1 = (uint32_t)(uint8_t)((int32_t)0U < (int32_t)arg0);
         tmp_lane_401731_0_1_1 = (uint32_t)(uint8_t)((int32_t)0U < (int32_t)arg1);
         if ((uint8_t)((uint32_t)tmp_lane_401724_0_1_1 != (uint32_t)0U) && (uint8_t)((uint32_t)tmp_lane_401731_0_1_1 != (uint32_t)0U)) {
             rax_8 = 2;
-            goto L2;
+            return (uint64_t)rax_8;
         } else {
         }
         {
             if ((uint8_t)((uint32_t)tmp_lane_401724_0_1_1 == (uint32_t)0U) && (uint8_t)((uint32_t)tmp_lane_401731_0_1_1 == (uint32_t)0U)) {
                 rax_8 = 0;
-                goto L2;
+                return (uint64_t)rax_8;
             } else {
             }
             {
@@ -1037,7 +1032,6 @@ uint64_t bool_relay(uint32_t arg0, uint32_t arg1)
             }
         }
         {
-L2: ;
             return (uint64_t)rax_8;
         }
     }
