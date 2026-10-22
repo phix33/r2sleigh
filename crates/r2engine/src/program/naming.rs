@@ -365,7 +365,9 @@ pub fn imports(source: &impl Source, decoder: &Disassembler, alignment: u32) -> 
         .filter(|(start, end)| named.range(*start..*end).next().is_some());
     let mut sections = declared_sections.collect::<Vec<_>>();
     let slots: BTreeMap<u64, &str> = image.import_slots().collect();
-    if slots.is_empty() {
+    // A stub also jumps through a word no import binds (an `IRELATIVE` slot), so only an image whose
+    // loader writes nothing holds no stub.
+    if slots.is_empty() && image.loader_writes.is_empty() {
         sections.sort_unstable();
         return Linkage {
             stubs: named,

@@ -583,6 +583,18 @@ impl Literal {
         Self::plt_importing("_Exit")
     }
 
+    /// [`Self::plt`] with its one slot filled by an `IRELATIVE` resolver: no import is bound anywhere.
+    pub fn plt_resolved() -> Self {
+        let mut program = Self::plt();
+        program.container.relocations.clear();
+        for write in &mut program.container.loader_writes {
+            if matches!(write.kind, WriteKind::Import { .. }) {
+                write.kind = WriteKind::Resolver(BASE + 0x40);
+            }
+        }
+        program
+    }
+
     /// The same `.plt` padded as ld pads it, its sections aligned as ld
     /// states them.
     pub fn plt_nop_padded() -> Self {
