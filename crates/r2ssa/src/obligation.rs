@@ -1246,6 +1246,37 @@ impl SemanticObligationInventory {
         Some(self.owed(inst)?.state)
     }
 
+    /// Whether `block` owes nothing but the branch it ends in, its producers and the state they carry
+    /// (no load, store, call, trap or unknown effect), so its test may move. O(|block|).
+    pub fn owes_only_its_branch(&self, graph: &SsaGraph, block: crate::BlockId) -> bool {
+        let Some(block) = graph.block(block) else {
+            return false;
+        };
+        block.insts.iter().all(|inst| match self.state_of(*inst) {
+            Some(
+                SemanticInstructionState::ProvenDead
+                | SemanticInstructionState::StructuralControlOnly,
+            ) => true,
+            Some(SemanticInstructionState::LiveObligation) => {
+                self.obligations_for_inst(*inst).all(|owed| {
+                    matches!(
+                        owed.id.kind,
+                        SemanticObligationKind::ControlPredicate
+                            | SemanticObligationKind::ControlTransfer
+                            | SemanticObligationKind::LiveValueProducer
+                            | SemanticObligationKind::LiveStateTransition
+                            | SemanticObligationKind::LoopCarriedState
+                    )
+                })
+            }
+            Some(
+                SemanticInstructionState::UnsupportedUnknown
+                | SemanticInstructionState::CompilerInserted,
+            )
+            | None => false,
+        })
+    }
+
     fn owed(&self, inst: InstId) -> Option<&Owed> {
         self.instructions.get(inst.0 as usize)?.as_ref()
     }
@@ -2178,6 +2209,86 @@ mod tests {
             .next()
             .expect("its transfer");
         assert!(transfer.inputs.is_empty(), "{transfer:?}");
+    }
+
+    /// A block that copies, computes flags and branches owes nothing else; one that also stores,
+    /// loads, calls or does what the lift does not state owes an effect and keeps its test.
+    #[test]
+    fn a_block_owes_only_its_branch_when_it_compares_and_branches() {
+        let (rax, rdi) = (Varnode::register(0, 8), Varnode::register(8, 8));
+        let stored = R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: rdi.clone(),
+            val: Varnode::constant(1, 4),
+        };
+        let loaded = R2ILOp::Load {
+            dst: Varnode::unique(0x40, 4),
+            space: SpaceId::Ram,
+            addr: rdi.clone(),
+        };
+        let called = R2ILOp::Call {
+            target: Varnode::ram(0x4000, 8),
+        };
+        let unknown = R2ILOp::CallOther {
+            output: None,
+            userop: 7,
+            inputs: vec![rdi.clone()],
+        };
+        let owes_only_branch = |effect: Option<R2ILOp>| {
+            let mut test = R2ILBlock::new(0x1000, 4);
+            // A copy that carries state out, and the flags of a comparison, one folded into the other.
+            test.push(R2ILOp::Copy {
+                dst: rax.clone(),
+                src: rdi.clone(),
+            });
+            test.push(R2ILOp::IntLess {
+                dst: Varnode::unique(0x10, 1),
+                a: rdi.clone(),
+                b: Varnode::constant(5, 8),
+            });
+            test.push(R2ILOp::IntSBorrow {
+                dst: Varnode::unique(0x11, 1),
+                a: rdi.clone(),
+                b: Varnode::constant(5, 8),
+            });
+            test.push(R2ILOp::BoolOr {
+                dst: Varnode::unique(0x12, 1),
+                a: Varnode::unique(0x10, 1),
+                b: Varnode::unique(0x11, 1),
+            });
+            if let Some(effect) = effect {
+                test.push(effect);
+            }
+            test.push(R2ILOp::CBranch {
+                target: Varnode::ram(0x1100, 8),
+                cond: Varnode::unique(0x12, 1),
+            });
+            let spin = |addr: u64| {
+                let mut block = R2ILBlock::new(addr, 4);
+                block.push(R2ILOp::Branch {
+                    target: Varnode::ram(addr, 8),
+                });
+                block
+            };
+            let blocks = [test, spin(0x1004), spin(0x1100)];
+            let artifact =
+                SsaArtifact::raw(&blocks, Some(&x86_64_call_arch())).expect("SSA artifact");
+            let graph = artifact.graph();
+            let block = graph.block_id_for_addr(0x1000).expect("the test block");
+            artifact
+                .facts()
+                .obligations
+                .owes_only_its_branch(graph, block)
+        };
+        assert!(owes_only_branch(None));
+        for (what, effect) in [
+            ("a store", stored),
+            ("a load", loaded),
+            ("a call", called),
+            ("an operation the lift does not state", unknown),
+        ] {
+            assert!(!owes_only_branch(Some(effect)), "{what}");
+        }
     }
 
     #[test]
