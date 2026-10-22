@@ -2047,9 +2047,8 @@ impl<'a> Values<'a> {
         }
     }
 
-    /// Whether the return ending `addr` hands back a merge of its own block that every edge in
-    /// copies a value no other edge copies (ADR §5): the compiler merged returns of different
-    /// values into this block. A merge that carries itself on an edge, or one no copy writes, is not.
+    /// Whether the return ending `addr` hands back a merge of its block whose edges in copy
+    /// pairwise-distinct canonical terms: returns the compiler joined (ADR §5).
     pub(super) fn returns_distinct_merge(&self, addr: u64) -> bool {
         let Some((inst, SSAOp::Return { .. })) = self.terminator(addr) else {
             return false;

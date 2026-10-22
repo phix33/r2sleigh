@@ -1,11 +1,5 @@
-//! Dominator-tree placement, `doc/adr-structure-dominator-tree.md` §4.
-//!
-//! Every block is written once, in the region of its immediate dominator or
-//! in the exit list of the outermost loop it leaves, unless it is a sole exit
-//! whose dominator subtree is closed, which is written where the edge leaves;
-//! every edge is written once, as adjacency, an `if` or `switch` arm,
-//! `continue`, or `goto`. The shape is total for any CFG, and the certificate
-//! in `certify.rs` is what says the text it produced is the machine's graph.
+//! Dominator-tree placement, `doc/adr-structure-dominator-tree.md` §4: every block is written once,
+//! and every edge once; the certificate in `certify.rs` says the text is the machine's graph.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -207,10 +201,8 @@ impl<'f> Placement<'f> {
             && (self.exit_of(from, to).is_none() || self.inlined.contains(&to))
     }
 
-    /// An exit written after its loop is reached by `break` when it is the first and the edge
-    /// leaves one loop, and by `goto` otherwise. A `goto` to a block that has no other way in
-    /// and whose dominator subtree is closed is not needed: the block goes where the edge leaves
-    /// (ADR §4). `O(exits)`.
+    /// An exit with one way in and a closed subtree goes where its edge leaves, unless `break`
+    /// reaches it as the first exit of one loop (ADR §4). `O(exits)`.
     fn inline_exits(&mut self, closed: &HashSet<u64>) {
         let loops = self.exits.keys().copied().collect::<Vec<_>>();
         for index in loops {
@@ -239,9 +231,8 @@ impl<'f> Placement<'f> {
     }
 }
 
-/// The blocks whose dominator subtree no edge leaves: every successor of a block in it is in it.
-/// A subtree is the preorder interval of its root, so each block keeps the lowest and highest
-/// preorder position among its successors and the subtree takes the extremes. `O(B + E)`.
+/// The blocks whose dominator subtree no edge leaves: the extremes of the successors' preorder
+/// positions over the subtree lie in its interval. `O(B + E)`.
 fn closed_subtrees(cfg: &r2ssa::cfg::CFG, dom: &DomTree, placed: &BTreeSet<u64>) -> HashSet<u64> {
     let order = dom.preorder();
     let position: HashMap<u64, usize> = order.iter().enumerate().map(|(at, b)| (*b, at)).collect();

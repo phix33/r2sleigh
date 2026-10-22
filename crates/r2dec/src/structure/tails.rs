@@ -1,10 +1,5 @@
-//! Terminal tails, `doc/adr-structure-dominator-tree.md` §5.
-//!
-//! Placement writes a block with no way on once, behind a label, and every site that reaches it
-//! jumps or falls into it. A source that returned in several places reads as that block at each
-//! of them. A copy carries the block's whole (empty) out-edge set, which is what the
-//! certificate asks of a block written twice, so a copy placed where the edge did not go is
-//! refused there.
+//! Terminal tails, `doc/adr-structure-dominator-tree.md` §5: a block with no way on is copied to
+//! the sites that reach it; a copy keeps its empty out-edge set, so the certificate reads it.
 
 use std::collections::BTreeMap;
 
@@ -14,10 +9,8 @@ use crate::ast::CStmt;
 /// The most statements a block may have to be read as a tail.
 const TAIL_LIMIT: usize = 4;
 
-/// Each `goto` to a labelled terminal block of at most [`TAIL_LIMIT`] statements becomes a copy
-/// of it, and the block goes once nothing falls into it; then a `return` of a merge of
-/// pairwise-distinct values, which the arms of one conditional fall to, is copied into those
-/// arms. `O(size of the tree)` plus the copies, at most [`TAIL_LIMIT`] per site.
+/// A `goto` to a terminal block of at most [`TAIL_LIMIT`] statements becomes a copy of it; then a
+/// `return` of a merge of distinct values is copied into the arms falling to it. O(tree + copies).
 pub(super) fn inline_tails(occ: &mut Occurrences, ev: &Evidence<'_>, stmt: &mut CStmt) {
     let mut tails = BTreeMap::new();
     each_sequence(stmt, &mut |seq| {
@@ -79,9 +72,8 @@ fn each_sequence(stmt: &mut CStmt, visit: &mut dyn FnMut(&mut Vec<CStmt>)) {
     }
 }
 
-/// The label and live statements of a block that has no way on: at most [`TAIL_LIMIT`]
-/// expression statements, the last a `return` or a call to a callee that never returns, with no
-/// residual or gap in it (a copy would be a second site of the same unproven cell).
+/// The label and statements of a block with no way on: expressions, the last a `return` or a call
+/// that never returns, none a residual or gap (a copy would be a second site of the same cell).
 fn parse(items: &[CStmt], ev: &Evidence<'_>) -> Option<(Option<String>, Vec<CStmt>)> {
     let mut label = None;
     let mut stmts = Vec::new();

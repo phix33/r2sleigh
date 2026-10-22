@@ -105,9 +105,8 @@ pub(crate) struct Evidence<'a> {
     pub(crate) distinct_return: &'a dyn Fn(u64) -> bool,
 }
 
-/// The structural rewrites, in order: jumps to the next position and to the end of a breakable
-/// go, unreferenced labels go, a terminal block is copied to the sites that reach it, and a
-/// skipped block is copied into the arms that fall to it.
+/// The structural rewrites (ADR §5): jumps to the next position go, a terminal block is copied to
+/// the sites that reach it, a skipped block to the arms that fall to it; labels nothing names go.
 pub(crate) fn shape(occ: &mut Occurrences, ev: &Evidence<'_>, stmt: CStmt) -> CStmt {
     let mut stmt = stmt;
     let scope = Scope {
