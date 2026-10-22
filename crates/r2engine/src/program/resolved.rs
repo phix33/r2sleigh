@@ -253,21 +253,27 @@ struct Assumed {
     floor: bool,
     /// Where the member's result is open: the result assumed, `None` inside being unstated, the top.
     result: Option<Option<SourceResultSeed>>,
+    /// The result an untracked member states in its own right, which no member can move.
+    kept: Option<SourceResultSeed>,
     interface: SourceFunctionInterface,
 }
 
 impl Assumed {
     /// What a read states: exact arity where `exact`, the seed as the result where `track`, else
-    /// the read's own with the result stripped.
+    /// the result the read states of its own (nothing waits on it).
     fn of(read: &CalleeRead, exact: bool, track: bool) -> Option<Self> {
         let interface = read.interface.as_ref()?;
         let cause = interface.arity_floor().filter(|_| !exact);
         let result = track.then(|| interface.unproven_result().and_then(|r| r.seed()));
+        let kept = interface.stated_result().filter(|_| !track);
         Some(Self {
             count: interface.arity().floor(),
             floor: cause.is_some(),
             result,
-            interface: interface.clone().assumed(cause.cloned(), result.flatten()),
+            kept,
+            interface: interface
+                .clone()
+                .assumed(cause.cloned(), result.flatten().or(kept)),
         })
     }
 
@@ -307,11 +313,13 @@ impl Assumed {
             true => interface.clone(),
             false => held.interface.clone(),
         };
-        let interface = from.assumed(cause.filter(|_| floor).cloned(), result.flatten());
+        let seed = result.flatten().or(held.kept);
+        let interface = from.assumed(cause.filter(|_| floor).cloned(), seed);
         *held = Self {
             count,
             floor,
             result,
+            kept: held.kept,
             interface,
         };
         true
