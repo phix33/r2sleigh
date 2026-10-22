@@ -72,9 +72,10 @@ slot along a chain of blocks each entered only from the one before, and no write
 overlap, call or opaque operation runs between them. The value solver reads such a load as that earlier
 load under what its block assumes, so `cmp dword [rsp + 0x10], 0x11; ja` bounds the index a later
 `mov eax, [rsp + 0x10]` feeds a jump table (libc-2.31 `clnt_sperror`). A slot nothing escapes is promoted to a
-value (P4.3) and needs none of this. Memory SSA cannot own the fact: the object model it is built over
-reads the value ranges. Cost `O(ops)` plus a clone of the held slots at each branch; a write to another
-exact slot keeps what is held, any other write drops all of it. Stack slots only: a pointer's reload is the
+value (P4.3) and needs none of this. Memory SSA cannot own the fact: the object model it is built over reads the value ranges. Cost
+`O(ops log h)` for `h` held slots: one table is walked down the chains with an undo trail, so a branch copies
+nothing, a clobber moves the table into the trail in `O(1)`, and a store to an exact slot keeps what it
+misses, looking only at the slots within 64 bytes of it; any other write drops all of it. Stack slots only: a pointer's reload is the
 same fact but a volatile or device read is not, and nothing in the IR says which.
 
 ## Done
