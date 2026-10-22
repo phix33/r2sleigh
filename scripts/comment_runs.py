@@ -160,6 +160,9 @@ def grown_runs(base: str, head: str) -> dict[str, list[Run]]:
         if not in_scope(new):
             continue
         lines = lines_of(git("show", f"{head}:{new}"))
+        # A file moved in from outside the scope has no base here: its runs are new to the ratchet.
+        if old is not None and not in_scope(old):
+            old = None
         if old is None:
             before, hunks = [], [Hunk(0, 0, 0, len(lines))]
         else:

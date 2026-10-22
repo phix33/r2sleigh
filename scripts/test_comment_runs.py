@@ -228,6 +228,21 @@ class AgainstGit(unittest.TestCase):
         self.commit("and one line longer")
         self.assertEqual(self.gate(), 1)
 
+    def moved_in_from(self, outside: str) -> None:
+        self.write(outside, "// 1\n// 2\n// 3\nfn a() {}\n")
+        self.commit("outside")
+        self.fork_here()
+        self.git("mv", outside, "crates/r2ssa/src/entered.rs")
+        self.commit("entered")
+        self.assertEqual(self.gate(), 1)
+        self.assertEqual(self.grown(), {"crates/r2ssa/src/entered.rs": [comment_runs.Run(1, 3, 3, 0)]})
+
+    def test_a_file_moved_into_the_scope_from_vendor_is_new(self) -> None:
+        self.moved_in_from("vendor/x/old.rs")
+
+    def test_a_file_moved_into_the_scope_from_a_build_directory_is_new(self) -> None:
+        self.moved_in_from("crates/r2ssa/target/old.rs")
+
     def test_files_outside_the_ratchets_scope_are_not_read(self) -> None:
         long = "// a\n// b\n// c\n"
         self.write("vendor/libsla/src/lib.rs", long)
