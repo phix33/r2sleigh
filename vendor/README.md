@@ -11,7 +11,7 @@ specifications do (ROADMAP D33). Each pin is in the table under Upstream pins.
 
 | Processor | Ghidra | Carried on that text (below) |
 |---|---|---|
-| x86 | master `918acd744d` | AF; RDRAND r32's r/m register; SHR/SHRD OF at count 1; CVTTSD2SI/CVTTSS2SI's integer indefinite; VEX VPEXTRW 0F3A 15's r/m register; PREFETCHh and MPX decoded where the `0F 18`-`0F 1F` hint NOP took them; the Go cspec's RDX (fork #2) |
+| x86 | master `918acd744d` | AF; RDRAND r32's r/m register; SHR/SHRD OF at count 1; CVTTSD2SI/CVTTSS2SI's integer indefinite; VEX VPEXTRW 0F3A 15's r/m register; PREFETCHh and MPX decoded where the `0F 18`-`0F 1F` hint NOP took them, with BNDLDX and BNDSTX user operations (`bndldx_op`, `bndstx_op`) where Ghidra reads and writes the effective address (fork pull request and Ghidra issue owed); the Go cspec's RDX (fork #2) |
 | ARM | master `918acd744d` | the hidden scratch marks; `ARM.cspec`'s `<returnaddress>` (fork #1) |
 | AARCH64 | master `918acd744d` | the fork's #2 to #15; #16 and #17; `AtomicBegin`/`AtomicEnd` on the LSE atomics; `fcvtzu`'s full-width scale; CSSC's W forms; the hidden scratch marks; `AARCH64_apple.cspec`'s `<returnaddress>` x30, which Ghidra master omits (fork pull request owed) |
 | MIPS | master `918acd744d` | none |
@@ -100,6 +100,8 @@ with no matching prefix is still the hint NOP, where they matched and then faile
 resolve their memory operand (Intel SDM Vol. 2, PREFETCHh and the MPX chapter;
 `crates/r2sleigh-lift/tests/x86_hints.rs`). No oracle case: a prefetch changes no state,
 and the recording CPU has no MPX, where `bndmov` would execute as a NOP.
+BNDLDX and BNDSTX go through the bounds directory, not the effective address, so they lift to the
+user operations `bndldx_op`, `bndstx_op` (unmodelled: eval stops, dataflow refuses), where Ghidra read and wrote `[Mem]`.
 
 Carried in this tree, not yet in the fork or in Ghidra (a sleigh-config pull
 request and a Ghidra issue owed; 918acd744d still says `# AF not implemented`): x86's

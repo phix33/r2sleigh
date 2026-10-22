@@ -4,6 +4,7 @@
 
 mod x86_machine;
 
+use r2il::R2ILOp;
 use x86_machine::{HELD, Machine};
 
 fn spelled(bytes: &[u8]) -> String {
@@ -51,8 +52,6 @@ fn a_bound_move_loads_the_bound_register() {
     // bndmov bnd0, [rsi]: 16 bytes in 64-bit mode
     let state = machine.run(&[0x66, 0x0f, 0x1a, 0x06], &[]);
     assert_eq!(machine.read(&state, "BND0"), HELD);
-    // bndldx bnd0, [rsi] (no prefix) reads the same cell in this model
-    assert!(spelled(&[0x0f, 0x1a, 0x06]).starts_with("bndldx"));
     // bndmov bnd0, bnd1 (66 0F 1A /r, mod 3): the register form copies the 16 bytes
     let state = machine.run(&[0x66, 0x0f, 0x1a, 0xc1], &[("BND1", HELD)]);
     assert_eq!(machine.read(&state, "BND0"), HELD);
@@ -62,4 +61,26 @@ fn a_bound_move_loads_the_bound_register() {
 fn a_bound_move_register_form_without_a_prefix_stays_the_hint_nop() {
     assert!(spelled(&[0x0f, 0x1a, 0xc0]).starts_with("nop"));
     assert!(spelled(&[0x0f, 0x1b, 0xc0]).starts_with("nop"));
+}
+
+#[test]
+fn the_bounds_table_forms_state_no_access_to_their_operand() {
+    // BNDLDX and BNDSTX go through the bounds directory, not the effective address.
+    let machine = Machine::x86_64();
+    for (bytes, name) in [
+        ([0x0f, 0x1a, 0x06], "bndldx"),
+        ([0x0f, 0x1b, 0x06], "bndstx"),
+    ] {
+        assert!(spelled(&bytes).starts_with(name), "{bytes:02x?}");
+        let ops = machine.lift(&bytes);
+        assert!(
+            ops.iter().any(|op| matches!(op, R2ILOp::CallOther { .. })),
+            "{name}: {ops:?}"
+        );
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, R2ILOp::Load { .. } | R2ILOp::Store { .. })),
+            "{name} models no access to [rsi]: {ops:?}"
+        );
+    }
 }

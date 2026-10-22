@@ -1,4 +1,9 @@
 define pcodeop br_exception;
+# The bounds directory and tables are not modelled: BNDLDX and BNDSTX state no access to Mem.
+define pcodeop bndldx_op;
+define pcodeop bndldx_lb_op;
+define pcodeop bndldx_ub_op;
+define pcodeop bndstx_op;
 
 
 # BNDMK needs the base address register only
@@ -101,8 +106,8 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
 #	BNDSTATUS = bndldx_status( Mem, BNDCFGS, BNDCFGU );
 #	bnd1      = bndldx( Mem, BNDCFGS, BNDCFGU );
 	
-# core implementation
-   bnd1 = *:16 Mem;
+# the bounds directory is not modelled
+   bnd1 = bndldx_op(Mem);
 }
 
 :BNDMK bnd1, Mem      is $(LONGMODE_ON) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F3) & byte=0x0F; byte=0x1B; (mod != 0b11 & bnd1 & bnd1_lb & bnd1_ub ) ... & ( bndmk_addr64 & Mem ) {
@@ -132,8 +137,8 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
 #	BNDSTATUS = bndstx_status( bnd1, BNDCFGS, BNDCFGU );
 #	Mem       = bndstx( bnd1, BNDCFGS, BNDCFGU );
 
-# core implementation
-   *:16 Mem = bnd1;
+# the bounds directory is not modelled
+   bndstx_op(Mem, bnd1);
 }
 
 @endif
@@ -191,11 +196,9 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
 #	BNDSTATUS = bndldx_status( Mem, BNDCFGS, BNDCFGU );
 #	bnd1      = bndldx( Mem, BNDCFGS, BNDCFGU );
 	
-# core implementation
-   tmp:8 = *:8 Mem;
-   bnd1_lb = zext(tmp:4);
-   tmp2:4 = tmp(4);
-   bnd1_ub = zext(tmp2);
+# the bounds directory is not modelled
+   bnd1_lb = bndldx_lb_op(Mem);
+   bnd1_ub = bndldx_ub_op(Mem);
 }
 
 :BNDMK bnd1, Mem      is $(LONGMODE_OFF) & vexMode=0 & (opsize=0 | opsize=1 | opsize=2 | opsize=3) & $(PRE_F3) & byte=0x0F; byte=0x1B; (mod != 0b11 & bnd1 & bnd1_lb & bnd1_ub ) ... & ( bndmk_addr32 & Mem ) {
@@ -228,7 +231,7 @@ bndmk_addr32: [Base]							is mod=2 & r_m=4; index=4 & Base; imm32=0		{ export B
 #	BNDSTATUS = bndstx_status( bnd1, BNDCFGS, BNDCFGU );
 #	Mem       = bndstx( bnd1, BNDCFGS, BNDCFGU );
 
-# core implementation
-   *:8 Mem = (zext(bnd1_ub:4) << 32) | zext(bnd1_lb:4);
+# the bounds directory is not modelled
+   bndstx_op(Mem, bnd1_lb, bnd1_ub);
 }
 
