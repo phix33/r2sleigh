@@ -82,30 +82,52 @@ pub fn render(
     let control::Written {
         body,
         labels,
-        mut blocks,
-        mut addresses,
+        blocks,
+        addresses,
         ..
     } = written;
-    // D1.1: SD's readability rewrites; a block's text they copy is a new occurrence of its block.
-    let mut fresh = |stmt: &CStmt| {
-        control::remint(stmt, &mut |id| {
-            let at = id.index() as usize;
-            let copy = crate::ast::RenderObservationId::from_dense_index(blocks.len());
-            blocks.push(blocks[at]);
-            addresses.push(addresses[at]);
-            copy
-        })
-    };
-    let mut body = crate::structure::shape::shape(&mut fresh, CStmt::Block(body));
-    let selections = select(&c, &mut body, &|id| {
-        blocks.get(id.index() as usize).copied()
-    });
+    let mut marks = BlockMarks { blocks, addresses };
     let never_return = values
         .as_ref()
         .map(values::Values::never_returning)
         .unwrap_or_default();
+    let unselected = std::collections::BTreeSet::new();
+    // D1.1: SD's stages. Each is kept only while the control certificate still holds (ADR §5).
+    let certified = |stmt: &CStmt, blocks: &[u64]| {
+        let role = |stmt: &CStmt| statement_role(stmt, &never_return, &unselected);
+        let certificate = control_certificate(input, stmt, blocks, &labels, &role);
+        match certificate.ok() {
+            true => Ok(()),
+            false => Err(format!(
+                "{certificate} {:?}",
+                certificate.violations.first()
+            )),
+        }
+    };
+    let body = stage(
+        "condition chains",
+        CStmt::Block(body),
+        &mut marks,
+        &certified,
+        |body, marks| {
+            let inert = |addr: u64| owes_only_its_branch(input, addr);
+            crate::structure::condition::collapse(body, marks, &inert).collapsed != 0
+        },
+    );
+    // The readability rewrites below copy a block's text as a new occurrence of that block.
+    let mut fresh = |stmt: &CStmt| {
+        control::remint(stmt, &mut |id| {
+            crate::structure::condition::Marks::copy_of(&mut marks, id)
+        })
+    };
+    let mut body = crate::structure::shape::shape(&mut fresh, body);
+    let BlockMarks { blocks, addresses } = marks;
+    let selections = select(&c, &mut body, &|id| {
+        blocks.get(id.index() as usize).copied()
+    });
     let role = |stmt: &CStmt| statement_role(stmt, &never_return, &selections);
     certify_control(input, &body, &blocks, &labels, &role)?;
+    crate::structure::condition::respell_negations(&mut body);
     // What remains is linear emission of a certified body, so a stop here keeps what was reached.
     let stopped = work.with_phase(DecompileWorkPhase::Rendering).poll().err();
     match &values {
@@ -181,20 +203,20 @@ fn ready_with_carriers(c: CFunction, tags: &tags::Tags) -> crate::codegen::Emiss
     ready
 }
 
-/// SD's §3 certificate over the shaped body, or the refusal that names its first violation.
-fn certify_control(
+/// SD's §3 certificate over a body.
+fn control_certificate(
     input: &RenderInput<'_>,
     body: &CStmt,
     blocks: &[u64],
     labels: &BTreeMap<u64, String>,
     role: &dyn Fn(&CStmt) -> StatementRole,
-) -> Result<(), RenderStop> {
+) -> crate::structure::certify::ControlCertificate {
     let function = input.function();
     let label_block = labels
         .iter()
         .map(|(addr, name)| (name.as_str(), *addr))
         .collect::<BTreeMap<_, _>>();
-    let certificate = crate::structure::certify::certify(
+    crate::structure::certify::certify(
         body,
         function.cfg(),
         function.domtree(),
@@ -202,7 +224,19 @@ fn certify_control(
         &|id| blocks.get(id.index() as usize).copied(),
         &|name| label_block.get(name).copied(),
         role,
-    );
+        &|addr| owes_only_its_branch(input, addr),
+    )
+}
+
+/// The certificate over the shaped body, or the refusal that names its first violation.
+fn certify_control(
+    input: &RenderInput<'_>,
+    body: &CStmt,
+    blocks: &[u64],
+    labels: &BTreeMap<u64, String>,
+    role: &dyn Fn(&CStmt) -> StatementRole,
+) -> Result<(), RenderStop> {
+    let certificate = control_certificate(input, body, blocks, labels, role);
     if certificate.ok() {
         return Ok(());
     }
@@ -210,6 +244,65 @@ fn certify_control(
         "control certificate: {certificate} {:?}",
         certificate.violations.first()
     )))
+}
+
+/// The block and instruction each marker of the body stands for, which a stage may add to.
+struct BlockMarks {
+    blocks: Vec<u64>,
+    addresses: Vec<u64>,
+}
+
+impl crate::structure::condition::Marks for BlockMarks {
+    fn block_of(&self, id: RenderObservationId) -> Option<u64> {
+        self.blocks.get(id.index() as usize).copied()
+    }
+
+    fn copy_of(&mut self, id: RenderObservationId) -> RenderObservationId {
+        let at = id.index() as usize;
+        let copy = RenderObservationId::from_dense_index(self.blocks.len());
+        self.blocks.push(self.blocks[at]);
+        self.addresses.push(self.addresses[at]);
+        copy
+    }
+}
+
+/// The control certificate over a candidate body and its markers' blocks: `Err` names the first violation.
+type Certified<'a> = dyn Fn(&CStmt, &[u64]) -> Result<(), String> + 'a;
+
+/// Run one structure stage on `body`; its result stands only if the certificate still holds.
+/// `apply` says whether it changed anything, and an unchanged body is not certified again.
+fn stage(
+    name: &str,
+    body: CStmt,
+    marks: &mut BlockMarks,
+    certified: &Certified<'_>,
+    apply: impl FnOnce(&mut CStmt, &mut BlockMarks) -> bool,
+) -> CStmt {
+    let (blocks, addresses) = (marks.blocks.len(), marks.addresses.len());
+    let mut candidate = body.clone();
+    if !apply(&mut candidate, marks) {
+        return body;
+    }
+    match certified(&candidate, &marks.blocks) {
+        Ok(()) => candidate,
+        Err(why) => {
+            r2il::refusal_evidence!(
+                "stage-reverted",
+                "{name} broke the control certificate: {why}"
+            );
+            marks.blocks.truncate(blocks);
+            marks.addresses.truncate(addresses);
+            body
+        }
+    }
+}
+
+/// Whether the block at `addr` owes the program nothing but the branch it ends in (r2ssa).
+fn owes_only_its_branch(input: &RenderInput<'_>, addr: u64) -> bool {
+    let graph = input.graph();
+    graph
+        .block_id_for_addr(addr)
+        .is_some_and(|block| input.obligations().owes_only_its_branch(graph, block))
 }
 
 /// D1.1's selections, each arm converted to `x`'s type as its own assignment converted it.

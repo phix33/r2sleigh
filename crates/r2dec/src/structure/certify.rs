@@ -100,6 +100,11 @@ pub(crate) enum Violation {
     Selection {
         block: u64,
     },
+    /// A test written as a chain of blocks that the machine's branches do not make.
+    Chain {
+        block: u64,
+        fault: super::condition::ChainFault,
+    },
     /// The occurrence's edges are not the block's edges.
     EdgeMismatch {
         block: u64,
@@ -125,6 +130,7 @@ impl Violation {
             Self::FallsOffEnd { .. } => "falls-off-end",
             Self::ReturnWhereMachineContinues { .. } => "return-where-machine-continues",
             Self::Selection { .. } => "selection",
+            Self::Chain { .. } => "chain",
             Self::EdgeMismatch { .. } => "edge-mismatch",
         }
     }
@@ -157,6 +163,7 @@ impl fmt::Display for Violation {
             Self::UnownedControl { kind, open } => write!(f, " {kind} open-ends={open}"),
             Self::StrayBreak | Self::StrayContinue | Self::EmptyLoopBody => Ok(()),
             Self::SwitchValue { block } | Self::Selection { block } => write!(f, " at {block:#x}"),
+            Self::Chain { block, fault } => write!(f, " at {block:#x}: {fault}"),
             Self::TerminalFallthrough { block, to } | Self::UnresolvedIndirect { block, to } => {
                 write!(f, " {block:#x} -> {to}")
             }
@@ -290,6 +297,8 @@ struct Walker<'a> {
     /// The next statement starts a position of its own: the function's
     /// first, or a do-while body's entry.
     force_open: bool,
+    /// By occurrence: the chain its test is written as, when it is one.
+    chains: BTreeMap<usize, super::condition::Written>,
 }
 
 impl Walker<'_> {
@@ -344,6 +353,20 @@ impl Walker<'_> {
                 });
                 None
             }
+        }
+    }
+
+    /// Take the chain `test` is written as, when its atoms carry blocks' markers.
+    fn note_test(&mut self, owner: usize, test: &CExpr) {
+        match super::condition::read(test, self.block_of) {
+            Ok(Some(written)) => {
+                self.chains.insert(owner, written);
+            }
+            Ok(None) => {}
+            Err(fault) => self.violations.push(Violation::Chain {
+                block: self.occurrences[owner].block,
+                fault,
+            }),
         }
     }
 
@@ -461,13 +484,14 @@ impl Walker<'_> {
                 Vec::new()
             }
             CStmt::If {
+                cond,
                 then_body,
                 else_body,
-                ..
             } => {
                 let Some(owner) = self.single_owner(&open, "if") else {
                     return Vec::new();
                 };
+                self.note_test(owner, cond);
                 let mut ends = self.walk(then_body, vec![(owner, EdgeLabel::True)]);
                 match else_body {
                     Some(else_body) => {
@@ -646,10 +670,11 @@ impl Walker<'_> {
         };
         let block = self.occurrences[owner].block;
         let arms = selected_arms(selection).filter(|_| tests(&block));
-        let Some(arms) = arms else {
+        let Some((test, arms)) = arms else {
             self.violations.push(Violation::Selection { block });
             return Vec::new();
         };
+        self.note_test(owner, test);
         let mut ends = Vec::new();
         for (arm, label) in arms.into_iter().zip([EdgeLabel::True, EdgeLabel::False]) {
             let mut named = arm
@@ -682,8 +707,26 @@ impl Walker<'_> {
         }
         let from = self.occurrences[open[0].0].block;
         from != block
-            && self.cfg.successors(from).contains(&block)
+            && self.leaves_to(open[0].0).contains(&block)
             && !self.dom.dominates(block, from)
+    }
+
+    /// The blocks control can go to from an occurrence: its block's successors, or, where its test
+    /// is a chain, the blocks the chain's tests lead out to.
+    fn leaves_to(&self, occurrence: usize) -> Vec<u64> {
+        let from = self.occurrences[occurrence].block;
+        let Some(written) = self.chains.get(&occurrence) else {
+            return self.cfg.successors(from);
+        };
+        let tested: BTreeSet<u64> = written.blocks.iter().copied().collect();
+        let mut out: Vec<u64> = tested
+            .iter()
+            .flat_map(|block| self.cfg.successors(*block))
+            .filter(|next| !tested.contains(next))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     fn walk_pre_test_loop(&mut self, body: &CStmt, open: Vec<OpenEnd>) -> Vec<OpenEnd> {
@@ -865,8 +908,9 @@ impl Walker<'_> {
     }
 }
 
-/// A selection's two values, then and else, when it assigns a plain variable and neither writes.
-fn selected_arms(selection: &CExpr) -> Option<[&CExpr; 2]> {
+/// A selection's test, and its two values, then and else, when it assigns a plain variable and
+/// neither writes.
+fn selected_arms(selection: &CExpr) -> Option<(&CExpr, [&CExpr; 2])> {
     let CExpr::Binary {
         op: crate::ast::BinaryOp::Assign,
         left,
@@ -876,16 +920,16 @@ fn selected_arms(selection: &CExpr) -> Option<[&CExpr; 2]> {
         return None;
     };
     let CExpr::Ternary {
+        cond,
         then_expr,
         else_expr,
-        ..
     } = right.unobserved()
     else {
         return None;
     };
     let plain = left.observation_ids().is_empty() && matches!(left.unobserved(), CExpr::Var(_));
     (plain && right.observation_ids().is_empty() && !writes(then_expr) && !writes(else_expr))
-        .then_some([then_expr.as_ref(), else_expr.as_ref()])
+        .then_some((cond.as_ref(), [then_expr.as_ref(), else_expr.as_ref()]))
 }
 
 /// Whether evaluating `expr` writes: one write in a selected value is a second effect the arm made.
@@ -1078,6 +1122,49 @@ fn switch_edges_agree(rendered: &[(Target, EdgeLabel)], expected: &[(Target, Edg
     })
 }
 
+/// The edges a chain's head has: each exit of the blocks the test names, labelled by the side
+/// of the test that reaches it.
+fn chain_exits(
+    cfg: &CFG,
+    head: u64,
+    written: &super::condition::Written,
+    contract: &dyn Fn(u64) -> Target,
+    inert: &dyn Fn(u64) -> bool,
+) -> Result<Vec<(Target, EdgeLabel)>, super::condition::ChainFault> {
+    let successors = |addr: u64| match cfg.get_block(addr).map(|block| &block.terminator) {
+        Some(BlockTerminator::ConditionalBranch {
+            true_target,
+            false_target,
+        }) if true_target != false_target => Some((*true_target, *false_target)),
+        _ => None,
+    };
+    let entered_from_outside = |addr: u64, chain: &BTreeSet<u64>| {
+        cfg.predecessors(addr)
+            .into_iter()
+            .any(|pred| !chain.contains(&pred))
+    };
+    let exits = super::condition::exits(
+        head,
+        written,
+        &successors,
+        contract,
+        inert,
+        &entered_from_outside,
+    )?;
+    let mut edges: Vec<_> = exits
+        .into_iter()
+        .map(|(target, true_side)| {
+            let label = match true_side {
+                true => EdgeLabel::True,
+                false => EdgeLabel::False,
+            };
+            (target, label)
+        })
+        .collect();
+    edges.sort();
+    Ok(edges)
+}
+
 /// Read the body back as a control graph and compare it with the CFG.
 ///
 /// `block_of` says which block an observed statement was emitted for, and
@@ -1090,6 +1177,7 @@ pub(crate) fn certify<R: Into<StatementRole>>(
     block_of: &dyn Fn(RenderObservationId) -> Option<u64>,
     label_block: &dyn Fn(&str) -> Option<u64>,
     role: &dyn Fn(&CStmt) -> R,
+    inert: &dyn Fn(u64) -> bool,
 ) -> ControlCertificate {
     let mut walker = Walker {
         cfg,
@@ -1102,6 +1190,7 @@ pub(crate) fn certify<R: Into<StatementRole>>(
         violations: Vec::new(),
         first_block: None,
         force_open: true,
+        chains: BTreeMap::new(),
     };
     let ends = walker.walk(body, Vec::new());
     for (id, _) in ends {
@@ -1111,6 +1200,7 @@ pub(crate) fn certify<R: Into<StatementRole>>(
         occurrences,
         mut violations,
         first_block,
+        chains,
         ..
     } = walker;
     let mut count = BTreeMap::<u64, usize>::new();
@@ -1153,10 +1243,43 @@ pub(crate) fn certify<R: Into<StatementRole>>(
         violations.push(Violation::EntryNotFirst { first: first_block });
     }
 
+    // A test written as a chain stands for the blocks it tests: its head's edges are the
+    // chain's exits, and the blocks past the head are written nowhere else.
+    let mut chain_members = BTreeSet::new();
+    let mut chain_edges = BTreeMap::<usize, Vec<(Target, EdgeLabel)>>::new();
+    let mut chain_faulted = BTreeSet::new();
+    for (index, written) in &chains {
+        let head = occurrences[*index].block;
+        match chain_exits(cfg, head, written, &contract, inert) {
+            Ok(edges) => {
+                chain_edges.insert(*index, edges);
+            }
+            Err(fault) => {
+                chain_faulted.insert(*index);
+                violations.push(Violation::Chain { block: head, fault });
+            }
+        }
+        for member in written.blocks.iter().skip(1) {
+            chain_members.insert(*member);
+            if count.contains_key(member) {
+                violations.push(Violation::Chain {
+                    block: head,
+                    fault: super::condition::ChainFault::Rendered { block: *member },
+                });
+            }
+        }
+    }
+
     let mut inversions = 0;
-    for occurrence in &occurrences {
+    for (index, occurrence) in occurrences.iter().enumerate() {
         let block = occurrence.block;
-        let expected = expected_edges(cfg, block, &contract);
+        if chain_faulted.contains(&index) {
+            continue;
+        }
+        let expected = match chain_edges.get(&index) {
+            Some(edges) => edges.clone(),
+            None => expected_edges(cfg, block, &contract),
+        };
         let inside: Vec<_> = expected
             .iter()
             .filter(|(target, _)| matches!(target, Target::Block(_)))
@@ -1176,6 +1299,15 @@ pub(crate) fn certify<R: Into<StatementRole>>(
             continue;
         }
         if rendered == expected {
+            continue;
+        }
+        // The chain's test says which exit it takes, so no inversion is read into its arms.
+        if chain_edges.contains_key(&index) {
+            violations.push(Violation::EdgeMismatch {
+                block,
+                rendered,
+                expected,
+            });
             continue;
         }
         let mut swapped: Vec<_> = rendered
@@ -1219,7 +1351,8 @@ pub(crate) fn certify<R: Into<StatementRole>>(
         });
     }
 
-    let contracted = contracted.into_inner();
+    let mut contracted = contracted.into_inner();
+    contracted.extend(chain_members);
     let mut unreachable_missing = 0;
     let mut blocks = 0;
     for addr in cfg.block_addrs() {
@@ -1295,6 +1428,18 @@ mod tests {
         labels: &[(&str, u64)],
         selects: &[RenderObservationId],
     ) -> ControlCertificate {
+        run_inert(body, cfg, entry, labels, selects, &|_| true)
+    }
+
+    /// The certificate where `inert` says which blocks owe the program nothing but their branch.
+    fn run_inert(
+        body: CStmt,
+        cfg: &CFG,
+        entry: u64,
+        labels: &[(&str, u64)],
+        selects: &[RenderObservationId],
+        inert: &dyn Fn(u64) -> bool,
+    ) -> ControlCertificate {
         let block_of = |id: RenderObservationId| Some(u64::from(id.index()));
         let label_block = |name: &str| {
             labels
@@ -1313,6 +1458,7 @@ mod tests {
                 true => StatementRole::Selects,
                 false => StatementRole::Plain,
             },
+            inert,
         )
     }
 
@@ -1766,5 +1912,226 @@ mod tests {
             assert!(selections.is_empty());
             assert!(matches!(stmt.unobserved(), CStmt::If { .. }), "{stmt:?}");
         }
+    }
+
+    // -- Condition chains.
+
+    /// `if (a && b) { X } else { Y }` over blocks 0x10 and 0x20, with 0x30 and 0x40 behind it.
+    fn chain_cfg() -> CFG {
+        cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x40)),
+                (0x20, cond_branch(0x30, 0x40)),
+                (0x30, BlockTerminator::Return),
+                (0x40, BlockTerminator::Return),
+            ],
+        )
+    }
+
+    /// An atom of a chain: the block's marker on its test.
+    fn atom(block: u32) -> CExpr {
+        CExpr::observe_one(
+            test_render_observation_id(block),
+            CExpr::IntLit(i64::from(block)),
+        )
+    }
+
+    fn both(left: CExpr, right: CExpr) -> CExpr {
+        CExpr::binary(crate::ast::BinaryOp::And, left, right)
+    }
+
+    /// The text of `chain_cfg` with `test` as the head's test, and `x` entered on its true arm.
+    fn chain_text(test: CExpr, x: u64) -> CStmt {
+        let enter = |block: u64| at(block, CStmt::Return(None));
+        let (yes, no) = match x {
+            0x30 => (enter(0x30), CStmt::Goto("L".to_owned())),
+            _ => (CStmt::Goto("L".to_owned()), enter(0x30)),
+        };
+        CStmt::Block(vec![
+            at(0x10, CStmt::if_stmt(test, yes, Some(no))),
+            CStmt::Block(vec![
+                CStmt::Label("L".to_owned()),
+                at(0x40, CStmt::Return(None)),
+            ]),
+        ])
+    }
+
+    #[test]
+    fn a_condition_chain_is_certified_by_its_exit_function() {
+        let body = chain_text(both(atom(0x10), atom(0x20)), 0x30);
+        let certificate = run(body, &chain_cfg(), 0x10, &[("L", 0x40)]);
+        assert!(certificate.ok(), "{certificate}");
+        // The second test is read through, as an empty block is, and counted.
+        assert_eq!(certificate.occurrences, 3);
+        assert_eq!(certificate.contracted, 1);
+    }
+
+    #[test]
+    fn a_chain_taking_the_other_exit_is_not_the_machine_s_even_with_the_test_negated() {
+        // `a && b` reaching 0x40 on its true arm: the machine reaches it when it is false.
+        let wrong = chain_text(both(atom(0x10), atom(0x20)), 0x40);
+        let certificate = run(wrong, &chain_cfg(), 0x10, &[("L", 0x40)]);
+        assert!(!certificate.ok(), "{certificate}");
+        assert_eq!(
+            certificate.inversions, 0,
+            "no inversion is read into a chain"
+        );
+        // Negated, the same arms are right.
+        let negated = CExpr::unary(crate::ast::UnaryOp::Not, both(atom(0x10), atom(0x20)));
+        let right = run(
+            chain_text(negated, 0x40),
+            &chain_cfg(),
+            0x10,
+            &[("L", 0x40)],
+        );
+        assert!(right.ok(), "{right}");
+    }
+
+    #[test]
+    fn a_chain_whose_test_is_not_the_blocks_function_is_different() {
+        // `a || b` over blocks that make a conjunction.
+        let or = CExpr::binary(crate::ast::BinaryOp::Or, atom(0x10), atom(0x20));
+        let certificate = run(chain_text(or, 0x30), &chain_cfg(), 0x10, &[("L", 0x40)]);
+        assert!(
+            certificate.violations.iter().any(|violation| matches!(
+                violation,
+                Violation::Chain {
+                    fault: super::super::condition::ChainFault::Different,
+                    ..
+                }
+            )),
+            "{certificate} {:?}",
+            certificate.violations
+        );
+    }
+
+    #[test]
+    fn a_chain_may_not_test_a_block_the_text_also_writes() {
+        let body = CStmt::Block(vec![
+            at(0x20, expr()),
+            chain_text(both(atom(0x10), atom(0x20)), 0x30),
+        ]);
+        let certificate = run(body, &chain_cfg(), 0x20, &[("L", 0x40)]);
+        assert!(
+            certificate.violations.iter().any(|violation| matches!(
+                violation,
+                Violation::Chain {
+                    fault: super::super::condition::ChainFault::Rendered { block: 0x20 },
+                    ..
+                }
+            )),
+            "{:?}",
+            certificate.violations
+        );
+    }
+
+    #[test]
+    fn a_chain_block_that_owes_more_than_its_branch_or_is_entered_from_outside_is_refused() {
+        use super::super::condition::ChainFault;
+        let body = || chain_text(both(atom(0x10), atom(0x20)), 0x30);
+        let fault = |certificate: &ControlCertificate| {
+            certificate
+                .violations
+                .iter()
+                .find_map(|violation| match violation {
+                    Violation::Chain { fault, .. } => Some(*fault),
+                    _ => None,
+                })
+        };
+        let owes = run_inert(body(), &chain_cfg(), 0x10, &[("L", 0x40)], &[], &|block| {
+            block != 0x20
+        });
+        assert_eq!(fault(&owes), Some(ChainFault::NotInert { block: 0x20 }));
+        // 0x50 also reaches 0x20.
+        let entered = cfg(
+            0x50,
+            &[
+                (0x50, cond_branch(0x10, 0x20)),
+                (0x10, cond_branch(0x20, 0x40)),
+                (0x20, cond_branch(0x30, 0x40)),
+                (0x30, BlockTerminator::Return),
+                (0x40, BlockTerminator::Return),
+            ],
+        );
+        let text = CStmt::Block(vec![
+            at(
+                0x50,
+                CStmt::if_stmt(CExpr::IntLit(1), CStmt::Empty, Some(CStmt::Empty)),
+            ),
+            chain_text(both(atom(0x10), atom(0x20)), 0x30),
+        ]);
+        let outside = run(text, &entered, 0x50, &[("L", 0x40)]);
+        assert_eq!(fault(&outside), Some(ChainFault::Outside { block: 0x20 }));
+        // A block that does not branch two ways is no test.
+        let straight = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x40)),
+                (0x20, branch(0x30)),
+                (0x30, BlockTerminator::Return),
+                (0x40, BlockTerminator::Return),
+            ],
+        );
+        let plain = run(body(), &straight, 0x10, &[("L", 0x40)]);
+        assert_eq!(
+            fault(&plain),
+            Some(ChainFault::NotConditional { block: 0x20 })
+        );
+    }
+
+    #[test]
+    fn a_test_whose_atoms_are_not_all_marked_is_not_read_as_a_chain() {
+        use super::super::condition::ChainFault;
+        // The head's test is bare: its polarity could not be told from the expression's own.
+        let bare = both(CExpr::IntLit(1), atom(0x20));
+        let certificate = run(chain_text(bare, 0x30), &chain_cfg(), 0x10, &[("L", 0x40)]);
+        assert!(
+            certificate.violations.iter().any(|violation| matches!(
+                violation,
+                Violation::Chain {
+                    fault: ChainFault::Shape,
+                    ..
+                }
+            )),
+            "{:?}",
+            certificate.violations
+        );
+    }
+
+    #[test]
+    fn a_selection_may_test_a_chain() {
+        // `x = (a && b) ? 1 : 2` over the chain 0x10, 0x20, with an arm block under each value.
+        let cfg = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x40)),
+                (0x20, cond_branch(0x30, 0x40)),
+                (0x30, branch(0x50)),
+                (0x40, branch(0x50)),
+                (0x50, BlockTerminator::Return),
+            ],
+        );
+        let mut symbols = crate::symbol::SymbolTable::new();
+        let x = symbols.declare_or_reuse("x");
+        let value = |block: u32, value: i64| {
+            CExpr::observe_one(test_render_observation_id(block), CExpr::IntLit(value))
+        };
+        let ternary = CExpr::Ternary {
+            cond: Box::new(both(atom(0x10), atom(0x20))),
+            then_expr: Box::new(value(0x30, 1)),
+            else_expr: Box::new(value(0x40, 2)),
+        };
+        let body = CStmt::Block(vec![
+            at(0x10, CStmt::Expr(CExpr::assign(CExpr::var(x), ternary))),
+            at(0x50, CStmt::Return(None)),
+        ]);
+        let certificate = run_selecting(body, &cfg, 0x10, &[], &selects());
+        assert!(
+            certificate.ok(),
+            "{certificate} {:?}",
+            certificate.violations
+        );
+        assert_eq!(certificate.contracted, 1);
     }
 }

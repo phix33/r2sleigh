@@ -1,0 +1,99 @@
+//! What the structurer writes for a function, from its bytes and an address.
+
+use crate::common;
+
+use common::{BASE, Literal};
+use r2engine::program::OpenProgram;
+
+fn c_of(code: &'static [u8]) -> String {
+    let size = code.len() as u64;
+    let mut program = OpenProgram::of(Literal::of_code(code, &[("f", BASE, size)]));
+    program
+        .rendered(BASE)
+        .expect("it renders")
+        .response
+        .output
+        .into_text()
+}
+
+/// The `if` lines of a rendering.
+fn tests_of(c: &str) -> Vec<&str> {
+    c.lines()
+        .map(str::trim_start)
+        .filter(|line| line.starts_with("if "))
+        .collect()
+}
+
+/// `test edi, edi; jne no; test esi, esi; jne no; mov eax, 1; ret; no: xor eax, eax; ret`
+const BOTH_ZERO: &[u8] = &[
+    0x85, 0xff, 0x75, 0x0a, 0x85, 0xf6, 0x75, 0x06, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0x31, 0xc0,
+    0xc3,
+];
+
+/// `test edi, edi; jne yes; test esi, esi; je no; yes: mov eax, 1; ret; no: xor eax, eax; ret`
+const EITHER_NOT_ZERO: &[u8] = &[
+    0x85, 0xff, 0x75, 0x04, 0x85, 0xf6, 0x74, 0x06, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0x31, 0xc0,
+    0xc3,
+];
+
+/// `test edi, edi; jne no; cmp dword [rsi], 0; jne no; mov eax, 1; ret; no: xor eax, eax; ret`
+const SECOND_TEST_LOADS: &[u8] = &[
+    0x85, 0xff, 0x75, 0x0b, 0x83, 0x3e, 0x00, 0x75, 0x06, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0x31,
+    0xc0, 0xc3,
+];
+
+#[test]
+fn two_tests_that_fail_to_one_exit_are_one_conjunction() {
+    let c = c_of(BOTH_ZERO);
+    let tests = tests_of(&c);
+    assert_eq!(tests.len(), 1, "{c}");
+    // The text is the machine's: both zero, which is what the source says.
+    assert_eq!(tests[0].matches("== (uint32_t)0U").count(), 2, "{c}");
+    assert!(tests[0].contains(" && ") && !tests[0].contains('!'), "{c}");
+    assert!(!c.contains("goto"), "{c}");
+}
+
+#[test]
+fn the_exit_only_the_chain_reaches_is_the_if_s_body() {
+    // Either input non-zero returns 1, which both tests reach; zero for both returns 0, which only
+    // the second test does, so that block is the body and the first block is the jump.
+    let c = c_of(EITHER_NOT_ZERO);
+    let tests = tests_of(&c);
+    assert_eq!(tests.len(), 1, "{c}");
+    assert_eq!(tests[0].matches("== (uint32_t)0U").count(), 2, "{c}");
+    assert!(tests[0].contains(" && "), "{c}");
+    assert!(c.contains("return 0;"), "{c}");
+}
+
+#[test]
+fn a_second_test_that_reads_memory_is_a_test_of_its_own() {
+    // The load is a statement between the two tests, so the second block is no part of the first's.
+    let c = c_of(SECOND_TEST_LOADS);
+    assert_eq!(tests_of(&c).len(), 2, "{c}");
+    assert!(!c.contains(" && ") && !c.contains(" || "), "{c}");
+}
+
+/// `test edi, edi; jne no; sub esi, 5; jne no; mov eax, esi; ret; no: xor eax, eax; ret`: the second
+/// test's block also computes the value the function returns.
+const SECOND_TEST_KEEPS_ITS_VALUE: &[u8] = &[
+    0x85, 0xff, 0x75, 0x08, 0x83, 0xee, 0x05, 0x75, 0x03, 0x89, 0xf0, 0xc3, 0x31, 0xc0, 0xc3,
+];
+
+/// The same, but the function returns 1: the subtraction is only its flags.
+const SECOND_TEST_ONLY_COMPARES: &[u8] = &[
+    0x85, 0xff, 0x75, 0x0b, 0x83, 0xee, 0x05, 0x75, 0x06, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0x31,
+    0xc0, 0xc3,
+];
+
+#[test]
+fn a_second_test_joins_the_chain_only_if_it_computes_nothing_the_function_keeps() {
+    // r2ssa says both blocks owe nothing but their branch and what they carry; only the text
+    // knows whether the subtraction is a statement of its own, which no `&&` may drop.
+    let kept = c_of(SECOND_TEST_KEEPS_ITS_VALUE);
+    assert_eq!(tests_of(&kept).len(), 2, "{kept}");
+    assert!(!kept.contains(" && "), "{kept}");
+    assert!(kept.contains("arg1 - (uint32_t)5U"), "{kept}");
+    let flags = c_of(SECOND_TEST_ONLY_COMPARES);
+    assert_eq!(tests_of(&flags).len(), 1, "{flags}");
+    assert!(flags.contains(" && "), "{flags}");
+}
