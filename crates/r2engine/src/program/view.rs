@@ -234,11 +234,13 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
         View::exit_premises(self, callee)
     }
 
+    /// A call through a slot that is not a kept loader binding is opaque, so it comes back.
     fn returns_through(&self, slot: u64) -> bool {
-        super::returns::Walking::new(self.clone(), false)
-            .ok()
-            .and_then(|walker| crate::discovery::Walker::declared(&walker, slot))
-            .is_none_or(|answer| answer.comes())
+        crate::stated::sealed_import(self, slot).is_none()
+            || super::returns::Walking::new(self.clone(), false)
+                .ok()
+                .and_then(|walker| crate::discovery::Walker::declared(&walker, slot))
+                .is_none_or(|answer| answer.comes())
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {

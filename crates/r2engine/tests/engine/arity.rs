@@ -4,7 +4,7 @@
 use crate::common;
 
 use common::{BASE, GLIBC, Literal};
-use r2engine::program::OpenProgram;
+use r2engine::program::{Libc, OpenProgram, PlatformEvidence};
 use r2ssa::{SourceFloorCause, SourceUnprovenCall};
 
 /// `f` writes both result registers and reads no argument (`xor eax, eax; pxor xmm0, xmm0`): its
@@ -197,6 +197,47 @@ fn a_call_through_a_sealed_import_slot_calls_the_import() {
     assert!(!text.contains(", 7)"), "{text}");
     let text = slot_caller("puts", false);
     assert!(!text.contains("puts("), "{text}");
+}
+
+/// `caller`: `call [rip + 0x1a]; mov eax, 7; ret`, the slot at 0x1020 the loader binds to an import.
+const CALL_THROUGH_A_SLOT_THEN_RETURN_SEVEN: &[u8] = &[
+    0xff, 0x15, 0x1a, 0x00, 0x00, 0x00, // 1000 call [rip + 0x1a]
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 1006 mov eax, 7
+    0xc3, // 100b ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 100c padding
+    0, 0, 0, 0, 0, 0, 0, 0, // 1020 the slot
+];
+
+/// A noreturn import ends the path only where the loader's binding stays: a slot the program may
+/// rebind is an opaque call that comes back, so the code after it is walked and rendered.
+#[test]
+fn a_call_through_a_writable_noreturn_slot_comes_back_and_a_sealed_one_does_not() {
+    let render = |sealed: bool| {
+        let slot = BASE + 0x20;
+        let mut literal = Literal::of_code(
+            CALL_THROUGH_A_SLOT_THEN_RETURN_SEVEN,
+            &[("caller", BASE, 0xc)],
+        )
+        .running_on(&[PlatformEvidence::Interpreter(Libc::Glibc)])
+        .writable_data_after(slot)
+        .loader_written(common::import_write(slot, 8, "_Exit"))
+        .relocated(common::import_slot(slot, "_Exit"));
+        if sealed {
+            literal = literal.sealed(slot..slot + 8);
+        }
+        OpenProgram::of(literal)
+            .rendered(BASE)
+            .expect("it renders")
+            .response
+            .output
+            .into_text()
+    };
+    let writable = render(false);
+    assert!(writable.contains('7'), "{writable}");
+    let sealed = render(true);
+    assert!(sealed.contains("_Exit("), "{sealed}");
+    assert!(!sealed.contains('7'), "{sealed}");
 }
 
 /// ld.so's `call [__rtld_malloc]`: a sealed slot no relocation fills holds 0 in the file, and
