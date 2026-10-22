@@ -1404,34 +1404,7 @@ mod tests {
     use super::*;
     use crate::ast::SwitchCase;
     use crate::ast::test_render_observation_id;
-    use r2ssa::cfg::BasicBlock;
-
-    fn cfg(entry: u64, blocks: &[(u64, BlockTerminator)]) -> CFG {
-        let mut cfg = CFG::new(entry);
-        for (addr, _) in blocks {
-            cfg.add_block(BasicBlock::new(*addr));
-        }
-        for (addr, terminator) in blocks {
-            cfg.set_terminator(*addr, terminator.clone());
-        }
-        cfg
-    }
-
-    /// A statement observed as belonging to `block`.
-    fn at(block: u64, stmt: CStmt) -> CStmt {
-        CStmt::observe_one(
-            test_render_observation_id(u32::try_from(block).expect("small address")),
-            stmt,
-        )
-    }
-
-    fn expr() -> CStmt {
-        CStmt::Expr(CExpr::IntLit(0))
-    }
-
-    fn cond() -> CExpr {
-        CExpr::IntLit(1)
-    }
+    use crate::structure::support::{at, branch, cfg, cond, cond_branch, expr};
 
     fn run(body: CStmt, cfg: &CFG, entry: u64, labels: &[(&str, u64)]) -> ControlCertificate {
         run_selecting(body, cfg, entry, labels, &[])
@@ -1486,17 +1459,6 @@ mod tests {
             &|_| StatementRole::Plain,
             inert,
         )
-    }
-
-    fn branch(target: u64) -> BlockTerminator {
-        BlockTerminator::Branch { target }
-    }
-
-    fn cond_branch(true_target: u64, false_target: u64) -> BlockTerminator {
-        BlockTerminator::ConditionalBranch {
-            true_target,
-            false_target,
-        }
     }
 
     #[test]

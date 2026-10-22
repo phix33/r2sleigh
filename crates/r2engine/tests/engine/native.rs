@@ -7050,3 +7050,54 @@ fn registers_written_on_one_path_before_an_unknown_call_are_no_parameters() {
         rendered.signature
     );
 }
+
+/// `edi == 0 ? 5 : 7` the way a compiler joins two returns of different values: both arms move
+/// theirs into eax and one `ret` follows.
+const RETURNS_JOINED_BY_A_JUMP: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x07, // 1002 je 0x100b
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 1004 mov eax, 7
+    0xeb, 0x05, // 1009 jmp 0x1010
+    0xb8, 0x05, 0x00, 0x00, 0x00, // 100b mov eax, 5
+    0xc3, // 1010 ret
+];
+
+/// The same two arms with the same value in both, which is one return the source wrote once.
+const ONE_VALUE_JOINED_BY_A_JUMP: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x07, // 1002 je 0x100b
+    0xb8, 0x05, 0x00, 0x00, 0x00, // 1004 mov eax, 5
+    0xeb, 0x05, // 1009 jmp 0x1010
+    0xb8, 0x05, 0x00, 0x00, 0x00, // 100b mov eax, 5
+    0xc3, // 1010 ret
+];
+
+#[test]
+fn returns_a_compiler_joined_are_written_in_the_arms_that_choose_their_values() {
+    let text = rendered(RETURNS_JOINED_BY_A_JUMP, "joined_returns");
+    assert_eq!(statements_returning(&text), 2, "{text}");
+    assert!(!text.contains("goto"), "{text}");
+    run_rendered(
+        "joined_returns",
+        &[&text],
+        r#"int main(void) {
+    if (joined_returns(0) != 5) return 1;
+    if (joined_returns(1) != 7) return 2;
+    if (joined_returns(0x100000000ull) != 5) return 3;
+    return 0;
+}"#,
+    );
+}
+
+#[test]
+fn a_value_every_edge_carries_is_one_return() {
+    let text = rendered(ONE_VALUE_JOINED_BY_A_JUMP, "one_value");
+    assert_eq!(statements_returning(&text), 1, "{text}");
+}
+
+/// How many `return` statements a rendering writes.
+fn statements_returning(text: &str) -> usize {
+    (text.lines())
+        .filter(|line| line.trim_start().starts_with("return"))
+        .count()
+}

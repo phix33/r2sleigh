@@ -2047,6 +2047,41 @@ impl<'a> Values<'a> {
         }
     }
 
+    /// Whether the return ending `addr` hands back a merge of its own block that every edge in
+    /// copies a value no other edge copies (ADR §5): the compiler merged returns of different
+    /// values into this block. A merge that carries itself on an edge, or one no copy writes, is not.
+    pub(super) fn returns_distinct_merge(&self, addr: u64) -> bool {
+        let Some((inst, SSAOp::Return { .. })) = self.terminator(addr) else {
+            return false;
+        };
+        let values = returned_values(self.inventory, inst);
+        let [value] = values.as_slice() else {
+            return false;
+        };
+        let Some(merge) = (self.graph.def_inst(*value)).and_then(|def| self.graph.inst(def)) else {
+            return false;
+        };
+        let here = self.graph.block_id_for_addr(addr);
+        if !matches!(merge.payload, InstPayload::Phi { .. })
+            || Some(merge.block) != here
+            || !self.bound[merge.id.0 as usize]
+        {
+            return false;
+        }
+        // Two defs of one computation are one value: edges are told apart by canonical term.
+        let inputs = self.graph.inputs(merge.id);
+        let mut told = inputs
+            .iter()
+            .map(|input| match self.roots.value(*input) {
+                Some(canonical) => (Some(canonical.canonical), None),
+                None => (None, Some(*input)),
+            })
+            .collect::<Vec<_>>();
+        told.sort_unstable();
+        told.dedup();
+        inputs.len() >= 2 && told.len() == inputs.len() && !inputs.contains(value)
+    }
+
     /// What the return ending `addr` hands back as `ty`: `None` where the facts do not state it.
     pub(super) fn returned(&self, addr: u64, ty: Option<&CType>) -> Option<Option<CExpr>> {
         self.attempt();

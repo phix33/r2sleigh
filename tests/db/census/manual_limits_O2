@@ -278,10 +278,11 @@ uint32_t _table_walk(uint64_t arg0, uint64_t arg1)
     uint64_t x0_2;
     uint64_t x0_5;
 
-    /* r2dec proof: no individual construct is marked; 92 source obligations: 92 rendered, 0 elided, 0 refused; 50 statements rendered */
+    /* r2dec proof: no individual construct is marked; 92 source obligations: 92 rendered, 0 elided, 0 refused; 51 statements rendered */
     {
         if ((uint8_t)((uint64_t)arg0 == (uint64_t)0U)) {
             x0_5 = arg0;
+            return (uint32_t)x0_5;
         } else {
             x0_1 = arg0;
             x8_2 = 0;
@@ -359,10 +360,8 @@ L1: ;
             {
 L4: ;
                 x0_5 = (uint64_t)(uint32_t)~(uint32_t)((uint64_t)x8_2 >> 0U);
+                return (uint32_t)x0_5;
             }
-        }
-        {
-            return (uint32_t)x0_5;
         }
     }
 }

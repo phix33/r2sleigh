@@ -1,0 +1,509 @@
+//! Terminal tails, `doc/adr-structure-dominator-tree.md` §5.
+//!
+//! Placement writes a block with no way on once, and every arm that reaches it falls into it. A
+//! source that returned in several places reads as that block at each of them. A copy carries
+//! the block's whole (empty) out-edge set, which is what the certificate asks of a block written
+//! twice, so a copy placed where the edge did not go is refused there.
+
+use super::shape::{Evidence, Occurrences};
+use crate::ast::CStmt;
+
+/// The most statements a block may have to be read as a tail.
+const TAIL_LIMIT: usize = 4;
+
+/// A `return` whose value is a merge of pairwise-distinct values on the edges in, which the arms
+/// of one conditional fall to, is copied into those arms. `O(size of the tree)` plus one copy
+/// per arm end.
+pub(super) fn join_returns(occ: &mut Occurrences, ev: &Evidence<'_>, stmt: &mut CStmt) {
+    each_sequence(stmt, &mut |seq| join_in_sequence(occ, ev, seq));
+}
+
+/// Every statement sequence in the tree, a sequence after the ones nested in it.
+fn each_sequence(stmt: &mut CStmt, visit: &mut dyn FnMut(&mut Vec<CStmt>)) {
+    match stmt {
+        CStmt::Observed { stmt, .. } => each_sequence(stmt, visit),
+        CStmt::Block(seq) => {
+            seq.iter_mut().for_each(|item| each_sequence(item, visit));
+            visit(seq);
+        }
+        CStmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            each_sequence(then_body, visit);
+            if let Some(else_body) = else_body {
+                each_sequence(else_body, visit);
+            }
+        }
+        CStmt::For { init, body, .. } => {
+            if let Some(init) = init {
+                each_sequence(init, visit);
+            }
+            each_sequence(body, visit);
+        }
+        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => each_sequence(body, visit),
+        CStmt::Switch { cases, default, .. } => {
+            let bodies = (cases.iter_mut().map(|case| &mut case.body)).chain(default.iter_mut());
+            for body in bodies {
+                body.iter_mut().for_each(|item| each_sequence(item, visit));
+                visit(body);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The label and live statements of a block that has no way on: at most [`TAIL_LIMIT`]
+/// expression statements, the last a `return` or a call to a callee that never returns, with no
+/// residual or gap in it (a copy would be a second site of the same unproven cell).
+fn parse(items: &[CStmt], ev: &Evidence<'_>) -> Option<(Option<String>, Vec<CStmt>)> {
+    let mut label = None;
+    let mut stmts = Vec::new();
+    gather(items, &mut label, &mut stmts).then_some(())?;
+    let live = stmts
+        .iter()
+        .map(CStmt::unobserved)
+        .filter(|stmt| !matches!(stmt, CStmt::Empty))
+        .collect::<Vec<_>>();
+    let (last, before) = live.split_last()?;
+    let ends = |stmt: &CStmt| match stmt {
+        CStmt::Return(_) => true,
+        CStmt::Expr(_) => (ev.never_returns)(stmt),
+        _ => false,
+    };
+    (live.len() <= TAIL_LIMIT && ends(last) && !before.iter().any(|stmt| ends(stmt)))
+        .then_some((label, stmts))
+}
+
+fn gather(items: &[CStmt], label: &mut Option<String>, out: &mut Vec<CStmt>) -> bool {
+    // Markers of empty statements are kept with the text but are not counted by the limit.
+    items.iter().all(|item| {
+        out.len() <= 2 * TAIL_LIMIT
+            && match item {
+                CStmt::Label(name) if out.is_empty() && label.is_none() => {
+                    *label = Some(name.clone());
+                    true
+                }
+                CStmt::Empty | CStmt::Comment(_) => true,
+                CStmt::Block(inner) => gather(inner, label, out),
+                other => {
+                    let plain = match other.unobserved() {
+                        CStmt::Expr(expr) => !crate::prelude::holds_residual(expr),
+                        CStmt::Return(value) => {
+                            !value.as_ref().is_some_and(crate::prelude::holds_residual)
+                        }
+                        CStmt::Empty => true,
+                        _ => false,
+                    };
+                    out.push(other.clone());
+                    plain
+                }
+            }
+    })
+}
+
+fn blank(stmt: &CStmt) -> bool {
+    matches!(stmt, CStmt::Empty | CStmt::Comment(_))
+}
+
+/// `stmts` as one statement.
+fn one(mut stmts: Vec<CStmt>) -> CStmt {
+    match stmts.len() {
+        0 => CStmt::Empty,
+        1 => stmts.remove(0),
+        _ => CStmt::Block(stmts),
+    }
+}
+
+/// `return x;` after a conditional whose arms fall into it, `x` a merge of distinct values: the
+/// compiler joined returns of different values, and each arm that fell returns its own.
+fn join_in_sequence(occ: &mut Occurrences, ev: &Evidence<'_>, seq: &mut Vec<CStmt>) {
+    let mut at = 1;
+    while at < seq.len() {
+        let Some(tail) = guarded_return(occ, ev, &seq[at]) else {
+            at += 1;
+            continue;
+        };
+        let before = seq[..at].iter().rposition(|stmt| !blank(stmt));
+        let ends = before.and_then(|before| falling_ends(&seq[before], ev));
+        let (Some(before), Some(2..)) = (before, ends) else {
+            at += 1;
+            continue;
+        };
+        let template = tail.clone();
+        let mut original = Some(tail);
+        let mut next = || match original.take() {
+            Some(first) => first,
+            None => template.iter().map(|stmt| occ.fresh(stmt)).collect(),
+        };
+        append_to_ends(&mut seq[before], ev, &mut next);
+        seq.remove(at);
+    }
+}
+
+/// The text of a block that is only a `return` of a merge of distinct values, and that no `goto`
+/// names (its label, if placement wrote one, has gone).
+fn guarded_return(occ: &Occurrences, ev: &Evidence<'_>, stmt: &CStmt) -> Option<Vec<CStmt>> {
+    let CStmt::Block(items) = stmt else {
+        return None;
+    };
+    let (None, stmts) = parse(items, ev)? else {
+        return None;
+    };
+    let [only] = stmts
+        .iter()
+        .filter(|stmt| !matches!(stmt.unobserved(), CStmt::Empty))
+        .collect::<Vec<_>>()
+        .try_into()
+        .ok()?;
+    let returns_value = matches!(only.unobserved(), CStmt::Return(Some(_)));
+    let distinct = only
+        .observation_ids()
+        .iter()
+        .filter_map(|id| occ.block_of(*id))
+        .any(|block| (ev.distinct_return)(block));
+    (returns_value && distinct).then_some(stmts)
+}
+
+/// How many arm ends of `stmt` complete into what follows it; `None` where an arm ends in a
+/// construct this does not read.
+fn falling_ends(stmt: &CStmt, ev: &Evidence<'_>) -> Option<usize> {
+    match stmt {
+        CStmt::Observed { stmt, .. } => falling_ends(stmt, ev),
+        CStmt::Block(items) => match items.iter().rev().find(|stmt| !blank(stmt)) {
+            Some(last) => falling_ends(last, ev),
+            None => Some(1),
+        },
+        CStmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            let then_ends = falling_ends(then_body, ev)?;
+            let else_ends = match else_body {
+                Some(else_body) => falling_ends(else_body, ev)?,
+                None => 1,
+            };
+            Some(then_ends + else_ends)
+        }
+        CStmt::Goto(_) | CStmt::Return(_) | CStmt::Break | CStmt::Continue => Some(0),
+        CStmt::Expr(_) => Some(usize::from(!(ev.never_returns)(stmt))),
+        CStmt::Empty | CStmt::Comment(_) => Some(1),
+        _ => None,
+    }
+}
+
+/// Put the next copy at every arm end [`falling_ends`] counts, in the same order.
+fn append_to_ends(stmt: &mut CStmt, ev: &Evidence<'_>, next: &mut dyn FnMut() -> Vec<CStmt>) {
+    match stmt {
+        CStmt::Observed { stmt, .. } => append_to_ends(stmt, ev, next),
+        CStmt::Block(items) => match items.iter().rposition(|stmt| !blank(stmt)) {
+            Some(last)
+                if matches!(items[last].unobserved(), CStmt::If { .. } | CStmt::Block(_)) =>
+            {
+                append_to_ends(&mut items[last], ev, next);
+            }
+            Some(last) if falling_ends(&items[last], ev) == Some(0) => {}
+            _ => items.extend(next()),
+        },
+        CStmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            append_to_ends(then_body, ev, next);
+            match else_body {
+                Some(else_body) => append_to_ends(else_body, ev, next),
+                None => *else_body = Some(Box::new(one(next()))),
+            }
+        }
+        CStmt::Empty => *stmt = one(next()),
+        _ if falling_ends(stmt, ev) == Some(0) => {}
+        other => {
+            let mut stmts = vec![std::mem::replace(other, CStmt::Empty)];
+            stmts.extend(next());
+            *other = CStmt::Block(stmts);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::CExpr;
+    use crate::structure::certify::{StatementRole, certify};
+    use crate::structure::shape::shape;
+    use crate::structure::support::{at, branch, cfg, cond, cond_branch, expr};
+    use r2ssa::cfg::{BlockTerminator, CFG};
+    use r2ssa::domtree::DomTree;
+
+    const EXIT: &str = "exit";
+
+    fn ret(value: i64) -> CStmt {
+        CStmt::Return(Some(CExpr::IntLit(value)))
+    }
+
+    fn never_returns(stmt: &CStmt) -> bool {
+        matches!(stmt, CStmt::Expr(CExpr::Call { func, .. })
+            if matches!(&**func, CExpr::External { name, .. } if name == EXIT))
+    }
+
+    /// An edge copy: a statement no block owns.
+    fn copy(value: i64) -> CStmt {
+        CStmt::Expr(CExpr::IntLit(value))
+    }
+
+    fn goto(label: &str) -> CStmt {
+        CStmt::Goto(label.to_owned())
+    }
+
+    fn label(name: &str) -> CStmt {
+        CStmt::Label(name.to_owned())
+    }
+
+    fn block(stmts: Vec<CStmt>) -> CStmt {
+        CStmt::Block(stmts)
+    }
+
+    fn branching(then_body: CStmt, else_body: CStmt) -> CStmt {
+        CStmt::if_stmt(cond(), then_body, Some(else_body))
+    }
+
+    fn count(stmt: &CStmt, pick: &dyn Fn(&CStmt) -> bool) -> usize {
+        let mut total = usize::from(pick(stmt));
+        let mut add = |inner: &CStmt| total += count(inner, pick);
+        match stmt {
+            CStmt::Observed { stmt, .. } => add(stmt),
+            CStmt::Block(stmts) => stmts.iter().for_each(add),
+            CStmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                add(then_body);
+                else_body.iter().for_each(|body| add(body));
+            }
+            CStmt::For { body, .. } | CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
+                add(body);
+            }
+            CStmt::Switch { cases, default, .. } => (cases.iter().flat_map(|case| &case.body))
+                .chain(default.iter().flatten())
+                .for_each(add),
+            _ => {}
+        }
+        total
+    }
+
+    fn gotos(stmt: &CStmt) -> usize {
+        count(stmt, &|stmt| matches!(stmt, CStmt::Goto(_)))
+    }
+
+    fn returns(stmt: &CStmt) -> usize {
+        count(stmt, &|stmt| matches!(stmt, CStmt::Return(_)))
+    }
+
+    fn labels(stmt: &CStmt) -> usize {
+        count(stmt, &|stmt| matches!(stmt, CStmt::Label(_)))
+    }
+
+    /// The tree shaped, and the certificate's reading of the result. `distinct` names the return
+    /// blocks whose value is a merge of pairwise-distinct values; `names` maps labels to blocks.
+    fn shaped(
+        body: CStmt,
+        cfg: &CFG,
+        names: &[(&str, u64)],
+        distinct: &[u64],
+    ) -> (CStmt, crate::structure::certify::ControlCertificate) {
+        let blocks = (0..0x100u64).collect::<Vec<_>>();
+        let mut occurrences = Occurrences::new(blocks.clone(), blocks);
+        let distinct_return = |block: u64| distinct.contains(&block);
+        let evidence = Evidence {
+            never_returns: &never_returns,
+            distinct_return: &distinct_return,
+        };
+        let body = shape(&mut occurrences, &evidence, body);
+        let label_block = |name: &str| {
+            names
+                .iter()
+                .find(|(label, _)| *label == name)
+                .map(|(_, block)| *block)
+        };
+        let certificate = certify(
+            &body,
+            cfg,
+            &DomTree::compute(cfg),
+            cfg.entry,
+            &|id| occurrences.block_of(id),
+            &label_block,
+            &|stmt| match never_returns(stmt) {
+                true => StatementRole::Ends,
+                false => StatementRole::Plain,
+            },
+            &|_| false,
+        );
+        (body, certificate)
+    }
+
+    /// 0x10 tests; 0x20 and 0x30 each copy a value in and meet at the return 0x40.
+    fn diamond() -> CFG {
+        cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x30)),
+                (0x20, branch(0x40)),
+                (0x30, branch(0x40)),
+                (0x40, BlockTerminator::Return),
+            ],
+        )
+    }
+
+    /// The tree placement writes for [`diamond`]: both arms copy and jump to the merge.
+    fn diamond_tree(tail: Vec<CStmt>) -> CStmt {
+        let arm =
+            |block: u64, value: i64| block_of(vec![at(block, expr()), copy(value), goto("L0")]);
+        let mut merge = vec![label("L0")];
+        merge.extend(tail);
+        block(vec![
+            at(0x10, expr()),
+            at(0x10, branching(arm(0x20, 1), arm(0x30, 2))),
+            block(merge),
+        ])
+    }
+
+    fn block_of(stmts: Vec<CStmt>) -> CStmt {
+        CStmt::Block(stmts)
+    }
+
+    #[test]
+    fn a_return_of_a_merge_of_distinct_values_is_copied_into_the_arms_that_fall_to_it() {
+        let (body, certificate) = shaped(
+            diamond_tree(vec![at(0x40, ret(7))]),
+            &diamond(),
+            &[("L0", 0x40)],
+            &[0x40],
+        );
+        assert!(certificate.ok(), "{certificate}");
+        assert_eq!((returns(&body), gotos(&body), labels(&body)), (2, 0, 0));
+        assert_eq!(certificate.duplicated, vec![0x40]);
+    }
+
+    #[test]
+    fn a_return_of_a_value_the_edges_do_not_all_differ_in_stays_one_return() {
+        let (body, certificate) = shaped(
+            diamond_tree(vec![at(0x40, ret(7))]),
+            &diamond(),
+            &[("L0", 0x40)],
+            &[],
+        );
+        assert!(certificate.ok(), "{certificate}");
+        assert_eq!((returns(&body), gotos(&body)), (1, 0));
+        assert!(certificate.duplicated.is_empty());
+    }
+
+    #[test]
+    fn a_side_effect_before_the_return_is_not_a_return_to_copy_into_arms() {
+        let tail = vec![at(0x40, expr()), at(0x40, ret(7))];
+        let (body, certificate) = shaped(diamond_tree(tail), &diamond(), &[("L0", 0x40)], &[0x40]);
+        assert!(certificate.ok(), "{certificate}");
+        assert_eq!(returns(&body), 1);
+    }
+
+    #[test]
+    fn the_arms_of_nested_conditionals_each_get_a_return() {
+        let cfg = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x30)),
+                (0x20, cond_branch(0x50, 0x60)),
+                (0x30, branch(0x40)),
+                (0x50, branch(0x40)),
+                (0x60, branch(0x40)),
+                (0x40, BlockTerminator::Return),
+            ],
+        );
+        let inner = branching(
+            block_of(vec![at(0x50, expr()), copy(1), goto("L0")]),
+            block_of(vec![at(0x60, expr()), copy(2), goto("L0")]),
+        );
+        let outer = branching(
+            block_of(vec![at(0x20, expr()), at(0x20, inner)]),
+            block_of(vec![at(0x30, expr()), copy(3), goto("L0")]),
+        );
+        let body = block(vec![
+            at(0x10, expr()),
+            at(0x10, outer),
+            block(vec![label("L0"), at(0x40, ret(7))]),
+        ]);
+        let (body, certificate) = shaped(body, &cfg, &[("L0", 0x40)], &[0x40]);
+        assert!(certificate.ok(), "{certificate}");
+        assert_eq!((returns(&body), gotos(&body)), (3, 0));
+    }
+
+    #[test]
+    fn one_arm_falling_to_the_return_is_not_a_join() {
+        // The other arm returns on its own: the return has one way in by fall-through.
+        let cfg = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x30)),
+                (0x20, BlockTerminator::Return),
+                (0x30, branch(0x40)),
+                (0x40, BlockTerminator::Return),
+            ],
+        );
+        let body = block(vec![
+            at(0x10, expr()),
+            at(
+                0x10,
+                branching(
+                    at(0x20, ret(1)),
+                    block_of(vec![at(0x30, expr()), copy(2), at(0x40, ret(7))]),
+                ),
+            ),
+        ]);
+        let (body, certificate) = shaped(body, &cfg, &[], &[0x40]);
+        assert!(certificate.ok(), "{certificate}");
+        assert_eq!(returns(&body), 2);
+    }
+
+    #[test]
+    fn a_return_something_still_jumps_to_is_not_copied_away() {
+        // `join_returns` alone, on a tree whose label a `goto` still names: the block must stay.
+        let blocks = (0..0x100u64).collect::<Vec<_>>();
+        let mut occurrences = Occurrences::new(blocks.clone(), blocks);
+        let evidence = Evidence {
+            never_returns: &never_returns,
+            distinct_return: &|_| true,
+        };
+        let arm = |block: u64| block_of(vec![at(block, expr()), copy(1)]);
+        let mut body = block(vec![
+            at(0x10, branching(arm(0x20), arm(0x30))),
+            block(vec![label("L0"), at(0x40, ret(7))]),
+            block(vec![at(0x50, goto("L0"))]),
+        ]);
+        join_returns(&mut occurrences, &evidence, &mut body);
+        assert_eq!((returns(&body), gotos(&body), labels(&body)), (1, 1, 1));
+    }
+
+    #[test]
+    fn a_copy_the_graph_does_not_have_is_refused_by_the_certificate() {
+        // The caller claims a return where the block goes on: copies of it are refused, not written.
+        let cfg = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x30)),
+                (0x20, branch(0x40)),
+                (0x30, branch(0x40)),
+                (0x40, branch(0x10)),
+            ],
+        );
+        let (_, certificate) = shaped(
+            diamond_tree(vec![at(0x40, ret(7))]),
+            &cfg,
+            &[("L0", 0x40)],
+            &[0x40],
+        );
+        assert!(!certificate.ok(), "{certificate}");
+    }
+}

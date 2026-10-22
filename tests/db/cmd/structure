@@ -1,0 +1,52 @@
+# Terminal tails (doc/adr-structure-dominator-tree.md §5; tests/corpus/branchy.c, gcc -O0). The
+# compiler joins every `return` of a function into one epilogue, and the value each arm returns
+# arrives as a merge of distinct values. The source wrote a `return` in each arm.
+
+NAME=a return of a merge of distinct values is written in each arm that falls to it
+FILE=tests/coverage/pinned/branchy_gcc_x64_O0
+CMDS=<<EOF
+pdd @ sym.gate_one
+pdd @ sym.inverted_guard
+EOF
+EXPECT=<<EOF
+uint64_t gate_one(uint32_t arg0)
+{
+    uint64_t rax_3;
+
+    /* r2dec proof: no individual construct is marked; 18 source obligations: 11 rendered, 7 elided, 0 refused; 5 statements rendered */
+    {
+        if ((uint8_t)((uint32_t)arg0 != (uint32_t)0xbeefU)) {
+            rax_3 = 0;
+            return (uint64_t)rax_3;
+        } else {
+            rax_3 = 1;
+            return (uint64_t)rax_3;
+        }
+    }
+}
+
+uint64_t inverted_guard(uint32_t arg0)
+{
+    extern char g_sink[];
+    extern char g_note[];
+
+    uint64_t rax_5;
+    uint64_t rax_7;
+
+    /* r2dec proof: no individual construct is marked; 21 source obligations: 14 rendered, 7 elided, 0 refused; 8 statements rendered; 2 data object types refused */
+    {
+        if ((uint8_t)((int32_t)arg0 <= (int32_t)9U)) {
+            rax_7 = (uint64_t)0xffffffffU;
+            return (uint64_t)rax_7;
+        } else {
+            r2sleigh_store_u64((void*)&g_note, (uint64_t)(int32_t)((uint32_t)arg0 + (uint32_t)2U));
+            r2sleigh_store_u32((void*)&g_sink, (uint32_t)arg0);
+            rax_5 = r2sleigh_load_u64((void*)&g_note);
+            rax_7 = rax_5;
+            return (uint64_t)rax_7;
+        }
+    }
+}
+
+EOF
+RUN

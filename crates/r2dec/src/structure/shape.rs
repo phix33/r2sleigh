@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::ast::{BinaryOp, CExpr, CStmt, RenderObservationId};
+use crate::ast::{BinaryOp, CExpr, CStmt, RenderObservationId, SwitchCase};
 use crate::symbol::SymbolId;
 
 /// What runs after a statement completes normally.
@@ -38,22 +38,158 @@ struct Scope {
     break_to: Cont,
 }
 
-/// The structural rewrites, in order: jumps to the next position and to
-/// the end of a breakable go, unreferenced labels go, and a skipped block
-/// is copied into the arms that fall to it.
-/// `fresh` copies a statement as a new occurrence, with markers of its own for the same cells.
-pub(crate) fn shape(fresh: &mut dyn FnMut(&CStmt) -> CStmt, stmt: CStmt) -> CStmt {
+/// The block and instruction each marker stands for; the rewrites mint a marker for every copy of
+/// a block's text they make.
+pub(crate) struct Occurrences {
+    blocks: Vec<u64>,
+    addresses: Vec<u64>,
+}
+
+impl Occurrences {
+    pub(crate) const fn new(blocks: Vec<u64>, addresses: Vec<u64>) -> Self {
+        Self { blocks, addresses }
+    }
+
+    /// The block a marker was written for.
+    pub(crate) fn block_of(&self, id: RenderObservationId) -> Option<u64> {
+        self.blocks.get(id.index() as usize).copied()
+    }
+
+    /// The instruction each marker's line accounts for, by marker.
+    pub(crate) fn into_addresses(self) -> Vec<u64> {
+        self.addresses
+    }
+
+    /// `stmt` copied as a new occurrence: each marker in it replaced by one for the same block.
+    pub(crate) fn fresh(&mut self, stmt: &CStmt) -> CStmt {
+        remint(stmt, &mut |id| self.copy_of(id))
+    }
+
+    /// A marker of its own for the same block and instruction, for one more occurrence of it.
+    pub(crate) fn copy_of(&mut self, id: RenderObservationId) -> RenderObservationId {
+        let at = id.index() as usize;
+        let copy = RenderObservationId::from_dense_index(self.blocks.len());
+        self.blocks.push(self.blocks[at]);
+        self.addresses.push(self.addresses[at]);
+        copy
+    }
+
+    /// How many markers exist, to hand back to `retract` when a stage's copies are refused.
+    pub(crate) fn issued(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Forget the markers minted after `issued` markers existed.
+    pub(crate) fn retract(&mut self, issued: usize) {
+        self.blocks.truncate(issued);
+        self.addresses.truncate(issued);
+    }
+}
+
+impl super::condition::Marks for Occurrences {
+    fn block_of(&self, id: RenderObservationId) -> Option<u64> {
+        Self::block_of(self, id)
+    }
+
+    fn copy_of(&mut self, id: RenderObservationId) -> RenderObservationId {
+        Self::copy_of(self, id)
+    }
+}
+
+/// What the rewrites may rely on that the tree does not say.
+pub(crate) struct Evidence<'a> {
+    /// Whether a statement is a call to a callee declared never to return.
+    pub(crate) never_returns: &'a dyn Fn(&CStmt) -> bool,
+    /// Whether the return ending a block hands back a merge whose inputs are pairwise distinct
+    /// values (the compiler merged returns of different values into this one).
+    pub(crate) distinct_return: &'a dyn Fn(u64) -> bool,
+}
+
+/// The structural rewrites, in order: jumps to the next position and to the end of a breakable
+/// go, unreferenced labels go, a return the arms fall into is copied into them, and a skipped
+/// block is copied into the arms that fall to it.
+pub(crate) fn shape(occ: &mut Occurrences, ev: &Evidence<'_>, stmt: CStmt) -> CStmt {
     let mut stmt = stmt;
     let scope = Scope {
         break_to: Cont::Unknown,
     };
     shape_stmt(&mut stmt, Cont::Unknown, &scope);
     drop_unreferenced_labels(&mut stmt);
+    // A return the arms fall into shows once the jumps to the next position have gone.
+    super::tails::join_returns(occ, ev, &mut stmt);
+    shape_stmt(&mut stmt, Cont::Unknown, &scope);
+    drop_unreferenced_labels(&mut stmt);
     // A skipped block shows only once the jumps to it have gone.
-    duplicate_skipped_tails(fresh, &mut stmt);
+    duplicate_skipped_tails(occ, &mut stmt);
     shape_stmt(&mut stmt, Cont::Unknown, &scope);
     drop_unreferenced_labels(&mut stmt);
     stmt
+}
+
+/// `stmt` copied as a new occurrence: each marker in it replaced by the one `mint` gives for it.
+fn remint(stmt: &CStmt, mint: &mut dyn FnMut(RenderObservationId) -> RenderObservationId) -> CStmt {
+    let copy = |stmts: &[CStmt],
+                mint: &mut dyn FnMut(RenderObservationId) -> RenderObservationId| {
+        stmts
+            .iter()
+            .map(|stmt| remint(stmt, mint))
+            .collect::<Vec<_>>()
+    };
+    match stmt {
+        CStmt::Observed { .. } => {
+            let ids = stmt
+                .observation_ids()
+                .iter()
+                .map(|id| mint(*id))
+                .collect::<Vec<_>>();
+            CStmt::observe_all(ids, remint(stmt.unobserved(), mint))
+        }
+        CStmt::Block(stmts) => CStmt::Block(copy(stmts, mint)),
+        CStmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => CStmt::If {
+            cond: cond.clone(),
+            then_body: Box::new(remint(then_body, mint)),
+            else_body: else_body.as_ref().map(|body| Box::new(remint(body, mint))),
+        },
+        CStmt::For {
+            init,
+            cond,
+            update,
+            body,
+        } => CStmt::For {
+            init: init.as_ref().map(|init| Box::new(remint(init, mint))),
+            cond: cond.clone(),
+            update: update.clone(),
+            body: Box::new(remint(body, mint)),
+        },
+        CStmt::While { cond, body } => CStmt::While {
+            cond: cond.clone(),
+            body: Box::new(remint(body, mint)),
+        },
+        CStmt::DoWhile { body, cond } => CStmt::DoWhile {
+            body: Box::new(remint(body, mint)),
+            cond: cond.clone(),
+        },
+        CStmt::Switch {
+            expr,
+            cases,
+            default,
+        } => CStmt::Switch {
+            expr: expr.clone(),
+            cases: cases
+                .iter()
+                .map(|case| SwitchCase {
+                    value: case.value.clone(),
+                    body: copy(&case.body, mint),
+                })
+                .collect(),
+            default: default.as_ref().map(|body| copy(body, mint)),
+        },
+        other => other.clone(),
+    }
 }
 
 /// `if (c) { x = a; } else { x = b; }` is `x = c ? a : b;`, the test's markers on the statement
@@ -175,29 +311,29 @@ fn sole_arm_assignment(arm: &CStmt) -> Option<(Vec<RenderObservationId>, SymbolI
 /// paths that do not jump each get their own copy of `T`, and the jumps
 /// then reach the next position and go. Only the text of one block is
 /// duplicated, because that is the unit a compiler merged.
-fn duplicate_skipped_tails(fresh: &mut dyn FnMut(&CStmt) -> CStmt, stmt: &mut CStmt) {
+fn duplicate_skipped_tails(occ: &mut Occurrences, stmt: &mut CStmt) {
     match stmt {
-        CStmt::Observed { stmt, .. } => duplicate_skipped_tails(fresh, stmt),
-        CStmt::Block(stmts) => duplicate_in_body(fresh, stmts),
+        CStmt::Observed { stmt, .. } => duplicate_skipped_tails(occ, stmt),
+        CStmt::Block(stmts) => duplicate_in_body(occ, stmts),
         CStmt::If {
             then_body,
             else_body,
             ..
         } => {
-            duplicate_skipped_tails(fresh, then_body);
+            duplicate_skipped_tails(occ, then_body);
             if let Some(else_body) = else_body {
-                duplicate_skipped_tails(fresh, else_body);
+                duplicate_skipped_tails(occ, else_body);
             }
         }
         CStmt::For { body, .. } | CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
-            duplicate_skipped_tails(fresh, body)
+            duplicate_skipped_tails(occ, body)
         }
         CStmt::Switch { cases, default, .. } => {
             for case in cases {
-                duplicate_in_body(fresh, &mut case.body);
+                duplicate_in_body(occ, &mut case.body);
             }
             if let Some(default) = default {
-                duplicate_in_body(fresh, default);
+                duplicate_in_body(occ, default);
             }
         }
         _ => {}
@@ -205,14 +341,14 @@ fn duplicate_skipped_tails(fresh: &mut dyn FnMut(&CStmt) -> CStmt, stmt: &mut CS
 }
 
 /// Each statement of a body, then the body's own sequence.
-fn duplicate_in_body(fresh: &mut dyn FnMut(&CStmt) -> CStmt, body: &mut Vec<CStmt>) {
+fn duplicate_in_body(occ: &mut Occurrences, body: &mut Vec<CStmt>) {
     for stmt in body.iter_mut() {
-        duplicate_skipped_tails(fresh, stmt);
+        duplicate_skipped_tails(occ, stmt);
     }
-    duplicate_in_sequence(fresh, body);
+    duplicate_in_sequence(occ, body);
 }
 
-fn duplicate_in_sequence(fresh: &mut dyn FnMut(&CStmt) -> CStmt, stmts: &mut Vec<CStmt>) {
+fn duplicate_in_sequence(occ: &mut Occurrences, stmts: &mut Vec<CStmt>) {
     let mut index = 0;
     while index + 2 < stmts.len() {
         // stmts[index] branches, stmts[index + 1] is the skipped block,
@@ -233,7 +369,7 @@ fn duplicate_in_sequence(fresh: &mut dyn FnMut(&CStmt) -> CStmt, stmts: &mut Vec
         // The first copy keeps the tail's own observations; every further
         // copy is a fresh occurrence with targets of its own.
         let mut copies =
-            std::iter::once(tail.clone()).chain(std::iter::repeat_with(|| fresh(&tail)));
+            std::iter::once(tail.clone()).chain(std::iter::repeat_with(|| occ.fresh(&tail)));
         append_to_falling_arms(&mut stmts[index], &mut copies);
         index += 1;
     }

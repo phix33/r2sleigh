@@ -42,17 +42,16 @@ uint64_t fcn_401000(void)
     uint64_t rax_1;
     uint64_t rax_3;
 
-    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 5 statements rendered; 1 never assigned, read as residuals (RAX_2) */
+    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 6 statements rendered; 1 never assigned, read as residuals (RAX_2) */
     {
         rax_1 = r2sleigh_load_u64((void*)(uint64_t)0x403fe0U);
         if ((uint8_t)((uint64_t)rax_1 == (uint64_t)0U)) {
             rax_3 = rax_1;
+            return (uint64_t)rax_3;
         } else {
             r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401014:4 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
             r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401014:11 covering 1 op (render::values) */
             rax_3 = r2sleigh_residual_u64(3);
-        }
-        {
             return (uint64_t)rax_3;
         }
     }

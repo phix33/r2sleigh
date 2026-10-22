@@ -46,17 +46,16 @@ uint64_t _init(void)
     uint64_t rax_1;
     uint64_t rax_3;
 
-    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 5 statements rendered; 1 never assigned, read as residuals (RAX_2) */
+    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 6 statements rendered; 1 never assigned, read as residuals (RAX_2) */
     {
         rax_1 = r2sleigh_load_u64((void*)(uint64_t)0x3fe8U);
         if ((uint8_t)((uint64_t)rax_1 == (uint64_t)0U)) {
             rax_3 = rax_1;
+            return (uint64_t)rax_3;
         } else {
             r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1014:4 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
             r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x1014:11 covering 1 op (render::values) */
             rax_3 = r2sleigh_residual_u64(3);
-        }
-        {
             return (uint64_t)rax_3;
         }
     }
@@ -448,7 +447,7 @@ int64_t mul_div(int64_t a, int64_t b)
     uint64_t rdx_5;
     uint64_t rax_10;
 
-    /* r2dec proof: 2 constructs are marked below; 41 source obligations: 31 rendered, 7 elided, 0 refused, 3 residual; 25 statements rendered */
+    /* r2dec proof: 2 constructs are marked below; 41 source obligations: 31 rendered, 7 elided, 0 refused, 3 residual; 26 statements rendered */
     {
         if ((uint8_t)((uint64_t)b != (uint64_t)0U)) {
             rax_4 = (uint64_t)((uint64_t)((uint64_t)a * (uint64_t)8U) - (uint64_t)a);
@@ -473,10 +472,9 @@ int64_t mul_div(int64_t a, int64_t b)
             tmp_12e3_70_1 = (__uint128_t)tmp_12e3_10_1 == (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffffffffffffULL) ? (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0U) : (__uint128_t)((__int128_t)tmp_12e3_50_1 % (__int128_t)tmp_12e3_10_1);
             rdx_5 = (uint64_t)((__uint128_t)tmp_12e3_70_1 >> 0U);
             rax_10 = (uint64_t)((uint64_t)rdx_5 + (uint64_t)rax_5);
+            return (int64_t)rax_10;
         } else {
             rax_10 = 0;
-        }
-        {
             return (int64_t)rax_10;
         }
     }
@@ -504,7 +502,7 @@ double avg(const double* v, int32_t n)
     uint32_t tmp_1336_8_1;
     _Alignas(16) uint8_t frame[40];
 
-    /* r2dec proof: no individual construct is marked; 53 source obligations: 38 rendered, 15 elided, 0 refused; 19 statements rendered */
+    /* r2dec proof: no individual construct is marked; 53 source obligations: 38 rendered, 15 elided, 0 refused; 20 statements rendered */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 24U), (uint64_t)0U);
         r2sleigh_store_u32((void*)(uint64_t)(frame + 20U), (uint32_t)0U);
@@ -524,13 +522,12 @@ double avg(const double* v, int32_t n)
         {
             if ((uint8_t)((uint32_t)n == (uint32_t)0U)) {
                 xmm0_10 = 0;
+                return (double)r2sleigh_float_from_bits_64((uint64_t)xmm0_10);
             } else {
                 tmp_1351_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
                 xmm0_7 = (__uint128_t)(((__uint128_t)0U & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffffffffffULL)) | ((__uint128_t)(uint64_t)0U & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffffffffffULL)) << 64U);
                 tmp_lane_1356_0_2_1 = r2sleigh_float_from_bits_64(tmp_1351_8_1) / (double)(int32_t)n;
                 xmm0_10 = (__uint128_t)(((__uint128_t)xmm0_7 & (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0U)) | ((__uint128_t)r2sleigh_float_to_bits_64(tmp_lane_1356_0_2_1) & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffffffffffULL)) << 0U);
-            }
-            {
                 return (double)r2sleigh_float_from_bits_64((uint64_t)xmm0_10);
             }
         }
@@ -551,15 +548,14 @@ int32_t fact(int32_t n)
     uint64_t rax_3;
     uint64_t rax_6;
 
-    /* r2dec proof: no individual construct is marked; 30 source obligations: 20 rendered, 10 elided, 0 refused; 5 statements rendered; 1 callee prototype supplied by the source */
+    /* r2dec proof: no individual construct is marked; 30 source obligations: 20 rendered, 10 elided, 0 refused; 6 statements rendered; 1 callee prototype supplied by the source */
     {
         if ((uint8_t)((int32_t)n <= (int32_t)1U)) {
             rax_6 = 1;
+            return (int32_t)rax_6;
         } else {
             rax_3 = (uint64_t)(uint32_t)fact((uint32_t)((uint32_t)n - (uint32_t)1U));
             rax_6 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)(int32_t)((uint64_t)rax_3 >> 0U) * (uint64_t)(int32_t)n) >> 0U);
-        }
-        {
             return (int32_t)rax_6;
         }
     }

@@ -34,7 +34,7 @@ uint32_t _struct_nested_array(void* arg0, uint32_t arg1, uint32_t arg2)
     uint16_t tmp_1000005bc_8_1;
     uint32_t stack_m4_1;
 
-    /* r2dec proof: no individual construct is marked; 47 source obligations: 44 rendered, 3 elided, 0 refused; 12 statements rendered */
+    /* r2dec proof: no individual construct is marked; 47 source obligations: 44 rendered, 3 elided, 0 refused; 13 statements rendered */
     {
         tmp_100000568_8_1 = (uint64_t)((uint64_t)((uint64_t)(int32_t)arg1 * (uint64_t)40U) + (uint64_t)arg0);
         tmp_100000578_8_1 = r2sleigh_load_u32((void*)((uint64_t)tmp_100000568_8_1 + (uint64_t)4U * 4U));
@@ -44,15 +44,14 @@ uint32_t _struct_nested_array(void* arg0, uint32_t arg1, uint32_t arg2)
             tmp_1000005b4_8_1 = r2sleigh_load_u32((void*)((uint64_t)tmp_100000568_8_1 + (uint64_t)2U * 4U));
             tmp_1000005bc_8_1 = r2sleigh_load_u16((void*)((uint64_t)tmp_100000568_8_1 + (uint64_t)3U * 2U));
             stack_m4_1 = (uint32_t)((uint32_t)tmp_1000005b4_8_1 - (uint32_t)((uint64_t)(uint16_t)tmp_1000005bc_8_1 >> 0U));
+            return (uint32_t)stack_m4_1;
         } else {
             {
                 tmp_100000598_8_1 = r2sleigh_load_u32((void*)((uint64_t)tmp_100000568_8_1 + (uint64_t)4U * 4U));
                 tmp_1000005a0_8_1 = r2sleigh_load_u32((void*)tmp_100000568_8_1);
                 stack_m4_1 = (uint32_t)((uint32_t)tmp_100000598_8_1 + (uint32_t)tmp_1000005a0_8_1);
+                return (uint32_t)stack_m4_1;
             }
-        }
-        {
-            return (uint32_t)stack_m4_1;
         }
     }
 }
@@ -228,22 +227,26 @@ uint32_t _sparse_switch(uint32_t arg0, uint32_t arg1, uint32_t arg2)
     uint32_t stack_m24_1;
     uint32_t stack_m4_1;
 
-    /* r2dec proof: 1 construct is marked below; 64 source obligations: 59 rendered, 3 elided, 0 refused, 2 residual; 18 statements rendered */
+    /* r2dec proof: 1 construct is marked below; 64 source obligations: 59 rendered, 3 elided, 0 refused, 2 residual; 23 statements rendered */
     {
         if ((uint8_t)((uint32_t)((uint32_t)arg0 + (uint32_t)7U) == (uint32_t)0U)) {
             stack_m4_1 = (uint32_t)((uint32_t)arg1 - (uint32_t)arg2);
+            return (uint32_t)stack_m4_1;
         } else {
             {
                 if ((uint8_t)((uint32_t)arg0 == (uint32_t)0U)) {
                     stack_m4_1 = (uint32_t)((uint32_t)arg1 + (uint32_t)arg2);
+                    return (uint32_t)stack_m4_1;
                 } else {
                     {
                         if ((uint8_t)((uint32_t)arg0 == (uint32_t)3U)) {
                             stack_m4_1 = (uint32_t)((uint32_t)((uint32_t)arg1 * (uint32_t)3U) + (uint32_t)arg2);
+                            return (uint32_t)stack_m4_1;
                         } else {
                             {
                                 if ((uint8_t)((uint32_t)arg0 == (uint32_t)42U)) {
                                     stack_m4_1 = (uint32_t)((uint32_t)((uint32_t)arg1 ^ (uint32_t)arg2) + (uint32_t)42U);
+                                    return (uint32_t)stack_m4_1;
                                 } else {
                                     {
                                         if ((uint8_t)((uint32_t)arg0 == (uint32_t)0x3e8U)) {
@@ -259,10 +262,12 @@ uint32_t _sparse_switch(uint32_t arg0, uint32_t arg1, uint32_t arg2)
                                             }
                                             {
                                                 stack_m4_1 = stack_m24_1;
+                                                return (uint32_t)stack_m4_1;
                                             }
                                         } else {
                                             {
                                                 stack_m4_1 = (uint32_t)((uint32_t)((uint32_t)arg0 + (uint32_t)arg1) - (uint32_t)arg2);
+                                                return (uint32_t)stack_m4_1;
                                             }
                                         }
                                     }
@@ -272,9 +277,6 @@ uint32_t _sparse_switch(uint32_t arg0, uint32_t arg1, uint32_t arg2)
                     }
                 }
             }
-        }
-        {
-            return (uint32_t)stack_m4_1;
         }
     }
 }
