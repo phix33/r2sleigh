@@ -744,7 +744,7 @@ static void child_run(struct run_state *run, const struct job_vector *vec, uint6
     struct sigaction on_budget;
     memset(&on_budget, 0, sizeof on_budget);
     on_budget.sa_sigaction = child_budget;
-    on_budget.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    on_budget.sa_flags = SA_SIGINFO | SA_RESETHAND | SA_ONSTACK;
     sigemptyset(&on_budget.sa_mask);
     sigaction(BUDGET_SIGNAL, &on_budget, NULL);
     /* The signal mask is inherited, and a blocked SIGALRM arms a timer that never fires. */
