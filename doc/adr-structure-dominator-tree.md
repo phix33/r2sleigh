@@ -166,10 +166,10 @@ per round; a round that decides nothing ends the loop.
 - S1: placement in `structure/place.rs`, the certificate in `structure/certify.rs`; the region builders, domain proofs, linearizer, structuring deadline and every `safety_reason` deleted; noreturn prototypes spelled; irreducible cycles keep a complete inventory.
 - S2, in part: jump-to-next and unreferenced-label elision, `break`/`continue` to the innermost loop header and the first block after it, and the checker. The rest of the original S2 was in the legacy cleanup pass `structure/rewrite.rs`, deleted with the legacy decompiler in 51b9d6a9 (2026-10-10) and not replaced: while and do-while rotation (the certificate supports both, the writer emits only `for(;;)`), switch-tail absorption, bounded tail duplication of returns, short-circuit `if`, and return into arms. 2026-10-22 measurement on DecBench (`tests/decbench/RESULT-2026-10-17.md`): this is why 40.2% of r2s's scored functions end in a goto.
 - S3: DecBench read 680 of 860, every mean above the previous run.
-- S2, two of the five (2026-10-22, B5-b): short-circuit `if` as condition chains (`structure/condition.rs`) and `while`
-  and `do-while` rotation (`structure/rotate.rs`), with the latch's copies written before its test (`structure/latch.rs`);
-  switch-tail absorption, bounded tail duplication of returns and return into arms are still not replaced. See the
-  section below.
+- S2, four of the five (2026-10-22, B5): short-circuit `if` as condition chains (`structure/condition.rs`), `while` and
+  `do-while` rotation (`structure/rotate.rs`) with the latch's copies written before its test (`structure/latch.rs`),
+  return into arms (`tails::join_returns`) and bounded tail duplication of returns (`tails::inline_tails`); switch-tail
+  absorption is still not replaced. See "the recoveries together" below.
 
 - S4 (2026-10-22): the recoveries below, each checked by `I_S` on its result.
 
@@ -199,6 +199,65 @@ the other three tools, a parser classifier over all of them, GED scored with Dec
   are not worth direct work: another tool is perfect on 3 of 567.
 - Replication into fallthrough arms conflicts with section 5 (fewest labels, then fewest duplicated blocks) unless it
   is guarded by the phi-of-distinct-edge-copies condition; amend section 5 or ship only the guarded form.
+
+## 2026-10-22: the recoveries together
+
+Two branches landed on one base and stack in this order: condition chains, `while`/`do-while` and the latch's
+copies written before its test (B5-b), then joined returns, terminal tails, sole closed exits and a callee's
+declaration read in address order (B5-a). The marker table is one type, `shape::Occurrences`, which implements
+`condition::Marks`, so a block's text copied by any stage is an occurrence of that block the certificate reads. In
+`render` the order is: placement (a sole closed exit is written where its edge leaves the loop), condition chains
+(a stage), `shape` (jumps to the next position, joined returns, the skipped-block copy, terminal tails), the
+latch's copies (a stage) and loop rotation (a stage). A stage stands only while the control certificate holds,
+`shape`'s copies are certified at the end, and `respell_negations` is the one change after the certificate.
+
+Measured on the mined set (bzip2, zlib and grep at O2 and O2-noinline: 1,570 functions, 1,305 scored in all three
+builds) with DecBench's own GED. One method for the three builds: the renderings come from each build on the Mac and
+are scored on contabo. These are mined-set numbers.
+
+| Build | Perfect | Mean GED | Total GED | Gotos | Functions with a goto |
+|---|---|---|---|---|---|
+| base `cb16ec2e` | 203 | 46.095 | 60,154 | 4,654 | 623 |
+| chains, rotation, latch copies `0a654255` | 197 (0 newly, 6 lost) | 45.195 | 58,980 (-1,174) | 4,578 | 615 |
+| and the tails, the stack's head | 206 (10 newly, 1 lost against the step before) | 43.795 | 57,153 (-1,827 more, -3,001 in all) | 2,661 | 426 |
+
+Held out (23 of radare2's test ELFs, 1,834 functions, none of them mined): rendered 1,496 and refused 338 in every
+build, the same 338 functions, none crashed; gotos 2,941, 2,915 and 2,100. One function gains gotos over the base:
+freebsd-ls `0x205b40`, 0 to 2. Its skipped block holds a residual cell and the base wrote it into two arms, two
+residual sites for one unproven cell; `tails::copyable` is asked of every copy, so the block is written once and the
+two arms jump to it. That is the visible residual rule 8 prefers to a duplicated one, and the one case the tails'
+own held-out sweep ("no function gains a goto") did not see, since it ran before the rule reached the skipped-block
+copy. The equivalence gate on the stack's head holds all 828 baseline records on x86-64 (744 equal, 63
+residual-trap, 1 slow, 20 unsupported) and on AArch64 (750, 57, 1, 20) with none differing. Release `pdd` on the
+largest functions of 0pack and pumasim stays within 0.1% instructions retired and the same peak footprint.
+
+**Kept costs.** The chains cost 0.2 mean GED and win none on the set they were measured on, and the latch's copies
+take 438 loops to `do-while` for 0.98 less mean GED at the price of 5 perfect (a single-block source `for` scores
+better as a `for (;;)`); the three stages together are 197 perfect for 203 and 0.9 mean GED fewer on this set. Both
+are kept for the reason in the section below: they spell the machine's test and loop as the CFG proves them, nothing
+was tuned to the score, and the benchmark rewards the source's spelling, which the binary does not state. The tails
+win the perfect count back (10 newly perfect, 1 lost) and take 1,917 gotos away. No recovery is added or dropped to
+move the sum.
+
+**Ledgered, not fixed here.** ROADMAP D58: a rendering decision must not depend on the order blocks are written
+(a callee's declaration was fixed; whether a name reads as a value or as a NeverAssigned residual is still the text
+written so far, which no write order makes right for a loop-carried merge whose entry copy is a gap; 0pack
+`0x476982`), and a copy's statements are not asked of the certificate per occurrence. ROADMAP D59: a chain whose exit
+is a `continue` to its own head faults `ExitCount` and reverts every chain of the function (bash `0x2e540`, still
+reproduced on the stack's head).
+
+**Left**, by when:
+
+- Next: the assignment before a copied or joined return, folded at the owner that spells the edge copy
+  (`return a;`); the exit edge's copies after a loop whose only exit is the latch (about 140 loops); D58 and D59.
+- Conditional: the four-statement bound and the skipped-block-first order were chosen on the mined set, so they move
+  with a measurement on projects the analysis did not mine; the unguarded join (+17, 2 lost), only with a CFG fact that
+  separates `return a || b` from two returns; a `while` whose exit arm is not a bare `break` (34 loops), once the exit
+  is the only way out.
+- Deferred: chains whose DAG is not read-once (a selection between two tests); splitting a chain around a block that
+  renders text; node splitting of irreducible entries; tails of five to sixteen statements (133 gotos) and jumps over
+  a block no rule closes (588); the AArch64 mined set, not measured.
+- Unnecessary: the lowest-common-ancestor count for closedness, whose answer the O(B + E) interval extremes give.
 
 ## 2026-10-22: condition chains, loop rotation and latch copies
 
@@ -251,13 +310,7 @@ They spell the machine's test and loop as the CFG proves them, nothing was tuned
 rewards the source's spelling, which the binary does not state. The cost is the price of the machine's graph, not a
 regression to chase: the next reader should not rediscover it, and no recovery is added or dropped to move it.
 
-**Left**, by cost: the exit edge's copies after a loop whose only exit is the latch (about 140 loops, next); a `while`
-whose exit arm is not a bare `break` (34, conditional on the exit being the only way out); chains whose DAG is not
-read-once (a selection between two tests), refused for now; splitting a chain around a block that renders text; a
-chain whose exit is a `continue` to its own head, which `exits` reads as an edge inside the chain, so its `ExitCount`
-fault reverts every chain of the function (ROADMAP D59).
-Equivalence cells at risk: `branchy`, `hashes`, `shapes` and `values` at O0, O1 and O2 under both compilers (every
-function with a chain or a rotated loop).
+What is left of the chains is in "the recoveries together".
 
 ## 2026-10-22: terminal tails, joined returns and sole exits
 
@@ -272,9 +325,9 @@ the engine (compiled and run) and a `tests/db/cmd/structure` golden on a real fu
   (`tails::inline_tails`), after the skipped-block copy.
 - Sole closed exits (`Placement::inline_exits`, `closed_subtrees`).
 
-Measured on bzip2, zlib and grep at O2 and O2-noinline (1,305 to 1,313 binary-function pairs
-scored in both, 552 distinct functions): these are projects the analysis mined, so the numbers
-are mined-set numbers. Perfect is GED 0 under DecBench's own code, run on contabo over the tip
+Measured with the tails alone on the base before the stack, on bzip2, zlib and grep at O2 and
+O2-noinline (1,305 to 1,313 binary-function pairs scored in both, 552 distinct functions): these are
+projects the analysis mined, so the numbers are mined-set numbers. The stack's are above. Perfect is GED 0 under DecBench's own code, run on contabo over the tip
 build's output and each step's (the tip reproduces the 2026-10-17 run's GED on 1,308 of 1,313):
 
 | step | perfect | total GED against the tip | gotos | functions with a goto |
@@ -293,19 +346,9 @@ source is `return a || b`. The unguarded join on the first step: 218 perfect (+1
 Over the 558 distinct functions the goto classes of the analysis go from 2,214 to 1,356: TR1 487 to 22,
 TR4 246 to 23, FW 580 to 237; left are JN 305 and JNB 283 (a jump over a block no rule closes), FW 237,
 LX 139 (an exit that is not closed), TR16 133 (a tail of five to sixteen statements), SP 86, CC 68,
-IR 57. Held out (23 binaries of radare2's test set, x86-64 and AArch64, 1,834 functions): rendered
-1,496 and refused 338 before and after, with the same functions refused; gotos 2,941 to 2,112; no
-function gains a goto.
+IR 57.
 
-Left, by when:
-
-- Next: the assignment before a copied or joined return, folded at the owner that spells the edge
-  copy (`return a;`); `&&`/`||` chains behind a BDD identity check (the analysis' ceiling is 29
-  bodies); while/do-while rotation (3 to 5 GED each) and a latch arm's copies (ceiling 17).
-- Conditional: the four-statement bound (tails of five to sixteen are 133 gotos; it moves with a
-  measurement on projects the analysis did not mine); the unguarded join, only with a CFG fact that
-  separates `return a || b` from two returns.
-- Unnecessary: the lowest-common-ancestor count for closedness.
+What is left of the tails is in "the recoveries together".
 
 ## 2026-10-23: what the chain and latch passes cost
 
