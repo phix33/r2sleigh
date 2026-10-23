@@ -153,9 +153,38 @@ into the tree (the scores it adds to a checkpoint).
   functions each cause alone keeps imperfect; `universe` says why a function has no row.
 * `ged_causes.py`, `counterfactual_ged.py`: block-graph deltas of the not-GED-perfect
   functions, and a re-score after a respelling, to bound what a renderer change gains.
+* `mined_set.py`: the mined-set comparison of two r2s builds (next section).
+* `run_gate.py`: the lost-evaluation and worker gates `run_decbench.sh` runs.
 * `evaluate_checkpointed.py`: evaluates decompilers already in a checkpoint (the driver
   only evaluates what it has just run); `r2s_timing.py`: r2s alone, without the backend's
   checkpoint, with peak RSS; `show_function.py`: source, rendering, scores and DWARF of one function.
+
+The mined-set comparison
+------------------------
+
+`mined_set.py` is how a structurer change is graded (ROADMAP D47): every function of
+the pinned mining set, bzip2, zlib and grep, at O2 and O2-noinline, rendered by two
+r2s builds and scored with DecBench's GED, then paired. It reads a results tree the
+driver wrote (`<tree>/<opt>/<project>/{stripped,compiled,decompiled}`: the targets
+are the addresses its `decompiled/*.toml` name) and runs where DecBench and Joern
+are installed.
+
+```
+tests/decbench/mined_set.py dump  --tree RUN --r2s base/r2s --out base --set mining
+tests/decbench/mined_set.py dump  --tree RUN --r2s new/r2s  --out new  --set mining
+../decbench-venv/bin/python tests/decbench/mined_set.py score --tree RUN --dump base --out base.json --decbench ../decbench
+../decbench-venv/bin/python tests/decbench/mined_set.py score --tree RUN --dump new  --out new.json  --decbench ../decbench
+tests/decbench/mined_set.py pair base.json new.json            # -u: one entry per function; -v: name them
+```
+
+`pair` prints, over the functions both runs scored: perfect count with the ones newly
+perfect and lost, mean and total GED with better, worse and same, gotos (all, and over
+the scored functions) and the functions with a goto, the functions whose text changed,
+and refusals (newly refused). `--set heldout` selects the other five projects (bash,
+diffutils, findutils, gzip, libexpat): those are run nightly and at an item's exit,
+never to choose a rule, and `pair` refuses to compare a mining run with a held-out
+run. The source CFGs are cached beside the scores (`srccache/`); delete it when the
+sources are recompiled.
 
 Local measurement
 -----------------
