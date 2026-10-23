@@ -623,7 +623,7 @@ jobs:
           for attempt in 1 2 3 4 5 6; do
             host=${hosts[$(( (attempt - 1) % 3 ))]}
             echo "try $attempt from $host"
-            sudo sed -i -E "s#https?://(([a-z]+\.)?(archive|security)\.ubuntu\.com|mirrors\.edge\.kernel\.org)/ubuntu/?#http://$host/ubuntu/#g" /etc/apt/sources.list.d/*.sources
+            sudo sed -i -E "s#(mirror\+file:/etc/apt/apt-mirrors\.txt|https?://(([a-z]+\.)?(archive|security)\.ubuntu\.com|mirrors\.edge\.kernel\.org)/ubuntu/?)#http://$host/ubuntu/#g" /etc/apt/sources.list.d/*.sources
             timeout -k 10 60 $apt update -qq &&
               timeout -k 10 90 $apt install --download-only --no-install-recommends -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user &&
               break
