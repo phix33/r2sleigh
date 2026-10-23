@@ -222,6 +222,12 @@ impl DomTree {
         self.pre[a] <= self.pre[b] && self.pre[b] <= self.last[a]
     }
 
+    /// Whether the edge `from -> to` returns to a block that dominates its source: a loop's
+    /// latch edge or a self loop. Any other edge is a forward edge, in `O(1)`.
+    pub fn is_back_edge(&self, from: u64, to: u64) -> bool {
+        self.dominates(to, from)
+    }
+
     /// Check if block A strictly dominates block B (A dominates B and A != B).
     pub fn strictly_dominates(&self, a: u64, b: u64) -> bool {
         a != b && self.dominates(a, b)
@@ -676,6 +682,29 @@ mod properties {
             dom,
             preds,
         }
+    }
+
+    #[test]
+    fn an_edge_back_to_a_dominator_is_a_back_edge_and_no_other_is() {
+        // 0 enters a loop 1 -> 2 -> 1 and a self loop on 3; 3 is also reached by the side block 4.
+        let edges = BTreeSet::from([(0, 1), (1, 2), (2, 1), (2, 3), (3, 3), (0, 4), (4, 3)]);
+        let dom = tree(5, &edges);
+        let back = |from: usize, to: usize| dom.is_back_edge(addr(from), addr(to));
+        assert!(back(2, 1), "the latch");
+        assert!(back(3, 3), "the self loop");
+        assert!(
+            !back(0, 1) && !back(1, 2),
+            "the loop is entered and walked forward"
+        );
+        assert!(
+            !back(2, 3),
+            "3 has a second way in, so it dominates neither of its sources"
+        );
+        assert!(
+            !back(4, 3),
+            "the side edge into the self loop's block is a forward edge"
+        );
+        assert!(!back(0, 4));
     }
 
     fn tree(n: usize, edges: &BTreeSet<(usize, usize)>) -> DomTree {

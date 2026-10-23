@@ -51,7 +51,6 @@ impl<'f> Placement<'f> {
             .filter(|addr| *addr == entry || dom.idom(*addr).is_some())
             .collect();
         let placed = |addr: u64| placed_set.contains(&addr);
-        let is_back_edge = |from: u64, to: u64| dom.dominates(to, from);
 
         let loops = natural_loops.outermost_first();
         let header_of: HashMap<u64, usize> = loops
@@ -74,7 +73,7 @@ impl<'f> Placement<'f> {
             let forward = cfg
                 .predecessors(addr)
                 .into_iter()
-                .filter(|pred| placed(*pred) && !is_back_edge(*pred, addr))
+                .filter(|pred| placed(*pred) && !dom.is_back_edge(*pred, addr))
                 .count();
             if forward >= 2 {
                 merge.insert(addr);
@@ -179,7 +178,7 @@ impl<'f> Placement<'f> {
 
     /// How the edge `from -> to` is written.
     pub(crate) fn edge(&self, from: u64, to: u64) -> EdgeShape {
-        if self.dom.dominates(to, from) {
+        if self.dom.is_back_edge(from, to) {
             return if self.innermost_loop(from) == self.header_of.get(&to).copied() {
                 EdgeShape::Continue
             } else {
