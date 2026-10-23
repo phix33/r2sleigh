@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ged_causes import function_body  # noqa: E402
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--run", required=True, type=Path)
     p.add_argument("--dec", default="r2sleigh_native")
@@ -26,7 +26,7 @@ def main() -> int:
     p.add_argument("opt")
     p.add_argument("binary")
     p.add_argument("function")
-    a = p.parse_args()
+    a = p.parse_args(argv)
     from decbench.models.project import OptimizationLevel, Project
     from decbench.pipeline.executor import PipelineConfig, PipelineExecutor
     from decbench.results_store import gather_project_tomls
@@ -49,9 +49,10 @@ def main() -> int:
             print("DWARF variables:")
             for v in names[a.function]:
                 print("  ", v["name"], "arg" if v["is_arg"] else "loc", v["type"][:5], "stack" if v["rbp_offset"] else "")
-    if not a.no_source:
+    if not a.no_source or a.graphs:
         project = Project.from_toml(next(t for t in gather_project_tomls() if t.stem == a.project))
         PipelineExecutor(PipelineConfig(output_dir=a.run, optimization_levels=[opt]))._discover_existing_binaries([project], a.run)
+    if not a.no_source:
         for stem, path in project.preprocessed_sources.get(opt, {}).items():
             body = function_body(Path(path).read_text(errors="replace"), a.function)
             if body:
