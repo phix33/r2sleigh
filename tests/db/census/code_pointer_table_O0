@@ -75,23 +75,19 @@ uint64_t _table_dispatch(uint64_t arg0, uint64_t arg1)
     uint32_t stack_m76_1;
     _Alignas(16) uint8_t frame[64];
 
-    /* r2dec proof: 3 constructs are marked below; 59 source obligations: 21 rendered, 11 elided, 0 refused, 27 residual; 10 statements rendered */
+    /* r2dec proof: 3 constructs are marked below; 59 source obligations: 21 rendered, 11 elided, 0 refused, 27 residual; 8 statements rendered */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 32U), (uint64_t)arg1);
         r2sleigh_store_u128((void*)(uint64_t)(frame + 0U), (__uint128_t)r2sleigh_load_u128((void*)(uint64_t)0x100004000U));
         r2sleigh_store_u64((void*)((uint64_t)(frame + 0U) + (uint64_t)16U), (uint64_t)r2sleigh_load_u64((void*)(uint64_t)0x100004010U));
         stack_m76_1 = 0;
-        for (; ; ) {
-            if ((uint8_t)((uint32_t)3U <= (uint32_t)stack_m76_1)) {
-                break;
-            } else {
+        while ((uint8_t)((uint32_t)3U > (uint32_t)stack_m76_1)) {
+            {
+                r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x10000046c:36 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
+                r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x10000046c:69 covering 1 op (render::values) */
                 {
-                    r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x10000046c:36 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
-                    r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x10000046c:69 covering 1 op (render::values) */
-                    {
-                        stack_m76_1 = (uint32_t)((uint32_t)stack_m76_1 + (uint32_t)1U);
-                    }
+                    stack_m76_1 = (uint32_t)((uint32_t)stack_m76_1 + (uint32_t)1U);
                 }
             }
         }

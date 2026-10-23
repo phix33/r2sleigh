@@ -207,6 +207,9 @@ pub(crate) enum UnassignedCause {
     /// Declared and never assigned, with no value from entry behind it: a
     /// result a call left in a register nothing claimed, for one.
     Unassigned,
+    /// Assigned, but where the block that reads it is not behind its definition: some path to the
+    /// read leaves it unassigned.
+    NotDominated,
 }
 
 impl UnassignedCause {}
@@ -241,6 +244,11 @@ fn note_unassigned_reads(detail: &mut String, unassigned: &[UnassignedRead]) {
             UnassignedCause::Unassigned,
             "never assigned",
             "never assigned",
+        ),
+        (
+            UnassignedCause::NotDominated,
+            "assigned on only some paths to its read",
+            "assigned on only some paths to their reads",
         ),
     ] {
         let names = unassigned

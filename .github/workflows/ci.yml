@@ -619,12 +619,16 @@ jobs:
       - name: Download the cross toolchain and qemu-user with their dependencies
         run: |
           apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20"
-          for attempt in 1 2 3; do
-            timeout -k 10 120 $apt update -qq &&
-              timeout -k 10 360 $apt install --download-only --no-install-recommends -y -qq gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user &&
+          hosts=(azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org)
+          for attempt in 1 2 3 4 5 6; do
+            host=${hosts[$(( (attempt - 1) % 3 ))]}
+            echo "try $attempt from $host"
+            sudo sed -i -E "s#(mirror\+file:/etc/apt/apt-mirrors\.txt|https?://(([a-z]+\.)?(archive|security)\.ubuntu\.com|mirrors\.edge\.kernel\.org)/ubuntu/?)#http://$host/ubuntu/#g" /etc/apt/sources.list.d/*.sources
+            timeout -k 10 60 $apt update -qq &&
+              timeout -k 10 90 $apt install --download-only --no-install-recommends -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user &&
               break
-            [ "$attempt" = 3 ] && exit 1
-            echo "apt try $attempt did not finish; trying again"
+            [ "$attempt" = 6 ] && exit 1
+            echo "try $attempt did not finish; trying again"
           done
           mkdir debs
           cp /var/cache/apt/archives/*.deb debs/

@@ -120,7 +120,9 @@ An evidence review of the whole project (caps and caches, a capability matrix, d
 measured performance, then a critic who re-verified five claims) found the following; D51 to D57 in the ROADMAP own it.
 
 - **Quality.** r2s is fourth of four on DecBench union-perfect (20.1%, [record](../tests/decbench/RESULT-2026-10-17.md)),
-  first on byte_match, last on type_match. Its edge is verification (certification, equivalence, oracles, typed
+  first on byte_match, last on type_match. (Corrected 2026-10-23: that run lost every bash row for r2s, kuna and ghidra to the
+  OOM killer. On all 6,978 rows r2s is third on union-perfect (28.0%), first on byte_match and third on type_match;
+  [record](../tests/decbench/RESULT-2026-10-23.md), D66 gates a lost row.) Its edge is verification (certification, equivalence, oracles, typed
   refusals), not recovery. Coverage is proof-first: bash renders 38.0% of 1,568 functions with no marked
   construct, fedora ls 58.7%.
 - **Behind the field, by name.** IDA, Ghidra and Kuna decompile more architectures (r2s: x86-64 and AArch64 only);

@@ -9,6 +9,15 @@ GED and VJ-GED are distances (zero is perfect), so their all-function number use
 ``1 / (1 + distance)``. This gives those metrics the same zero-is-worst quality
 scale as byte_match and type_match; filling a refused distance with raw zero would
 incorrectly reward it as a perfect graph.
+
+It also refuses a run that lost rows. A row is *scored* by a decompiler when the
+result has a metric value for it. Decompilers are compared only over the rows
+every compared decompiler scored; the report says how many rows that left out and
+how many rows each decompiler has no score for, and the exit status is 73 when a
+compared decompiler scored nothing in a project, or fewer than
+``--min-scored-fraction`` of its rows. (The 2026-10-17 run lost every bash
+evaluation of kuna, ghidra and r2s, and the scoreboard compared 692 angr-only rows
+as misses for the rest.)
 """
 
 from __future__ import annotations
@@ -121,6 +130,125 @@ def collect(results: dict) -> Collected:
         reference_cells,
         set(results.get("metrics") or []),
     )
+
+
+LOST_ROWS = 73
+PERFECT_DEFAULT = {"byte_match": 1.0, "ged": 0.0, "vj_ged": 0.0, "type_match": 1.0}
+
+
+def row_project(key: str) -> str:
+    return key.split("/", 1)[0]
+
+
+def compared_decompilers(results: dict) -> list[str]:
+    """The decompilers this result set measured: the versions it records, else what its rows name."""
+    named = set(results.get("decompiler_versions") or {}) or set(results.get("decompilers") or [])
+    if not named:
+        for group in results.get("groups", []):
+            for function in group.get("functions", []):
+                named.update(function.get("values") or {})
+                named.update(function.get("decompiled") or {})
+    return sorted(named)
+
+
+@dataclass
+class Coverage:
+    decompilers: list[str]
+    rows: int
+    common: list[str]
+    no_score: dict[str, int]
+    by_project: dict[str, dict[str, tuple[int, int]]]
+    failures: list[str]
+    results: dict
+
+
+def coverage(results: dict, decompilers: list[str], min_fraction: float = 0.0) -> Coverage:
+    """Who scored which rows, the rows all of ``decompilers`` scored, and the shortfalls.
+
+    A decompiler is owed the rows of the cells it ran in (``sweep.decompiler_cells``, when the
+    result set is a merge of shards), else every row. It fails a project where it scored none
+    of its rows, or fewer than ``min_fraction`` of them.
+    """
+    cells_of = (results.get("sweep") or {}).get("decompiler_cells") or {}
+    scored: dict[str, set[str]] = {d: set() for d in decompilers}
+    owed: dict[str, set[str]] = {d: set() for d in decompilers}
+    rows: set[str] = set()
+    for group in results.get("groups", []):
+        cell = cell_key(group["project"], group["opt_level"])
+        for function in group.get("functions", []):
+            key = function_key(group, function)
+            rows.add(key)
+            for decompiler in decompilers:
+                if decompiler in cells_of and cell not in cells_of[decompiler]:
+                    continue
+                owed[decompiler].add(key)
+                values = (function.get("values") or {}).get(decompiler) or {}
+                if any(value is not None for value in values.values()):
+                    scored[decompiler].add(key)
+    by_project: dict[str, dict[str, tuple[int, int]]] = {}
+    failures = []
+    for decompiler in decompilers:
+        for project in sorted({row_project(key) for key in owed[decompiler]}):
+            total = sum(1 for key in owed[decompiler] if row_project(key) == project)
+            got = sum(1 for key in scored[decompiler] if row_project(key) == project)
+            by_project.setdefault(project, {})[decompiler] = (got, total)
+            if got == 0 or got < min_fraction * total:
+                failures.append(f"{decompiler} scored {got} of {total} rows of {project}")
+    common = sorted(set.intersection(*scored.values())) if scored else []
+    return Coverage(
+        decompilers, len(rows), common,
+        {d: len(owed[d]) - len(scored[d]) for d in decompilers},
+        by_project, failures, results,
+    )
+
+
+def common_rows_table(cover: Coverage) -> dict[str, dict[str, dict]]:
+    """Per metric and decompiler, over the common rows: how many have the metric, the mean, how many are perfect."""
+    perfect = {**PERFECT_DEFAULT, **(cover.results.get("perfect_values") or {})}
+    wanted = set(cover.common)
+    values: dict[str, dict[str, list[float]]] = {}
+    for group in cover.results.get("groups", []):
+        for function in group.get("functions", []):
+            if function_key(group, function) not in wanted:
+                continue
+            for decompiler in cover.decompilers:
+                for metric, value in ((function.get("values") or {}).get(decompiler) or {}).items():
+                    if value is not None:
+                        values.setdefault(metric, {}).setdefault(decompiler, []).append(float(value))
+    return {
+        metric: {
+            decompiler: {
+                "n": len(per[decompiler]),
+                "mean": sum(per[decompiler]) / len(per[decompiler]),
+                "perfect": sum(1 for v in per[decompiler] if abs(v - perfect.get(metric, 0.0)) < 1e-9),
+            }
+            for decompiler in cover.decompilers if per.get(decompiler)
+        }
+        for metric, per in sorted(values.items())
+    }
+
+
+def print_coverage(cover: Coverage) -> None:
+    names = ", ".join(cover.decompilers)
+    print(f"compared decompilers: {names}")
+    print(
+        f"rows: {cover.rows}; scored by all {len(cover.decompilers)}: {len(cover.common)}; "
+        f"left out of the comparison: {cover.rows - len(cover.common)}"
+    )
+    print("rows with no score: " + ", ".join(
+        f"{decompiler} {count}" for decompiler, count in cover.no_score.items()))
+    print("scored / rows, per project:")
+    for project, per in sorted(cover.by_project.items()):
+        print(f"  {project:12} " + ", ".join(
+            f"{decompiler} {got}/{total}" for decompiler, (got, total) in per.items()))
+    table = common_rows_table(cover)
+    if table:
+        print(f"over the {len(cover.common)} common rows: metric, then per decompiler "
+              "perfect/n and mean")
+    for metric, per in table.items():
+        print(f"  {metric:11} " + "; ".join(
+            f"{decompiler} {data['perfect']}/{data['n']} {data['mean']:.3f}"
+            for decompiler, data in per.items()))
 
 
 def quality(metric: str, value: float) -> float:
@@ -618,13 +746,40 @@ def main() -> int:
     parser.add_argument("--results", type=Path, required=True)
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--accept-baseline", action="store_true")
+    parser.add_argument(
+        "--compare",
+        help="comma list of the decompilers to compare (default: every one the results name)",
+    )
+    parser.add_argument(
+        "--min-scored-fraction",
+        type=float,
+        default=0.0,
+        help="fail when a compared decompiler scored fewer than this share of a project's "
+        "rows (default 0: fail only when it scored none)",
+    )
     args = parser.parse_args()
 
     try:
-        current = collect(json.loads(args.results.read_text()))
+        raw = json.loads(args.results.read_text())
+        current = collect(raw)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         print(f"invalid result set: {exc}", file=sys.stderr)
         return 70
+    cover = coverage(
+        raw,
+        args.compare.split(",") if args.compare else compared_decompilers(raw),
+        args.min_scored_fraction,
+    )
+    print_coverage(cover)
+    if cover.failures:
+        print(
+            f"ERROR: {len(cover.failures)} project/decompiler pairs lost their rows; "
+            "no number of this run is comparable:",
+            file=sys.stderr,
+        )
+        for line in cover.failures:
+            print(f"  {line}", file=sys.stderr)
+        return LOST_ROWS
     baseline, invalid = usable_baseline(
         json.loads(args.baseline.read_text()) if args.baseline.exists() else None
     )

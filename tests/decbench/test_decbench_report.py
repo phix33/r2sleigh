@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 
@@ -45,6 +50,127 @@ def payload(project: str, score: float | None, decompiled: bool = True) -> dict:
             }
         ],
     }
+
+
+def results_of(projects: dict[str, list[dict]], **extra) -> dict:
+    """Result set: per project, one function per entry; an entry maps a decompiler to its metrics, or None."""
+    decompilers = sorted({d for rows in projects.values() for row in rows for d in row})
+    return {
+        "schema_version": 2,
+        "decompilers": decompilers,
+        "decompiler_versions": {d: "test" for d in decompilers},
+        "metrics": ["byte_match", "ged"],
+        "perfect_values": {"byte_match": 1.0, "ged": 0.0},
+        "groups": [
+            {
+                "project": project,
+                "binary": "b",
+                "opt_level": "O2",
+                "functions": [
+                    {
+                        "function": f"f{number}",
+                        "values": {d: m for d, m in row.items() if m},
+                        "decompiled": {d: m is not None for d, m in row.items()},
+                    }
+                    for number, row in enumerate(rows)
+                ],
+            }
+            for project, rows in projects.items()
+        ],
+        **extra,
+    }
+
+
+def perfect() -> dict:
+    return {"byte_match": 1.0, "ged": 0.0}
+
+
+def worse() -> dict:
+    return {"byte_match": 0.5, "ged": 3.0}
+
+
+class CoverageTests(unittest.TestCase):
+    def test_a_project_one_decompiler_lost_stops_the_report_before_any_number(self) -> None:
+        # The 2026-10-17 bash: three decompilers lost every row, angr kept some.
+        lost = {"angr": perfect(), "kuna": None, "r2sleigh_native": None}
+        kept = {"angr": perfect(), "kuna": worse(), "r2sleigh_native": worse()}
+        data = results_of({"bash": [lost, lost, lost], "zlib": [kept, kept]})
+        cover = report.coverage(data, report.compared_decompilers(data))
+        self.assertEqual(cover.failures, [
+            "kuna scored 0 of 3 rows of bash",
+            "r2sleigh_native scored 0 of 3 rows of bash",
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            results = Path(directory) / "function_results.json"
+            results.write_text(json.dumps(data))
+            baseline = Path(directory) / "baseline.json"
+            argv = ["report_decbench.py", "--results", str(results), "--baseline", str(baseline),
+                    "--accept-baseline"]
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(sys, "argv", argv),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(stderr),
+            ):
+                status = report.main()
+            self.assertEqual(status, report.LOST_ROWS)
+            self.assertIn("kuna scored 0 of 3 rows of bash", stderr.getvalue())
+            self.assertFalse(baseline.exists())  # a lossy run is not accepted as the record
+
+    def test_decompilers_are_compared_only_on_rows_every_one_scored(self) -> None:
+        both = {"angr": perfect(), "r2sleigh_native": worse()}
+        only_r2s = {"angr": None, "r2sleigh_native": perfect()}
+        only_angr = {"angr": perfect(), "r2sleigh_native": None}
+        data = results_of({"zlib": [both, both, only_r2s, only_r2s, only_r2s, only_angr]})
+        cover = report.coverage(data, ["angr", "r2sleigh_native"])
+        self.assertEqual(cover.failures, [])
+        self.assertEqual(cover.rows, 6)
+        self.assertEqual(len(cover.common), 2)
+        self.assertEqual(cover.no_score, {"angr": 3, "r2sleigh_native": 1})
+        self.assertEqual(cover.by_project["zlib"], {"angr": (3, 6), "r2sleigh_native": (5, 6)})
+        table = report.common_rows_table(cover)
+        # Over the two shared rows r2s is perfect on none, angr on both; the three rows only r2s
+        # scored, all perfect, do not make it look better.
+        self.assertEqual(table["ged"]["angr"], {"n": 2, "mean": 0.0, "perfect": 2})
+        self.assertEqual(table["ged"]["r2sleigh_native"], {"n": 2, "mean": 3.0, "perfect": 0})
+
+    def test_the_report_says_how_many_rows_it_left_out(self) -> None:
+        row = {"angr": perfect(), "r2sleigh_native": None}
+        data = results_of({"zlib": [row, row, row]})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            report.print_coverage(report.coverage(data, ["angr", "r2sleigh_native"]))
+        text = out.getvalue()
+        self.assertIn("rows: 3; scored by all 2: 0; left out of the comparison: 3", text)
+        self.assertIn("rows with no score: angr 0, r2sleigh_native 3", text)
+
+    def test_a_stated_fraction_fails_a_project_that_is_mostly_unscored(self) -> None:
+        mostly_lost = [{"kuna": worse()}] + [{"kuna": None}] * 3
+        data = results_of({"bash": mostly_lost})
+        self.assertEqual(report.coverage(data, ["kuna"]).failures, [])
+        failures = report.coverage(data, ["kuna"], min_fraction=0.5).failures
+        self.assertEqual(failures, ["kuna scored 1 of 4 rows of bash"])
+
+    def test_a_decompiler_is_owed_only_the_cells_it_ran_in(self) -> None:
+        # A merge of shards: angr ran in `fresh` only, so `cached` is not a loss.
+        data = results_of({"fresh": [{"angr": perfect(), "r2sleigh_native": worse()}],
+                           "cached": [{"r2sleigh_native": worse()}]},
+                          sweep={"decompiler_cells": {"angr": ["fresh/O2"],
+                                                      "r2sleigh_native": ["cached/O2", "fresh/O2"]}})
+        cover = report.coverage(data, ["angr", "r2sleigh_native"])
+        self.assertEqual(cover.failures, [])
+        self.assertEqual(sorted(cover.by_project), ["cached", "fresh"])
+        self.assertNotIn("angr", cover.by_project["cached"])
+        # Naming a decompiler that never scored is a failure, not a pass.
+        self.assertEqual(report.coverage(data, ["ghidra"]).failures,
+                         ["ghidra scored 0 of 1 rows of cached", "ghidra scored 0 of 1 rows of fresh"])
+
+    def test_the_compared_set_is_what_the_results_name(self) -> None:
+        data = results_of({"zlib": [{"angr": perfect(), "kuna": worse()}]})
+        self.assertEqual(report.compared_decompilers(data), ["angr", "kuna"])
+        del data["decompiler_versions"]
+        data["decompilers"] = ["angr"]
+        self.assertEqual(report.compared_decompilers(data), ["angr"])
 
 
 class ReportTests(unittest.TestCase):

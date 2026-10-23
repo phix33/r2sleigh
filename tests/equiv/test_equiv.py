@@ -82,12 +82,13 @@ class BatchTests(unittest.TestCase):
     ADDRESSES = [0x1000, 0x2000, 0x3000, 0x4000]
 
     def ask(self, timeout: float = 30.0, addresses: list[int] | None = None,
-            startup: float | None = None, **env: str):
+            startup: float | None = None, on_answer=None, **env: str):
         with _StubEnv(**env), tempfile.TemporaryDirectory() as state:
             os.environ["STUB_R2S_STATE"] = state
             try:
                 return run_batch(STUB, "/bin/true", addresses or self.ADDRESSES,
-                                 function_timeout=timeout, startup_timeout=startup)
+                                 function_timeout=timeout, startup_timeout=startup,
+                                 on_answer=on_answer)
             finally:
                 os.environ.pop("STUB_R2S_STATE", None)
 
@@ -113,6 +114,29 @@ class BatchTests(unittest.TestCase):
         self.assertIn("SIGABRT", report.answers[1].cause)
         self.assertIn("0x2000", report.answers[1].cause)
         self.assertEqual(report.processes, 2)
+
+    def test_an_answer_is_delivered_while_r2s_is_still_running(self):
+        # A consumer that checkpoints from on_answer keeps what a killed run had already given:
+        # the answers before a hang arrive before the hang is given up on, not after it.
+        seen: list[tuple[int, float]] = []
+        started = time.monotonic()
+        self.ask(timeout=3.0, addresses=[0x1000, 0x2000, 0x3000], STUB_R2S_MODE="minimal",
+                 STUB_R2S_FAULTS="sleep@3000",
+                 on_answer=lambda a: seen.append((a.address, time.monotonic())))
+        ended = time.monotonic()
+        self.assertEqual([address for address, _ in seen], [0x1000, 0x2000, 0x3000])
+        self.assertLess(seen[1][1] - started, 2.0)
+        self.assertGreater(ended - seen[1][1], 2.0)
+
+    def test_a_failing_consumer_stops_r2s_and_the_batch(self):
+        def refuse(answer):
+            raise OSError("disk full")
+
+        started = time.monotonic()
+        with self.assertRaises(OSError):
+            self.ask(timeout=30.0, STUB_R2S_MODE="minimal", STUB_R2S_FAULTS="sleep@2000",
+                     on_answer=refuse)
+        self.assertLess(time.monotonic() - started, 10.0)
 
     def test_a_hang_is_charged_to_the_function_it_hung_on(self):
         report = self.ask(timeout=2.0, STUB_R2S_MODE="minimal", STUB_R2S_FAULTS="sleep@1000")

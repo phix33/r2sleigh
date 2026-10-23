@@ -46,17 +46,16 @@ uint64_t _init(void)
     uint64_t rax_1;
     uint64_t rax_3;
 
-    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 5 statements rendered; 1 never assigned, read as residuals (RAX_2) */
+    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 6 statements rendered; 1 never assigned, read as residuals (RAX_2) */
     {
         rax_1 = r2sleigh_load_u64((void*)(uint64_t)0x3fe8U);
         if ((uint8_t)((uint64_t)rax_1 == (uint64_t)0U)) {
             rax_3 = rax_1;
+            return (uint64_t)rax_3;
         } else {
             r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1014:4 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
             r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x1014:11 covering 1 op (render::values) */
             rax_3 = r2sleigh_residual_u64(3);
-        }
-        {
             return (uint64_t)rax_3;
         }
     }
@@ -402,7 +401,7 @@ uint32_t sum_array(uint64_t arg0, uint32_t arg1)
     uint32_t tmp_lane_1398_7_0_1;
     uint64_t rdi_2;
 
-    /* r2dec proof: no individual construct is marked; 42 source obligations: 34 rendered, 8 elided, 0 refused; 15 statements rendered */
+    /* r2dec proof: no individual construct is marked; 42 source obligations: 34 rendered, 8 elided, 0 refused; 13 statements rendered */
     {
         tmp_1384_0_1 = arg1;
         if ((uint8_t)((int32_t)tmp_1384_0_1 <= (int32_t)0U)) {
@@ -411,17 +410,13 @@ uint32_t sum_array(uint64_t arg0, uint32_t arg1)
             tmp_138d_8_1 = (uint64_t)((uint64_t)((uint64_t)(int32_t)arg1 * (uint64_t)4U) + (uint64_t)arg0);
             rax_2 = 0;
             rdi_1 = arg0;
-            for (; ; ) {
+            do {
                 tmp_1398_0_1 = r2sleigh_load_u32((void*)rdi_1);
                 tmp_lane_1398_7_0_1 = (uint32_t)((uint32_t)((uint64_t)rax_2 >> 0U) + (uint32_t)tmp_1398_0_1);
                 rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)4U);
-                if ((uint8_t)((uint64_t)rdi_2 != (uint64_t)tmp_138d_8_1)) {
-                    rax_2 = (uint64_t)(uint32_t)tmp_lane_1398_7_0_1;
-                    rdi_1 = rdi_2;
-                } else {
-                    break;
-                }
-            }
+                rax_2 = (uint64_t)(uint32_t)tmp_lane_1398_7_0_1;
+                rdi_1 = rdi_2;
+            } while ((uint8_t)((uint64_t)rdi_2 != (uint64_t)tmp_138d_8_1));
             {
                 return (uint32_t)tmp_lane_1398_7_0_1;
             }
@@ -445,15 +440,14 @@ uint64_t classify(uint32_t arg0)
     uint32_t tmp_13c7_10_1;
     uint64_t rax_4;
 
-    /* r2dec proof: no individual construct is marked; 19 source obligations: 15 rendered, 4 elided, 0 refused; 5 statements rendered; 1 data object type refused */
+    /* r2dec proof: no individual construct is marked; 19 source obligations: 15 rendered, 4 elided, 0 refused; 6 statements rendered; 1 data object type refused */
     {
         if ((uint8_t)((uint32_t)7U < (uint32_t)arg0)) {
             rax_4 = (uint64_t)0xffffffffU;
+            return (uint64_t)rax_4;
         } else {
             tmp_13c7_10_1 = r2sleigh_load_u32((void*)((uint64_t)((uint64_t)(uint32_t)arg0 * (uint64_t)4U) + (uint64_t)&CSWTCH_12));
             rax_4 = (uint64_t)(uint32_t)tmp_13c7_10_1;
-        }
-        {
             return (uint64_t)rax_4;
         }
     }
@@ -476,24 +470,20 @@ uint32_t list_len(uint64_t arg0)
     uint64_t rdi_2;
     uint32_t tmp_lane_13e4_6_0_1;
 
-    /* r2dec proof: no individual construct is marked; 34 source obligations: 27 rendered, 7 elided, 0 refused; 13 statements rendered */
+    /* r2dec proof: no individual construct is marked; 34 source obligations: 27 rendered, 7 elided, 0 refused; 11 statements rendered */
     {
         if ((uint8_t)((uint64_t)arg0 == (uint64_t)0U)) {
             return 0;
         } else {
             rax_2 = 0;
             rdi_1 = arg0;
-            for (; ; ) {
+            do {
                 tmp_13e0_8_1 = r2sleigh_load_u64((void*)(uint64_t)((uint64_t)rdi_1 + (uint64_t)8U));
                 rdi_2 = tmp_13e0_8_1;
                 tmp_lane_13e4_6_0_1 = (uint32_t)((uint32_t)((uint64_t)rax_2 >> 0U) + (uint32_t)1U);
-                if ((uint8_t)((uint64_t)rdi_2 != (uint64_t)0U)) {
-                    rax_2 = (uint64_t)(uint32_t)tmp_lane_13e4_6_0_1;
-                    rdi_1 = rdi_2;
-                } else {
-                    break;
-                }
-            }
+                rax_2 = (uint64_t)(uint32_t)tmp_lane_13e4_6_0_1;
+                rdi_1 = rdi_2;
+            } while ((uint8_t)((uint64_t)rdi_2 != (uint64_t)0U));
             {
                 return (uint32_t)tmp_lane_13e4_6_0_1;
             }
@@ -533,10 +523,11 @@ uint64_t mul_div(uint64_t arg0, uint64_t arg1)
     uint64_t rdx_4;
     uint64_t rax_8;
 
-    /* r2dec proof: 2 constructs are marked below; 38 source obligations: 31 rendered, 4 elided, 0 refused, 3 residual; 25 statements rendered */
+    /* r2dec proof: 2 constructs are marked below; 38 source obligations: 31 rendered, 4 elided, 0 refused, 3 residual; 26 statements rendered */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             rax_8 = 0;
+            return (uint64_t)rax_8;
         } else {
             rax_3 = (uint64_t)((uint64_t)((uint64_t)arg0 * (uint64_t)8U) - (uint64_t)arg0);
             tmp_1416_0_1 = (__uint128_t)(int64_t)rax_3;
@@ -560,8 +551,6 @@ uint64_t mul_div(uint64_t arg0, uint64_t arg1)
             tmp_1423_60_1 = (__uint128_t)tmp_1423_0_1 == (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffffffffffffULL) ? (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0U) : (__uint128_t)((__int128_t)tmp_1423_40_1 % (__int128_t)tmp_1423_0_1);
             rdx_4 = (uint64_t)((__uint128_t)tmp_1423_60_1 >> 0U);
             rax_8 = (uint64_t)((uint64_t)rax_4 + (uint64_t)rdx_4);
-        }
-        {
             return (uint64_t)rax_8;
         }
     }
@@ -585,7 +574,7 @@ uint64_t avg(int64_t* arg0, uint32_t arg1)
     uint64_t rdi_2;
     uint64_t rdi_3;
 
-    /* r2dec proof: 2 constructs are marked below; 49 source obligations: 37 rendered, 8 elided, 0 refused, 4 residual; 22 statements rendered */
+    /* r2dec proof: 2 constructs are marked below; 49 source obligations: 37 rendered, 8 elided, 0 refused, 4 residual; 20 statements rendered */
     {
         tmp_1434_0_1 = arg1;
         zf_1 = (uint8_t)((uint32_t)tmp_1434_0_1 == (uint32_t)0U);
@@ -607,16 +596,12 @@ uint64_t avg(int64_t* arg0, uint32_t arg1)
                     rdi_2 = rdi_1;
                 }
             }
-            for (; ; ) {
+            do {
                 (void)r2sleigh_load_u64((void*)rdi_2);
                 rdi_3 = (uint64_t)((uint64_t)rdi_2 + (uint64_t)16U);
                 (void)r2sleigh_load_u64((void*)(uint64_t)((uint64_t)rdi_3 - (uint64_t)8U));
-                if ((uint8_t)((uint64_t)rdi_3 != (uint64_t)rax_1)) {
-                    rdi_2 = rdi_3;
-                } else {
-                    break;
-                }
-            }
+                rdi_2 = rdi_3;
+            } while ((uint8_t)((uint64_t)rdi_3 != (uint64_t)rax_1));
         }
         {
 L1: ;
@@ -642,7 +627,7 @@ uint64_t fact(uint32_t arg0)
     uint32_t tmp_lane_14a2_5_0_1;
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 38 source obligations: 30 rendered, 8 elided, 0 refused; 13 statements rendered */
+    /* r2dec proof: no individual construct is marked; 38 source obligations: 30 rendered, 8 elided, 0 refused; 11 statements rendered */
     {
         rdi_1 = (uint64_t)(uint32_t)arg0;
         if ((uint8_t)((int32_t)arg0 <= (int32_t)1U)) {
@@ -650,16 +635,12 @@ uint64_t fact(uint32_t arg0)
         } else {
             rax_2 = 1;
             rdi_1_2 = rdi_1;
-            for (; ; ) {
+            do {
                 tmp_lane_14a2_5_0_1 = (uint32_t)((uint32_t)((uint64_t)rdi_1_2 >> 0U) - (uint32_t)1U);
                 rax_3 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)(int32_t)((uint64_t)rax_2 >> 0U) * (uint64_t)(int32_t)((uint64_t)rdi_1_2 >> 0U)) >> 0U);
-                if ((uint8_t)((uint32_t)tmp_lane_14a2_5_0_1 != (uint32_t)1U)) {
-                    rax_2 = rax_3;
-                    rdi_1_2 = (uint64_t)(uint32_t)tmp_lane_14a2_5_0_1;
-                } else {
-                    break;
-                }
-            }
+                rax_2 = rax_3;
+                rdi_1_2 = (uint64_t)(uint32_t)tmp_lane_14a2_5_0_1;
+            } while ((uint8_t)((uint32_t)tmp_lane_14a2_5_0_1 != (uint32_t)1U));
             {
                 return (uint64_t)rax_3;
             }
@@ -712,12 +693,12 @@ uint64_t fill(uint32_t arg0)
     uint32_t tmp_lane_14f4_3_2_1;
     uint32_t tmp_1501_0_1;
 
-    /* r2dec proof: 1 construct is marked below; 57 source obligations: 51 rendered, 4 elided, 0 refused, 2 residual; 39 statements rendered; 1 data object type refused */
+    /* r2dec proof: 1 construct is marked below; 57 source obligations: 51 rendered, 4 elided, 0 refused, 2 residual; 37 statements rendered; 1 data object type refused */
     {
         xmm2_1 = r2sleigh_load_u128((void*)(uint64_t)0x2050U);
         rax_2 = 0x4040;
         xmm1_2 = r2sleigh_load_u128((void*)(uint64_t)0x2040U);
-        for (; ; ) {
+        do {
             rax_3 = (uint64_t)((uint64_t)rax_2 + (uint64_t)16U);
             tmp_lane_14f0_0_0_1 = (uint32_t)((__uint128_t)xmm1_2 >> 0U);
             tmp_lane_14f0_0_1_1 = (uint32_t)((__uint128_t)xmm2_1 >> 0U);
@@ -746,13 +727,9 @@ uint64_t fill(uint32_t arg0)
             tmp_lane_14f4_3_0_1 = (uint32_t)((__uint128_t)xmm1_2 >> 96U);
             tmp_lane_14f4_3_2_1 = (uint32_t)((uint32_t)tmp_lane_14f4_3_0_1 + (uint32_t)arg0);
             r2sleigh_store_u128((void*)(uint64_t)((uint64_t)rax_3 - (uint64_t)16U), (__uint128_t)(((__uint128_t)xmm0_4 & (__uint128_t)((__uint128_t)0xffffffffU << 64U | (__uint128_t)0xffffffffffffffffULL)) | ((__uint128_t)tmp_lane_14f4_3_2_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 96U));
-            if ((uint8_t)((uint64_t)rax_3 != (uint64_t)0x4080U)) {
-                rax_2 = rax_3;
-                xmm1_2 = (__uint128_t)(((__uint128_t)xmm1_5 & (__uint128_t)((__uint128_t)0xffffffffU << 64U | (__uint128_t)0xffffffffffffffffULL)) | ((__uint128_t)tmp_lane_14f0_3_2_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 96U);
-            } else {
-                break;
-            }
-        }
+            rax_2 = rax_3;
+            xmm1_2 = (__uint128_t)(((__uint128_t)xmm1_5 & (__uint128_t)((__uint128_t)0xffffffffU << 64U | (__uint128_t)0xffffffffffffffffULL)) | ((__uint128_t)tmp_lane_14f0_3_2_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 96U);
+        } while ((uint8_t)((uint64_t)rax_3 != (uint64_t)0x4080U));
         {
             tmp_1501_0_1 = r2sleigh_load_u32((void*)&g_counter);
             r2sleigh_store_u32((void*)&g_counter, (uint32_t)((uint32_t)tmp_1501_0_1 + (uint32_t)arg0));
@@ -891,7 +868,7 @@ uint64_t find(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
     uint32_t tmp_15cb_10_1;
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 43 source obligations: 36 rendered, 7 elided, 0 refused; 17 statements rendered */
+    /* r2dec proof: no individual construct is marked; 43 source obligations: 36 rendered, 7 elided, 0 refused; 16 statements rendered */
     {
         tmp_15b4_0_1 = arg1;
         if ((uint8_t)((int32_t)tmp_15b4_0_1 <= (int32_t)0U)) {
@@ -902,11 +879,11 @@ uint64_t find(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
                 tmp_15cb_10_1 = r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)rax_2 * 4U));
                 if ((uint8_t)((uint32_t)tmp_15cb_10_1 != (uint32_t)arg2)) {
                     if ((uint8_t)((int32_t)arg2 < (int32_t)tmp_15cb_10_1)) {
-                        goto L1;
+                        return (uint64_t)0xffffffffU;
                     } else {
                         rax_3 = (uint64_t)((uint64_t)rax_2 + (uint64_t)1U);
                         if ((uint8_t)((uint64_t)rax_3 == (uint64_t)rsi_1)) {
-                            goto L1;
+                            return (uint64_t)0xffffffffU;
                         } else {
                             rax_2 = rax_3;
                         }
@@ -920,7 +897,6 @@ uint64_t find(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
             }
         }
         {
-L1: ;
             return (uint64_t)0xffffffffU;
         }
     }

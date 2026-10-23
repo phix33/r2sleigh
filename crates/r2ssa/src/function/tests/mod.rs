@@ -1,6 +1,7 @@
 mod caller_slots;
 mod control;
 mod interface;
+mod lanes;
 mod lift;
 mod memory;
 mod stack;

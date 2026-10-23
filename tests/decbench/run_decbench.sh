@@ -16,8 +16,16 @@
 #   4. optionally compile the projects (DecBench's compile_all.py);
 #   5. run scripts/run_benchmark.py through decbench_cli.py, which registers
 #      the vj_ged metric when DecBench does not;
-#   6. check every r2sleigh_native result names that sha256, then report
-#      against baseline.json (report_decbench.py).
+#   6. check every binary the run decompiled has its scores in evaluated/
+#      (run_gate.py: a run that loses rows stops here with status 71), check
+#      every r2sleigh_native result names that sha256, then report against
+#      baseline.json (report_decbench.py, which compares decompilers only over
+#      the rows all of them scored and stops with status 73 when one scored
+#      nothing in a project).
+#
+# More than one worker is refused for a binary whose decompiled C exceeds 8 MB
+# (r2s's bash: 13 MB, 5.2 GB per evaluation worker; run_gate.py): up front for
+# C already in --out, and inside the driver before it evaluates.
 #
 # The driver needs cgroup v2 and a user systemd manager (`systemd-run --user`)
 # for its per-binary limits; it says so and stops when they are missing.
@@ -35,6 +43,7 @@ plan=0
 decompilers=r2sleigh_native,angr
 metrics=byte_match,ged,vj_ged,type_match
 workers=${R2SLEIGH_DECBENCH_WORKERS:-4}
+compare=
 declare -a projects=()
 declare -a opts=()
 
@@ -51,7 +60,9 @@ usage: tests/decbench/run_decbench.sh [options]
   --opt-level OPT      O0, O2 or O2_noinline; repeatable (default: O0 O2)
   --decompilers LIST   (default: r2sleigh_native,angr)
   --metrics LIST       (default: byte_match,ged,vj_ged,type_match)
-  --workers N          DecBench workers (default: 4)
+  --workers N          DecBench workers (default: 4); 1 for bash
+  --compare LIST       decompilers report_decbench.py compares, over the rows
+                       all of them scored (default: every one the results name)
   --r2s PATH           measure this r2s instead of building target/release/r2s
   --compile            compile the projects first (DecBench's compile_all.py)
   --accept-baseline    start or extend baseline.json with this run
@@ -69,6 +80,7 @@ while [[ $# -gt 0 ]]; do
         --decompilers) decompilers=$2; shift 2 ;;
         --metrics) metrics=$2; shift 2 ;;
         --workers) workers=$2; shift 2 ;;
+        --compare) compare=$2; shift 2 ;;
         --r2s) r2s=$2; shift 2 ;;
         --compile) compile=1; shift ;;
         --accept-baseline) accept=1; shift ;;
@@ -78,6 +90,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 (( ${#opts[@]} )) || opts=(O0 O2)
+[[ $workers =~ ^[1-9][0-9]*$ ]] || { echo "--workers wants a positive integer, not '$workers'" >&2; exit 64; }
+started=$(date +%s)
 out=${out:-$root/tests/decbench/artifacts/run-$(date -u +%Y%m%dT%H%M%SZ)}
 opt_list=$(IFS=,; echo "${opts[*]}")
 
@@ -87,6 +101,11 @@ run() {
     printf '\n'
     (( plan )) || "$@"
 }
+
+if (( workers > 1 )); then
+    python3 "$root/tests/decbench/run_gate.py" workers --tree "$out" --workers "$workers" \
+        --decompilers "$decompilers" || exit $?
+fi
 
 if [[ -z $r2s ]]; then
     run cargo build --release -p r2s --features sleigh --manifest-path "$root/Cargo.toml"
@@ -113,7 +132,7 @@ fi
 export R2SLEIGH_R2S_BIN=$r2s
 export R2SLEIGH_REFUSAL_CENSUS_DIR=$out/refusals
 if (( compile )); then
-    run env -C "$decbench" "$python" scripts/compile_all.py "$out" "$workers" "${projects[@]}"
+    run env -C "$decbench" "$python" scripts/compile_all.py "$out" "$workers" ${projects[@]+"${projects[@]}"}
 fi
 declare -a only=()
 (( ${#projects[@]} )) && only=(-- "${projects[@]}")
@@ -123,8 +142,10 @@ run env -C "$decbench" \
     DECBENCH_METRICS="$metrics" \
     DECBENCH_WORKERS="$workers" \
     R2SLEIGH_DECBENCH_PHASE_LOG="$out/phases.tsv" \
-    "$python" "$root/tests/decbench/decbench_cli.py" run-benchmark "$out" "${only[@]}"
+    "$python" "$root/tests/decbench/decbench_cli.py" run-benchmark "$out" ${only[@]+"${only[@]}"}
 
+run python3 "$root/tests/decbench/run_gate.py" evaluated --tree "$out" \
+    --decompilers "$decompilers" --since "$started"
 (( plan )) && exit 0
 results=$out/function_results.json
 python3 - "$results" "$witness" <<'PY'
@@ -138,4 +159,5 @@ PY
 declare -a report=(python3 "$root/tests/decbench/report_decbench.py" --results "$results"
     --baseline "$root/tests/decbench/baseline.json")
 (( accept )) && report+=(--accept-baseline)
+[[ -n $compare ]] && report+=(--compare "$compare")
 run "${report[@]}"

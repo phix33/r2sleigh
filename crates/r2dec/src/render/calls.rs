@@ -43,6 +43,16 @@ pub(super) struct CallPlan {
     pub(super) declared: Option<Prototype>,
 }
 
+impl CallPlan {
+    /// The class the call returns in: its callee's for a tail transfer, else the result it leaves.
+    pub(super) fn returns(&self) -> Option<&MachineType> {
+        match &self.tail {
+            Some(tail) => tail.as_ref().map(|(_, class)| class),
+            None => self.result.as_ref().map(CallResult::class),
+        }
+    }
+}
+
 /// What a call leaves its caller.
 #[derive(Debug, Clone)]
 pub(super) enum CallResult {

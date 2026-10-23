@@ -14,15 +14,18 @@ r2s is replaced by ``tests/equiv/testdata/stub_r2s.py``, which answers
 
 from __future__ import annotations
 
+import itertools
 import os
 import pickle
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -107,6 +110,8 @@ TARGETS = [0x401150, 0x401160, 0x4011F0, 0x401210, 0x401230, 0x401290]
 
 
 class Backend(unittest.TestCase):
+    runs = itertools.count()
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.env = {
@@ -154,24 +159,12 @@ class Backend(unittest.TestCase):
         self.assertEqual(result.decompiler.extra["processes"], 1)
         self.assertEqual(result.decompiler.failed_functions, [f"0x{TARGETS[1]:x}"])
 
-    def test_a_crash_costs_one_function_and_every_answer_is_checkpointed(self):
+    def test_a_crash_costs_one_function_and_the_end_is_checkpointed(self):
         # D4: abort on the third of six; r2s restarts at the fourth, and the
-        # progress pickle grows by one function per answer.
+        # pickle the driver would recover holds the five answers.
         os.environ["STUB_R2S_FAULTS"] = f"abort@{TARGETS[2]:x}"
-        sizes: list[int] = []
-        original = r2sleigh_raw.common.dump_progress
-
-        def spy(path, result):
-            sizes.append(len(result.functions) + len(result.decompiler.extra["decline_causes"]))
-            original(path, result)
-
-        r2sleigh_raw.common.dump_progress = spy
-        try:
-            progress = Path(self.tmp.name) / "progress.pkl"
-            result = self.decompile(function_names=set(TARGETS), progress_path=progress)
-        finally:
-            r2sleigh_raw.common.dump_progress = original
-        self.assertEqual(sizes, [1, 2, 3, 4, 5, 6])
+        progress = Path(self.tmp.name) / "progress.pkl"
+        result = self.decompile(function_names=set(TARGETS), progress_path=progress)
         causes = result.decompiler.extra["decline_causes"]
         self.assertEqual(list(causes), [f"0x{TARGETS[2]:x}"])
         self.assertIn("SIGABRT", causes[f"0x{TARGETS[2]:x}"])
@@ -181,6 +174,142 @@ class Backend(unittest.TestCase):
         saved = pickle.loads(progress.read_bytes())
         self.assertEqual(len(saved.functions), 5)
         self.assertEqual(result.decompiler.extra["processes"], 2)
+        self.assertNotIn("resume", result.decompiler.extra)
+
+    def checkpoint_rows(self, answer_times, interval="30"):
+        """The rows held by each checkpoint of a run whose answers arrive at ``answer_times`` seconds."""
+        clock = [0.0]
+        rows: list[int] = []
+        os.environ["R2SLEIGH_CHECKPOINT_SECONDS"] = interval
+        real_batch = r2sleigh_raw.r2s_batch.run_batch
+        real_dump = r2sleigh_raw.common.dump_progress
+
+        def timed(*args, on_answer=None, **kwargs):
+            moments = iter(answer_times)
+
+            def arrive(answer):
+                clock[0] = next(moments)
+                on_answer(answer)
+
+            return real_batch(*args, on_answer=arrive, **kwargs)
+
+        def spy(path, result):
+            rows.append(len(result.functions) + len(result.decompiler.extra["decline_causes"]))
+            real_dump(path, result)
+
+        try:
+            r2sleigh_raw.r2s_batch.run_batch = timed
+            r2sleigh_raw.common.dump_progress = spy
+            r2sleigh_raw._clock = lambda: clock[0]
+            # A path of its own: a checkpoint left by an earlier call would resume.
+            self.decompile(function_names=set(TARGETS),
+                           progress_path=Path(self.tmp.name) / f"cadence-{next(self.runs)}.pkl")
+        finally:
+            r2sleigh_raw.r2s_batch.run_batch = real_batch
+            r2sleigh_raw.common.dump_progress = real_dump
+            r2sleigh_raw._clock = time.monotonic
+        return rows
+
+    def test_a_checkpoint_is_written_by_elapsed_time_and_at_the_end(self):
+        # Six answers in one second are one pickle, not six; a pause of 30 seconds is one more.
+        self.assertEqual(self.checkpoint_rows([1, 2, 3, 4, 5, 6]), [6])
+        self.assertEqual(self.checkpoint_rows([1, 2, 31, 32, 33, 70]), [3, 6, 6])
+        self.assertEqual(self.checkpoint_rows([1, 2, 3, 4, 5, 6], interval="0"),
+                         [1, 2, 3, 4, 5, 6, 6])
+
+    def test_the_interval_is_thirty_seconds_unless_the_environment_says_otherwise(self):
+        os.environ.pop("R2SLEIGH_CHECKPOINT_SECONDS", None)
+        self.assertEqual(r2sleigh_raw.checkpoint_interval(), 30.0)
+        for given, expected in (("5", 5.0), ("0", 0.0), ("-3", 0.0), ("soon", 30.0),
+                                ("nan", 30.0), ("inf", 30.0)):
+            os.environ["R2SLEIGH_CHECKPOINT_SECONDS"] = given
+            self.assertEqual(r2sleigh_raw.checkpoint_interval(), expected, given)
+
+    def asked_addresses(self):
+        """Patch the runner to record the addresses it is asked about; returns the list and an undo."""
+        asked: list[int] = []
+        real_batch = r2sleigh_raw.r2s_batch.run_batch
+
+        def spy(executable, binary, addresses, **kwargs):
+            asked.extend(addresses)
+            return real_batch(executable, binary, addresses, **kwargs)
+
+        r2sleigh_raw.r2s_batch.run_batch = spy
+        self.addCleanup(setattr, r2sleigh_raw.r2s_batch, "run_batch", real_batch)
+        return asked
+
+    @unittest.skipUnless(hasattr(os, "fork"), "needs fork to kill a run without cleanup")
+    def test_a_killed_run_resumes_from_its_last_checkpoint_and_gives_the_same_rows(self):
+        progress = Path(self.tmp.name) / "progress.pkl"
+        os.environ["R2SLEIGH_CHECKPOINT_SECONDS"] = "30"
+        clock = [0.0]
+        real_batch = r2sleigh_raw.r2s_batch.run_batch
+
+        def dying(*args, on_answer=None, **kwargs):
+            given = []
+
+            def arrive(answer):
+                clock[0] += 10.0  # a checkpoint on every third answer
+                on_answer(answer)
+                given.append(answer)
+                if len(given) == 5:
+                    os._exit(9)  # SIGKILL's view of the run: no handler, no `finally`
+
+            return real_batch(*args, on_answer=arrive, **kwargs)
+
+        pid = os.fork()
+        if pid == 0:
+            code = 2
+            try:
+                r2sleigh_raw._clock = lambda: clock[0]
+                r2sleigh_raw.r2s_batch.run_batch = dying
+                self.decompile(function_names=set(TARGETS), progress_path=progress)
+            except BaseException:  # noqa: BLE001
+                code = 3
+            finally:
+                os._exit(code)  # never fall back into the test runner
+        _, status = os.waitpid(pid, 0)
+        self.assertEqual(os.WEXITSTATUS(status), 9)
+        # Five answers were given; the third's checkpoint is the last, so two are lost, one interval at most.
+        kept = pickle.loads(progress.read_bytes())
+        self.assertEqual(sorted(f.address for f in kept.functions.values()), TARGETS[:3])
+
+        asked = self.asked_addresses()
+        resumed = self.decompile(function_names=set(TARGETS), progress_path=progress)
+        self.assertEqual(asked, TARGETS[3:])
+        self.assertEqual(resumed.decompiler.extra["resumed"], 3)
+        fresh = self.decompile(function_names=set(TARGETS))
+
+        def rows(result):
+            return ({name: (f.address, f.decompiled_code, f.metadata)
+                     for name, f in result.functions.items()},
+                    result.decompiler.extra["decline_causes"],
+                    result.decompiler.failed_functions,
+                    (result.decompiler.extra["requested"], result.decompiler.extra["rendered"],
+                     result.decompiler.extra["declined"]))
+
+        self.assertEqual(rows(resumed), rows(fresh))
+
+    def test_a_checkpoint_of_another_task_is_not_read(self):
+        progress = Path(self.tmp.name) / "progress.pkl"
+        self.decompile(function_names=set(TARGETS[:3]), progress_path=progress)
+        asked = self.asked_addresses()
+        # The checkpoint holds three targets, this run has six: nothing carries over.
+        result = self.decompile(function_names=set(TARGETS), progress_path=progress)
+        self.assertEqual(asked, TARGETS)
+        self.assertNotIn("resumed", result.decompiler.extra)
+        # The same six, another r2s build: nothing carries over either.
+        other = Path(self.tmp.name) / "other-build.pkl"
+        shutil.copyfile(progress, other)
+        asked.clear()
+        with mock.patch.object(r2sleigh_raw.R2sDecompiler, "get_version",
+                               return_value="r2s sha256:another"):
+            self.decompile(function_names=set(TARGETS), progress_path=other)
+        self.assertEqual(asked, TARGETS)
+        # The same task: the end-of-run checkpoint answers everything.
+        asked.clear()
+        again = self.decompile(function_names=set(TARGETS), progress_path=progress)
+        self.assertEqual((asked, again.decompiler.extra["resumed"]), ([], 6))
 
     def test_thousands_of_targets_are_one_process_and_every_one_is_filed(self):
         # The sailr set's large binaries have thousands of functions. As one -c

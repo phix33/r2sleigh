@@ -7,6 +7,7 @@ mod frame;
 pub(crate) mod globals;
 mod input;
 pub(crate) mod proof;
+mod spelled;
 mod tags;
 mod terms;
 mod values;
@@ -23,6 +24,7 @@ use crate::codegen::{
 use crate::control::{DecompileExecutionStop, DecompileWorkControl, DecompileWorkPhase};
 use crate::ledger::{ObligationLedger, Outcome};
 use crate::structure::certify::StatementRole;
+use crate::structure::shape::{Evidence, Occurrences};
 
 /// One function the staged pipeline rendered, and what became of each obligation.
 pub struct Rendered {
@@ -72,52 +74,47 @@ pub fn render(
     let work = DecompileWorkControl::new(control, DecompileWorkPhase::Structuring);
     work.poll()?;
     let name = rendered_name_of(input.name(), input.function().root());
-    let mut c = CFunction::new(name, result_type(input));
     let tags = tags::Tags::of(input);
-    let values = values::Values::new(input, &tags, std::rc::Rc::clone(&c.symbols));
-    let written = control::write(input, values.as_ref(), &work);
+    let function = input.function();
+    let placement = crate::structure::place::Placement::compute(
+        function.cfg(),
+        function.domtree(),
+        function.natural_loops(),
+        function.root(),
+    );
+    let order = crate::structure::place::placed_in_order(function);
+    let (mut c, values, spelled) = spell_function(input, &tags, &name, &order, &work)?;
+    let written = control::write(input, spelled, &placement, &work);
     if let Some(stop) = written.stopped {
         return Err(stop.into());
     }
     let control::Written {
         body,
         labels,
-        mut blocks,
-        mut addresses,
+        blocks,
+        addresses,
         ..
     } = written;
-    // D1.1: SD's readability rewrites; a block's text they copy is a new occurrence of its block.
-    let mut fresh = |stmt: &CStmt| {
-        control::remint(stmt, &mut |id| {
-            let at = id.index() as usize;
-            let copy = crate::ast::RenderObservationId::from_dense_index(blocks.len());
-            blocks.push(blocks[at]);
-            addresses.push(addresses[at]);
-            copy
-        })
-    };
-    let mut body = crate::structure::shape::shape(&mut fresh, CStmt::Block(body));
-    let selections = select(&c, &mut body, &|id| {
-        blocks.get(id.index() as usize).copied()
-    });
     let never_return = values
         .as_ref()
         .map(values::Values::never_returning)
         .unwrap_or_default();
-    let role = |stmt: &CStmt| statement_role(stmt, &never_return, &selections);
-    certify_control(input, &body, &blocks, &labels, &role)?;
+    let never_returns = |stmt: &CStmt| calls_never_returning(stmt, &never_return);
+    let distinct_return =
+        |addr: u64| (values.as_ref()).is_some_and(|values| values.returns_distinct_merge(addr));
+    let evidence = Evidence {
+        never_returns: &never_returns,
+        distinct_return: &distinct_return,
+    };
+    let mut occurrences = Occurrences::new(blocks, addresses);
+    let mut body = structured(input, body, &labels, &evidence, &mut occurrences);
+    let selections = select(&c, &mut body, &|id| occurrences.block_of(id));
+    let role = |stmt: &CStmt| statement_role(stmt, &never_returns, &selections);
+    certify_control(input, &body, &occurrences, &labels, &role)?;
+    crate::structure::condition::respell_negations(&mut body);
     // What remains is linear emission of a certified body, so a stop here keeps what was reached.
     let stopped = work.with_phase(DecompileWorkPhase::Rendering).poll().err();
-    match &values {
-        Some(values) => {
-            c.params = values.params();
-            c.variadic = input.variadic();
-            c.locals = values.locals();
-            c.externs = values.externs();
-            c.extern_objects = values.extern_objects();
-        }
-        None => c.params_known = false,
-    }
+    declare(&mut c, input, values.as_ref());
     c.body = match body {
         CStmt::Block(stmts) => stmts,
         stmt => vec![stmt],
@@ -143,7 +140,7 @@ pub fn render(
     // Each marker names the instruction its statement was written for, so each line names its own.
     ready.seal_observation_markers(
         &mut crate::codegen::ObservationSealAuthority::staged(),
-        crate::codegen::ObservationLocations::new(addresses.into_iter().map(Some).collect()),
+        crate::codegen::ObservationLocations::new(occurrences.into_addresses()),
     );
     let emission = CodeGenerator::new(CodeGenConfig::default()).emit(&ready, input.ptr_bits());
     Ok(Rendered {
@@ -151,6 +148,52 @@ pub fn render(
         ledger,
         stopped,
     })
+}
+
+/// D2 over every placed block. A late edge's copy is promised to render; when one gaps, spell again with
+/// that merge owing one more (ADR D58). Each attempt adds a merge to `forced`, so they end.
+fn spell_function<'a>(
+    input: &RenderInput<'a>,
+    tags: &tags::Tags,
+    name: &str,
+    order: &[u64],
+    work: &DecompileWorkControl<'_>,
+) -> Result<(CFunction, Option<values::Values<'a>>, spelled::Spelled), DecompileExecutionStop> {
+    let mut forced = r2ssa::dense::IdSet::new(input.graph().values.len());
+    loop {
+        let c = CFunction::new(name.to_owned(), result_type(input));
+        let values = values::Values::new(input, tags, std::rc::Rc::clone(&c.symbols), &forced);
+        let spelled = spelled::spell(input, values.as_ref(), order, work)?;
+        let broken = values
+            .as_ref()
+            .map(values::Values::broken)
+            .unwrap_or_default();
+        if broken.is_empty() {
+            return Ok((c, values, spelled));
+        }
+        r2il::refusal_evidence!(
+            "late-copy-gapped",
+            "{name}: {} merges read as variables on a promise a late copy broke; spelling again",
+            broken.len()
+        );
+        broken
+            .into_iter()
+            .for_each(|merge| _ = forced.insert(merge));
+    }
+}
+
+/// What the values stage declared for `c`, or that its parameters are unknown.
+fn declare(c: &mut CFunction, input: &RenderInput<'_>, values: Option<&values::Values>) {
+    match values {
+        Some(values) => {
+            c.params = values.params();
+            c.variadic = input.variadic();
+            c.locals = values.locals();
+            c.externs = values.externs();
+            c.extern_objects = values.extern_objects();
+        }
+        None => c.params_known = false,
+    }
 }
 
 /// `c` ready to emit: a wide carrier is a struct the unit defines, with the helpers that take it
@@ -181,28 +224,80 @@ fn ready_with_carriers(c: CFunction, tags: &tags::Tags) -> crate::codegen::Emiss
     ready
 }
 
-/// SD's §3 certificate over the shaped body, or the refusal that names its first violation.
-fn certify_control(
+/// D1.1: SD's stages over the placed body, each kept only while the control certificate still holds
+/// (ADR §5): condition chains, `shape`, the latch's copies, and loop rotation.
+fn structured(
+    input: &RenderInput<'_>,
+    body: Vec<CStmt>,
+    labels: &BTreeMap<u64, String>,
+    evidence: &Evidence<'_>,
+    marks: &mut Occurrences,
+) -> CStmt {
+    let unselected = std::collections::BTreeSet::new();
+    let certified = |stmt: &CStmt, marks: &Occurrences| {
+        let role = |stmt: &CStmt| statement_role(stmt, evidence.never_returns, &unselected);
+        let certificate = control_certificate(input, stmt, marks, labels, &role);
+        match certificate.ok() {
+            true => Ok(()),
+            false => Err(format!(
+                "{certificate} {:?}",
+                certificate.violations.first()
+            )),
+        }
+    };
+    let chains = |body: &mut CStmt, marks: &mut Occurrences| {
+        crate::structure::condition::collapse(body, marks).collapsed != 0
+    };
+    let body = stage(
+        "condition chains",
+        CStmt::Block(body),
+        marks,
+        &certified,
+        chains,
+    );
+    // The readability rewrites below copy a block's text as a new occurrence of that block.
+    let body = crate::structure::shape::shape(marks, evidence, body);
+    let body = stage("latch copies", body, marks, &certified, |body, marks| {
+        crate::structure::latch::hoist(body, marks) != 0
+    });
+    stage("loop rotation", body, marks, &certified, |body, marks| {
+        crate::structure::rotate::rotate(body, marks) != 0
+    })
+}
+
+/// SD's §3 certificate over a body.
+fn control_certificate(
     input: &RenderInput<'_>,
     body: &CStmt,
-    blocks: &[u64],
+    occurrences: &Occurrences,
     labels: &BTreeMap<u64, String>,
     role: &dyn Fn(&CStmt) -> StatementRole,
-) -> Result<(), RenderStop> {
+) -> crate::structure::certify::ControlCertificate {
     let function = input.function();
     let label_block = labels
         .iter()
         .map(|(addr, name)| (name.as_str(), *addr))
         .collect::<BTreeMap<_, _>>();
-    let certificate = crate::structure::certify::certify(
+    crate::structure::certify::certify(
         body,
         function.cfg(),
         function.domtree(),
         function.root(),
-        &|id| blocks.get(id.index() as usize).copied(),
+        occurrences,
         &|name| label_block.get(name).copied(),
         role,
-    );
+    )
+}
+
+/// The certificate over the shaped body, or the refusal that names its first violation.
+fn certify_control(
+    input: &RenderInput<'_>,
+    body: &CStmt,
+    occurrences: &Occurrences,
+    labels: &BTreeMap<u64, String>,
+    role: &dyn Fn(&CStmt) -> StatementRole,
+) -> Result<(), RenderStop> {
+    let certificate = control_certificate(input, body, occurrences, labels, role);
     if certificate.ok() {
         return Ok(());
     }
@@ -210,6 +305,36 @@ fn certify_control(
         "control certificate: {certificate} {:?}",
         certificate.violations.first()
     )))
+}
+
+/// The control certificate over a candidate body and its markers: `Err` names the first violation.
+type Certified<'a> = dyn Fn(&CStmt, &Occurrences) -> Result<(), String> + 'a;
+
+/// Run one structure stage on `body`; its result stands only if the certificate still holds.
+/// `apply` says whether it changed anything, and an unchanged body is not certified again.
+fn stage(
+    name: &str,
+    body: CStmt,
+    marks: &mut Occurrences,
+    certified: &Certified<'_>,
+    apply: impl FnOnce(&mut CStmt, &mut Occurrences) -> bool,
+) -> CStmt {
+    let issued = marks.issued();
+    let mut candidate = body.clone();
+    if !apply(&mut candidate, marks) {
+        return body;
+    }
+    match certified(&candidate, marks) {
+        Ok(()) => candidate,
+        Err(why) => {
+            r2il::refusal_evidence!(
+                "stage-reverted",
+                "{name} broke the control certificate: {why}"
+            );
+            marks.retract(issued);
+            body
+        }
+    }
 }
 
 /// D1.1's selections, each arm converted to `x`'s type as its own assignment converted it.
@@ -234,7 +359,7 @@ fn select(
 /// What the certificate reads a statement as: a selection the stage recorded, or one ending control.
 fn statement_role(
     stmt: &CStmt,
-    never_return: &std::collections::BTreeSet<String>,
+    never_returns: &dyn Fn(&CStmt) -> bool,
     selections: &std::collections::BTreeSet<RenderObservationId>,
 ) -> StatementRole {
     match stmt
@@ -243,7 +368,7 @@ fn statement_role(
         .any(|id| selections.contains(id))
     {
         true => StatementRole::Selects,
-        false => (traps(stmt) || calls_never_returning(stmt, never_return)).into(),
+        false => (traps(stmt) || never_returns(stmt)).into(),
     }
 }
 
@@ -358,4 +483,52 @@ pub(crate) fn residual_function_for_render_boundary(func_name: &str, reason: &st
             crate::ast::c_identifier(func_name),
             sanitize_comment_text(reason)
         ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(index: usize) -> RenderObservationId {
+        RenderObservationId::from_dense_index(index)
+    }
+
+    /// Markers 0 and 1 for blocks 0x10 and 0x20, the second on the body's one statement.
+    fn start() -> (CStmt, Occurrences) {
+        let body = CStmt::observe_all([id(1)], CStmt::Break);
+        (
+            body,
+            Occurrences::new(vec![0x10, 0x20], vec![Some(0x11), Some(0x21)]),
+        )
+    }
+
+    /// A stage that writes a copy of the body under a marker of its own, and one more marker.
+    fn copies(body: &mut CStmt, marks: &mut Occurrences) -> bool {
+        *body = marks.fresh(body);
+        marks.copy_of(id(0));
+        true
+    }
+
+    #[test]
+    fn a_stage_that_breaks_the_certificate_leaves_neither_its_text_nor_its_markers() {
+        let (body, mut marks) = start();
+        let refuse = |_: &CStmt, _: &Occurrences| Err("broken".to_owned());
+        let kept = stage("copies", body.clone(), &mut marks, &refuse, copies);
+        assert_eq!(kept, body);
+        assert_eq!((marks.issued(), marks.block_of(id(1))), (2, Some(0x20)));
+        assert_eq!(marks.into_addresses(), [Some(0x11), Some(0x21)]);
+    }
+
+    #[test]
+    fn a_stage_that_keeps_the_certificate_keeps_its_text_and_its_markers() {
+        let (body, mut marks) = start();
+        let accept = |candidate: &CStmt, marks: &Occurrences| {
+            let copied = candidate.observation_ids().into_owned();
+            assert_eq!((copied.len(), marks.block_of(copied[0])), (1, Some(0x20)));
+            Ok(())
+        };
+        let kept = stage("copies", body, &mut marks, &accept, copies);
+        assert_eq!(kept.observation_ids().into_owned(), [id(2)]);
+        assert_eq!(marks.issued(), 4);
+    }
 }

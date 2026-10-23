@@ -1005,18 +1005,30 @@ pub(crate) fn proven_low_lane(
         .filter(|lane| *lane != value)
 }
 
-/// A register argument narrowed to the value its slot's bits are, with the wider value it was read
-/// from: the boundary fact's `value` and `lane_of`.
+/// A register argument narrowed to the lane its slot's bits are (`value`, with the carrier as `lane_of`),
+/// where the lane's definition has run at the call; else the carrier (ROADMAP D68).
 pub(crate) fn narrowed_argument(
-    prep: Option<&crate::DecompilePrepFacts>,
-    graph: &SsaGraph,
+    at: &super::boundaries::CallPosition<'_>,
     value: SourceCallArgumentValue,
     storage: CanonicalStorageId,
 ) -> (SourceCallArgumentValue, Option<ValueId>) {
     let SourceCallArgumentValue::Value(carrier) = value else {
         return (value, None);
     };
-    match prep.and_then(|prep| proven_low_lane(&prep.views, graph, carrier, storage)) {
+    let lane = at
+        .prep
+        .and_then(|prep| proven_low_lane(&prep.views, at.graph, carrier, storage))
+        .filter(|lane| {
+            crate::fact_mutants::unsound_lanes()
+                || crate::integrity::defined_before(
+                    at.function,
+                    at.graph,
+                    *lane,
+                    at.block_addr,
+                    at.op_index,
+                )
+        });
+    match lane {
         Some(lane) => (SourceCallArgumentValue::Value(lane), Some(carrier)),
         None => (value, None),
     }

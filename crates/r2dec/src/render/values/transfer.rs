@@ -255,7 +255,7 @@ impl Values<'_> {
         }
         for (read, output) in answered {
             self.mark(read);
-            self.assigns(output);
+            self.defines(output);
         }
     }
 

@@ -1056,7 +1056,7 @@ pub(crate) fn convention_call_boundary(
                 break;
             }
         };
-        let (value, lane_of) = super::shared::narrowed_argument(prep, graph, value, *slot);
+        let (value, lane_of) = super::shared::narrowed_argument(&at, value, *slot);
         arguments.push(SourceCallArgumentFact {
             slot: CallBoundarySlot::Register {
                 index,
@@ -1198,7 +1198,7 @@ fn stated_call_arguments(
             }
             None => return (arguments, false),
         };
-        let (value, lane_of) = super::shared::narrowed_argument(at.prep, at.graph, value, *slot);
+        let (value, lane_of) = super::shared::narrowed_argument(&at, value, *slot);
         let Ok(index) = u32::try_from(position) else {
             return (arguments, false);
         };
@@ -1375,8 +1375,17 @@ pub(crate) fn collect_source_boundary_facts(
                                 );
                             }
                             found.map(|value| {
-                                let (value, lane_of) =
-                                    super::shared::narrowed_argument(prep, graph, value, storage);
+                                let (value, lane_of) = super::shared::narrowed_argument(
+                                    &CallPosition {
+                                        function,
+                                        prep,
+                                        graph,
+                                        block_addr,
+                                        op_index,
+                                    },
+                                    value,
+                                    storage,
+                                );
                                 SourceCallArgumentFact {
                                     slot: CallBoundarySlot::Register {
                                         index: argument.index(),

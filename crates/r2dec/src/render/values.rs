@@ -1,7 +1,7 @@
 //! D2: which values the text computes and where (doc/adr-decompiler-rewrite.md, "D2 and D3, as
 //! they are built"). Every value is its own local, so a term is valid wherever its producer dominates.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -41,8 +41,19 @@ pub(super) struct Values<'a> {
     /// The structure member each cell term is, by term index: the accesses through a parameter
     /// that points to its inferred structure.
     members: Vec<Option<CExpr>>,
-    /// The named values a statement written so far assigns: a read of any other is a residual.
-    assigned: RefCell<Vec<bool>>,
+    /// By value index: the definitions a named value owes before a read of it is a variable; a merge
+    /// owes one per early forward edge in, and a back edge pays none (doc/adr-decompiler-rewrite.md, Merges).
+    owed: RefCell<Vec<u32>>,
+    /// The merges the last attempt read as variables on a late edge's promise and that edge gapped.
+    broken: RefCell<Vec<ValueId>>,
+    /// The merges that owe one definition more than any edge pays, which no read of them clears.
+    forced: r2ssa::dense::IdSet<ValueId>,
+    /// The dominator tree and root, which tell a forward edge from a back edge.
+    dom: &'a r2ssa::domtree::DomTree,
+    root: u64,
+    /// The block whose text is being spelled: a name reads as a variable only where its definition
+    /// has run (doc/adr-decompiler-rewrite.md, "D2's spelling order").
+    reading: Cell<u64>,
     /// By instruction index: whether a statement assigns the instruction's output where it stands.
     bound: Vec<bool>,
     /// The frame array each stack object a spelled term names is declared as, on first use.
@@ -73,7 +84,9 @@ pub(super) struct Values<'a> {
     unplanned: r2ssa::dense::IdMap<InstId, CallGap>,
     /// The values a described call's statement assigns.
     results: r2ssa::dense::IdSet<ValueId>,
-    /// One declaration per callee, which every call to it here must agree with.
+    /// One declaration per callee, the first call's in address order, which every call must state.
+    prototypes: BTreeMap<String, CExternDecl>,
+    /// The declarations of the calls written, which the function declares.
     externs: RefCell<BTreeMap<String, CExternDecl>>,
     /// The text the capture proves at each address, which a passed constant address is.
     strings: &'a BTreeMap<u64, String>,
@@ -134,6 +147,28 @@ fn needed<T>(value: Option<T>, inst: InstId, why: CallRefusal) -> Result<T, Call
     value.ok_or_else(|| {
         r2il::refusal_evidence!("staged-call", "{inst:?}: {why:?}");
         why
+    })
+}
+
+/// The declaration a call to a named callee states, `types` its arguments' types, the prototype's
+/// where the plan has one: none for a call through a value.
+fn extern_decl(plan: &CallPlan, mut types: Vec<CType>, ret_type: CType) -> Option<CExternDecl> {
+    let calls::Callee::Named { name, address, .. } = &plan.callee else {
+        return None;
+    };
+    if let Some(declared) = &plan.declared {
+        for (ty, to) in types.iter_mut().zip(&declared.params) {
+            *ty = to.clone();
+        }
+    }
+    types.truncate(plan.fixed);
+    Some(CExternDecl {
+        name: name.clone(),
+        ret_type,
+        params: Some(types),
+        variadic: plan.variadic,
+        noreturn: plan.noreturn,
+        address: *address,
     })
 }
 
@@ -755,6 +790,7 @@ impl<'a> Values<'a> {
         input: &RenderInput<'a>,
         tags: &super::tags::Tags,
         symbols: Rc<RefCell<SymbolTable>>,
+        forced: &r2ssa::dense::IdSet<ValueId>,
     ) -> Option<Self> {
         let artifact: &'a SsaArtifact = input.artifact();
         let graph = input.graph();
@@ -789,7 +825,12 @@ impl<'a> Values<'a> {
             names: vec![None; graph.values.len()],
             declared: vec![false; graph.values.len()],
             members: Vec::new(),
-            assigned: RefCell::new(vec![false; graph.values.len()]),
+            owed: RefCell::new(vec![1; graph.values.len()]),
+            broken: RefCell::new(Vec::new()),
+            forced: forced.clone(),
+            dom: input.function().domtree(),
+            root: input.function().root(),
+            reading: Cell::new(input.function().root()),
             bound,
             frame: super::frame::Frame::of(artifact),
             frame_array: RefCell::new(None),
@@ -807,6 +848,7 @@ impl<'a> Values<'a> {
             calls: planned,
             unplanned,
             results,
+            prototypes: BTreeMap::new(),
             externs: RefCell::new(BTreeMap::new()),
             strings: input.string_literals(),
             globals: super::globals::Globals::of(input),
@@ -828,6 +870,7 @@ impl<'a> Values<'a> {
             .as_ref()
             .map(|parameters| parameters.iter().map(|(_, _, class)| *class).collect());
         values.declare(input, tags, parameters);
+        values.prototypes = values.decide_prototypes();
         Some(values)
     }
 
@@ -921,7 +964,7 @@ impl<'a> Values<'a> {
                 SymbolRole::Parameter(index),
             );
             self.names[value.0 as usize] = Some((name, ty));
-            self.assigned.get_mut()[value.0 as usize] = true;
+            self.owed.get_mut()[value.0 as usize] = 0;
             if let CType::Pointer(pointee) = &c
                 && let CType::Struct(tag) = pointee.as_ref()
             {
@@ -930,6 +973,7 @@ impl<'a> Values<'a> {
             self.params.push(CParam { ty: c, name });
         }
         self.members = self.members_of(input, pointing);
+        let mut forward = vec![None; self.graph.blocks.len()];
         for inst in &self.graph.insts {
             let Some(output) = inst.output.filter(|_| self.bound[inst.id.0 as usize]) else {
                 continue;
@@ -946,6 +990,15 @@ impl<'a> Values<'a> {
                 .borrow_mut()
                 .declare(name, c.clone(), SymbolRole::Carrier);
             self.names[output.0 as usize] = Some((id, ty));
+            let forced = u32::from(self.forced.contains(output));
+            self.owed.get_mut()[output.0 as usize] = match inst.payload {
+                InstPayload::Phi { .. } => {
+                    forced
+                        + *forward[inst.block.0 as usize]
+                            .get_or_insert_with(|| self.forward_in(input, inst.block))
+                }
+                InstPayload::Op(_) => 1,
+            };
             self.locals.get_mut().push(CLocal {
                 ty: c,
                 name: id,
@@ -953,6 +1006,35 @@ impl<'a> Values<'a> {
                 align: None,
             });
         }
+    }
+
+    /// The copies a merge in `block` owes: one per placed predecessor it does not dominate that is
+    /// spelled before it; a later one pays after the first reads and is verified (`broken`). `O(preds)`.
+    fn forward_in(&self, input: &RenderInput<'_>, block: r2ssa::BlockId) -> u32 {
+        let Some(block) = self.graph.block(block) else {
+            return 1;
+        };
+        let (dom, root) = (self.dom, self.root);
+        let mut forward = (input.function().cfg().predecessors(block.addr).into_iter())
+            .filter(|pred| {
+                crate::structure::place::is_placed(dom, root, *pred)
+                    && !dom.is_back_edge(*pred, block.addr)
+            })
+            .collect::<Vec<_>>();
+        forward.dedup();
+        let early = (forward.iter())
+            .filter(|pred| self.graph.block_id_for_addr(**pred) < Some(block.id))
+            .count();
+        u32::try_from(if forward.is_empty() { 1 } else { early }).unwrap_or(u32::MAX)
+    }
+
+    /// The merges this attempt read as variables on a late edge's promise that the edge then broke:
+    /// the next attempt owes them one more, so no read of them is a variable. Sorted, once each.
+    pub(super) fn broken(&self) -> Vec<ValueId> {
+        let mut broken = self.broken.borrow().clone();
+        broken.sort_unstable();
+        broken.dedup();
+        broken
     }
 
     /// A frame object's address in the function's one frame array (D4), and its extent: the
@@ -1080,21 +1162,25 @@ impl<'a> Values<'a> {
         }
     }
 
-    /// A name as its class reads it: a parameter declared a pointer is read as its word, and a
-    /// name no statement written before assigns (its definition a gap) is never assigned.
+    /// A name as its class reads it: a parameter declared a pointer is read as its word, and a name
+    /// still owed a definition or defined out of this block's scope is never assigned.
     fn read_name(&self, value: ValueId, name: SymbolId, held: &MachineType) -> Option<CExpr> {
-        if !self
-            .assigned
-            .borrow()
-            .get(value.0 as usize)
-            .copied()
-            .unwrap_or(false)
-        {
+        let owed = self.owed.borrow().get(value.0 as usize).copied();
+        let at = self.reading.get();
+        let scope = || self.artifact.value_defined_before(value, at, usize::MAX);
+        if let Err(cause) = variable_or_residual(owed == Some(0), scope) {
             let read = crate::prelude::residual(
                 &terms::c_type(held)?,
                 crate::prelude::ResidualCause::NeverAssigned,
             );
-            self.unassigned_read(value, super::proof::UnassignedCause::Unassigned, held);
+            if cause == super::proof::UnassignedCause::NotDominated {
+                r2il::refusal_evidence!(
+                    "read-not-dominated",
+                    "{} is read in {at:#x}, which its definition does not dominate",
+                    self.graph.var(value).display_name()
+                );
+            }
+            self.unassigned_read(value, cause, held);
             return read;
         }
         let var = CExpr::var(name);
@@ -1102,6 +1188,11 @@ impl<'a> Values<'a> {
             Some(true) => Some(CExpr::cast(terms::c_type(held)?, var)),
             _ => Some(var),
         }
+    }
+
+    /// Spell the text of the block at `addr` from here: its names are read there.
+    pub(super) fn enter(&self, addr: u64) {
+        self.reading.set(addr);
     }
 
     /// The variable `expr` reads as its word, where the variable is declared `to` already and the
@@ -1449,13 +1540,14 @@ impl<'a> Values<'a> {
         self.mark(inst.id);
         self.residual_in(inst.id, stmt);
         if let Some(output) = inst.output.filter(|value| self.is_named(*value)) {
-            self.assigns(output);
+            self.defines(output);
         }
     }
 
-    fn assigns(&self, value: ValueId) {
-        if let Some(slot) = self.assigned.borrow_mut().get_mut(value.0 as usize) {
-            *slot = true;
+    /// A statement written assigns `value` itself, which owes nothing more.
+    fn defines(&self, value: ValueId) {
+        if let Some(slot) = self.owed.borrow_mut().get_mut(value.0 as usize) {
+            *slot = 0;
         }
     }
 
@@ -1498,11 +1590,7 @@ impl<'a> Values<'a> {
             let call = self.recursive_call(inst, plan).map(|stmt| vec![stmt]);
             return needed(call, inst, CallRefusal::SelfCallNotSpelled);
         }
-        let call = self.call_expr(
-            inst,
-            plan,
-            plan.result.as_ref().map(calls::CallResult::class),
-        )?;
+        let call = self.call_expr(inst, plan)?;
         needed(
             self.assign_call(inst, plan, call),
             inst,
@@ -1582,40 +1670,96 @@ impl<'a> Values<'a> {
         let mut arguments = Vec::with_capacity(plan.arguments.len());
         let mut types = Vec::with_capacity(plan.arguments.len());
         for ((argument, class), stacked) in plan.arguments.iter().zip(&plan.stacked) {
-            let held = needed(self.value_type(*argument), inst, CallRefusal::ArgumentType)?;
-            // A float the caller stored as bits would travel in a float register once C declares it.
-            if *stacked && matches!(held, MachineType::Float { .. }) {
-                return needed(None, inst, CallRefusal::FloatOnStack);
-            }
+            let (held, ty) = self.argument_type(inst, *argument, class, *stacked)?;
             let operand = self.operand(*argument, inst);
             let operand = needed(operand, inst, CallRefusal::ArgumentOperand)?;
             let fitted = fit(operand, &held, class);
             arguments.push(needed(fitted, inst, CallRefusal::ArgumentFit)?);
-            types.push(needed(
-                terms::c_type(class),
-                inst,
-                CallRefusal::ArgumentType,
-            )?);
+            types.push(ty);
         }
         Ok((arguments, types))
     }
 
-    /// The call's expression, returning `ret`: a named callee is declared once, and one reached
-    /// through its target value is cast to the function type it is called at.
-    fn call_expr(
+    /// The type an argument is held at and the C type its class passes it as, from the facts alone.
+    fn argument_type(
+        &self,
+        inst: InstId,
+        argument: ValueId,
+        class: &MachineType,
+        stacked: bool,
+    ) -> Result<(MachineType, CType), CallRefusal> {
+        let held = needed(self.value_type(argument), inst, CallRefusal::ArgumentType)?;
+        // A float the caller stored as bits would travel in a float register once C declares it.
+        if stacked && matches!(held, MachineType::Float { .. }) {
+            return needed(None, inst, CallRefusal::FloatOnStack);
+        }
+        let ty = needed(terms::c_type(class), inst, CallRefusal::ArgumentType)?;
+        Ok((held, ty))
+    }
+
+    /// The C type the call returns: its declared prototype's, else its result's class, else `void`.
+    fn return_type(&self, inst: InstId, plan: &CallPlan) -> Result<CType, CallRefusal> {
+        let ret = match plan.returns() {
+            Some(class) => needed(terms::c_type(class), inst, CallRefusal::ResultNotSpelled)?,
+            None => CType::Void,
+        };
+        Ok(plan
+            .declared
+            .as_ref()
+            .map_or(ret, |declared| declared.ret.clone()))
+    }
+
+    /// What the call at `inst` declares of its named callee, a function of its plan alone: the same
+    /// whichever block is written first. `Ok(None)` for a call through a value.
+    fn declaration(
         &self,
         inst: InstId,
         plan: &CallPlan,
-        ret: Option<&MachineType>,
-    ) -> Result<CExpr, CallRefusal> {
+    ) -> Result<Option<CExternDecl>, CallRefusal> {
+        let calls::Callee::Named { .. } = &plan.callee else {
+            return Ok(None);
+        };
+        let mut types = Vec::with_capacity(plan.arguments.len());
+        for ((argument, class), stacked) in plan.arguments.iter().zip(&plan.stacked) {
+            types.push(self.argument_type(inst, *argument, class, *stacked)?.1);
+        }
+        let ret_type = self.return_type(inst, plan)?;
+        Ok(extern_decl(plan, types, ret_type))
+    }
+
+    /// Each named callee's declaration: its first call's in address order (block, then place in
+    /// the block) among the calls that state one, so no write order changes it. O(calls log callees).
+    fn decide_prototypes(&self) -> BTreeMap<String, CExternDecl> {
+        let mut first = BTreeMap::<String, ((u64, usize), CExternDecl)>::new();
+        for (inst, plan) in self.calls.iter() {
+            let (Some(at), Ok(Some(declaration))) =
+                (self.graph.inst(inst), self.declaration(inst, plan))
+            else {
+                continue;
+            };
+            let place = (
+                self.graph.block_addr_of(inst).unwrap_or(u64::MAX),
+                at.ordinal,
+            );
+            let name = declaration.name.clone();
+            if first.get(&name).is_none_or(|(held, _)| place < *held) {
+                first.insert(name, (place, declaration));
+            }
+        }
+        first
+            .into_iter()
+            .map(|(name, (_, declaration))| (name, declaration))
+            .collect()
+    }
+
+    /// The call's expression: a named callee is declared as `prototypes` has it, one reached
+    /// through a value is cast to the function type it is called at.
+    fn call_expr(&self, inst: InstId, plan: &CallPlan) -> Result<CExpr, CallRefusal> {
         let (mut arguments, mut types) = self.passed(inst, plan)?;
         let texts = (plan.arguments.iter())
             .map(|(argument, class)| self.passed_text(*argument, class, inst))
             .collect();
-        let mut ret_type = match ret {
-            Some(class) => needed(terms::c_type(class), inst, CallRefusal::ResultNotSpelled)?,
-            None => CType::Void,
-        };
+        let ret_type = self.return_type(inst, plan)?;
         // A declared prototype passes and returns at the types the source states.
         if let Some(declared) = &plan.declared {
             for ((argument, ty), to) in arguments.iter_mut().zip(&mut types).zip(&declared.params) {
@@ -1626,15 +1770,10 @@ impl<'a> Values<'a> {
                 };
                 *ty = to.clone();
             }
-            ret_type = declared.ret.clone();
         }
         self.literals_passed(&mut arguments, &types, texts, plan.fixed);
-        let (name, kind, address) = match &plan.callee {
-            calls::Callee::Named {
-                name,
-                kind,
-                address,
-            } => (name, *kind, *address),
+        let (name, kind) = match &plan.callee {
+            calls::Callee::Named { name, kind, .. } => (name, *kind),
             calls::Callee::Through(target) => {
                 // The printer spells a function type in a cast as the pointer to it: `ret (*)(params)`.
                 let pointer = CType::Function {
@@ -1655,24 +1794,16 @@ impl<'a> Values<'a> {
         if (self.symbols.try_borrow()).map_or(true, |symbols| symbols.by_name(name).is_some()) {
             return needed(None, inst, CallRefusal::CalleeShadowed);
         }
-        types.truncate(plan.fixed);
-        let declaration = CExternDecl {
-            name: name.clone(),
-            ret_type,
-            params: Some(types),
-            variadic: plan.variadic,
-            noreturn: plan.noreturn,
-            address,
-        };
         // One declaration describes every call to a callee, so calls that disagree cannot both be C.
-        match self.externs.borrow_mut().entry(name.clone()) {
-            std::collections::btree_map::Entry::Vacant(slot) => {
-                slot.insert(declaration);
+        let declaration = extern_decl(plan, types, ret_type);
+        match (declaration, self.prototypes.get(name)) {
+            (Some(declaration), Some(decided)) if declaration == *decided => {
+                self.externs
+                    .borrow_mut()
+                    .entry(name.clone())
+                    .or_insert(declaration);
             }
-            std::collections::btree_map::Entry::Occupied(slot) if *slot.get() != declaration => {
-                return needed(None, inst, CallRefusal::DeclarationDisagrees);
-            }
-            std::collections::btree_map::Entry::Occupied(_) => {}
+            _ => return needed(None, inst, CallRefusal::DeclarationDisagrees),
         }
         let callee = CExpr::External {
             name: name.clone(),
@@ -1719,8 +1850,7 @@ impl<'a> Values<'a> {
             .return_kind();
         let stmts = match (returns, tail) {
             (r2source::SourceFunctionReturn::Void, _) => {
-                let call =
-                    (self.call_expr(inst, plan, tail.as_ref().map(|(_, class)| class))).ok()?;
+                let call = self.call_expr(inst, plan).ok()?;
                 vec![CStmt::Expr(call), CStmt::Return(None)]
             }
             (r2source::SourceFunctionReturn::Register { storage }, Some((carried, class)))
@@ -1735,7 +1865,7 @@ impl<'a> Values<'a> {
                         _ => return None,
                     },
                 };
-                let call = self.call_expr(inst, plan, Some(class)).ok()?;
+                let call = self.call_expr(inst, plan).ok()?;
                 // The function's caller reads the bytes r2ssa says its declared result occupies.
                 let demanded = (self.artifact.machine_context().function_interface())
                     .and_then(r2ssa::returned_bytes)
@@ -1793,7 +1923,7 @@ impl<'a> Values<'a> {
         if let Some(def) = self.graph.def_inst(*result) {
             self.mark(def);
         }
-        self.assigns(*result);
+        self.defines(*result);
         Some(vec![assign(*name, value)])
     }
 
@@ -1850,7 +1980,7 @@ impl<'a> Values<'a> {
             .iter()
             .filter_map(|(named, _)| named.map(|(value, ..)| value))
         {
-            self.assigns(value);
+            self.defines(value);
         }
         for value in [halves.0, halves.1].into_iter().flatten() {
             if let Some(def) = self.graph.def_inst(value) {
@@ -1896,7 +2026,7 @@ impl<'a> Values<'a> {
         if let Some(def) = self.graph.def_inst(result) {
             self.mark(def);
         }
-        self.assigns(result);
+        self.defines(result);
         Some(assign(*name, value))
     }
 
@@ -1938,10 +2068,7 @@ impl<'a> Values<'a> {
     fn global(&self, at: u64, class: &MachineType, store: bool) -> Option<super::globals::Named> {
         self.globals.at(at, class, store, |name| {
             name == self.own.name
-                || self
-                    .externs
-                    .try_borrow()
-                    .map_or(true, |externs| externs.contains_key(name))
+                || self.prototypes.contains_key(name)
                 || (self.symbols.try_borrow())
                     .map_or(true, |symbols| symbols.by_name(name).is_some())
         })
@@ -2045,6 +2172,40 @@ impl<'a> Values<'a> {
             }
             _ => {}
         }
+    }
+
+    /// Whether the return ending `addr` hands back a merge of its block whose edges in copy
+    /// pairwise-distinct canonical terms: returns the compiler joined (ADR §5).
+    pub(super) fn returns_distinct_merge(&self, addr: u64) -> bool {
+        let Some((inst, SSAOp::Return { .. })) = self.terminator(addr) else {
+            return false;
+        };
+        let values = returned_values(self.inventory, inst);
+        let [value] = values.as_slice() else {
+            return false;
+        };
+        let Some(merge) = (self.graph.def_inst(*value)).and_then(|def| self.graph.inst(def)) else {
+            return false;
+        };
+        let here = self.graph.block_id_for_addr(addr);
+        if !matches!(merge.payload, InstPayload::Phi { .. })
+            || Some(merge.block) != here
+            || !self.bound[merge.id.0 as usize]
+        {
+            return false;
+        }
+        // Two defs of one computation are one value: edges are told apart by canonical term.
+        let inputs = self.graph.inputs(merge.id);
+        let mut told = inputs
+            .iter()
+            .map(|input| match self.roots.value(*input) {
+                Some(canonical) => (Some(canonical.canonical), None),
+                None => (None, Some(*input)),
+            })
+            .collect::<Vec<_>>();
+        told.sort_unstable();
+        told.dedup();
+        inputs.len() >= 2 && told.len() == inputs.len() && !inputs.contains(value)
     }
 
     /// What the return ending `addr` hands back as `ty`: `None` where the facts do not state it.
@@ -2235,6 +2396,8 @@ impl<'a> Values<'a> {
         ) else {
             return Vec::new();
         };
+        let forward = !self.dom.is_back_edge(from, to);
+        let late = forward && from_id > to_block.id;
         let mut copies = Vec::new();
         for inst in to_block.insts.iter().filter_map(|id| self.graph.inst(*id)) {
             let InstPayload::Phi { predecessors } = &inst.payload else {
@@ -2259,7 +2422,7 @@ impl<'a> Values<'a> {
             if input == output
                 && let Some((spelled, attempt)) = source
             {
-                self.account_copy(inst.id, output, attempt, &CStmt::Expr(spelled));
+                self.account_copy(inst.id, output, attempt, (&CStmt::Expr(spelled), false));
                 continue;
             }
             copies.push((inst.id, output, source, reads));
@@ -2280,12 +2443,12 @@ impl<'a> Values<'a> {
             let (Some((source, attempt)), Some((name, ty))) =
                 (source, self.names[output.0 as usize].as_ref())
             else {
-                // The edge's gap stands for this merge and the value it could not carry.
-                self.residual.borrow_mut()[inst.0 as usize] = true;
-                out.push(unrendered_copy(to));
+                out.push(self.gapped_copy((inst, output), (from, to), (forward, late)));
                 continue;
             };
-            self.account_copy(inst, output, attempt, &CStmt::Expr(source.clone()));
+            let copy = CStmt::Expr(source.clone());
+            self.promised((from, to), late);
+            self.account_copy(inst, output, attempt, (&copy, forward && !late));
             match clobbers {
                 false => out.push(self.assign_value(output, *name, source)),
                 true => {
@@ -2299,13 +2462,53 @@ impl<'a> Values<'a> {
         out
     }
 
-    /// The merge `inst` has a copy on this edge: its instruction and what the source absorbed are
-    /// rendered, whether or not `stmt` is written.
-    fn account_copy(&self, inst: InstId, output: ValueId, attempt: Attempt, stmt: &CStmt) {
+    /// A late edge's copy rendered: the early reads of its merge were right to rest on it.
+    fn promised(&self, (from, to): (u64, u64), late: bool) {
+        if late {
+            r2il::refusal_evidence!(
+                "late-forward-edge",
+                "{from:#x} -> {to:#x} pays a merge after {to:#x} was spelled; its reads rest on the copy rendering"
+            );
+        }
+    }
+
+    /// The gap that stands for a merge and the value its copy could not carry. On a forward edge it keeps
+    /// the merge owed; on a late one it breaks the promise the merge's early reads were made on.
+    fn gapped_copy(
+        &self,
+        (inst, output): (InstId, ValueId),
+        (from, to): (u64, u64),
+        (forward, late): (bool, bool),
+    ) -> CStmt {
+        self.residual.borrow_mut()[inst.0 as usize] = true;
+        if forward {
+            r2il::refusal_evidence!(
+                "gapped-forward-copy",
+                "{from:#x} -> {to:#x} renders no copy, so every read of the merge stays residual"
+            );
+        }
+        if late && !self.forced.contains(output) {
+            self.broken.borrow_mut().push(output);
+        }
+        unrendered_copy(to)
+    }
+
+    /// The merge `inst` has a copy on this edge, rendered whether or not `stmt` is written. Only a copy
+    /// that `pays` (on an early forward edge) lowers what the merge owes, once per edge.
+    fn account_copy(
+        &self,
+        inst: InstId,
+        output: ValueId,
+        attempt: Attempt,
+        (stmt, pays): (&CStmt, bool),
+    ) {
         *self.pending.borrow_mut() = attempt;
         self.mark(inst);
         self.residual_in(inst, stmt);
-        self.assigns(output);
+        if let (true, Some(owed)) = (pays, self.owed.borrow_mut().get_mut(output.0 as usize)) {
+            debug_assert!(*owed > 0, "a forward edge pays a merge once");
+            *owed = owed.saturating_sub(1);
+        }
     }
 
     /// A local `<name>_next` of the merge's type, where a cycle of copies goes through.
@@ -2686,8 +2889,42 @@ fn writes_value(op: &SSAOp<ValueId>) -> bool {
         && op.dst().is_some()
 }
 
+/// Whether a bound name reads as its variable: its writes are all spelled (`assigned`) and its
+/// definition stands behind the read (`scope`, asked only then); else why it is a residual.
+fn variable_or_residual(
+    assigned: bool,
+    scope: impl FnOnce() -> bool,
+) -> Result<(), super::proof::UnassignedCause> {
+    use super::proof::UnassignedCause;
+    if !assigned {
+        Err(UnassignedCause::Unassigned)
+    } else if !scope() {
+        Err(UnassignedCause::NotDominated)
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::proof::UnassignedCause;
+
+    /// A name read where its definition does not dominate is a residual, however many of its writes
+    /// were spelled before: reverse postorder is not dominance (ROADMAP D68).
+    #[test]
+    fn a_name_is_a_variable_only_where_it_is_assigned_and_its_definition_stands_behind_the_read() {
+        assert_eq!(super::variable_or_residual(true, || true), Ok(()));
+        assert_eq!(
+            super::variable_or_residual(true, || false),
+            Err(UnassignedCause::NotDominated)
+        );
+        // A name still owed a write is unassigned, and scope is not asked.
+        assert_eq!(
+            super::variable_or_residual(false, || panic!("asked")),
+            Err(UnassignedCause::Unassigned)
+        );
+    }
+
     /// A declared name another language allows can still be a C keyword or reserved spelling.
     #[test]
     fn a_declared_name_c_reserves_is_no_identifier() {

@@ -34,8 +34,14 @@ and the DWARF ``low_pc`` of every source function:
   or ``harness: <how r2s ended> while rendering <addr>`` (a crash or a
   deadline, after which r2s is restarted at the next function).
   ``rendered + declined == requested`` is checked before returning.
-* After every function the partial result is pickled to ``progress_path``, so
-  the driver's hard kill loses nothing already answered.
+* The partial result is pickled to ``progress_path`` every
+  ``$R2SLEIGH_CHECKPOINT_SECONDS`` (default 30) and once more at the end, so
+  the driver's hard kill loses the answers of one interval at most. A pickle
+  costs time proportional to every function answered so far, which is why it
+  is not written per function (2.5 MB each on bzip2, 18 MB on bash). A run that
+  finds a checkpoint of the same r2s, binary and targets at ``progress_path``
+  asks r2s only for the addresses it has no answer for; the official driver
+  gives each attempt a fresh path, so that is for a manual re-run.
 * It fails closed on a binary carrying ``.symtab`` or any debug section
   (``.debug_*``, compressed ``.zdebug_*``, or the MiniDebugInfo
   ``.gnu_debugdata``): r2s reads the declarations of the file it opens, and
@@ -54,7 +60,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
+import pickle
 import re
 import shutil
 import struct
@@ -83,6 +91,9 @@ except ImportError:  # loaded from the r2sleigh tree: tests/equiv owns the runne
 log = logging.getLogger(__name__)
 
 BACKEND = "r2sleigh_native"
+
+CHECKPOINT_SECONDS = 30.0
+_clock = time.monotonic  # replaced in tests, which never sleep
 
 # Sections whose presence means r2s would read facts DecBench grades against:
 # the symbol table, and debug information in any of its spellings.
@@ -169,6 +180,35 @@ def discover(executable: Path, binary: Path, timeout: float) -> tuple[list[tuple
         functions.append((f"sub_{address:x}" if name == "-" else name, address))
     ending = "" if proc.returncode == 0 else f"r2s afl exited {proc.returncode}"
     return functions, ending
+
+
+def checkpoint_interval() -> float:
+    """Seconds between checkpoints: ``$R2SLEIGH_CHECKPOINT_SECONDS``, 30 by default, 0 for every answer."""
+    try:
+        seconds = float(os.environ.get("R2SLEIGH_CHECKPOINT_SECONDS", CHECKPOINT_SECONDS))
+    except ValueError:
+        return CHECKPOINT_SECONDS
+    return max(0.0, seconds) if math.isfinite(seconds) else CHECKPOINT_SECONDS
+
+
+def resume_state(progress_path: Path | None, identity: dict) -> tuple[dict, dict] | None:
+    """The rendered functions and declines of a checkpoint of this very task, or None.
+
+    ``identity`` names the r2s build, the binary's bytes and the targets with their names; a checkpoint
+    of anything else is not read, so a stale file cannot put another run's answers into this one.
+    """
+    if progress_path is None or not Path(progress_path).is_file():
+        return None
+    try:
+        saved = pickle.loads(Path(progress_path).read_bytes())
+        block = (saved.decompiler.extra or {}).get("resume")
+        if not isinstance(block, dict) or block.get("identity") != identity:
+            return None
+        declined = {int(address): (str(label), str(cause))
+                    for address, label, cause in block["declined"]}
+        return dict(saved.functions), declined
+    except Exception:  # noqa: BLE001 - a checkpoint that cannot be read is no checkpoint
+        return None
 
 
 def stack_offset(location: str) -> int | None:
@@ -302,7 +342,7 @@ class R2sDecompiler(Decompiler):
         rendered: dict[str, FunctionDecompilation] = {}
         extra: dict = {"requested_from": source}
 
-        def result() -> DecompilationResult:
+        def result(resume: dict | None = None) -> DecompilationResult:
             extra.update({
                 "requested": len(requested),
                 "rendered": len(rendered),
@@ -317,7 +357,7 @@ class R2sDecompiler(Decompiler):
                     decompiler_version=self.get_version(),
                     total_time_seconds=time.time() - started,
                     failed_functions=sorted(label for label, _ in declined.values()),
-                    extra=dict(extra),
+                    extra={**extra, "resume": resume} if resume is not None else dict(extra),
                 ),
                 functions=dict(rendered),
                 output_dir=output_dir,
@@ -354,6 +394,34 @@ class R2sDecompiler(Decompiler):
                                + (f" ({ending})" if ending else ""))
                 return result()
 
+        # The checkpoint names its task, so only a re-run of the same r2s, bytes and targets reads it.
+        identity = {
+            "version": self.get_version(),
+            "binary": binary_path.name,
+            "sha256": hashlib.sha256(binary_path.read_bytes()).hexdigest()
+            if progress_path is not None else "",
+            "requested": [[address, name] for address, name in requested.items()],
+        }
+        resumed = resume_state(progress_path, identity)
+        if resumed is not None:
+            rendered.update(resumed[0])
+            declined.update(resumed[1])
+            extra["resumed"] = len(rendered) + len(declined)
+        answered = {function.address for function in rendered.values()} | set(declined)
+
+        interval = checkpoint_interval()
+        saved_at = _clock()
+
+        def checkpoint() -> None:
+            nonlocal saved_at
+            saved_at = _clock()
+            if progress_path is not None:
+                common.dump_progress(progress_path, result({
+                    "identity": identity,
+                    "declined": [[address, label, cause]
+                                 for address, (label, cause) in declined.items()],
+                }))
+
         def file_answer(answer: "r2s_batch.Answer") -> None:
             name = requested.get(answer.address)
             key = name or f"0x{answer.address:x}"
@@ -364,12 +432,16 @@ class R2sDecompiler(Decompiler):
                 rendered[function.name] = function
             else:
                 declined[answer.address] = (key, answer.cause or "harness: no answer")
-            common.dump_progress(progress_path, result())
+            if _clock() - saved_at >= interval:
+                checkpoint()
 
-        report = r2s_batch.run_batch(
-            executable, binary_path, list(requested), function_timeout=timeout,
-            startup_timeout=startup, on_answer=file_answer,
-        )
+        try:
+            report = r2s_batch.run_batch(
+                executable, binary_path, [a for a in requested if a not in answered],
+                function_timeout=timeout, startup_timeout=startup, on_answer=file_answer,
+            )
+        finally:
+            checkpoint()
         extra["processes"] = report.processes
         extra["process_endings"] = report.endings
         if len(rendered) + len(declined) != len(requested):

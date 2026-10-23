@@ -6803,9 +6803,17 @@ fn merges_rax_at(artifact: &r2ssa::SsaArtifact, block: u64) -> bool {
 /// Whether a `rax` the C assigns before its loop is assigned again inside it: the value the
 /// back edge carries, rather than the one the loop was entered with on every pass.
 fn loop_carries_rax(output: &str) -> bool {
-    let Some((before, inside)) = output.split_once("for (; ; ) {") else {
+    let opens = |line: &str| {
+        let line = line.trim();
+        line == "for (; ; ) {"
+            || line == "do {"
+            || (line.starts_with("while (") && line.ends_with(") {"))
+    };
+    let Some(at) = output.lines().position(opens) else {
         return false;
     };
+    let lines: Vec<&str> = output.lines().collect();
+    let (before, inside) = (lines[..at].join("\n"), lines[at + 1..].join("\n"));
     let assigned = |text: &str| {
         text.lines()
             .filter_map(|line| line.trim_start().split_once(" = ").map(|(name, _)| name))
@@ -6813,7 +6821,7 @@ fn loop_carries_rax(output: &str) -> bool {
             .map(str::to_owned)
             .collect::<BTreeSet<_>>()
     };
-    !assigned(before).is_disjoint(&assigned(inside))
+    !assigned(&before).is_disjoint(&assigned(&inside))
 }
 
 /// A loop that writes its accumulator only by `cmpxchg`'s or `cmovcc`'s `SELECT` carries it to its
@@ -7042,3 +7050,293 @@ fn registers_written_on_one_path_before_an_unknown_call_are_no_parameters() {
         rendered.signature
     );
 }
+
+/// `edi == 0 ? 5 : 7` the way a compiler joins two returns of different values: both arms move
+/// theirs into eax and one `ret` follows.
+const RETURNS_JOINED_BY_A_JUMP: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x07, // 1002 je 0x100b
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 1004 mov eax, 7
+    0xeb, 0x05, // 1009 jmp 0x1010
+    0xb8, 0x05, 0x00, 0x00, 0x00, // 100b mov eax, 5
+    0xc3, // 1010 ret
+];
+
+/// The same two arms with the same value in both, which is one return the source wrote once.
+const ONE_VALUE_JOINED_BY_A_JUMP: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x07, // 1002 je 0x100b
+    0xb8, 0x05, 0x00, 0x00, 0x00, // 1004 mov eax, 5
+    0xeb, 0x05, // 1009 jmp 0x1010
+    0xb8, 0x05, 0x00, 0x00, 0x00, // 100b mov eax, 5
+    0xc3, // 1010 ret
+];
+
+#[test]
+fn returns_a_compiler_joined_are_written_in_the_arms_that_choose_their_values() {
+    let text = rendered(RETURNS_JOINED_BY_A_JUMP, "joined_returns");
+    assert_eq!(statements_returning(&text), 2, "{text}");
+    assert!(!text.contains("goto"), "{text}");
+    run_rendered(
+        "joined_returns",
+        &[&text],
+        r#"int main(void) {
+    if (joined_returns(0) != 5) return 1;
+    if (joined_returns(1) != 7) return 2;
+    if (joined_returns(0x100000000ull) != 5) return 3;
+    return 0;
+}"#,
+    );
+}
+
+#[test]
+fn a_value_every_edge_carries_is_one_return() {
+    let text = rendered(ONE_VALUE_JOINED_BY_A_JUMP, "one_value");
+    assert_eq!(statements_returning(&text), 1, "{text}");
+}
+
+/// `edi == 0 && esi == 0 ? 1 : 0` as a compiler joins it: both tests jump to the `xor`, the `1`
+/// arm jumps over it, and one `ret` follows.
+const CONJUNCTION_JOINED_BY_A_JUMP: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x75, 0x0b, // 1002 jne 0x100f
+    0x85, 0xf6, // 1004 test esi, esi
+    0x75, 0x07, // 1006 jne 0x100f
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1008 mov eax, 1
+    0xeb, 0x02, // 100d jmp 0x1011
+    0x31, 0xc0, // 100f xor eax, eax
+    0xc3, // 1011 ret
+];
+
+#[test]
+fn a_conjunction_whose_arms_join_at_one_return_returns_in_each_arm() {
+    // The chain stage makes one test of the two, then the arms that fall to the `ret` each hold it.
+    let text = rendered(CONJUNCTION_JOINED_BY_A_JUMP, "both_zero");
+    let tests = text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("if "));
+    assert_eq!(tests.clone().count(), 1, "{text}");
+    assert!(tests.clone().all(|line| line.contains(" && ")), "{text}");
+    assert_eq!(statements_returning(&text), 2, "{text}");
+    assert!(!text.contains("goto"), "{text}");
+    run_rendered(
+        "both_zero",
+        &[&text],
+        r#"int main(void) {
+    if (both_zero(0, 0) != 1) return 1;
+    if (both_zero(1, 0) != 0) return 2;
+    if (both_zero(0, 1) != 0) return 3;
+    if (both_zero(1, 1) != 0) return 4;
+    return 0;
+}"#,
+    );
+}
+
+/// How many `return` statements a rendering writes.
+fn statements_returning(text: &str) -> usize {
+    (text.lines())
+        .filter(|line| line.trim_start().starts_with("return"))
+        .count()
+}
+
+/// `while (*p) { if (*p == c) return 1; p++; } return 0;`: the loop has two exits, and the second
+/// is reached from inside it.
+const SEARCH_WITH_TWO_EXITS: &[u8] = &[
+    0x80, 0x3f, 0x00, // 1000 cmp byte [rdi], 0
+    0x74, 0x0a, // 1003 je 0x100f
+    0x40, 0x3a, 0x37, // 1005 cmp sil, [rdi]
+    0x74, 0x08, // 1008 je 0x1012
+    0x48, 0xff, 0xc7, // 100a inc rdi
+    0xeb, 0xf1, // 100d jmp 0x1000
+    0x31, 0xc0, // 100f xor eax, eax
+    0xc3, // 1011 ret
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1012 mov eax, 1
+    0xc3, // 1017 ret
+];
+
+#[test]
+fn a_return_a_loop_exits_to_is_written_where_it_exits() {
+    let text = rendered(SEARCH_WITH_TWO_EXITS, "has_byte");
+    assert!(!text.contains("goto"), "{text}");
+    run_rendered(
+        "has_byte",
+        &[&text],
+        r#"int main(void) {
+    if ((uint32_t)has_byte((uint64_t)"abc", 'b') != 1) return 1;
+    if ((uint32_t)has_byte((uint64_t)"abc", 'c') != 1) return 2;
+    if ((uint32_t)has_byte((uint64_t)"abc", 'z') != 0) return 3;
+    if ((uint32_t)has_byte((uint64_t)"", 'z') != 0) return 4;
+    return 0;
+}"#,
+    );
+}
+
+/// The same search whose end-of-string exit goes on to choose between two returns on `edx`: an
+/// exit with one way in and a closed subtree of three blocks, beside the found exit.
+const SEARCH_WITH_A_BRANCHING_EXIT: &[u8] = &[
+    0x80, 0x3f, 0x00, // 1000 cmp byte [rdi], 0
+    0x74, 0x0a, // 1003 je 0x100f
+    0x40, 0x3a, 0x37, // 1005 cmp sil, [rdi]
+    0x74, 0x15, // 1008 je 0x101f
+    0x48, 0xff, 0xc7, // 100a inc rdi
+    0xeb, 0xf1, // 100d jmp 0x1000
+    0x85, 0xd2, // 100f test edx, edx
+    0x74, 0x06, // 1011 je 0x1019
+    0xb8, 0x00, 0x00, 0x00, 0x00, // 1013 mov eax, 0
+    0xc3, // 1018 ret
+    0xb8, 0x03, 0x00, 0x00, 0x00, // 1019 mov eax, 3
+    0xc3, // 101e ret
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 101f mov eax, 1
+    0xc3, // 1024 ret
+];
+
+#[test]
+fn an_exit_that_only_the_loop_reaches_is_written_in_the_loop_with_what_it_goes_on_to() {
+    let text = rendered(SEARCH_WITH_A_BRANCHING_EXIT, "which_byte");
+    assert!(!text.contains("goto"), "{text}");
+    run_rendered(
+        "which_byte",
+        &[&text],
+        r#"int main(void) {
+    if ((uint32_t)which_byte((uint64_t)"abc", 'b', 1) != 1) return 1;
+    if ((uint32_t)which_byte((uint64_t)"abc", 'c', 0) != 1) return 2;
+    if ((uint32_t)which_byte((uint64_t)"abc", 'z', 1) != 0) return 3;
+    if ((uint32_t)which_byte((uint64_t)"abc", 'z', 0) != 3) return 4;
+    return 0;
+}"#,
+    );
+}
+
+/// Code whose second function, at `callee`, the first calls and no summary reads, so each call
+/// declares the callee from its own arguments and result.
+struct CallsAFunction {
+    code: &'static [u8],
+    callee: u64,
+    /// The stub of the import the callee ends by jumping to, and its name.
+    import: (u64, &'static str),
+}
+
+impl r2engine::body::Program for CallsAFunction {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+        let slice = self.code.get(offset..)?;
+        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        code_region(self.code.len(), vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        vaddr == BASE || vaddr == self.callee || self.import_at(vaddr).is_some()
+    }
+}
+
+impl Program for CallsAFunction {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.import_at(vaddr)
+            .or_else(|| (vaddr == BASE).then(|| "scan".to_owned()))
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == self.import.0).then(|| self.import.1.to_owned())
+    }
+}
+
+/// Two calls of `release` disagree about a result; the layouts write them in opposite orders, the
+/// declaration and the call left as a residual must not differ.
+#[test]
+fn a_callee_is_declared_by_its_first_call_in_address_order_whichever_block_is_written_first() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    // The higher exit is written in the loop in the first, after it in the second.
+    for (code, callee, higher) in [
+        (RELEASE_AT_BOTH_EXITS, 0x1030, 0x1015),
+        (RELEASE_AFTER_A_SECOND_WAY_IN, 0x1034, 0x101a),
+    ] {
+        let program = CallsAFunction {
+            code,
+            callee,
+            import: (callee + 30, "free"),
+        };
+        let response = decompile(&target, &program, BASE).expect("decompile");
+        let text = response.output.text();
+        let declaration = format!("uint64_t fcn_{callee:x}(uint64_t, uint64_t);");
+        assert!(text.contains(&declaration), "{declaration}:\n{text}");
+        let disagrees = "another call disagrees with its declaration";
+        assert_eq!(text.matches(disagrees).count(), 1, "{text}");
+        let gap = format!("CallNotRendered at {higher:#x}:");
+        assert!(text.contains(&gap), "{gap}:\n{text}");
+    }
+}
+
+/// `while (*p) { if (*p == c) return release(p, c); p++; } release(p, c); return 0;`, the lower exit
+/// returning what the call leaves in `rax` and the higher overwriting it.
+const RELEASE_AT_BOTH_EXITS: &[u8] = &[
+    0x80, 0x3f, 0x00, // 1000 cmp byte [rdi], 0
+    0x74, 0x10, // 1003 je 0x1015
+    0x40, 0x3a, 0x37, // 1005 cmp sil, [rdi]
+    0x74, 0x05, // 1008 je 0x100f
+    0x48, 0xff, 0xc7, // 100a inc rdi
+    0xeb, 0xf1, // 100d jmp 0x1000
+    0xe8, 0x1c, 0x00, 0x00, 0x00, // 100f call 0x1030
+    0xc3, // 1014 ret
+    0xe8, 0x16, 0x00, 0x00, 0x00, // 1015 call 0x1030
+    0xb8, 0x00, 0x00, 0x00, 0x00, // 101a mov eax, 0
+    0xc3, // 101f ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, // 1020 padding
+    0x48, 0x85, 0xff, // +0 release: test rdi, rdi
+    0x74, 0x13, // +3 je +24
+    0x48, 0x85, 0xf6, // +5 test rsi, rsi
+    0x74, 0x0e, // +8 je +24
+    0x48, 0x8b, 0x87, 0x78, 0x04, 0x00, 0x00, // +10 mov rax, [rdi + 0x478]
+    0x48, 0x85, 0xc0, // +17 test rax, rax
+    0x74, 0x03, // +20 je +25
+    0xff, 0xe0, // +22 jmp rax
+    0xc3, // +24 ret
+    0x48, 0x89, 0xf7, // +25 mov rdi, rsi
+    0xeb, 0x00, // +28 jmp +30
+    0xc3, // +30 free's stub
+];
+
+/// The same search entered through a test of `rdi` that also reaches the higher exit, so that exit
+/// has a second way in and the lower one is the exit written in the loop.
+const RELEASE_AFTER_A_SECOND_WAY_IN: &[u8] = &[
+    0x48, 0x85, 0xff, // 1000 test rdi, rdi
+    0x74, 0x15, // 1003 je 0x101a
+    0x80, 0x3f, 0x00, // 1005 cmp byte [rdi], 0
+    0x74, 0x10, // 1008 je 0x101a
+    0x40, 0x3a, 0x37, // 100a cmp sil, [rdi]
+    0x74, 0x05, // 100d je 0x1014
+    0x48, 0xff, 0xc7, // 100f inc rdi
+    0xeb, 0xf1, // 1012 jmp 0x1005
+    0xe8, 0x1b, 0x00, 0x00, 0x00, // 1014 call 0x1034
+    0xc3, // 1019 ret
+    0xe8, 0x15, 0x00, 0x00, 0x00, // 101a call 0x1034
+    0xb8, 0x00, 0x00, 0x00, 0x00, // 101f mov eax, 0
+    0xc3, // 1024 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, // 1025 padding
+    0x48, 0x85, 0xff, // +0 release: test rdi, rdi
+    0x74, 0x13, // +3 je +24
+    0x48, 0x85, 0xf6, // +5 test rsi, rsi
+    0x74, 0x0e, // +8 je +24
+    0x48, 0x8b, 0x87, 0x78, 0x04, 0x00, 0x00, // +10 mov rax, [rdi + 0x478]
+    0x48, 0x85, 0xc0, // +17 test rax, rax
+    0x74, 0x03, // +20 je +25
+    0xff, 0xe0, // +22 jmp rax
+    0xc3, // +24 ret
+    0x48, 0x89, 0xf7, // +25 mov rdi, rsi
+    0xeb, 0x00, // +28 jmp +30
+    0xc3, // +30 free's stub
+];

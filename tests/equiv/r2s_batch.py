@@ -250,8 +250,8 @@ def run_batch(
     ``function_timeout`` bounds each address from its BEGIN marker;
     ``startup_timeout`` (default: ``function_timeout``) bounds a process from
     its start to its first BEGIN marker. ``on_answer`` is called once per
-    address, in request order, as soon as its answer is final -- the adapter
-    uses it to checkpoint after every function.
+    address, in request order, while r2s is still running: a consumer that
+    checkpoints from it keeps every answer a killed run had already given.
     """
     pending = list(addresses)
     startup = function_timeout if startup_timeout is None else startup_timeout
@@ -259,14 +259,12 @@ def run_batch(
     index = 0
     while pending:
         answers, consumed, ending, before = _one_process(
-            r2s, binary, pending, index, command, parse, function_timeout, startup, env
+            r2s, binary, pending, index, command, parse, function_timeout, startup, env,
+            on_answer,
         )
         report.processes += 1
         report.endings.append(ending)
-        for answer in answers:
-            report.answers.append(answer)
-            if on_answer is not None:
-                on_answer(answer)
+        report.answers.extend(answers)
         if consumed == 0:
             # The process ended, or ran out of its startup budget, before it
             # began the first address: every restart would do the same, so the
@@ -283,13 +281,14 @@ def run_batch(
 
 
 def _one_process(r2s, binary, addresses, first_index, command, parse, function_timeout,
-                 startup_timeout, env):
+                 startup_timeout, env, on_answer=None):
     """Run one r2s over ``addresses``, one stdin line each, until it finishes or dies.
 
     Returns the answers it produced, how many addresses they cover (a crash
     counts the address it died on), how the process ended, and -- for a
     process that never began an address -- the answer every remaining address
-    shares.
+    shares. ``on_answer`` sees each answer the moment it is final; a callback
+    that raises takes the r2s process down with it.
     """
     argv = [str(r2s), "-q", str(binary)]
     process_env = dict(os.environ)
@@ -325,6 +324,17 @@ def _one_process(r2s, binary, addresses, first_index, command, parse, function_t
             return False
 
     answers: list[Answer] = []
+
+    def record(answer: Answer) -> None:
+        answers.append(answer)
+        if on_answer is not None:
+            try:
+                on_answer(answer)
+            except BaseException:
+                _kill(proc)
+                proc.wait()
+                raise
+
     tail: list[str] = []
     body: list[str] = []
     began = False          # the current address's BEGIN marker has come back
@@ -387,7 +397,7 @@ def _one_process(r2s, binary, addresses, first_index, command, parse, function_t
                     body.append(end[0])
                 answer = parse(address, "\n".join(body))
                 answer.seconds = time.monotonic() - started
-                answers.append(answer)
+                record(answer)
                 answered = True
                 continue
             begin = split_marker(stripped, BEGIN)
@@ -442,8 +452,8 @@ def _one_process(r2s, binary, addresses, first_index, command, parse, function_t
             cause = f"harness: r2s {ending} while rendering 0x{address:x}"
             if last:
                 cause += f" (last output: {last[:400]})"
-            answers.append(Answer(address, "crash", text="\n".join(body), cause=cause,
-                                  seconds=time.monotonic() - started))
+            record(Answer(address, "crash", text="\n".join(body), cause=cause,
+                          seconds=time.monotonic() - started))
             consumed += 1
         elif consumed == 0:
             before = _before_answer(ending, timed_out, returncode, tail, last)

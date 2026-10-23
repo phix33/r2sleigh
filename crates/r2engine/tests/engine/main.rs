@@ -29,6 +29,7 @@ mod reuse;
 mod signature;
 mod staged;
 mod start;
+mod structure;
 mod variadic;
 mod variadic_registers;
 mod walk;

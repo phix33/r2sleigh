@@ -16,6 +16,18 @@ use r2ssa::domtree::DomTree;
 use crate::ast::RenderObservationId;
 use crate::ast::{CExpr, CStmt};
 
+/// What the markers say of the statements the placement wrote.
+pub(crate) trait Placed {
+    /// The block a marker was written for.
+    fn block_of(&self, id: RenderObservationId) -> Option<u64>;
+    /// The statement the placement wrote that a marker stands for: itself, or the one it copies.
+    fn statement_of(&self, id: RenderObservationId) -> Option<RenderObservationId>;
+    /// How many statements the placement wrote: markers `0..written` are the originals.
+    fn written(&self) -> usize;
+    /// Whether a marker is on a copy an edge carries, which is its block's statement but no place in it.
+    fn edge_copy(&self, id: RenderObservationId) -> bool;
+}
+
 /// What a terminator says about one of its edges.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum EdgeLabel {
@@ -24,16 +36,6 @@ pub(crate) enum EdgeLabel {
     False,
     Case(BTreeSet<u64>),
     Default,
-}
-
-impl EdgeLabel {
-    fn inverted(&self) -> Self {
-        match self {
-            Self::True => Self::False,
-            Self::False => Self::True,
-            other => other.clone(),
-        }
-    }
 }
 
 /// Where an edge arrives: a block of this function, or somewhere outside it.
@@ -100,6 +102,18 @@ pub(crate) enum Violation {
     Selection {
         block: u64,
     },
+    /// A test written as a chain of blocks that the machine's branches do not make.
+    Chain {
+        block: u64,
+        fault: super::condition::ChainFault,
+    },
+    /// The statements the placement wrote for a block are not all written as often as each other, or
+    /// none is: a block read through as a pass-through that was not one.
+    Statement {
+        block: u64,
+        fewest: usize,
+        most: usize,
+    },
     /// The occurrence's edges are not the block's edges.
     EdgeMismatch {
         block: u64,
@@ -125,6 +139,8 @@ impl Violation {
             Self::FallsOffEnd { .. } => "falls-off-end",
             Self::ReturnWhereMachineContinues { .. } => "return-where-machine-continues",
             Self::Selection { .. } => "selection",
+            Self::Chain { .. } => "chain",
+            Self::Statement { .. } => "statement",
             Self::EdgeMismatch { .. } => "edge-mismatch",
         }
     }
@@ -157,6 +173,18 @@ impl fmt::Display for Violation {
             Self::UnownedControl { kind, open } => write!(f, " {kind} open-ends={open}"),
             Self::StrayBreak | Self::StrayContinue | Self::EmptyLoopBody => Ok(()),
             Self::SwitchValue { block } | Self::Selection { block } => write!(f, " at {block:#x}"),
+            Self::Chain { block, fault } => write!(f, " at {block:#x}: {fault}"),
+            Self::Statement { block, most: 0, .. } => {
+                write!(f, " at {block:#x}: no statement of the block is written")
+            }
+            Self::Statement {
+                block,
+                fewest,
+                most,
+            } => write!(
+                f,
+                " at {block:#x}: a statement written {fewest} times where another is {most}"
+            ),
             Self::TerminalFallthrough { block, to } | Self::UnresolvedIndirect { block, to } => {
                 write!(f, " {block:#x} -> {to}")
             }
@@ -185,7 +213,6 @@ pub(crate) struct ControlCertificate {
     pub(crate) blocks: usize,
     pub(crate) duplicated: Vec<u64>,
     pub(crate) contracted: usize,
-    pub(crate) inversions: usize,
     pub(crate) unreachable_missing: usize,
 }
 
@@ -214,12 +241,11 @@ impl fmt::Display for ControlCertificate {
         }
         write!(
             f,
-            " occurrences={} blocks={} duplicated={} contracted={} inversions={} unreachable={}",
+            " occurrences={} blocks={} duplicated={} contracted={} unreachable={}",
             self.occurrences,
             self.blocks,
             self.duplicated.len(),
             self.contracted,
-            self.inversions,
             self.unreachable_missing
         )
     }
@@ -290,6 +316,11 @@ struct Walker<'a> {
     /// The next statement starts a position of its own: the function's
     /// first, or a do-while body's entry.
     force_open: bool,
+    /// By occurrence: the chain its test is written as, when it is one.
+    chains: BTreeMap<usize, super::condition::Written>,
+    /// Every marker the text writes a statement under, in the order the walk meets them.
+    met: Vec<RenderObservationId>,
+    edge_copy: &'a dyn Fn(RenderObservationId) -> bool,
 }
 
 impl Walker<'_> {
@@ -344,6 +375,20 @@ impl Walker<'_> {
                 });
                 None
             }
+        }
+    }
+
+    /// Take the chain `test` is written as, when its atoms carry blocks' markers.
+    fn note_test(&mut self, owner: usize, test: &CExpr) {
+        match super::condition::read(test, self.block_of) {
+            Ok(Some(written)) => {
+                self.chains.insert(owner, written);
+            }
+            Ok(None) => {}
+            Err(fault) => self.violations.push(Violation::Chain {
+                block: self.occurrences[owner].block,
+                fault,
+            }),
         }
     }
 
@@ -461,13 +506,14 @@ impl Walker<'_> {
                 Vec::new()
             }
             CStmt::If {
+                cond,
                 then_body,
                 else_body,
-                ..
             } => {
                 let Some(owner) = self.single_owner(&open, "if") else {
                     return Vec::new();
                 };
+                self.note_test(owner, cond);
                 let mut ends = self.walk(then_body, vec![(owner, EdgeLabel::True)]);
                 match else_body {
                     Some(else_body) => {
@@ -485,10 +531,10 @@ impl Walker<'_> {
                 if self.body_owns_no_block(body) {
                     return open;
                 }
-                self.walk_pre_test_loop(body, open)
+                self.walk_pre_test_loop(loop_test(stmt), body, open)
             }
             // A do-while nobody observed cannot say which block its test is.
-            CStmt::DoWhile { body, .. } => self.walk_do_while(&[], body, open),
+            CStmt::DoWhile { body, .. } => self.walk_do_while(&[], loop_test(stmt), body, open),
             CStmt::Switch { cases, default, .. } => {
                 self.walk_switch(open, cases, default.as_deref())
             }
@@ -570,7 +616,9 @@ impl Walker<'_> {
     /// of whatever text it sits in, and its edge is read through it.
     fn walk_observed(&mut self, stmt: &CStmt, open: Vec<OpenEnd>) -> Vec<OpenEnd> {
         let mut blocks = Vec::new();
-        for id in stmt.observation_ids().iter() {
+        let ids = stmt.observation_ids();
+        self.met.extend(ids.iter());
+        for id in ids.iter().filter(|id| !(self.edge_copy)(**id)) {
             if let Some(block) = (self.block_of)(*id)
                 && !blocks.contains(&block)
             {
@@ -582,7 +630,9 @@ impl Walker<'_> {
             CStmt::Expr(selection) if (self.role)(stmt) == StatementRole::Selects => {
                 self.walk_selection(&blocks, selection, open)
             }
-            CStmt::DoWhile { body, .. } => self.walk_do_while(&blocks, body, open),
+            CStmt::DoWhile { body, .. } => {
+                self.walk_do_while(&blocks, loop_test(inner), body, open)
+            }
             CStmt::For {
                 cond: None, body, ..
             } => self.walk_infinite_loop(body, open),
@@ -598,7 +648,7 @@ impl Walker<'_> {
                     Some(header) => self.enter_block(open, header),
                     None => open,
                 };
-                self.walk_pre_test_loop(body, open)
+                self.walk_pre_test_loop(loop_test(inner), body, open)
             }
             CStmt::If { .. }
             | CStmt::Switch { .. }
@@ -646,15 +696,16 @@ impl Walker<'_> {
         };
         let block = self.occurrences[owner].block;
         let arms = selected_arms(selection).filter(|_| tests(&block));
-        let Some(arms) = arms else {
+        let Some((test, arms)) = arms else {
             self.violations.push(Violation::Selection { block });
             return Vec::new();
         };
+        self.note_test(owner, test);
         let mut ends = Vec::new();
         for (arm, label) in arms.into_iter().zip([EdgeLabel::True, EdgeLabel::False]) {
-            let mut named = arm
-                .observation_ids()
-                .iter()
+            self.met.extend(arm.observation_ids().iter());
+            let mut named = (arm.observation_ids().iter())
+                .filter(|id| !(self.edge_copy)(**id))
                 .filter_map(|id| (self.block_of)(*id))
                 .collect::<Vec<_>>();
             named.sort_unstable();
@@ -682,14 +733,40 @@ impl Walker<'_> {
         }
         let from = self.occurrences[open[0].0].block;
         from != block
-            && self.cfg.successors(from).contains(&block)
+            && self.leaves_to(open[0].0).contains(&block)
             && !self.dom.dominates(block, from)
     }
 
-    fn walk_pre_test_loop(&mut self, body: &CStmt, open: Vec<OpenEnd>) -> Vec<OpenEnd> {
+    /// The blocks control can go to from an occurrence: its block's successors, or, where its test
+    /// is a chain, the blocks the chain's tests lead out to.
+    fn leaves_to(&self, occurrence: usize) -> Vec<u64> {
+        let from = self.occurrences[occurrence].block;
+        let Some(written) = self.chains.get(&occurrence) else {
+            return self.cfg.successors(from);
+        };
+        let tested: BTreeSet<u64> = written.blocks.iter().copied().collect();
+        let mut out: Vec<u64> = tested
+            .iter()
+            .flat_map(|block| self.cfg.successors(*block))
+            .filter(|next| !tested.contains(next))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    fn walk_pre_test_loop(
+        &mut self,
+        test: Option<&CExpr>,
+        body: &CStmt,
+        open: Vec<OpenEnd>,
+    ) -> Vec<OpenEnd> {
         let Some(owner) = self.single_owner(&open, "loop") else {
             return Vec::new();
         };
+        if let Some(test) = test {
+            self.note_test(owner, test);
+        }
         let header = self.occurrences[owner].block;
         self.frames.push(Frame::Loop {
             head: LoopHead::Block(header),
@@ -742,6 +819,7 @@ impl Walker<'_> {
     fn walk_do_while(
         &mut self,
         candidates: &[u64],
+        test: Option<&CExpr>,
         body: &CStmt,
         open: Vec<OpenEnd>,
     ) -> Vec<OpenEnd> {
@@ -803,8 +881,11 @@ impl Walker<'_> {
                 }),
             }
         }
-        for test in &tests {
-            self.occurrences[*test]
+        for at in &tests {
+            if let Some(test) = test {
+                self.note_test(*at, test);
+            }
+            self.occurrences[*at]
                 .edges
                 .push((Target::Block(entry), EdgeLabel::True));
         }
@@ -865,8 +946,17 @@ impl Walker<'_> {
     }
 }
 
-/// A selection's two values, then and else, when it assigns a plain variable and neither writes.
-fn selected_arms(selection: &CExpr) -> Option<[&CExpr; 2]> {
+/// The test of a `while` or `do-while`, which a `for` of the lowering does not state as one.
+fn loop_test(stmt: &CStmt) -> Option<&CExpr> {
+    match stmt.unobserved() {
+        CStmt::While { cond, .. } | CStmt::DoWhile { cond, .. } => Some(cond),
+        _ => None,
+    }
+}
+
+/// A selection's test, and its two values, then and else, when it assigns a plain variable and
+/// neither writes.
+fn selected_arms(selection: &CExpr) -> Option<(&CExpr, [&CExpr; 2])> {
     let CExpr::Binary {
         op: crate::ast::BinaryOp::Assign,
         left,
@@ -876,16 +966,16 @@ fn selected_arms(selection: &CExpr) -> Option<[&CExpr; 2]> {
         return None;
     };
     let CExpr::Ternary {
+        cond,
         then_expr,
         else_expr,
-        ..
     } = right.unobserved()
     else {
         return None;
     };
     let plain = left.observation_ids().is_empty() && matches!(left.unobserved(), CExpr::Var(_));
     (plain && right.observation_ids().is_empty() && !writes(then_expr) && !writes(else_expr))
-        .then_some([then_expr.as_ref(), else_expr.as_ref()])
+        .then_some((cond.as_ref(), [then_expr.as_ref(), else_expr.as_ref()]))
 }
 
 /// Whether evaluating `expr` writes: one write in a selected value is a second effect the arm made.
@@ -1078,23 +1168,184 @@ fn switch_edges_agree(rendered: &[(Target, EdgeLabel)], expected: &[(Target, Edg
     })
 }
 
+/// The CFG as a written chain's blocks are read from it.
+struct CfgMachine<'a> {
+    cfg: &'a CFG,
+    contract: &'a dyn Fn(u64) -> Target,
+}
+
+impl super::condition::Machine for CfgMachine<'_> {
+    type Exit = Target;
+
+    fn successors(&self, block: u64) -> Option<(u64, u64)> {
+        match self.cfg.get_block(block).map(|block| &block.terminator) {
+            Some(BlockTerminator::ConditionalBranch {
+                true_target,
+                false_target,
+            }) if true_target != false_target => Some((*true_target, *false_target)),
+            _ => None,
+        }
+    }
+
+    fn arrives(&self, target: u64) -> Target {
+        (self.contract)(target)
+    }
+
+    fn entered_from_outside(&self, block: u64, chain: &BTreeSet<u64>) -> bool {
+        (self.cfg.predecessors(block).into_iter()).any(|pred| !chain.contains(&pred))
+    }
+}
+
+/// What a chain test makes of the occurrences it heads: their edges, the occurrences that were
+/// refused, and the blocks the tests are written through.
+#[derive(Default)]
+struct ChainReading {
+    edges: BTreeMap<usize, Vec<(Target, EdgeLabel)>>,
+    faulted: BTreeSet<usize>,
+    members: BTreeSet<u64>,
+}
+
+/// A test written as a chain stands for the blocks it tests: its head's edges are the chain's
+/// exits, and the blocks past the head are written nowhere else.
+fn read_chains(
+    occurrences: &[Occurrence],
+    chains: &BTreeMap<usize, super::condition::Written>,
+    count: &BTreeMap<u64, usize>,
+    machine: &CfgMachine<'_>,
+    violations: &mut Vec<Violation>,
+) -> ChainReading {
+    let mut reading = ChainReading::default();
+    for (index, written) in chains {
+        let head = occurrences[*index].block;
+        match super::condition::exits(head, written, machine) {
+            Ok(exits) => {
+                let mut edges: Vec<_> = (exits.into_iter())
+                    .map(|(target, true_side)| match true_side {
+                        true => (target, EdgeLabel::True),
+                        false => (target, EdgeLabel::False),
+                    })
+                    .collect();
+                edges.sort();
+                reading.edges.insert(*index, edges);
+            }
+            Err(fault) => {
+                reading.faulted.insert(*index);
+                violations.push(Violation::Chain { block: head, fault });
+            }
+        }
+        for member in written.blocks.iter().skip(1) {
+            reading.members.insert(*member);
+            if count.contains_key(member) {
+                violations.push(Violation::Chain {
+                    block: head,
+                    fault: super::condition::ChainFault::Rendered { block: *member },
+                });
+            }
+        }
+    }
+    reading
+}
+
+/// Compare an occurrence with `expected`, labels and all: a negation is read from the `!` over a
+/// marked atom, never from swapped arms.
+fn judge(
+    cfg: &CFG,
+    occurrence: &Occurrence,
+    expected: Vec<(Target, EdgeLabel)>,
+) -> Option<Violation> {
+    let block = occurrence.block;
+    let mut rendered = occurrence.edges.clone();
+    rendered.sort();
+    if rendered.is_empty() {
+        let continues = (expected.iter()).any(|(target, _)| matches!(target, Target::Block(_)));
+        return match (continues, occurrence.returned) {
+            (false, _) => None,
+            (true, true) => Some(Violation::ReturnWhereMachineContinues { block }),
+            (true, false) => Some(Violation::FallsOffEnd { block }),
+        };
+    }
+    if rendered == expected {
+        return None;
+    }
+    if switch_edges_agree(&rendered, &expected)
+        || converted_conditional_agrees(&rendered, &expected)
+    {
+        return None;
+    }
+    let terminator = cfg.get_block(block).map(|block| &block.terminator);
+    Some(match terminator {
+        Some(
+            BlockTerminator::None
+            | BlockTerminator::Call {
+                fallthrough: None, ..
+            }
+            | BlockTerminator::IndirectCall { fallthrough: None },
+        ) => Violation::TerminalFallthrough {
+            block,
+            to: rendered[0].0,
+        },
+        Some(BlockTerminator::IndirectBranch) if expected.is_empty() => {
+            Violation::UnresolvedIndirect {
+                block,
+                to: rendered[0].0,
+            }
+        }
+        _ => Violation::EdgeMismatch {
+            block,
+            rendered,
+            expected,
+        },
+    })
+}
+
+/// A block's text is copied whole: every statement the placement wrote for a block is written, and as
+/// often as any other of it. `met` holds each marker a statement is written under; O(statements).
+fn statement_violations(placed: &dyn Placed, met: &[RenderObservationId]) -> Vec<Violation> {
+    let mut found = vec![0usize; placed.written()];
+    for id in met {
+        if let Some(slot) =
+            (placed.statement_of(*id)).and_then(|at| found.get_mut(at.index() as usize))
+        {
+            *slot += 1;
+        }
+    }
+    let mut span = BTreeMap::<u64, (usize, usize)>::new();
+    for (at, found) in found.into_iter().enumerate() {
+        if let Some(block) = placed.block_of(RenderObservationId::from_dense_index(at)) {
+            let (fewest, most) = span.entry(block).or_insert((found, found));
+            *fewest = (*fewest).min(found);
+            *most = (*most).max(found);
+        }
+    }
+    (span.into_iter())
+        .filter(|(_, (fewest, most))| fewest != most || *most == 0)
+        .map(|(block, (fewest, most))| Violation::Statement {
+            block,
+            fewest,
+            most,
+        })
+        .collect()
+}
+
 /// Read the body back as a control graph and compare it with the CFG.
 ///
-/// `block_of` says which block an observed statement was emitted for, and
-/// `label_block` which block a label names; neither is derived here.
+/// `placed` says which block an observed statement was emitted for and which statement the placement
+/// wrote it as, and `label_block` which block a label names; neither is derived here.
 pub(crate) fn certify<R: Into<StatementRole>>(
     body: &CStmt,
     cfg: &CFG,
     dom: &DomTree,
     entry: u64,
-    block_of: &dyn Fn(RenderObservationId) -> Option<u64>,
+    placed: &dyn Placed,
     label_block: &dyn Fn(&str) -> Option<u64>,
     role: &dyn Fn(&CStmt) -> R,
 ) -> ControlCertificate {
+    let block_of = |id: RenderObservationId| placed.block_of(id);
+    let edge_copy = |id: RenderObservationId| placed.edge_copy(id);
     let mut walker = Walker {
         cfg,
         dom,
-        block_of,
+        block_of: &block_of,
         label_block,
         role: &|stmt| role(stmt).into(),
         occurrences: Vec::new(),
@@ -1102,6 +1353,9 @@ pub(crate) fn certify<R: Into<StatementRole>>(
         violations: Vec::new(),
         first_block: None,
         force_open: true,
+        chains: BTreeMap::new(),
+        met: Vec::new(),
+        edge_copy: &edge_copy,
     };
     let ends = walker.walk(body, Vec::new());
     for (id, _) in ends {
@@ -1111,12 +1365,20 @@ pub(crate) fn certify<R: Into<StatementRole>>(
         occurrences,
         mut violations,
         first_block,
+        chains,
+        mut met,
         ..
     } = walker;
     let mut count = BTreeMap::<u64, usize>::new();
     for occurrence in &occurrences {
         *count.entry(occurrence.block).or_default() += 1;
     }
+    // A chain's tests past its head are written as atoms of the head's test, not as statements.
+    let members: BTreeSet<_> = (chains.values())
+        .flat_map(|written| written.marks.iter().skip(1).flatten().copied())
+        .collect();
+    met.extend(members);
+    violations.extend(statement_violations(placed, &met));
     // A block that rendered nothing and only passes control on is read
     // through, the way the text does; the blocks read through are counted.
     let contracted = std::cell::RefCell::new(BTreeSet::<u64>::new());
@@ -1153,73 +1415,29 @@ pub(crate) fn certify<R: Into<StatementRole>>(
         violations.push(Violation::EntryNotFirst { first: first_block });
     }
 
-    let mut inversions = 0;
-    for occurrence in &occurrences {
-        let block = occurrence.block;
-        let expected = expected_edges(cfg, block, &contract);
-        let inside: Vec<_> = expected
-            .iter()
-            .filter(|(target, _)| matches!(target, Target::Block(_)))
-            .cloned()
-            .collect();
-        let mut rendered = occurrence.edges.clone();
-        rendered.sort();
-        if rendered.is_empty() {
-            if inside.is_empty() {
-                continue;
-            }
-            violations.push(if occurrence.returned {
-                Violation::ReturnWhereMachineContinues { block }
-            } else {
-                Violation::FallsOffEnd { block }
-            });
+    let machine = CfgMachine {
+        cfg,
+        contract: &contract,
+    };
+    let ChainReading {
+        edges: chain_edges,
+        faulted: chain_faulted,
+        members: chain_members,
+    } = read_chains(&occurrences, &chains, &count, &machine, &mut violations);
+
+    for (index, occurrence) in occurrences.iter().enumerate() {
+        if chain_faulted.contains(&index) {
             continue;
         }
-        if rendered == expected {
-            continue;
-        }
-        let mut swapped: Vec<_> = rendered
-            .iter()
-            .map(|(target, label)| (*target, label.inverted()))
-            .collect();
-        swapped.sort();
-        if swapped == expected {
-            inversions += 1;
-            continue;
-        }
-        if switch_edges_agree(&rendered, &expected) {
-            continue;
-        }
-        if converted_conditional_agrees(&rendered, &expected) {
-            continue;
-        }
-        let terminator = cfg.get_block(block).map(|block| &block.terminator);
-        violations.push(match terminator {
-            Some(
-                BlockTerminator::None
-                | BlockTerminator::Call {
-                    fallthrough: None, ..
-                }
-                | BlockTerminator::IndirectCall { fallthrough: None },
-            ) => Violation::TerminalFallthrough {
-                block,
-                to: rendered[0].0,
-            },
-            Some(BlockTerminator::IndirectBranch) if expected.is_empty() => {
-                Violation::UnresolvedIndirect {
-                    block,
-                    to: rendered[0].0,
-                }
-            }
-            _ => Violation::EdgeMismatch {
-                block,
-                rendered,
-                expected,
-            },
-        });
+        let expected = match chain_edges.get(&index) {
+            Some(edges) => edges.clone(),
+            None => expected_edges(cfg, occurrence.block, &contract),
+        };
+        violations.extend(judge(cfg, occurrence, expected));
     }
 
-    let contracted = contracted.into_inner();
+    let mut contracted = contracted.into_inner();
+    contracted.extend(chain_members);
     let mut unreachable_missing = 0;
     let mut blocks = 0;
     for addr in cfg.block_addrs() {
@@ -1244,7 +1462,6 @@ pub(crate) fn certify<R: Into<StatementRole>>(
         blocks,
         duplicated,
         contracted: contracted.len(),
-        inversions,
         unreachable_missing,
     }
 }
@@ -1254,34 +1471,7 @@ mod tests {
     use super::*;
     use crate::ast::SwitchCase;
     use crate::ast::test_render_observation_id;
-    use r2ssa::cfg::BasicBlock;
-
-    fn cfg(entry: u64, blocks: &[(u64, BlockTerminator)]) -> CFG {
-        let mut cfg = CFG::new(entry);
-        for (addr, _) in blocks {
-            cfg.add_block(BasicBlock::new(*addr));
-        }
-        for (addr, terminator) in blocks {
-            cfg.set_terminator(*addr, terminator.clone());
-        }
-        cfg
-    }
-
-    /// A statement observed as belonging to `block`.
-    fn at(block: u64, stmt: CStmt) -> CStmt {
-        CStmt::observe_one(
-            test_render_observation_id(u32::try_from(block).expect("small address")),
-            stmt,
-        )
-    }
-
-    fn expr() -> CStmt {
-        CStmt::Expr(CExpr::IntLit(0))
-    }
-
-    fn cond() -> CExpr {
-        CExpr::IntLit(1)
-    }
+    use crate::structure::support::{ByBlock, at, branch, cfg, cond, cond_branch, expr};
 
     fn run(body: CStmt, cfg: &CFG, entry: u64, labels: &[(&str, u64)]) -> ControlCertificate {
         run_selecting(body, cfg, entry, labels, &[])
@@ -1295,7 +1485,6 @@ mod tests {
         labels: &[(&str, u64)],
         selects: &[RenderObservationId],
     ) -> ControlCertificate {
-        let block_of = |id: RenderObservationId| Some(u64::from(id.index()));
         let label_block = |name: &str| {
             labels
                 .iter()
@@ -1307,24 +1496,13 @@ mod tests {
             cfg,
             &DomTree::compute(cfg),
             entry,
-            &block_of,
+            &ByBlock,
             &label_block,
             &|stmt| match stmt.observation_ids().iter().any(|id| selects.contains(id)) {
                 true => StatementRole::Selects,
                 false => StatementRole::Plain,
             },
         )
-    }
-
-    fn branch(target: u64) -> BlockTerminator {
-        BlockTerminator::Branch { target }
-    }
-
-    fn cond_branch(true_target: u64, false_target: u64) -> BlockTerminator {
-        BlockTerminator::ConditionalBranch {
-            true_target,
-            false_target,
-        }
     }
 
     #[test]
@@ -1350,7 +1528,6 @@ mod tests {
         assert!(certificate.ok(), "{certificate}");
         assert_eq!(certificate.occurrences, 4);
         assert_eq!(certificate.contracted, 0);
-        assert_eq!(certificate.inversions, 0);
     }
 
     #[test]
@@ -1410,10 +1587,65 @@ mod tests {
         ]);
         let straight = run(body.clone(), &blocks(0x30, 0x40), 0x10, &[]);
         assert!(straight.ok(), "{straight}");
-        assert_eq!(straight.inversions, 0);
-        let inverted = run(body, &blocks(0x40, 0x30), 0x10, &[]);
-        assert!(inverted.ok(), "{inverted}");
-        assert_eq!(inverted.inversions, 1);
+        // A test the text does not mark cannot say it is negated, so the swapped edges are refused.
+        let swapped = run(body, &blocks(0x40, 0x30), 0x10, &[]);
+        assert!(
+            swapped
+                .violations
+                .iter()
+                .any(|violation| matches!(violation, Violation::EdgeMismatch { block: 0x20, .. })),
+            "{swapped}"
+        );
+    }
+
+    /// The loop whose test block 0x20 is marked on its one atom, which says which edge stays.
+    fn marked_while(test: impl Fn(CExpr) -> CExpr) -> CStmt {
+        let atom = CExpr::observe_one(test_render_observation_id(0x20), cond());
+        CStmt::Block(vec![
+            at(0x10, expr()),
+            at(0x20, CStmt::while_loop(test(atom), at(0x30, expr()))),
+            at(0x40, CStmt::Return(None)),
+        ])
+    }
+
+    fn loop_blocks(true_target: u64, false_target: u64) -> CFG {
+        cfg(
+            0x10,
+            &[
+                (0x10, branch(0x20)),
+                (0x20, cond_branch(true_target, false_target)),
+                (0x30, branch(0x20)),
+                (0x40, BlockTerminator::Return),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_loop_test_of_one_marked_atom_is_read_with_the_polarity_it_is_written() {
+        let not = |expr| CExpr::unary(crate::ast::UnaryOp::Not, expr);
+        // The machine stays in the loop when the test holds: the atom is the loop's test.
+        let stays = run(
+            marked_while(|atom| atom),
+            &loop_blocks(0x30, 0x40),
+            0x10,
+            &[],
+        );
+        assert!(stays.ok(), "{stays}");
+        // It leaves when the test holds: the atom alone would stay when the machine leaves.
+        let leaves = loop_blocks(0x40, 0x30);
+        let wrong = run(marked_while(|atom| atom), &leaves, 0x10, &[]);
+        assert!(
+            wrong
+                .violations
+                .iter()
+                .any(|violation| matches!(violation, Violation::EdgeMismatch { block: 0x20, .. })),
+            "{wrong}"
+        );
+        // ... and the negated atom stays when the machine does.
+        let right = run(marked_while(not), &leaves, 0x10, &[]);
+        assert!(right.ok(), "{right}");
+        let again = run(marked_while(not), &loop_blocks(0x30, 0x40), 0x10, &[]);
+        assert!(!again.ok(), "{again}");
     }
 
     #[test]
@@ -1766,5 +1998,506 @@ mod tests {
             assert!(selections.is_empty());
             assert!(matches!(stmt.unobserved(), CStmt::If { .. }), "{stmt:?}");
         }
+    }
+
+    // -- Condition chains.
+
+    /// `if (a && b) { X } else { Y }` over blocks 0x10 and 0x20, with 0x30 and 0x40 behind it.
+    fn chain_cfg() -> CFG {
+        cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x40)),
+                (0x20, cond_branch(0x30, 0x40)),
+                (0x30, BlockTerminator::Return),
+                (0x40, BlockTerminator::Return),
+            ],
+        )
+    }
+
+    /// An atom of a chain: the block's marker on its test.
+    fn atom(block: u32) -> CExpr {
+        CExpr::observe_one(
+            test_render_observation_id(block),
+            CExpr::IntLit(i64::from(block)),
+        )
+    }
+
+    fn both(left: CExpr, right: CExpr) -> CExpr {
+        CExpr::binary(crate::ast::BinaryOp::And, left, right)
+    }
+
+    /// The text of `chain_cfg` with `test` as the head's test, and `x` entered on its true arm.
+    fn chain_text(test: CExpr, x: u64) -> CStmt {
+        let enter = |block: u64| at(block, CStmt::Return(None));
+        let (yes, no) = match x {
+            0x30 => (enter(0x30), CStmt::Goto("L".to_owned())),
+            _ => (CStmt::Goto("L".to_owned()), enter(0x30)),
+        };
+        CStmt::Block(vec![
+            at(0x10, CStmt::if_stmt(test, yes, Some(no))),
+            CStmt::Block(vec![
+                CStmt::Label("L".to_owned()),
+                at(0x40, CStmt::Return(None)),
+            ]),
+        ])
+    }
+
+    #[test]
+    fn a_condition_chain_is_certified_by_its_exit_function() {
+        let body = chain_text(both(atom(0x10), atom(0x20)), 0x30);
+        let certificate = run(body, &chain_cfg(), 0x10, &[("L", 0x40)]);
+        assert!(certificate.ok(), "{certificate}");
+        // The second test is read through, as an empty block is, and counted.
+        assert_eq!(certificate.occurrences, 3);
+        assert_eq!(certificate.contracted, 1);
+    }
+
+    #[test]
+    fn a_chain_whose_second_test_goes_back_to_its_head_has_the_head_as_an_exit() {
+        // Both tests hold and the loop goes round again; either fails to 0x30.
+        let looped = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x30)),
+                (0x20, cond_branch(0x10, 0x30)),
+                (0x30, BlockTerminator::Return),
+            ],
+        );
+        let text = |stay: CStmt, leave: CStmt| {
+            let test = CStmt::if_stmt(both(atom(0x10), atom(0x20)), stay, Some(leave));
+            let body = CStmt::Block(vec![at(0x10, test)]);
+            CStmt::Block(vec![
+                CStmt::For {
+                    init: None,
+                    cond: None,
+                    update: None,
+                    body: Box::new(body),
+                },
+                at(0x30, CStmt::Return(None)),
+            ])
+        };
+        let right = run(text(CStmt::Continue, CStmt::Break), &looped, 0x10, &[]);
+        assert!(right.ok(), "{right}");
+        let swapped = run(text(CStmt::Break, CStmt::Continue), &looped, 0x10, &[]);
+        assert!(!swapped.ok(), "{swapped}");
+    }
+
+    #[test]
+    fn a_chain_taking_the_other_exit_is_not_the_machine_s_even_with_the_test_negated() {
+        // `a && b` reaching 0x40 on its true arm: the machine reaches it when it is false.
+        let wrong = chain_text(both(atom(0x10), atom(0x20)), 0x40);
+        let certificate = run(wrong, &chain_cfg(), 0x10, &[("L", 0x40)]);
+        assert!(!certificate.ok(), "{certificate}");
+        // Negated, the same arms are right.
+        let negated = CExpr::unary(crate::ast::UnaryOp::Not, both(atom(0x10), atom(0x20)));
+        let right = run(
+            chain_text(negated, 0x40),
+            &chain_cfg(),
+            0x10,
+            &[("L", 0x40)],
+        );
+        assert!(right.ok(), "{right}");
+    }
+
+    #[test]
+    fn a_chain_whose_test_is_not_the_blocks_function_is_different() {
+        // `a || b` over blocks that make a conjunction.
+        let or = CExpr::binary(crate::ast::BinaryOp::Or, atom(0x10), atom(0x20));
+        let certificate = run(chain_text(or, 0x30), &chain_cfg(), 0x10, &[("L", 0x40)]);
+        // The chain is the one fault: its head is not also read as a block with edges of its own.
+        assert!(
+            matches!(
+                certificate.violations.as_slice(),
+                [Violation::Chain {
+                    fault: super::super::condition::ChainFault::Different,
+                    ..
+                }]
+            ),
+            "{certificate} {:?}",
+            certificate.violations
+        );
+    }
+
+    #[test]
+    fn a_chain_may_not_test_a_block_the_text_also_writes() {
+        let body = CStmt::Block(vec![
+            at(0x20, expr()),
+            chain_text(both(atom(0x10), atom(0x20)), 0x30),
+        ]);
+        let certificate = run(body, &chain_cfg(), 0x20, &[("L", 0x40)]);
+        assert!(
+            certificate.violations.iter().any(|violation| matches!(
+                violation,
+                Violation::Chain {
+                    fault: super::super::condition::ChainFault::Rendered { block: 0x20 },
+                    ..
+                }
+            )),
+            "{:?}",
+            certificate.violations
+        );
+    }
+
+    #[test]
+    fn a_chain_block_that_is_entered_from_outside_or_does_not_branch_is_refused() {
+        use super::super::condition::ChainFault;
+        let body = || chain_text(both(atom(0x10), atom(0x20)), 0x30);
+        let fault = |certificate: &ControlCertificate| {
+            certificate
+                .violations
+                .iter()
+                .find_map(|violation| match violation {
+                    Violation::Chain { fault, .. } => Some(*fault),
+                    _ => None,
+                })
+        };
+        // 0x50 also reaches 0x20.
+        let entered = cfg(
+            0x50,
+            &[
+                (0x50, cond_branch(0x10, 0x20)),
+                (0x10, cond_branch(0x20, 0x40)),
+                (0x20, cond_branch(0x30, 0x40)),
+                (0x30, BlockTerminator::Return),
+                (0x40, BlockTerminator::Return),
+            ],
+        );
+        let text = CStmt::Block(vec![
+            at(
+                0x50,
+                CStmt::if_stmt(CExpr::IntLit(1), CStmt::Empty, Some(CStmt::Empty)),
+            ),
+            chain_text(both(atom(0x10), atom(0x20)), 0x30),
+        ]);
+        let outside = run(text, &entered, 0x50, &[("L", 0x40)]);
+        assert_eq!(fault(&outside), Some(ChainFault::Outside { block: 0x20 }));
+        // A block that does not branch two ways is no test.
+        let straight = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x40)),
+                (0x20, branch(0x30)),
+                (0x30, BlockTerminator::Return),
+                (0x40, BlockTerminator::Return),
+            ],
+        );
+        let plain = run(body(), &straight, 0x10, &[("L", 0x40)]);
+        assert_eq!(
+            fault(&plain),
+            Some(ChainFault::NotConditional { block: 0x20 })
+        );
+    }
+
+    #[test]
+    fn a_test_whose_atoms_are_not_all_marked_is_not_read_as_a_chain() {
+        use super::super::condition::ChainFault;
+        // The head's test is bare: its polarity could not be told from the expression's own.
+        let bare = both(CExpr::IntLit(1), atom(0x20));
+        let certificate = run(chain_text(bare, 0x30), &chain_cfg(), 0x10, &[("L", 0x40)]);
+        assert!(
+            certificate.violations.iter().any(|violation| matches!(
+                violation,
+                Violation::Chain {
+                    fault: ChainFault::Shape,
+                    ..
+                }
+            )),
+            "{:?}",
+            certificate.violations
+        );
+    }
+
+    #[test]
+    fn a_selection_may_test_a_chain() {
+        // `x = (a && b) ? 1 : 2` over the chain 0x10, 0x20, with an arm block under each value.
+        let cfg = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x40)),
+                (0x20, cond_branch(0x30, 0x40)),
+                (0x30, branch(0x50)),
+                (0x40, branch(0x50)),
+                (0x50, BlockTerminator::Return),
+            ],
+        );
+        let mut symbols = crate::symbol::SymbolTable::new();
+        let x = symbols.declare_or_reuse("x");
+        let value = |block: u32, value: i64| {
+            CExpr::observe_one(test_render_observation_id(block), CExpr::IntLit(value))
+        };
+        let ternary = CExpr::Ternary {
+            cond: Box::new(both(atom(0x10), atom(0x20))),
+            then_expr: Box::new(value(0x30, 1)),
+            else_expr: Box::new(value(0x40, 2)),
+        };
+        let body = CStmt::Block(vec![
+            at(0x10, CStmt::Expr(CExpr::assign(CExpr::var(x), ternary))),
+            at(0x50, CStmt::Return(None)),
+        ]);
+        let certificate = run_selecting(body, &cfg, 0x10, &[], &selects());
+        assert!(
+            certificate.ok(),
+            "{certificate} {:?}",
+            certificate.violations
+        );
+        assert_eq!(certificate.contracted, 1);
+    }
+
+    // -- Statements: a block's text is copied whole.
+
+    use crate::ast::RenderObservationId;
+    use crate::structure::shape::Occurrences;
+
+    /// The markers a placement wrote: marker `n` is a statement of `blocks[n]`, and of an instruction
+    /// unless `copies` names it (an edge's copy).
+    fn written(blocks: &[u64], copies: &[usize]) -> Occurrences {
+        let addresses = (blocks.iter().enumerate())
+            .map(|(at, block)| (!copies.contains(&at)).then_some(*block))
+            .collect();
+        Occurrences::new(blocks.to_vec(), addresses)
+    }
+
+    fn id(index: usize) -> RenderObservationId {
+        RenderObservationId::from_dense_index(index)
+    }
+
+    fn mark(index: usize, stmt: CStmt) -> CStmt {
+        CStmt::observe_one(id(index), stmt)
+    }
+
+    fn certify_written(
+        body: &CStmt,
+        cfg: &CFG,
+        entry: u64,
+        placed: &Occurrences,
+    ) -> ControlCertificate {
+        let labels = |name: &str| (name == "L").then_some(0x40);
+        let dom = DomTree::compute(cfg);
+        let role = |_: &CStmt| StatementRole::Plain;
+        certify(body, cfg, &dom, entry, placed, &labels, &role)
+    }
+
+    /// 0x10 tests; 0x20 and 0x30 each go on to the return 0x40.
+    fn two_ways_to_a_return() -> CFG {
+        cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x30)),
+                (0x20, branch(0x40)),
+                (0x30, branch(0x40)),
+                (0x40, BlockTerminator::Return),
+            ],
+        )
+    }
+
+    /// The text of 0x40 (marker 3 a statement, marker 4 its return) at the end of the true arm, and the
+    /// `keep` of it as copies at the end of the false arm.
+    fn return_in_both_arms(placed: &mut Occurrences, keep: &[usize]) -> CStmt {
+        let text = |at: usize| match at {
+            4 => CStmt::Return(None),
+            _ => expr(),
+        };
+        let then_arm = vec![mark(1, expr()), mark(3, text(3)), mark(4, text(4))];
+        let mut else_arm = vec![mark(2, expr())];
+        for at in keep {
+            else_arm.push(CStmt::observe_one(placed.copy_of(id(*at)), text(*at)));
+        }
+        let test = CStmt::if_stmt(cond(), CStmt::Block(then_arm), Some(CStmt::Block(else_arm)));
+        mark(0, test)
+    }
+
+    #[test]
+    fn a_block_copied_to_a_second_place_is_written_whole_there() {
+        let mut placed = written(&[0x10, 0x20, 0x30, 0x40, 0x40], &[]);
+        let body = return_in_both_arms(&mut placed, &[3, 4]);
+        let certificate = certify_written(&body, &two_ways_to_a_return(), 0x10, &placed);
+        assert!(
+            certificate.ok(),
+            "{certificate} {:?}",
+            certificate.violations
+        );
+    }
+
+    #[test]
+    fn a_copy_that_leaves_out_a_statement_of_its_block_is_refused_though_its_edges_hold() {
+        // The second copy of 0x40 is entered and returns as the machine does, but lacks its first
+        // statement: every edge is right and only what the text says of the block is wrong.
+        let mut placed = written(&[0x10, 0x20, 0x30, 0x40, 0x40], &[]);
+        let body = return_in_both_arms(&mut placed, &[4]);
+        let certificate = certify_written(&body, &two_ways_to_a_return(), 0x10, &placed);
+        assert_eq!(
+            certificate.violations,
+            [Violation::Statement {
+                block: 0x40,
+                fewest: 1,
+                most: 2
+            }],
+            "{certificate}"
+        );
+    }
+
+    /// 0x10 tests and each side returns; each edge carries one copy of 0x10 (markers 1 and 2), written
+    /// where `shown` says.
+    fn copies_on_the_edges(shown: [bool; 2]) -> (Occurrences, CStmt, CFG) {
+        let placed = written(&[0x10, 0x10, 0x10, 0x20, 0x30], &[1, 2]);
+        let arm = |copy: usize, shown: bool, ret: usize| {
+            let mut stmts = Vec::new();
+            if shown {
+                stmts.push(mark(copy, expr()));
+            }
+            stmts.push(mark(ret, CStmt::Return(None)));
+            CStmt::Block(stmts)
+        };
+        let test = CStmt::if_stmt(cond(), arm(1, shown[0], 3), Some(arm(2, shown[1], 4)));
+        let cfg = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x30)),
+                (0x20, BlockTerminator::Return),
+                (0x30, BlockTerminator::Return),
+            ],
+        );
+        (placed, mark(0, test), cfg)
+    }
+
+    #[test]
+    fn an_edge_s_copy_is_a_statement_of_the_block_it_leaves_and_no_place_of_its_own() {
+        let (placed, body, cfg) = copies_on_the_edges([true, true]);
+        let certificate = certify_written(&body, &cfg, 0x10, &placed);
+        assert!(
+            certificate.ok(),
+            "{certificate} {:?}",
+            certificate.violations
+        );
+        // One edge's copy gone: every edge is the machine's, and 0x10 has lost a statement.
+        let (placed, body, cfg) = copies_on_the_edges([true, false]);
+        let certificate = certify_written(&body, &cfg, 0x10, &placed);
+        assert_eq!(
+            certificate.violations,
+            [Violation::Statement {
+                block: 0x10,
+                fewest: 0,
+                most: 1
+            }],
+            "{certificate}"
+        );
+    }
+
+    /// `a && b` over 0x10 and 0x20 as the chain writes it: the head's statement carries marker 0 and its
+    /// atom a copy of it, and 0x20's marker rides on the second atom.
+    fn chain_over_two_blocks(placed: &mut Occurrences) -> CStmt {
+        let atom = |marker: RenderObservationId, value: i64| {
+            CExpr::observe_one(marker, CExpr::IntLit(value))
+        };
+        let test = both(atom(placed.copy_of(id(0)), 1), atom(id(1), 2));
+        let taken = mark(2, CStmt::Return(None));
+        CStmt::Block(vec![
+            mark(
+                0,
+                CStmt::if_stmt(test, taken, Some(CStmt::Goto("L".to_owned()))),
+            ),
+            CStmt::Block(vec![
+                CStmt::Label("L".to_owned()),
+                mark(3, CStmt::Return(None)),
+            ]),
+        ])
+    }
+
+    #[test]
+    fn a_chain_s_tests_past_its_head_are_statements_of_their_blocks() {
+        let mut placed = written(&[0x10, 0x20, 0x30, 0x40], &[]);
+        let body = chain_over_two_blocks(&mut placed);
+        let certificate = certify_written(&body, &chain_cfg(), 0x10, &placed);
+        assert!(
+            certificate.ok(),
+            "{certificate} {:?}",
+            certificate.violations
+        );
+        // A second statement of 0x20 (marker 4) that the chain does not carry is a statement lost.
+        let mut placed = written(&[0x10, 0x20, 0x30, 0x40, 0x20], &[]);
+        let body = chain_over_two_blocks(&mut placed);
+        let certificate = certify_written(&body, &chain_cfg(), 0x10, &placed);
+        assert_eq!(
+            certificate.violations,
+            [Violation::Statement {
+                block: 0x20,
+                fewest: 0,
+                most: 1
+            }],
+            "{certificate}"
+        );
+    }
+
+    #[test]
+    fn the_values_of_a_selection_carry_the_statements_of_their_blocks() {
+        // `x = c ? 0x1000 : 5` for a triangle: the values carry the test block's copy (marker 1) and block 0x20
+        // with its copy (markers 2, 3). Each block is written whole, though none stands at a statement.
+        let placed = written(&[0x10, 0x10, 0x20, 0x20, 0x40], &[1, 3]);
+        let cfg = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x40, 0x20)),
+                (0x20, branch(0x40)),
+                (0x40, BlockTerminator::Return),
+            ],
+        );
+        let mut symbols = crate::symbol::SymbolTable::new();
+        let x = symbols.declare_or_reuse("x");
+        let ternary = CExpr::Ternary {
+            cond: Box::new(cond()),
+            then_expr: Box::new(CExpr::observe_all([id(1)], CExpr::IntLit(0x1000))),
+            else_expr: Box::new(CExpr::observe_all([id(2), id(3)], CExpr::IntLit(5))),
+        };
+        let selection = mark(0, CStmt::Expr(CExpr::assign(CExpr::var(x), ternary)));
+        let body = CStmt::Block(vec![selection, mark(4, CStmt::Return(None))]);
+        let role = |stmt: &CStmt| match stmt.observation_ids().contains(&id(0)) {
+            true => StatementRole::Selects,
+            false => StatementRole::Plain,
+        };
+        let dom = DomTree::compute(&cfg);
+        let certificate = certify(&body, &cfg, &dom, 0x10, &placed, &|_| None, &role);
+        assert!(
+            certificate.ok(),
+            "{certificate} {:?}",
+            certificate.violations
+        );
+    }
+
+    #[test]
+    fn a_block_whose_statements_are_all_missing_is_not_read_through() {
+        // 0x20 is the block between: with its text gone, the edge from 0x10 still reaches 0x30 by reading
+        // 0x20 as a pass-through, and only the count of what was written says it was not one.
+        let cfg = cfg(
+            0x10,
+            &[
+                (0x10, branch(0x20)),
+                (0x20, branch(0x30)),
+                (0x30, BlockTerminator::Return),
+            ],
+        );
+        let placed = written(&[0x10, 0x20, 0x30], &[]);
+        let body = CStmt::Block(vec![mark(0, expr()), mark(2, CStmt::Return(None))]);
+        let certificate = certify_written(&body, &cfg, 0x10, &placed);
+        assert_eq!(
+            certificate.violations,
+            [Violation::Statement {
+                block: 0x20,
+                fewest: 0,
+                most: 0
+            }],
+            "{certificate}"
+        );
+        let body = CStmt::Block(vec![
+            mark(0, expr()),
+            mark(1, expr()),
+            mark(2, CStmt::Return(None)),
+        ]);
+        let certificate = certify_written(&body, &cfg, 0x10, &placed);
+        assert!(
+            certificate.ok(),
+            "{certificate} {:?}",
+            certificate.violations
+        );
     }
 }

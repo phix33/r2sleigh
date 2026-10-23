@@ -1,15 +1,14 @@
 //! D1: the function's control, placed by the dominator tree (doc/adr-structure-dominator-tree.md
-//! §4), around D2's statements; where D2 has none, a block's operations are one gap.
+//! §4), around the text D2 spelled for every block (`spelled`); control decides layout, never a value.
 
 use std::collections::BTreeMap;
 
 use r2ssa::cfg::BlockTerminator;
 
 use super::RenderInput;
-use super::values::Values;
+use super::spelled::{BlockText, EdgeText, Edges, End, Spelled, values_not_rendered};
 use crate::ast::RenderObservationId;
-use crate::ast::{CExpr, CStmt, CType, GapKind, GapMarker, SwitchCase};
-use crate::prelude::ResidualCause;
+use crate::ast::{CExpr, CStmt, SwitchCase};
 use crate::structure::place::{EdgeShape, Placement};
 
 /// The written body, its labels, and the block and instruction each marked statement stands for.
@@ -18,8 +17,8 @@ pub(super) struct Written {
     pub(super) labels: BTreeMap<u64, String>,
     /// By observation index: the block a marked statement was written for, which the certificate reads.
     pub(super) blocks: Vec<u64>,
-    /// By observation index: the instruction, which each emitted line names.
-    pub(super) addresses: Vec<u64>,
+    /// By observation index: the instruction, which each emitted line names; none for an edge's copy.
+    pub(super) addresses: Vec<Option<u64>>,
     /// Where the work control stopped the writing, if it did.
     pub(super) stopped: Option<crate::control::DecompileExecutionStop>,
 }
@@ -27,22 +26,16 @@ pub(super) struct Written {
 /// Write every block once, in the region of its immediate dominator or after the loop it leaves.
 pub(super) fn write(
     input: &RenderInput<'_>,
-    values: Option<&Values<'_>>,
+    spelled: Spelled,
+    placement: &Placement<'_>,
     work: &crate::control::DecompileWorkControl<'_>,
 ) -> Written {
-    let function = input.function();
-    let placement = Placement::compute(
-        function.cfg(),
-        function.domtree(),
-        function.natural_loops(),
-        function.root(),
-    );
     let mut writer = Writer {
         input,
-        values,
+        spelled,
         work,
         stopped: None,
-        placement: &placement,
+        placement,
         labels: BTreeMap::new(),
         blocks: Vec::new(),
         addresses: Vec::new(),
@@ -51,6 +44,10 @@ pub(super) fn write(
         writer.label(addr);
     }
     let body = writer.place(placement.entry());
+    debug_assert!(
+        writer.stopped.is_some() || writer.spelled.is_empty(),
+        "every block spelled was written"
+    );
     Written {
         body,
         labels: writer.labels,
@@ -62,16 +59,16 @@ pub(super) fn write(
 
 struct Writer<'w, 'i> {
     input: &'w RenderInput<'i>,
-    values: Option<&'w Values<'i>>,
+    spelled: Spelled,
     work: &'w crate::control::DecompileWorkControl<'w>,
     stopped: Option<crate::control::DecompileExecutionStop>,
     placement: &'w Placement<'i>,
     labels: BTreeMap<u64, String>,
     blocks: Vec<u64>,
-    addresses: Vec<u64>,
+    addresses: Vec<Option<u64>>,
 }
 
-impl<'i> Writer<'_, 'i> {
+impl Writer<'_, '_> {
     fn label(&mut self, addr: u64) -> String {
         let next = self.labels.len();
         self.labels
@@ -87,6 +84,15 @@ impl<'i> Writer<'_, 'i> {
 
     /// The same, naming the instruction at `at` as the one the statement's line accounts for.
     fn observe_at(&mut self, addr: u64, at: u64, stmt: CStmt) -> CStmt {
+        self.mark(addr, Some(at), stmt)
+    }
+
+    /// A copy an edge of block `addr` carries: the block's statement, which no instruction writes.
+    fn observe_copy(&mut self, addr: u64, stmt: CStmt) -> CStmt {
+        self.mark(addr, None, stmt)
+    }
+
+    fn mark(&mut self, addr: u64, at: Option<u64>, stmt: CStmt) -> CStmt {
         let id = RenderObservationId::from_dense_index(self.blocks.len());
         self.blocks.push(addr);
         self.addresses.push(at);
@@ -121,233 +127,105 @@ impl<'i> Writer<'_, 'i> {
             self.stopped = Some(stop);
             return CStmt::Block(Vec::new());
         }
+        let text = self.spelled.take(addr);
+        debug_assert!(text.is_some(), "the block {addr:#x} was spelled");
+        let mut text = text.unwrap_or_else(|| BlockText::gap(addr));
         let mut stmts = Vec::new();
         if self.placement.labelled().contains(&addr) {
             stmts.push(CStmt::Label(self.label(addr)));
         }
         let written = stmts.len();
-        if let Some(values) = self.values {
-            for (at, stmt) in values.statements(addr) {
-                stmts.push(self.observe_at(addr, at, stmt));
-            }
-        } else {
-            stmts.extend(self.gap(addr));
+        for (at, stmt) in std::mem::take(&mut text.statements) {
+            stmts.push(self.observe_at(addr, at, stmt));
         }
         // A block that writes nothing and leaves by plain flow still occurs, which the certificate reads.
-        if stmts.len() == written && !self.ends_observed(addr) {
+        if stmts.len() == written && matches!(text.end, End::Flow) {
             stmts.push(self.observe(addr, CStmt::Empty));
         }
-        stmts.extend(self.arms(addr));
+        stmts.extend(self.arms(addr, text));
         for merge in self.placement.merges_in(addr).to_vec() {
             stmts.extend(self.place(merge));
         }
         CStmt::Block(stmts)
     }
 
-    /// A block's operations as one gap, where D2 rendered no values.
-    fn gap(&mut self, addr: u64) -> Option<CStmt> {
-        let graph = self.input.graph();
-        let ops = (graph.block_id_for_addr(addr)).map_or(0, |block| graph.op_insts(block).len());
-        (ops != 0).then(|| {
-            let gap = CStmt::Gap(GapMarker {
-                kind: GapKind::ValuesNotRendered,
-                origin: "render::control".to_owned(),
-                block_addr: addr,
-                op_idx: 0,
-                ops,
-            });
-            self.observe(addr, gap)
-        })
-    }
-
-    /// Whether the block's terminator is written as a statement marked for the block.
-    fn ends_observed(&self, addr: u64) -> bool {
-        match self
+    /// The block's terminator, one transfer per edge.
+    fn arms(&mut self, addr: u64, mut text: BlockText) -> Vec<CStmt> {
+        let Some(terminator) = self
             .input
             .function()
-            .cfg()
-            .get_block(addr)
-            .map(|b| &b.terminator)
-        {
-            Some(BlockTerminator::ConditionalBranch {
-                true_target,
-                false_target,
-            }) => true_target != false_target,
-            Some(
-                BlockTerminator::Switch { .. }
-                | BlockTerminator::IndirectBranch
-                | BlockTerminator::Return
-                | BlockTerminator::Call {
-                    fallthrough: None, ..
-                }
-                | BlockTerminator::IndirectCall { fallthrough: None }
-                | BlockTerminator::None,
-            ) => true,
-            _ => false,
-        }
-    }
-
-    /// The block's terminator, one transfer per edge.
-    fn arms(&mut self, addr: u64) -> Vec<CStmt> {
-        let function = self.input.function();
-        let Some(terminator) = function
             .cfg()
             .get_block(addr)
             .map(|block| block.terminator.clone())
         else {
             return Vec::new();
         };
-        match terminator {
-            BlockTerminator::Fallthrough { next: target }
-            | BlockTerminator::Branch { target }
-            | BlockTerminator::Call {
-                fallthrough: Some(target),
-                ..
-            }
-            | BlockTerminator::IndirectCall {
-                fallthrough: Some(target),
-            }
-            | BlockTerminator::ConditionalExit { next: target } => self.edge(addr, target),
+        match (terminator, text.end) {
+            (
+                BlockTerminator::Fallthrough { next: target }
+                | BlockTerminator::Branch { target }
+                | BlockTerminator::Call {
+                    fallthrough: Some(target),
+                    ..
+                }
+                | BlockTerminator::IndirectCall {
+                    fallthrough: Some(target),
+                }
+                | BlockTerminator::ConditionalExit { next: target },
+                End::Flow,
+            ) => self.edge(&mut text.edges, addr, target),
             // Both arms to one block are one edge, which is how the CFG holds it.
-            BlockTerminator::ConditionalBranch {
-                true_target,
-                false_target,
-            } if true_target == false_target => self.edge(addr, true_target),
-            BlockTerminator::ConditionalBranch {
-                true_target,
-                false_target,
-            } => {
-                let then_body = arm(self.edge(addr, true_target));
-                let else_body = arm(self.edge(addr, false_target));
-                let test = self.spelled(addr, Values::condition, &CType::Bool);
+            (
+                BlockTerminator::ConditionalBranch {
+                    true_target,
+                    false_target,
+                },
+                End::Flow,
+            ) if true_target == false_target => self.edge(&mut text.edges, addr, true_target),
+            (
+                BlockTerminator::ConditionalBranch {
+                    true_target,
+                    false_target,
+                },
+                End::Test(test),
+            ) => {
+                let then_body = arm(self.edge(&mut text.edges, addr, true_target));
+                let else_body = arm(self.edge(&mut text.edges, addr, false_target));
                 vec![self.observe(addr, CStmt::if_stmt(test, then_body, Some(else_body)))]
             }
-            BlockTerminator::Switch { cases, default } => {
-                let selector = self.spelled(addr, Values::selector, &super::word(self.input));
-                self.switch(addr, selector, &cases, default)
+            (BlockTerminator::Switch { cases, default }, End::Selector(selector)) => {
+                self.switch(addr, selector, (&cases, default), &mut text.edges)
             }
-            BlockTerminator::IndirectBranch => {
-                let targets = function.successors(addr);
-                let cases = targets
-                    .iter()
-                    .map(|target| (*target, *target))
+            (BlockTerminator::IndirectBranch, End::Selector(selector)) => {
+                let cases = (self.input.function().successors(addr).into_iter())
+                    .map(|target| (target, target))
                     .collect::<Vec<_>>();
-                match cases.is_empty() {
-                    // No stated target: control goes where the facts do not say, so the text traps.
-                    true => vec![self.trap(addr, GapKind::UnresolvedIndirectBranch)],
-                    false => {
-                        self.residual_terminator(addr);
-                        let selector = self.residual(&super::word(self.input));
-                        self.switch(addr, selector, &cases, None)
-                    }
-                }
+                self.switch(addr, selector, (&cases, None), &mut text.edges)
             }
-            BlockTerminator::Return => {
-                let stmt = self.return_stmt(Some(addr));
-                // The line accounts for the return instruction, wherever in the block it sits.
-                let at = (self.values)
-                    .and_then(|values| values.terminator_address(addr))
-                    .unwrap_or(addr);
+            (BlockTerminator::Return, End::Return { stmt, at }) => {
                 vec![self.observe_at(addr, at, stmt)]
             }
-            BlockTerminator::Call {
-                fallthrough: None, ..
-            }
-            | BlockTerminator::IndirectCall { fallthrough: None }
-                if self
-                    .values
-                    .is_some_and(|values| values.ends_never_returning(addr)) =>
-            {
-                // The call written above is declared never to return, which C ends control at.
-                Vec::new()
-            }
-            // Control never comes back: a void residual traps, so the text ends here as the machine does.
-            BlockTerminator::Call {
-                fallthrough: None, ..
-            }
-            | BlockTerminator::IndirectCall { fallthrough: None }
-            | BlockTerminator::None => vec![self.trap(addr, GapKind::TransferNotFollowed)],
-        }
-    }
-
-    /// A return hands back what D2 spelled, else a residual of the result type, or nothing for `void`.
-    fn return_stmt(&self, addr: Option<u64>) -> CStmt {
-        let ty = super::result_type(self.input);
-        let decided = self
-            .input
-            .return_type()
-            .and_then(r2types::ReturnTypeFact::decided);
-        let spelled = self
-            .values
-            .zip(addr)
-            .and_then(|(values, addr)| Some((values.returned(addr, decided)?, values, addr)));
-        if let Some((value, values, addr)) = spelled {
-            let stmt = CStmt::Return(value);
-            values.spelled_terminator(addr, &stmt);
-            return stmt;
-        }
-        // The interface proves no result: what this return hands back is unproven, not a gap.
-        let unproven = self
-            .input
-            .return_type()
-            .is_some_and(r2types::ReturnTypeFact::is_unproven);
-        if ty != CType::Void
-            && let Some(addr) = addr
-        {
-            self.residual_terminator(addr);
-        }
-        match ty {
-            CType::Void => CStmt::Return(None),
-            ty if unproven => CStmt::Return(Some(
-                crate::prelude::residual(&ty, ResidualCause::UnprovenReturn)
-                    .unwrap_or_else(|| self.residual(&ty)),
-            )),
-            ty => CStmt::Return(Some(self.residual(&ty))),
-        }
-    }
-
-    /// The terminator's operand as D2 spelled it, else a residual of `ty`.
-    fn spelled(&self, addr: u64, read: fn(&Values<'i>, u64) -> Option<CExpr>, ty: &CType) -> CExpr {
-        match self
-            .values
-            .and_then(|values| Some((read(values, addr)?, values)))
-        {
-            Some((expr, values)) => {
-                values.spelled_terminator(addr, &CStmt::Expr(expr.clone()));
-                expr
-            }
-            None => {
-                self.residual_terminator(addr);
-                self.residual(ty)
+            (
+                BlockTerminator::IndirectBranch
+                | BlockTerminator::Call {
+                    fallthrough: None, ..
+                }
+                | BlockTerminator::IndirectCall { fallthrough: None }
+                | BlockTerminator::None,
+                End::Trap(gap),
+            ) => vec![self.observe(addr, gap)],
+            (
+                BlockTerminator::Call {
+                    fallthrough: None, ..
+                }
+                | BlockTerminator::IndirectCall { fallthrough: None },
+                End::NoReturn,
+            ) => Vec::new(),
+            _ => {
+                debug_assert!(false, "the block {addr:#x} ends as it was spelled");
+                vec![self.observe(addr, values_not_rendered(addr, 0))]
             }
         }
-    }
-
-    /// The terminator of the block at `addr` is a residual the text spells, which the ledger reads.
-    fn residual_terminator(&self, addr: u64) {
-        if let Some(values) = self.values {
-            values.residual_terminator(addr);
-        }
-    }
-
-    /// A residual of `ty`, or of the machine word where C has no residual of `ty`.
-    /// A transfer the text cannot make, as a gap whose marker names it: running it traps.
-    fn trap(&mut self, addr: u64, kind: GapKind) -> CStmt {
-        self.residual_terminator(addr);
-        let gap = CStmt::Gap(GapMarker {
-            kind,
-            origin: "render::control".to_owned(),
-            block_addr: addr,
-            op_idx: 0,
-            ops: 0,
-        });
-        self.observe(addr, gap)
-    }
-
-    fn residual(&self, ty: &CType) -> CExpr {
-        crate::prelude::residual(ty, ResidualCause::Gap)
-            .or_else(|| crate::prelude::residual(&super::word(self.input), ResidualCause::Gap))
-            .expect("a machine word has a residual")
     }
 
     /// A switch on `selector`, one arm per target; values reaching the default are its own.
@@ -355,8 +233,8 @@ impl<'i> Writer<'_, 'i> {
         &mut self,
         addr: u64,
         selector: CExpr,
-        cases: &[(u64, u64)],
-        default: Option<u64>,
+        (cases, default): (&[(u64, u64)], Option<u64>),
+        edges: &mut Edges,
     ) -> Vec<CStmt> {
         let mut by_target = BTreeMap::<u64, Vec<u64>>::new();
         for (value, target) in cases {
@@ -366,10 +244,10 @@ impl<'i> Writer<'_, 'i> {
         }
         let mut order = by_target.keys().copied().collect::<Vec<_>>();
         order.sort_by_key(|target| self.placement.rpo_of(*target));
-        let default_body = default.map(|target| self.edge(addr, target));
+        let default_body = default.map(|target| self.edge(edges, addr, target));
         let mut switch_cases = Vec::new();
         for target in order {
-            let body = self.edge(addr, target);
+            let body = self.edge(edges, addr, target);
             let values = &by_target[&target];
             let (last, leading) = values.split_last().expect("a target has a value");
             switch_cases.extend(leading.iter().map(|value| SwitchCase {
@@ -391,35 +269,18 @@ impl<'i> Writer<'_, 'i> {
 
     /// One edge: its merge copies, then the target written here, a `continue`, a `goto`, or a
     /// return where it leaves the function.
-    fn edge(&mut self, from: u64, to: u64) -> Vec<CStmt> {
-        // An edge out of the function is a tail call D2 writes from its certificate; any other
-        // transfer the text cannot make, so it traps rather than return.
-        if self.input.function().cfg().get_block(to).is_none() {
-            let ty = super::result_type(self.input);
-            let decided = self
-                .input
-                .return_type()
-                .and_then(r2types::ReturnTypeFact::decided);
-            if let Some(stmts) = self
-                .values
-                .and_then(|values| values.tail_call(from, &ty, decided))
-            {
+    fn edge(&mut self, edges: &mut Edges, from: u64, to: u64) -> Vec<CStmt> {
+        let mut out: Vec<CStmt> = match edges.take(from, to) {
+            EdgeText::Leaves(stmts) => {
                 return stmts
                     .into_iter()
                     .map(|stmt| self.observe(from, stmt))
                     .collect();
             }
-            let resolution = self.input.callee_resolution();
-            let call = (self.values).and_then(|values| values.tail_gap(from, resolution));
-            return vec![self.trap(from, GapKind::TailTransferNotRendered(call))];
-        }
-        let mut out = self
-            .values
-            .map(|values| values.copies(from, to))
-            .unwrap_or_default();
-        if let Some(values) = self.values {
-            values.transferred(from);
-        }
+            EdgeText::Copies(copies) => (copies.into_iter())
+                .map(|copy| self.observe_copy(from, copy))
+                .collect(),
+        };
         match self.placement.edge(from, to) {
             EdgeShape::Inline => out.extend(self.place(to)),
             EdgeShape::Continue => out.push(CStmt::Continue),
@@ -434,74 +295,5 @@ fn arm(mut stmts: Vec<CStmt>) -> CStmt {
         0 => CStmt::Empty,
         1 => stmts.remove(0),
         _ => CStmt::Block(stmts),
-    }
-}
-
-/// `stmt` copied as a new occurrence: each marker in it replaced by the one `mint` gives for it.
-pub(super) fn remint(
-    stmt: &CStmt,
-    mint: &mut dyn FnMut(RenderObservationId) -> RenderObservationId,
-) -> CStmt {
-    let copy = |stmts: &[CStmt],
-                mint: &mut dyn FnMut(RenderObservationId) -> RenderObservationId| {
-        stmts
-            .iter()
-            .map(|stmt| remint(stmt, mint))
-            .collect::<Vec<_>>()
-    };
-    match stmt {
-        CStmt::Observed { .. } => {
-            let ids = stmt
-                .observation_ids()
-                .iter()
-                .map(|id| mint(*id))
-                .collect::<Vec<_>>();
-            CStmt::observe_all(ids, remint(stmt.unobserved(), mint))
-        }
-        CStmt::Block(stmts) => CStmt::Block(copy(stmts, mint)),
-        CStmt::If {
-            cond,
-            then_body,
-            else_body,
-        } => CStmt::If {
-            cond: cond.clone(),
-            then_body: Box::new(remint(then_body, mint)),
-            else_body: else_body.as_ref().map(|body| Box::new(remint(body, mint))),
-        },
-        CStmt::For {
-            init,
-            cond,
-            update,
-            body,
-        } => CStmt::For {
-            init: init.as_ref().map(|init| Box::new(remint(init, mint))),
-            cond: cond.clone(),
-            update: update.clone(),
-            body: Box::new(remint(body, mint)),
-        },
-        CStmt::While { cond, body } => CStmt::While {
-            cond: cond.clone(),
-            body: Box::new(remint(body, mint)),
-        },
-        CStmt::DoWhile { body, cond } => CStmt::DoWhile {
-            body: Box::new(remint(body, mint)),
-            cond: cond.clone(),
-        },
-        CStmt::Switch {
-            expr,
-            cases,
-            default,
-        } => CStmt::Switch {
-            expr: expr.clone(),
-            cases: cases
-                .iter()
-                .map(|case| SwitchCase {
-                    value: case.value.clone(),
-                    body: copy(&case.body, mint),
-                })
-                .collect(),
-            default: default.as_ref().map(|body| copy(body, mint)),
-        },
-        other => other.clone(),
     }
 }

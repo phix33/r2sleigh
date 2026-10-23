@@ -1188,6 +1188,18 @@ impl SsaArtifact {
         self.sealed.graph()
     }
 
+    /// Whether `value` is defined where operation `ordinal` of the block at `block_addr` reads (the
+    /// rule the boundary facts are checked by); `usize::MAX` asks at the block's end.
+    pub fn value_defined_before(&self, value: ValueId, block_addr: u64, ordinal: usize) -> bool {
+        crate::integrity::defined_before(
+            self.sealed.function(),
+            self.sealed.graph(),
+            value,
+            block_addr,
+            ordinal,
+        )
+    }
+
     pub fn facts(&self) -> &PreparedFunctionFacts {
         &self.facts
     }

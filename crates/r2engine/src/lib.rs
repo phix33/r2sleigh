@@ -1453,6 +1453,17 @@ impl SealedFunctionAnalysis {
     pub const fn facts(&self) -> &r2types::SourceOwnedFunctionFacts {
         &self.source_owned_facts
     }
+
+    /// This function as the stub of the import `program` says its address is, where its body is only
+    /// the transfer to that import.
+    pub(crate) fn stub_of(mut self, program: &dyn native::Program) -> Self {
+        let (source, report) = (
+            self.source_owned_facts.source(),
+            self.source_owned_facts.report(),
+        );
+        self.import_stub = stub::import_stub(source, report, program);
+        self
+    }
 }
 
 /// One rendering asked of one sealed analysis, under one request's control.
@@ -1953,8 +1964,6 @@ impl EngineSession {
             EnginePhaseStatus::Executed,
             normalization_started.elapsed(),
         );
-        let import_stub =
-            stub::import_stub(source_owned_facts.source(), source_owned_facts.report());
         Ok(SealedFunctionAnalysis {
             function_name: display_name,
             source_owned_facts,
@@ -1962,7 +1971,7 @@ impl EngineSession {
             input_quality: input_quality_facts,
             render_target,
             metrics,
-            import_stub,
+            import_stub: None,
         })
     }
 

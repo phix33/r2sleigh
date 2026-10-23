@@ -856,7 +856,7 @@ fn render(
 ) -> Result<EngineDecompileResponse, NativeRefusal> {
     let control = program.control();
     let prepared = analysed(target, program, entry)?;
-    Ok(match sealed(target, entry, &prepared, &control) {
+    Ok(match sealed(target, program, entry, &prepared, &control) {
         Ok(sealed) => EngineSession::new().render_sealed(&sealed, &control),
         Err(refused) => *refused,
     })
@@ -865,11 +865,14 @@ fn render(
 /// The type analysis of one prepared function under this request's control; a refusal is the response a rendering returns.
 pub fn sealed(
     target: &NativeTarget<'_>,
+    program: &dyn Program,
     entry: u64,
     prepared: &Prepared,
     control: &crate::EngineExecutionControl,
 ) -> Result<crate::SealedFunctionAnalysis, Box<EngineDecompileResponse>> {
-    EngineSession::new().seal_function_from_input(request(target, entry, prepared, control))
+    let sealed =
+        EngineSession::new().seal_function_from_input(request(target, entry, prepared, control))?;
+    Ok(sealed.stub_of(program))
 }
 
 /// The request one prepared function is analysed under.

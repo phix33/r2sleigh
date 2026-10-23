@@ -1727,6 +1727,23 @@ mod tests {
         );
     }
 
+    /// A gap runs as the void residual call, whose helper traps: what a gap stands for is not
+    /// computed, so control cannot go on past it as if it were (ADR D58, Merges).
+    #[test]
+    fn a_gap_is_written_as_the_residual_call_whose_helper_traps() {
+        let gap = CStmt::Gap(crate::ast::GapMarker {
+            kind: crate::ast::GapKind::ValuesNotRendered,
+            origin: "render::control".to_owned(),
+            block_addr: 0x1000,
+            op_idx: 0,
+            ops: 1,
+        });
+        let text = CodeGenerator::new(CodeGenConfig::default()).generate_stmt(&gap);
+        let residual = crate::prelude::Helper::Residual(crate::prelude::ResidualType::Void);
+        assert!(text.contains(&format!("{}(", residual.name())), "{text}");
+        assert!(residual.definition().contains("__builtin_trap();"));
+    }
+
     /// A declared address defines nothing, and its declaration stands alone.
     ///
     /// The storage class is spelled because there is no definition beside it,

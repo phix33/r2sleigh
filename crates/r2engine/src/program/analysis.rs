@@ -290,7 +290,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Sealed {
         };
         let control = db.inputs().control.clone();
         let sealed = crate::isolation::isolated(|| {
-            crate::native::sealed(&target, key.0, prepared, &control)
+            crate::native::sealed(&target, &view, key.0, prepared, &control)
         });
         let response = match sealed {
             Ok(Ok(sealed)) => return Sealing::Sealed(Shared(Arc::new(sealed))),
