@@ -121,10 +121,19 @@ that, and `run_decbench.sh` runs both:
   file that scores only other decompilers stop the run (exit 71) and name the
   cells. Checked on the 2026-10-17 tree it reports 55 of 192 cells, all bash.
 
-Read the scoreboard only over rows every compared decompiler has
-(`compare_runs.py --exclude-project bash` for a tree that has none): its
-denominator is every row *anyone* scored, so a row only one decompiler has counts
-as a miss for the others. A re-run of one decompiler is
+`report_decbench.py` is the third gate. It compares decompilers only over the rows
+every compared decompiler scored (a row is scored when the results hold a metric
+value for it), prints how many rows that left out and, per decompiler and per
+project, how many rows have no score, and exits 73 when a compared decompiler
+scored nothing in a project (`--min-scored-fraction F` raises that to fewer than
+F of the project's rows; `--compare a,b` picks the decompilers, by default every
+one the results name, and `run_decbench.sh --compare` forwards it). On the
+2026-10-17 results it stops at `kuna scored 0 of 4144 rows of bash`; on the
+2026-10-23 results it passes and reports 3,814 common rows of 6,978 (angr
+scored 1,285 of bash's 4,131). The scoreboard's own denominator is every row
+*anyone* scored, so a row only one decompiler has counts as a miss for the
+others (`compare_runs.py --exclude-project bash` is the same cut for a tree that
+has none). A re-run of one decompiler is
 `DECBENCH_REDO_DECOMPILERS=r2sleigh_native` on a copy of the tree; DecBench's
 `finalize_results.py --allow-drops` is needed when functions that used to be
 declined (rows named by their address) are now rendered.

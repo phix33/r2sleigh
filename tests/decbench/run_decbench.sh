@@ -19,7 +19,9 @@
 #   6. check every binary the run decompiled has its scores in evaluated/
 #      (run_gate.py: a run that loses rows stops here with status 71), check
 #      every r2sleigh_native result names that sha256, then report against
-#      baseline.json (report_decbench.py).
+#      baseline.json (report_decbench.py, which compares decompilers only over
+#      the rows all of them scored and stops with status 73 when one scored
+#      nothing in a project).
 #
 # More than one worker is refused for a binary whose decompiled C exceeds 8 MB
 # (r2s's bash: 13 MB, 5.2 GB per evaluation worker; run_gate.py): up front for
@@ -41,6 +43,7 @@ plan=0
 decompilers=r2sleigh_native,angr
 metrics=byte_match,ged,vj_ged,type_match
 workers=${R2SLEIGH_DECBENCH_WORKERS:-4}
+compare=
 declare -a projects=()
 declare -a opts=()
 
@@ -58,6 +61,8 @@ usage: tests/decbench/run_decbench.sh [options]
   --decompilers LIST   (default: r2sleigh_native,angr)
   --metrics LIST       (default: byte_match,ged,vj_ged,type_match)
   --workers N          DecBench workers (default: 4); 1 for bash
+  --compare LIST       decompilers report_decbench.py compares, over the rows
+                       all of them scored (default: every one the results name)
   --r2s PATH           measure this r2s instead of building target/release/r2s
   --compile            compile the projects first (DecBench's compile_all.py)
   --accept-baseline    start or extend baseline.json with this run
@@ -75,6 +80,7 @@ while [[ $# -gt 0 ]]; do
         --decompilers) decompilers=$2; shift 2 ;;
         --metrics) metrics=$2; shift 2 ;;
         --workers) workers=$2; shift 2 ;;
+        --compare) compare=$2; shift 2 ;;
         --r2s) r2s=$2; shift 2 ;;
         --compile) compile=1; shift ;;
         --accept-baseline) accept=1; shift ;;
@@ -153,4 +159,5 @@ PY
 declare -a report=(python3 "$root/tests/decbench/report_decbench.py" --results "$results"
     --baseline "$root/tests/decbench/baseline.json")
 (( accept )) && report+=(--accept-baseline)
+[[ -n $compare ]] && report+=(--compare "$compare")
 run "${report[@]}"
