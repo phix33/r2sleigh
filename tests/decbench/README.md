@@ -7,7 +7,9 @@ signature types against DWARF, and assembly similarity after recompiling with
 the original toolchain. Its Union score is the share of functions perfect on at
 least one of the three.
 
-**No valid number exists yet.** Everything this directory recorded before
+**Valid numbers start at [RESULT-2026-10-17.md](RESULT-2026-10-17.md) and are
+corrected by [RESULT-2026-10-23.md](RESULT-2026-10-23.md): the first scored no bash
+row for any decompiler.** Everything this directory recorded before
 2026-09-25 -- `baseline.json`, the tables that used to be here, and the figures
 in the since-deleted planning documents -- was measured
 through the deleted radare2 plugin with `decbench run`, which hands the
@@ -79,14 +81,52 @@ function its own from the moment r2s starts on it
   (`.debug_*`, `.zdebug_*`, `.gnu_debugdata`) is declined
   whole: nothing r2s says about it is admissible.
 * **Structured facts.** `variables` and `line_mappings` come from `pddj`.
-  DecBench uses address correspondence for `type_match` only for the backends
-  on its `ADDRESS_CORRESPONDENCE_BACKENDS` allowlist; until `r2sleigh_native`
-  is on it upstream, locals are matched by the legacy offset rule, fed by the
-  stack offsets `pddj` states.
+  `r2sleigh_native` is not on DecBench's `ADDRESS_CORRESPONDENCE_BACKENDS`
+  allowlist, but a function whose `line_mappings` carry instruction addresses
+  is scored by address correspondence anyway (`has_line_address_evidence`):
+  argument position, then stack offset, then address overlap of the lines
+  naming a variable. In the 2026-10-23 run that is every function with a
+  `type_match` row (the legacy offset rule, fed by `pddj`'s stack offsets,
+  scored 20 functions of zlib in the 2026-10-17 run and none now).
 
 Declines and residual counts are written per binary to
 `r2sleigh-refusals-*.json` (schema 4) beside the run, and
 `census_decbench.py` ranks their causes.
+
+Memory and coverage
+-------------------
+
+Evaluating r2s's `bash` (a 13 MB C file for 1,540 functions) takes 5.2 GB in one
+`evaluate_project` worker. Four workers on the 8 GB benchmark host are killed by
+the OOM killer, `evaluate_project` then returns `{}` for the binary, and the
+scoreboard silently drops it: the 2026-10-17 run scored no bash row for any
+decompiler (angr kept 692 rows of one build). Run `bash` with `--workers 1`, check
+`evaluated/<binary>.toml` is not 16 bytes, and read the scoreboard only over rows
+every compared decompiler has (`compare_runs.py --exclude-project bash`): the
+scoreboard's denominator is every row *anyone* scored, so a row only one decompiler
+has counts as a miss for the others. A re-run of one decompiler is
+`DECBENCH_REDO_DECOMPILERS=r2sleigh_native` on a copy of the tree; DecBench's
+`finalize_results.py --allow-drops` is needed when functions that used to be declined
+(rows named by their address) are now rendered.
+
+Analysis tools
+--------------
+
+All read a results tree (`checkpoints/*.pkl`, `function_results.json`) and need the
+DecBench venv (`PYTHONPATH=<decbench checkout>`); only `evaluate_checkpointed.py` writes
+into the tree (the scores it adds to a checkpoint).
+
+* `compare_runs.py`: the four-decompiler table, the delta against an earlier tree
+  (`--old`), the same over a row subset (`--exclude-project bash`), paired
+  better/worse/newly-perfect counts (`--paired`), the goto/residual split.
+* `type_causes.py`: one verdict per DWARF variable from DecBench's own matcher
+  (asserted equal to the stored `type_match`), grouped by cause with the number of
+  functions each cause alone keeps imperfect; `universe` says why a function has no row.
+* `ged_causes.py`, `counterfactual_ged.py`: block-graph deltas of the not-GED-perfect
+  functions, and a re-score after a respelling, to bound what a renderer change gains.
+* `evaluate_checkpointed.py`: evaluates decompilers already in a checkpoint (the driver
+  only evaluates what it has just run); `r2s_timing.py`: r2s alone, without the backend's
+  checkpoint, with peak RSS; `show_function.py`: source, rendering, scores and DWARF of one function.
 
 Local measurement
 -----------------
