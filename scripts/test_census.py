@@ -95,5 +95,92 @@ class HeapSites(unittest.TestCase):
         self.assertEqual(sites, {site: 320})
 
 
+# F1 of crates/r2engine/tests/engine/structure.rs under two write orders: the loop's merge `rax_2` has a gap for
+# its entry copy, and one order reads it as a variable in the exit after the loop.
+EXIT_INLINED = """
+    /* r2dec proof: 3 constructs are marked below; 36 source obligations: 20 rendered, 8 elided, 0 refused, 8 residual; 11 statements rendered; 1 never assigned, read as residuals (RAX_2) */
+    {
+        r2sleigh_residual_void(1); /* r2dec gap: ValuesNotRendered at 0x1009 (render::values) */
+        rdi_1 = arg0;
+        for (; ; ) {
+            if (c) {
+                return (uint64_t)r2sleigh_residual_u64(2);
+            } else {
+                rax_2 = (uint64_t)((uint64_t)r2sleigh_residual_u64(3) + (uint64_t)1U);
+                continue;
+            }
+        }
+        L1:
+        {
+            return (uint64_t)((uint64_t)rax_2 + (uint64_t)5U);
+        }
+    }
+"""
+EXIT_AFTER = EXIT_INLINED.replace("r2sleigh_residual_u64(2)", "rax_2").replace("20 rendered", "22 rendered")
+
+
+def record(code, **parts):
+    base = {"refused": None, "code": code, "proof": {"total": 36, "residual": 8}, "variables": [], "links": [],
+            "lines": [{"line": 5, "addrs": [4096]}],
+            "residuals": [{"site": 1, "type": "void", "cause": "gap", "gap": "ValuesNotRendered", "callee": None,
+                           "reason": None, "line": 5}]}
+    return {**base, **parts}
+
+
+class WriteOrders(unittest.TestCase):
+    def test_the_names_read_as_never_assigned_come_from_the_proof_line(self) -> None:
+        self.assertEqual(census.never_assigned(EXIT_INLINED), ["RAX_2"])
+        self.assertEqual(census.never_assigned(HIDDEN), [])
+
+    def test_statements_are_leaves_without_control_or_site_numbers(self) -> None:
+        leaves = census.leaf_statements(EXIT_INLINED)
+        self.assertIn("rdi_1 = arg0;", leaves)
+        self.assertIn("rax_2 = (uint64_t)((uint64_t)r2sleigh_residual_u64(N) + (uint64_t)1U);", leaves)
+        self.assertIn("r2sleigh_residual_void(N); /* r2dec gap: ValuesNotRendered at 0x1009 (render::values) */", leaves)
+        self.assertFalse([leaf for leaf in leaves if leaf.startswith(("for", "if", "continue", "L1"))])
+        self.assertEqual(census.leaf_statements("L17: ;\nL4:\n    x = 1;\n"), ["x = 1;"])
+
+    def test_a_layout_that_moves_only_control_moves_no_verdict(self) -> None:
+        moved = EXIT_INLINED.replace("continue;", "goto L0;").replace("L1:", "L1: L2:")
+        self.assertEqual(census.verdict_moves(census.fingerprint(record(EXIT_INLINED)),
+                                              census.fingerprint(record(moved))), ([], None))
+
+    def test_a_read_that_turns_from_a_residual_into_a_variable_is_a_moved_verdict(self) -> None:
+        moves, refusal = census.verdict_moves(census.fingerprint(record(EXIT_INLINED)),
+                                              census.fingerprint(record(EXIT_AFTER)))
+        self.assertEqual((moves, refusal), (["statements"], None))
+
+    def test_the_ledger_and_the_residual_sites_are_verdicts(self) -> None:
+        natural = census.fingerprint(record(EXIT_INLINED))
+        columns = census.fingerprint(record(EXIT_INLINED, proof={"total": 36, "residual": 6}))
+        sites = census.fingerprint(record(EXIT_INLINED, lines=[{"line": 5, "addrs": [4100]}]))
+        self.assertEqual(census.verdict_moves(natural, columns), (["proof"], None))
+        self.assertEqual(census.verdict_moves(natural, sites), (["sites"], None))
+
+    def test_a_selection_the_structurer_chose_differently_is_no_move(self) -> None:
+        arms = EXIT_INLINED.replace("rdi_1 = arg0;", "x_1 = 1;\n        x_1 = 2;")
+        selected = EXIT_INLINED.replace("rdi_1 = arg0;", "x_1 = c ? 1 : 2;")
+        natural, mutant = census.fingerprint(record(arms)), census.fingerprint(record(selected))
+        self.assertEqual(census.verdict_moves(natural, mutant), ([], None))
+        self.assertNotEqual(natural["statements"], mutant["statements"])
+
+    def test_a_statement_that_is_no_selection_is_a_move(self) -> None:
+        other = EXIT_INLINED.replace("rdi_1 = arg0;", "x_1 = 1;\n        y_1 = 2;")
+        lone = EXIT_INLINED.replace("rdi_1 = arg0;", "x_1 = c ? 1 : 2;")
+        moves = census.verdict_moves(census.fingerprint(record(other)), census.fingerprint(record(lone)))
+        self.assertEqual(moves, (["statements"], None))
+        # A target assigned on one side only is no selection either.
+        gone = census.fingerprint(record(EXIT_INLINED.replace("rdi_1 = arg0;", "")))
+        self.assertEqual(census.verdict_moves(census.fingerprint(record(EXIT_INLINED)), gone)[0], ["statements"])
+
+    def test_a_function_refused_under_one_side_only_is_reported_with_the_side(self) -> None:
+        refused = {"refused": {"kind": "rendering", "reason": "control certificate"}}
+        natural = census.fingerprint(record(EXIT_INLINED))
+        self.assertIsNone(census.fingerprint(refused))
+        self.assertEqual(census.verdict_moves(natural, None), ([], "refused only under the mutant"))
+        self.assertEqual(census.verdict_moves(None, natural), ([], "refused only at natural"))
+        self.assertEqual(census.verdict_moves(None, None), ([], None))
+
+
 if __name__ == "__main__":
     unittest.main()

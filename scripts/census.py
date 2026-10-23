@@ -19,6 +19,12 @@
                                                    peak RSS grow with a function's instructions
                                                    (ROADMAP LX's exit): `afl; pdd @ f` less `afl`,
                                                    under `perf stat` (Linux); fails above X
+  census.py orders --r2s R2S [--out DIR] [--reuse] [--min-live N] BINARY...
+                                                   pddj of every function under the write orders of a
+                                                   `--features placement_mutants` build (natural, then
+                                                   o1: no exit inlined, o2: exits reversed, o3: merges
+                                                   reversed); fails when a verdict differs from
+                                                   natural's (ROADMAP D58) or an order moves no text
   census.py heap [--top N] [INSTRUCTIONS=]PROFILE...
                                                    bytes live at each dhat profile's heap peak by
                                                    allocation site (a `--features dhat-heap` build
@@ -415,6 +421,146 @@ def heap(args):
         print(f"{growth} {cells}  {' <- '.join(frame[:70] for frame in site.split(' <- '))}")
 
 
+WRITE_ORDERS = ("natural", "o1", "o2", "o3")
+NEVER_ASSIGNED = re.compile(r"never assigned, read as residuals \(([^)]*)\)")
+RESIDUAL_CALL = re.compile(r"(r2sleigh_residual_\w+)\(\d+\)")
+TRAILING_COMMENT = re.compile(r"\s*/\*.*?\*/\s*$")
+LABEL = re.compile(r"^\w+:(\s*;)?$")
+CONTROL = ("goto ", "continue;", "break;", "if (", "} else", "else", "for (", "while (", "} while (", "do {",
+           "switch (", "case ", "default:", "/*")
+
+
+def never_assigned(code):
+    """The names the proof line says were read as residuals for want of a value."""
+    found = NEVER_ASSIGNED.search(code)
+    return sorted(name.strip() for name in found[1].split(",")) if found else []
+
+
+def leaf_statements(code):
+    """The set of statement lines of a rendering, apart from its control (a label, a jump, a brace) and
+    the numbering of its residual sites: what no block write order may change. A set, since a tail is
+    written once per jump to it."""
+    leaves = set()
+    for line in code.splitlines():
+        line = line.strip()
+        without_comment = TRAILING_COMMENT.sub("", line)
+        if not without_comment.endswith(";") or line.startswith(CONTROL) or LABEL.match(line):
+            continue
+        leaves.add(RESIDUAL_CALL.sub(r"\1(N)", line))
+    return sorted(leaves)
+
+
+def fingerprint(record):
+    """What a rendering says that no write order may change: the ledger's columns, the values read as
+    never assigned, the residual sites by (instruction address, cause, gap kind, callee, reason), the
+    names it declares and links, and its leaf statements. `None` for a function that was refused."""
+    if record.get("refused"):
+        return None
+    addrs = {line["line"]: sorted(line["addrs"]) for line in record["lines"]}
+    return {
+        "proof": record["proof"],
+        "never_assigned": never_assigned(record["code"]),
+        "sites": sorted(json.dumps([addrs.get(site["line"], []), site["cause"], site["gap"], site["callee"],
+                                    site["reason"], site["type"]]) for site in record["residuals"]),
+        "variables": sorted(json.dumps(variable, sort_keys=True) for variable in record["variables"]),
+        "links": sorted(json.dumps(link, sort_keys=True) for link in record["links"]),
+        "statements": leaf_statements(record["code"]),
+    }
+
+
+ASSIGNMENT = re.compile(r"^(\S+) = (.*);$")
+
+
+def selection_only(natural, mutant):
+    """Whether two leaf-statement sets differ only where the structurer's selection pass chose differently:
+    each variable they disagree on is assigned on both sides, and a conditional expression is one of the
+    assignments (`if (c) x = a; else x = b;` against `x = c ? a : b;`). That pass reads the layout, so it is
+    no verdict of D2's; any other difference is."""
+    only = [line for line in set(natural) ^ set(mutant)]
+    targets = collections.defaultdict(lambda: [0, 0, False])
+    for line in only:
+        found = ASSIGNMENT.match(line)
+        if not found:
+            return False
+        side = targets[found[1]]
+        side[0 if line in natural else 1] += 1
+        side[2] |= " ? " in found[2]
+    return all(n and m and ternary for n, m, ternary in targets.values())
+
+
+def verdict_moves(natural, mutant):
+    """The parts of two fingerprints that differ, and how the pair is refused (`None` where neither is).
+    A difference in the statements that only the selection pass explains is no move (`selection_only`)."""
+    if natural is None or mutant is None:
+        return ([], "refused only under the mutant" if natural is not None else
+                "refused only at natural" if mutant is not None else None)
+    moved = [part for part in natural if natural[part] != mutant[part]]
+    if "statements" in moved and selection_only(natural["statements"], mutant["statements"]):
+        moved.remove("statements")
+    return moved, None
+
+
+def order_answers(args, order, binary):
+    """`{address: (fingerprint or refusal, code hash)}` for every function of `binary` under `order`."""
+    sys.path.insert(0, str(ROOT / "tests" / "equiv"))
+    import r2s_batch
+
+    listing = r2s(binary, "aa; afl", args.r2s)
+    addresses = [int(line.split()[0], 16) for line in listing.splitlines()
+                 if line.startswith("0x") and not line.split()[3].startswith(("sym.imp", "sym._"))]
+    env = {**os.environ, "R2SLEIGH_WRITE_ORDER": order}
+    report = r2s_batch.run_batch(args.r2s, binary, addresses, function_timeout=120, startup_timeout=600, env=env)
+    answers = {}
+    for answer in report.answers:
+        if answer.ok:
+            record = answer.record
+            answers[hex(answer.address)] = {"fingerprint": fingerprint(record),
+                                            "text": hashlib.sha256(record["code"].encode()).hexdigest()}
+        else:
+            answers[hex(answer.address)] = {"fingerprint": None, "text": None, "cause": (answer.cause or "")[:120]}
+    return answers
+
+
+def orders(args):
+    """Every function under each write order, against natural: its verdicts must not move, and the order
+    must (a knob that moves no text proves nothing)."""
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    binaries = [Path(b) for b in args.binaries]
+    results = {}
+    for order in WRITE_ORDERS:
+        cached = out / f"{order}.json"
+        if args.reuse and cached.exists():
+            results[order] = json.loads(cached.read_text())
+            continue
+        with concurrent.futures.ThreadPoolExecutor(min(3, len(binaries))) as pool:
+            done = list(pool.map(lambda binary: order_answers(args, order, binary), binaries))
+        results[order] = {binary.name: answers for binary, answers in zip(binaries, done)}
+        cached.write_text(json.dumps(results[order]))
+    failed = False
+    total = sum(len(answers) for answers in results["natural"].values())
+    print(f"orders: {total} functions in {', '.join(b.name for b in binaries)}")
+    for order in WRITE_ORDERS[1:]:
+        differ, live, selected, parity, shown = 0, 0, 0, collections.Counter(), []
+        for name, natural in results["natural"].items():
+            for address, was in natural.items():
+                now = results[order][name].get(address, {"fingerprint": None, "text": None})
+                moved, refusal = verdict_moves(was["fingerprint"], now["fingerprint"])
+                live += was["text"] != now["text"]
+                if was["fingerprint"] and now["fingerprint"] and not moved:
+                    selected += was["fingerprint"]["statements"] != now["fingerprint"]["statements"]
+                if refusal:
+                    parity[refusal] += 1
+                if moved or refusal == "refused only under the mutant":
+                    differ += 1
+                    shown.append(f"  {name} {address}: {', '.join(moved) or refusal}")
+        print(f"{order}: {differ} differ, {live} change text, {selected} differ only in a selection, {dict(parity)}")
+        print("\n".join(shown[:args.show]))
+        failed |= differ > 0 or live < args.min_live
+    if failed:
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -452,6 +598,14 @@ def main():
     p.add_argument("--out")
     p.add_argument("binaries", nargs="+")
     p.set_defaults(func=exponent)
+    p = sub.add_parser("orders")
+    p.add_argument("--r2s", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--reuse", action="store_true", help="read an order's answers from OUT where it has them")
+    p.add_argument("--min-live", type=int, default=50, help="the fewest functions each order must change the text of")
+    p.add_argument("--show", type=int, default=20)
+    p.add_argument("binaries", nargs="+")
+    p.set_defaults(func=orders)
     p = sub.add_parser("heap")
     p.add_argument("--top", type=int, default=30)
     p.add_argument("profiles", nargs="+")
