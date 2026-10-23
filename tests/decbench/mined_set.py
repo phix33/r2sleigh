@@ -14,13 +14,15 @@ pinned set of DecBench projects, with the build before it and the build after it
   the runner the backend uses (`tests/equiv/r2s_batch.py`, on the stripped binary). The functions are the
   addresses the run's own `decompiled/*.toml` name, the union over its decompilers, so the targets are the
   driver's: the DWARF functions of the project's own sources.
-* `score` computes DecBench's GED for each rendering against the source CFG of the `.i` that defines the
-  function (`<tree>/<opt>/<project>/compiled/*.i`), by the flow of DecBench's `metrics/ged.py` (isomorphism,
-  the size bound above `GED_MAX_NODES`, else VJ). It needs DecBench importable (`--decbench` or the venv) and
-  Joern; it is not run by the unit tests.
+* `score` computes DecBench's GED for each rendering against the source CFG of the translation unit the
+  binary's DWARF says defines the function at its address (`binfmt.source_function_owners` over the compiled
+  binary, the driver's own owner; the units are `<tree>/<opt>/<project>/compiled/*.i`), by the flow of
+  DecBench's `metrics/ged.py` (isomorphism, the size bound above `GED_MAX_NODES`, else VJ). A function with no
+  owner, or whose owner yields no CFG, is not scored and is counted. It needs DecBench importable
+  (`--decbench` or the venv) and Joern; it is not run by the unit tests.
 * `pair` reports two scored runs over the functions both scored: perfect count (newly, lost), mean and total
-  GED (better, worse, same), gotos, functions with a goto, functions whose text changed and functions newly
-  refused.
+  GED (better, worse, same), gotos, functions with a goto, functions whose text changed, functions newly
+  refused and the functions that had no source to be scored against.
 
 The pinned lists split what may be mined from what may only be reported: MINING (bzip2, zlib, grep) is run
 on every change; HELD_OUT is the rest of the sailr set, run nightly and at an item's exit only, and a
@@ -54,6 +56,8 @@ OPT_LEVELS = ("O2", "O2-noinline")
 DECOMPILERS = ("r2sleigh_native", "angr", "ghidra", "kuna")
 SCHEMA = 1
 GED_SECONDS = 120
+NO_OWNER = "no_owner"  # the binary's DWARF names no source unit for the function's address
+NO_SOURCE_CFG = "no_source_cfg"  # the owner is known and yields no CFG for it; the driver abstains here too
 
 
 # --- targets and dump -------------------------------------------------------------------------
@@ -140,11 +144,12 @@ class Timeout(Exception):
 
 
 def decbench_scorer(decbench: Path | None):
-    """DecBench's GED flow as `(source_cfgs, ged, dec_cfg_of)`; imports DecBench, so it needs the venv."""
+    """DecBench's GED flow as `(source_cfgs, ged, dec_cfg_of, owners_of)`; imports DecBench, so it needs the venv."""
     if decbench is not None:
         sys.path.insert(0, str(decbench))
     from decbench.metrics.ged import GED_MAX_NODES, _is_isomorphic
     from decbench.metrics.vj_ged import vj_ged
+    from decbench.utils.binfmt import source_function_owners
     from decbench.utils.cfg import (
         _parse_cfgs,
         canonicalize_infinite_loops,
@@ -153,6 +158,11 @@ def decbench_scorer(decbench: Path | None):
         preprocess_decompiled_c,
         sanitize_decompiled_c,
     )
+    from decbench.utils.dwarf_policy import dwarf_follow_abstract_origin
+
+    def owners_of(binary: Path, stems: set[str]) -> dict[int, tuple[str, str]]:
+        """`{address: (DWARF name, defining unit stem)}`, as the driver asks it of the binary it scores."""
+        return source_function_owners(binary, stems, follow_abstract_origin=dwarf_follow_abstract_origin())
 
     def ged(source_cfg, decompiled_cfg):
         if is_degenerate_source_cfg(source_cfg):
@@ -174,46 +184,49 @@ def decbench_scorer(decbench: Path | None):
             path.write_text(marked)
             return _parse_cfgs(path).get(name)
 
-    return (lambda path: extract_cfgs_from_source(Path(path))), ged, dec_cfg_of
+    return (lambda path: extract_cfgs_from_source(Path(path))), ged, dec_cfg_of, owners_of
 
 
-def source_cfgs_by_name(tree: Path, opt: str, project: str, cache: Path, extract) -> dict[str, list]:
-    """`{function: [(translation unit stem, cfg)]}` over the project's `.i` files; cached per (opt, project).
+def source_cfgs_by_unit(tree: Path, opt: str, project: str, cache: Path, extract) -> dict[str, dict]:
+    """`{translation unit stem: {function: cfg}}` over the project's `.i` files; cached per (opt, project).
 
-    The cache is keyed by name alone: delete it when the sources are recompiled.
+    A unit that yields no CFGs stays in the map, empty, as the driver's `extract_source_cfgs` leaves it. The
+    cache is keyed by unit and name: delete it when the sources are recompiled.
     """
-    pickled = cache / f"{opt}.{project}.pkl"
+    pickled = cache / f"{opt}.{project}.tu.pkl"
     if pickled.exists():
         return pickle.loads(pickled.read_bytes())
-    by_name: dict[str, list] = {}
+    by_unit: dict[str, dict] = {}
     for source in sorted((tree / opt / project / "compiled").glob("*.i")):
         try:
-            cfgs = extract(source)
+            by_unit[source.stem] = extract(source) or {}
         except Exception as error:  # noqa: BLE001
             print(f"no source CFGs from {source.name}: {error}", file=sys.stderr)
-            continue
-        for name, graph in cfgs.items():
-            by_name.setdefault(name, []).append((source.stem, graph))
+            by_unit[source.stem] = {}
     cache.mkdir(parents=True, exist_ok=True)
-    pickled.write_bytes(pickle.dumps(by_name))
-    return by_name
+    pickled.write_bytes(pickle.dumps(by_unit))
+    return by_unit
 
 
-def pick_source(candidates: list, binary: str):
-    """The only definition, else the one in the translation unit named like the binary, else the first."""
-    if len(candidates) == 1:
-        return candidates[0][1]
-    wanted = {binary, binary.split(".so")[0]}
-    for stem, graph in candidates:
-        if stem in wanted:
-            return graph
-    return candidates[0][1]
+def owners_of_binary(owners_of, project_dir: Path, binary: str, stems: set[str]) -> dict[int, tuple[str, str]]:
+    """The DWARF owners of a binary's functions, read from the unstripped binary in `compiled/`.
+
+    The stripped copy keeps the compiled file's name (the driver's `_stripped_copy`), so its name finds the
+    compiled file even when the stem is shared with `<stem>.i`. No file: no owners, and the caller counts them.
+    """
+    stripped = binaries_by_stem(project_dir / "stripped").get(binary)
+    compiled = project_dir / "compiled" / stripped.name if stripped is not None else None
+    if compiled is None or not compiled.is_file():
+        print(f"no compiled binary for {project_dir.parts[-2]}/{project_dir.parts[-1]}/{binary}: "
+              "its functions have no DWARF owner", file=sys.stderr)
+        return {}
+    return owners_of(compiled, stems)
 
 
 def score(tree: Path, dump_dir: Path, out: Path, decbench: Path | None, cache: Path | None) -> int:
     import signal
 
-    extract, ged, dec_cfg_of = decbench_scorer(decbench)
+    extract, ged, dec_cfg_of, owners_of = decbench_scorer(decbench)
     cache = cache or out.parent / "srccache"
     manifest = json.loads((dump_dir / "manifest.json").read_text())
 
@@ -226,26 +239,38 @@ def score(tree: Path, dump_dir: Path, out: Path, decbench: Path | None, cache: P
         if dumped.name == "manifest.json":
             continue
         opt, project, binary = dumped.name[:-len(".json")].split(".", 2)
-        cfgs = source_cfgs_by_name(tree, opt, project, cache, extract)
+        cfgs = source_cfgs_by_unit(tree, opt, project, cache, extract)
+        owners = owners_of_binary(owners_of, tree / opt / project, binary, set(cfgs))
+        unowned = no_cfg = 0
         for key, record in json.loads(dumped.read_text()).items():
             code = record.get("code") or ""
             row = {"gotos": len(re.findall(r"\bgoto\b", code)), "lines": code.count("\n"),
                    "refused": bool(record.get("refused")), "status": record["status"],
                    "loops": len(re.findall(r"for \(; ; \)", code)), "whiles": len(re.findall(r"\bwhile \(", code)),
                    "text": hashlib.sha256(code.encode()).hexdigest()[:16], "ged": None}
-            if record["status"] == "output" and not row["refused"] and record["name"] in cfgs:
-                signal.alarm(GED_SECONDS)
-                try:
-                    cfg = dec_cfg_of(code, record["name"])
-                    row["ged"] = ged(pick_source(cfgs[record["name"]], binary), cfg) if cfg is not None else None
-                except Timeout:
-                    row["ged"] = "err:timeout"
-                except Exception as error:  # noqa: BLE001
-                    row["ged"] = "err:" + type(error).__name__
-                finally:
-                    signal.alarm(0)
+            if record["status"] == "output" and not row["refused"]:
+                owner = owners.get(int(record["addr"], 16))
+                source = cfgs.get(owner[1], {}).get(owner[0]) if owner is not None else None
+                if owner is None:
+                    row["ged"] = NO_OWNER
+                    unowned += 1
+                elif source is None:
+                    row["ged"] = NO_SOURCE_CFG
+                    no_cfg += 1
+                else:
+                    signal.alarm(GED_SECONDS)
+                    try:
+                        cfg = dec_cfg_of(code, record["name"])
+                        row["ged"] = ged(source, cfg) if cfg is not None else None
+                    except Timeout:
+                        row["ged"] = "err:timeout"
+                    except Exception as error:  # noqa: BLE001
+                        row["ged"] = "err:" + type(error).__name__
+                    finally:
+                        signal.alarm(0)
             rows[key] = row
-        print(f"{opt} {project} {binary}: {len(rows)} scored so far", flush=True)
+        print(f"{opt} {project} {binary}: {len(rows)} rows so far; {unowned} without a DWARF owner, "
+              f"{no_cfg} with an owner and no source CFG (neither is scored)", flush=True)
     meta = {k: manifest[k] for k in ("set", "r2s_sha256", "projects", "opt_levels") if k in manifest}
     out.write_text(json.dumps({"schema": SCHEMA, **meta, "rows": rows}))
     return len(rows)
@@ -310,6 +335,10 @@ def pair(base: dict, new: dict, unique: bool = False) -> dict:
         "text_changed": sum(1 for k in with_text if base[k]["text"] != new[k]["text"]) if with_text else None,
         "text_compared": len(with_text),
         "refused": [sum(1 for r in base.values() if r.get("refused")), sum(1 for r in new.values() if r.get("refused"))],
+        "unowned": [sum(1 for r in base.values() if r.get("ged") == NO_OWNER),
+                    sum(1 for r in new.values() if r.get("ged") == NO_OWNER)],
+        "no_source_cfg": [sum(1 for r in base.values() if r.get("ged") == NO_SOURCE_CFG),
+                          sum(1 for r in new.values() if r.get("ged") == NO_SOURCE_CFG)],
         "newly_refused": sorted(k for k in shared if new[k].get("refused") and not base[k].get("refused")),
     }
 
@@ -326,6 +355,8 @@ def format_report(label: str, report: dict) -> str:
         f"{report['gotos_scored'][1]}; scored fns with a goto {report['functions_with_goto'][0]} -> "
         f"{report['functions_with_goto'][1]}",
         f"  total GED {report['total_ged'][0]:.0f} -> {report['total_ged'][1]:.0f}",
+        f"  no source: no DWARF owner {report['unowned'][0]} -> {report['unowned'][1]}, "
+        f"owner without a CFG {report['no_source_cfg'][0]} -> {report['no_source_cfg'][1]}",
     ]
     if report["text_changed"] is None:
         lines.append(f"  text changed: n/a (these scores carry no text hash); refused {report['refused'][0]} -> "

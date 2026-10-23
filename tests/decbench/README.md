@@ -180,11 +180,15 @@ tests/decbench/mined_set.py pair base.json new.json            # -u: one entry p
 `pair` prints, over the functions both runs scored: perfect count with the ones newly
 perfect and lost, mean and total GED with better, worse and same, gotos (all, and over
 the scored functions) and the functions with a goto, the functions whose text changed,
-and refusals (newly refused). `--set heldout` selects the other five projects (bash,
-diffutils, findutils, gzip, libexpat): those are run nightly and at an item's exit,
-never to choose a rule, and `pair` refuses to compare a mining run with a held-out
-run. The source CFGs are cached beside the scores (`srccache/`); delete it when the
-sources are recompiled.
+refusals (newly refused) and the functions with no source to score against. Each
+rendering is scored against the CFG of the unit the compiled binary's DWARF names as the
+owner of its address (the driver's `source_function_owners`, so the same
+`DECBENCH_DWARF_ABSTRACT_ORIGIN` as the run); a function with no owner, or whose owner
+yields no CFG, is not scored and is counted, never matched by name. `--set heldout`
+selects the other five projects (bash, diffutils, findutils, gzip, libexpat): those are
+run nightly and at an item's exit, never to choose a rule, and `pair` refuses to compare
+a mining run with a held-out run. The source CFGs are cached beside the scores (`srccache/`, by unit and function);
+delete it when the sources are recompiled.
 
 Local measurement
 -----------------

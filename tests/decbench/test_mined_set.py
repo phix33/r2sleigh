@@ -76,6 +76,7 @@ class Pairing(unittest.TestCase):
             "  mean GED 2.20 -> 1.40  better 2 worse 1 same 2",
             "  gotos all 3 -> 2; scored 3 -> 2; scored fns with a goto 2 -> 2",
             "  total GED 11 -> 7",
+            "  no source: no DWARF owner 0 -> 0, owner without a CFG 0 -> 0",
             "  text changed 3 of 7 functions in both runs; refused 0 -> 1, newly refused 1",
         ])
 
@@ -200,11 +201,11 @@ class Graph:
 
 
 class Score(unittest.TestCase):
-    """`score` walks a dump, finds each source CFG, and writes one row per function.
+    """`score` walks a dump, finds each function's source CFG by its address, and writes one row per function.
 
     DecBench is replaced by stand-ins that are isomorphic by `kind` and otherwise a distance of the node
-    count, so this checks the walk, the pick of the source, the rows and their pairing; the GED itself is
-    DecBench's.
+    count, so this checks the walk, the owner of each source, the rows and their pairing; the GED itself and
+    the DWARF walk behind `source_function_owners` are DecBench's.
     """
 
     def stand_ins(self):
@@ -216,68 +217,115 @@ class Score(unittest.TestCase):
         parsed = lambda path: {  # noqa: E731
             name: Graph("loop" if "while" in text else "line", text.count(";") + 1)
             for name, text in re.findall(r"// Function: (\w+)\n(.*?)(?=// Function:|\Z)", Path(path).read_text(), re.S)}
+
+        def source_function_owners(path, stems, follow_abstract_origin=False):
+            self.owner_calls.append((Path(path), set(stems), follow_abstract_origin))
+            return self.owners
+
+        # `crc32.i` sorts first and defines a crc32 of its own; the binary's crc32 is the one in `other.i`.
+        units = {"crc32": {"crc32": Graph("loop", 2), "tiny": Graph("degenerate", 1)},
+                 "other": {"crc32": Graph("line", 4), "helper": Graph("line", 2)}}
         cfg = module(
             "decbench.utils.cfg", _parse_cfgs=parsed, sanitize_decompiled_c=lambda t: t,
             preprocess_decompiled_c=lambda t: t, canonicalize_infinite_loops=lambda t: t,
             is_degenerate_source_cfg=lambda g: g.kind == "degenerate",
-            extract_cfgs_from_source=lambda path: {"crc32": Graph("loop", 2), "tiny": Graph("degenerate", 1)}
-            if path.stem == "crc32" else {"crc32": Graph("line", 99), "helper": Graph("line", 2)})
+            extract_cfgs_from_source=lambda path: units[Path(path).stem])
         return {
             "decbench": module("decbench"), "decbench.utils": module("decbench.utils"),
             "decbench.utils.cfg": cfg, "decbench.metrics": module("decbench.metrics"),
+            "decbench.utils.binfmt": module("decbench.utils.binfmt", source_function_owners=source_function_owners),
+            "decbench.utils.dwarf_policy": module("decbench.utils.dwarf_policy",
+                                                  dwarf_follow_abstract_origin=lambda: True),
             "decbench.metrics.ged": module("decbench.metrics.ged", GED_MAX_NODES=200,
                                            _is_isomorphic=lambda a, b: a.kind == b.kind and a.nodes == b.nodes),
             "decbench.metrics.vj_ged": module("decbench.metrics.vj_ged",
                                               vj_ged=lambda a, b: abs(a.nodes - b.nodes) + (a.kind != b.kind)),
         }
 
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.dir.name)
+        self.owner_calls = []
+        # The DWARF owners of the compiled binary: address -> (name, translation unit stem). 0x4 has none.
+        self.owners = {0x1: ("crc32", "other"), 0x2: ("helper", "other"), 0x3: ("tiny", "crc32"),
+                       0x5: ("ghost", "other")}
+        patch = mock.patch.dict(sys.modules, self.stand_ins())
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(self.dir.cleanup)
+        project = self.root / "run" / "O2" / "zlib"
+        (project / "compiled").mkdir(parents=True)
+        (project / "stripped").mkdir()
+        # The binary is libz.so.1.2.13 (stem libz.so.1.2) in both directories; `crc32.i` shares no stem with it.
+        for name in ("crc32.i", "other.i", "libz.so.1.2.13"):
+            (project / "compiled" / name).write_text("")
+        (project / "stripped" / "libz.so.1.2.13").write_text("")
+
+    def dump(self, name, helper_code, refused=False, binary="libz.so.1.2"):
+        folder = self.root / name
+        folder.mkdir()
+        rows = {
+            f"O2|zlib|{binary}|crc32": {"name": "crc32", "addr": "0x1", "status": "output",
+                                        "refused": False, "code": "while (1) { goto out; }\n"},
+            f"O2|zlib|{binary}|helper": {"name": "helper", "addr": "0x2", "status": "output",
+                                         "refused": False, "code": helper_code},
+            f"O2|zlib|{binary}|tiny": {"name": "tiny", "addr": "0x3", "status": "output",
+                                       "refused": False, "code": "x;\n"},
+            f"O2|zlib|{binary}|nosource": {"name": "nosource", "addr": "0x4", "status": "output",
+                                           "refused": False, "code": "y;\n"},
+            f"O2|zlib|{binary}|ghost": {"name": "ghost", "addr": "0x5", "status": "output",
+                                        "refused": False, "code": "z;\n"},
+        }
+        if refused:
+            rows[f"O2|zlib|{binary}|helper"] = {"name": "helper", "addr": "0x2", "status": "decline",
+                                                "refused": True, "cause": "refused: no"}
+        (folder / f"O2.zlib.{binary}.json").write_text(json.dumps(rows))
+        (folder / "manifest.json").write_text(json.dumps({"set": "mining", "r2s_sha256": name}))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            mined_set.score(self.root / "run", folder, self.root / f"{name}.json", None, self.root / "cache")
+        self.output = out.getvalue()
+        return mined_set.load_scores(self.root / f"{name}.json")
+
     def test_each_dumped_function_gets_a_row_and_two_runs_pair(self):
-        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(sys.modules, self.stand_ins()):
-            root = Path(directory)
-            compiled = root / "run" / "O2" / "zlib" / "compiled"
-            compiled.mkdir(parents=True)
-            for name in ("crc32", "other"):
-                (compiled / f"{name}.i").write_text("")
+        base, meta = self.dump("base", "a; b;\n")
+        self.assertEqual(meta["set"], "mining")
+        crc = base["O2|zlib|libz.so.1.2|crc32"]
+        # The binary's crc32 is the one in other.i (a 4-block line), not the loop in crc32.i that sorts first.
+        self.assertEqual((crc["ged"], crc["gotos"], crc["loops"], crc["whiles"]), (3.0, 1, 0, 1))
+        self.assertEqual(base["O2|zlib|libz.so.1.2|helper"]["ged"], 1.0)  # 3 nodes against 2: distance 1
+        self.assertIsNone(base["O2|zlib|libz.so.1.2|tiny"]["ged"])  # a degenerate source scores nothing
+        new, _ = self.dump("new", "a;\n")
+        self.assertEqual(new["O2|zlib|libz.so.1.2|helper"]["ged"], 0.0)
+        report = mined_set.pair(base, new)
+        self.assertEqual((report["scored"], report["perfect"], report["text_changed"]), (2, [0, 1], 1))
+        gone, _ = self.dump("gone", "", refused=True)
+        report = mined_set.pair(base, gone)
+        self.assertEqual((report["lost_scoring"], report["newly_refused"]),
+                         (1, ["O2|zlib|libz.so.1.2|helper"]))
+        self.assertTrue((self.root / "cache" / "O2.zlib.tu.pkl").exists())
 
-            def dump(name, helper_code, refused=False):
-                folder = root / name
-                folder.mkdir()
-                rows = {
-                    "O2|zlib|libz.so.1.2|crc32": {"name": "crc32", "addr": "0x1", "status": "output",
-                                                  "refused": False, "code": "while (1) { goto out; }\n"},
-                    "O2|zlib|libz.so.1.2|helper": {"name": "helper", "addr": "0x2", "status": "output",
-                                                   "refused": False, "code": helper_code},
-                    "O2|zlib|libz.so.1.2|tiny": {"name": "tiny", "addr": "0x3", "status": "output",
-                                                 "refused": False, "code": "x;\n"},
-                    "O2|zlib|libz.so.1.2|nosource": {"name": "nosource", "addr": "0x4", "status": "output",
-                                                     "refused": False, "code": "y;\n"},
-                }
-                if refused:
-                    rows["O2|zlib|libz.so.1.2|helper"] = {"name": "helper", "addr": "0x2", "status": "decline",
-                                                          "refused": True, "cause": "refused: no"}
-                (folder / "O2.zlib.libz.so.1.2.json").write_text(json.dumps(rows))
-                (folder / "manifest.json").write_text(json.dumps({"set": "mining", "r2s_sha256": name}))
-                with contextlib.redirect_stdout(io.StringIO()):
-                    mined_set.score(root / "run", folder, root / f"{name}.json", None, root / "cache")
-                return mined_set.load_scores(root / f"{name}.json")
+    def test_the_owner_is_asked_of_the_compiled_binary_and_followed_through_the_abstract_origin_policy(self):
+        self.dump("base", "a;\n")
+        self.assertEqual(self.owner_calls, [(self.root / "run" / "O2" / "zlib" / "compiled" / "libz.so.1.2.13",
+                                             {"crc32", "other"}, True)])
 
-            base, meta = dump("base", "a; b;\n")
-            self.assertEqual(meta["set"], "mining")
-            crc = base["O2|zlib|libz.so.1.2|crc32"]
-            # Two definitions: libz.so.1.2 has no translation unit of its name, so the first, crc32.i, is the one.
-            self.assertEqual((crc["ged"], crc["gotos"], crc["loops"], crc["whiles"]), (0.0, 1, 0, 1))
-            self.assertEqual(base["O2|zlib|libz.so.1.2|helper"]["ged"], 1.0)  # 3 nodes against 2: distance 1
-            self.assertIsNone(base["O2|zlib|libz.so.1.2|tiny"]["ged"])  # a degenerate source scores nothing
-            self.assertIsNone(base["O2|zlib|libz.so.1.2|nosource"]["ged"])
-            new, _ = dump("new", "a;\n")
-            self.assertEqual(new["O2|zlib|libz.so.1.2|helper"]["ged"], 0.0)
-            report = mined_set.pair(base, new)
-            self.assertEqual((report["scored"], report["perfect"], report["text_changed"]), (2, [1, 2], 1))
-            gone, _ = dump("gone", "", refused=True)
-            report = mined_set.pair(base, gone)
-            self.assertEqual((report["lost_scoring"], report["newly_refused"]),
-                             (1, ["O2|zlib|libz.so.1.2|helper"]))
-            self.assertTrue((root / "cache" / "O2.zlib.pkl").exists())
+    def test_a_function_without_an_owner_is_not_scored_and_is_counted(self):
+        rows, _ = self.dump("base", "a;\n")
+        self.assertEqual(rows["O2|zlib|libz.so.1.2|nosource"]["ged"], "no_owner")
+        self.assertEqual(rows["O2|zlib|libz.so.1.2|ghost"]["ged"], "no_source_cfg")  # owned by a unit with no ghost
+        self.assertIn("1 without a DWARF owner, 1 with an owner and no source CFG", self.output)
+        report = mined_set.pair(rows, rows)
+        self.assertEqual((report["unowned"], report["no_source_cfg"]), ([1, 1], [1, 1]))
+        self.assertEqual(report["scored"], 2)
+        self.assertIn("no source: no DWARF owner 1 -> 1, owner without a CFG 1 -> 1", mined_set.format_report("x", report))
+
+    def test_a_binary_not_found_in_compiled_has_no_owners_and_says_so(self):
+        (self.root / "run" / "O2" / "zlib" / "stripped" / "libz.so.1.2.13").unlink()
+        rows, _ = self.dump("base", "a;\n")
+        self.assertEqual(self.owner_calls, [])
+        self.assertEqual({r["ged"] for r in rows.values()}, {"no_owner"})
+        self.assertIn("no compiled binary for O2/zlib/libz.so.1.2", self.output)
 
 
 if __name__ == "__main__":
