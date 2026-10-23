@@ -274,10 +274,12 @@ reads; the comment no longer claims an order.
 engine's where those pass, then the golden census: 5 no longer apply (C1, T3, V2 are deleted code; S8 and V4 are
 rewritten as S8b and V4b, both killed); of the 56 that run, 42 are killed by unit tests, 8 more by engine tests (S7,
 T10, P2, V1, C7, N5, N10, V4b), and 6 survive both: C3, T7 and T13 are
-killed by the golden census only (1, 5 and 3 tests), S5 and S6 (the stage and final roles without the never-returns
-evidence) are killed by the corpus only (70 functions refused, 37 changed with 5 more gotos, the skeptic's figures),
-and T9 is equal. All 11 mutants of the statement clause, the edge copies and the hoist's copy test die. ROADMAP D61 holds
-the five corpus-only guards.
+killed by the golden census only (1, 5 and 3 tests), S5 and S6 (the final and the stage roles without the never-returns
+evidence) were killed by the corpus only (70 functions refused, 37 changed with 5 more gotos, the skeptic's figures)
+until the engine test `an_arm_ending_in_a_call_declared_never_to_return_is_a_conjunction_that_leaves_by_it` (a
+conjunction whose exit arm calls `exit`: S5 refuses it, S6 reverts the chain) killed both, and T9 is equal. All 11
+mutants of the statement clause, the edge copies and the hoist's copy test die. ROADMAP D61 holds the three
+census-only guards.
 
 **Cost.** The statement clause is one pass over the markers met and one over the markers written per certificate, and
 a certificate runs once per stage that changed the body and once at the end. Release `pdd` with `aa`, two runs each,
