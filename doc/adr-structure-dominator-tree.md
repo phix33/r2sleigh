@@ -40,9 +40,9 @@ the target's builtin. Fabricating a `return` is not acceptable.
 
 A compound test (a condition chain) is `&&`, `||` and `!` over atoms that each carry the marker of the block whose
 test they are, the head's own included, so a `!` is the chain's and never the lowering's. The checker reads the
-DAG of those blocks from the CFG: each is a two-way branch, every block past the head owes the program nothing but
-its branch (`SemanticObligationInventory::owes_only_its_branch`), is entered only from the chain and is written
-nowhere else, and the DAG has two exits. It requires the DAG's exit function to equal the test's by BDD identity:
+DAG of those blocks from the CFG: each is a two-way branch, every block past the head is entered only from the chain
+and is written nowhere else, and the DAG has two exits. An edge to a later test is an edge of the DAG; one back to the
+head or to an earlier test leaves it, so a loop whose test is a chain ends in its own head as one of the two exits. It requires the DAG's exit function to equal the test's by BDD identity:
 the test evaluates its atoms left to right and skips the decided ones, so its trace is the reduced ordered BDD of
 its function under that order, and the DAG is that trace only if every edge runs forward in the order and no atom
 decides nothing. At most 16 atoms and 512 BDD nodes; past either the chain is refused with a typed `ChainFault`
@@ -58,15 +58,14 @@ plain test; a stage that dropped a negation was kept). One text change follows t
 `Le`/`Gt`); a table test evaluates all six rows against the negation on every 8-bit pair and the edges of 16, 32 and
 64 bits, signed and unsigned, and a float comparison, false on a NaN, has no opposite and keeps its `!`.
 
-Two facts decide whether a block may be a member of a chain, and each has one owner. r2ssa states what the block owes
-(`owes_only_its_branch`: no load, store, call, trap or unknown effect; a zero-op native span owes nothing the text
-writes, since the rendering elides it); the certificate asks it of every member because it cannot see how the text
-was built. The rewrite also needs the block's text to be its test and nothing else, which only the text states: D2
-writes a value the function keeps as a statement of its own, so `sub esi, 5; jne` with `esi` returned is a test of its
-own though r2ssa calls its block inert (`a_second_test_joins_the_chain_only_if_it_computes_nothing_the_function_keeps`).
-Neither implies the other. Weaken the text shape and the fact alone still refuses the load of
-`a_second_test_that_reads_memory_is_a_test_of_its_own`; replace the fact by `true` and the text shape alone refuses it,
-because D2 writes every effect as its own statement, which is why that replacement moves 0 of 1,822 renderings.
+Whether a block may be a member of a chain has one owner, the text: the block's text is its test and nothing else
+(`Explore::edge`, `test_regions`), so D2 writes a value the function keeps as a statement of its own and `sub esi, 5;
+jne` with `esi` returned is a test of its own (`a_second_test_joins_the_chain_only_if_it_computes_nothing_the_function_keeps`),
+and a load, store or call is a statement (`a_second_test_that_reads_memory_is_a_test_of_its_own`). r2ssa's
+`owes_only_its_branch` was a second owner of the same question and is gone (2026-10-23): replacing it by `true` moved 0
+of 3,765 renderings, a condition holds a load in none of them, and no program the engine tests build makes it refuse
+what the text accepts. What it guarded is read where it can be read, as below: a statement of a member that the chain
+does not carry is a lost statement, a `Statement` violation, and an effect that went unrendered is the ledger's.
 
 A selection `x = c ? a : b;`, written by the readability stage for an `if`
 whose arms each assign `x` once, is read as that `if`. The statement carries
@@ -75,6 +74,25 @@ an arm that is the edge itself); that block's occurrence is entered on the
 arm's edge. The rewrite records the statement as a selection. The checker
 refuses one whose test is not a conditional branch, whose target is not a plain
 variable, or whose value writes: that write is a second effect of the arm.
+
+### The statements of a block
+
+`I_T`: every statement the placement wrote for a block is written, and as often as any other statement of that
+block. The unit is a block's text, which a copy reproduces whole. A *statement* is a marker (§5) counted by the
+marker it stands for (`Placed::statement_of`: itself, or the one `copy_of` copied); the walk meets one at a statement
+under a marker, at a value of a selection, and at each test of a chain past its head (the head's own is on its
+statement). An edge's copies are statements of the block the edge leaves, one marker each (`Writer::observe_copy`),
+which name no instruction, so no line changes, and which open no occurrence, so the walk reads them where it read the
+unmarked statement; the latch hoist moves only statements so marked, since a block's own assignment is not a copy its
+edge carries. A copy that drops a statement of its block, or a stage that drops the copies a latch carries, leaves
+that marker one fewer than the block's others, and a block whose statements are all gone is a pass-through to the
+walk (§3 reads a block that rendered nothing through): with every edge the machine's, only this count says it was
+not one. O(statements): one pass over the markers met, one over the markers written, a minimum and a maximum by block.
+
+What it does not read: a statement moved from one copy of a block to another leaves the counts equal (no stage does
+it); a block of one statement has no other to differ from, so a copy of it that is missing from one site and present
+at another shows only in that site's edges; a copy's text is not compared with its original's (`remint` clones the
+expressions, so only a producer that rewrites a copy could differ). ROADMAP D61 holds these.
 
 ### §4 Placement
 
@@ -200,6 +218,77 @@ the other three tools, a parser classifier over all of them, GED scored with Dec
 - Replication into fallthrough arms conflicts with section 5 (fewest labels, then fewest duplicated blocks) unless it
   is guarded by the phi-of-distinct-edge-copies condition; amend section 5 or ship only the guarded form.
 
+## 2026-10-23: the guards, and what a copy says
+
+The last two skeptics (50 and 59 mutants of the seam over bash, ls-toybox and pigz, 2,508 functions, and 70,000 base
+against tip vectors with no wrong C) left findings open on the chains and the tails. ROADMAP D59 and D60 close them;
+what they leave is D61.
+
+**A chain that continues to its own head.** `condition::exits` read an edge back to the head, or to an earlier test
+of a chain, as an edge of its DAG. A chain whose second test goes back to its head then found one exit where it has
+two (`ExitCount { found: 1 }`), and the stage reverted every chain of the function (bash `0x2e540`). Only an edge to a
+later test is inside the DAG; any other edge to a member leaves it, as a lone test's always did. Over bash, ld-2.31.so,
+fedora_32_bin_ls, ls-toybox, pigz, bashbot O0 and static-glibc (3,765 functions) 12 functions change, none is newly
+refused, no goto or residual site is added; eleven move only control lines (more `&&`, `do`/`while` for `for (;;)`,
+fewer `break`, the statements equal) and pigz `get_header` writes one copy fewer of a two-statement tail. The engine
+program, `top: movzx edx, [rdi]; add rdi, 1; test dl, dl; je done; cmp dl, 0x3a; jne top; done: lea rax, [rdi - 1]`,
+rendered two tests in a `for (;;)` and renders `do { c = *p; q = p + 1; p = q; } while (c != 0 && c != 58); return q - 1;`.
+
+**De Morgan.** `rotate::negated` swaps the connective when a loop leaves on a chain's true side. No hand loop at O0 to
+Os and none of the 2,508 functions reached it (R1, `let flipped = op;`, survived everything), because a chain that
+continues to its head could not be written. D59's program does not reach it either: its continue carries a copy, so
+that arm is the `if`'s body and the chain is spelled on the side the loop stays by. Where nothing is copied on the way
+round both exits are bare and the chain is spelled on the exit with fewer negations, the one the loop leaves by; the
+engine test for that program (`a_loop_that_leaves_on_a_chain_stays_on_both_tests_negated`: `do { ... } while (c != 0
+&& c != 58)`) and the unit test beside the rotation each fail with only the connective kept.
+
+**The latch hoist's guards.** Each of the three data guards has an engine test that fails with only it removed, and one
+test each: a test that reads what the copy writes (`a_copy_stays_on_its_arm_when_the_test_reads_the_variable_it_writes`),
+code after the loop that reads it (a tail too long to copy to its jumps, read after the loop as in pigz `0x4079f0`; the
+rule cannot tell which exit reads, so it is conservative where the reader is an exit taken before the latch), and a
+test on an unproven call (a copy is not moved across a test that traps where its cell is unproven).
+
+**Statements.** See "The statements of a block" in section 3. Mutants of the previous skeptic that were invisible to
+the certificate, run again on this tree through the corpus (3,765 functions of seven binaries, the skeptic's three
+binaries among them): L5, the hoist drops its copies: 543 functions change, the certificate reverts the stage in every
+one and none loses a statement (before, 388 of 388 changed functions passed); T2, a tail copy drops its first
+statement: 488 change and the certificate refuses all 488 (before, 207 of 280 refused and 73 passed); T12, a joined
+return's copy drops its first statement: 204 change, 204 refused (before, 144 of 144). The latch hoist took any
+assignment of its arm for a copy until the certificate refused it in four functions; it moves only copies an edge
+carries.
+
+**Chain members, one owner.** The text decides (section 3); r2ssa's `owes_only_its_branch` is deleted, with the
+`NotInert` fault and the certificate's `inert` parameter. Forced to `true` it moved 0 of 3,765 renderings, a condition
+holds a load in none of them, and the text refused every program the engine tests build that it refused. The statement
+clause is what reads a member's text where the fact claimed to.
+
+**Mutants that were dead code or equal.** `judge`'s `exact` flag (C1) could not change a verdict: a chain head's
+terminator is a conditional branch and its two exits differ, so neither the switch nor the converted-conditional
+reading can hold; it is gone. A faulted chain's head is skipped, so the chain is the one violation (C4): the test now
+asserts exactly one. `remove_run`'s `named` check (T3) was redundant by construction: every `goto` to a label inside a
+resolved run was copied, since the run's suffix resolves where the run does; it is gone. The order `append_to_ends`
+visits arm ends (T9) changes which end keeps the original's markers and nothing a line, a link or the certificate
+reads; the comment no longer claims an order.
+
+**The sweep again.** 61 mutants (the skeptic's 50 and 11 of this change), run against r2dec's unit tests, then the
+engine's where those pass, then the golden census: 5 no longer apply (C1, T3, V2 are deleted code; S8 and V4 are
+rewritten as S8b and V4b, both killed); of the 56 that run, 42 are killed by unit tests, 8 more by engine tests (S7,
+T10, P2, V1, C7, N5, N10, V4b), and 6 survive both: C3, T7 and T13 are
+killed by the golden census only (1, 5 and 3 tests), S5 and S6 (the stage and final roles without the never-returns
+evidence) are killed by the corpus only (70 functions refused, 37 changed with 5 more gotos, the skeptic's figures),
+and T9 is equal. All 11 mutants of the statement clause, the edge copies and the hoist's copy test die. ROADMAP D61 holds
+the five corpus-only guards.
+
+**Cost.** The statement clause is one pass over the markers met and one over the markers written per certificate, and
+a certificate runs once per stage that changed the body and once at the end. Release `pdd` with `aa`, two runs each,
+instructions retired, base then this branch: 0pack `0x62ecf0` 71.793G and 71.704G against 71.721G and 71.721G,
+pumasim `0x23fdf0` 84.958G and 84.986G against 84.985G and 85.027G (from -0.1% to +0.1%), peak RSS 283 to 301 MB in
+both, the renderings byte-identical. Over every function of 0pack and pumasim (23,213, mangled names included) 8
+change, all of them the loops D59 reads (a `for (;;)` with a chain's two empty arms and a `break` becomes
+`do { ... } while (a || b)`; pumasim `0x2ed240` also writes one statement of a tail once), none is newly refused and
+none gains a goto or a residual site. Over bash, ld-2.31.so, fedora_32_bin_ls, ls-toybox, pigz, bashbot O0 and
+static-glibc with every name (3,953 functions) the 12 of D59 change and no other.
+
 ## 2026-10-22: the recoveries together
 
 Two branches landed on one base and stack in this order: condition chains, `while`/`do-while` and the latch's
@@ -243,14 +332,14 @@ move the sum.
 **Ledgered, not fixed here.** ROADMAP D58: a rendering decision must not depend on the order blocks are written
 (a callee's declaration was fixed; whether a name reads as a value or as a NeverAssigned residual is still the text
 written so far, which no write order makes right for a loop-carried merge whose entry copy is a gap; 0pack
-`0x476982`), and a copy's statements are not asked of the certificate per occurrence. ROADMAP D59: a chain whose exit
-is a `continue` to its own head faults `ExitCount` and reverts every chain of the function (bash `0x2e540`, still
-reproduced on the stack's head).
+`0x476982`). ROADMAP D59 (a chain whose exit is a `continue` to its own head faulted `ExitCount` and reverted every
+chain of the function: bash `0x2e540`) and D60 (the certificate asked nothing of a copy's statements) are closed in
+"2026-10-23" below.
 
 **Left**, by when:
 
 - Next: the assignment before a copied or joined return, folded at the owner that spells the edge copy
-  (`return a;`); the exit edge's copies after a loop whose only exit is the latch (about 140 loops); D58 and D59.
+  (`return a;`); the exit edge's copies after a loop whose only exit is the latch (about 140 loops); D58 and D61.
 - Conditional: the four-statement bound and the skipped-block-first order were chosen on the mined set, so they move
   with a measurement on projects the analysis did not mine; the unguarded join (+17, 2 lost), only with a CFG fact that
   separates `return a || b` from two returns; a `while` whose exit arm is not a bare `break` (34 loops), once the exit
@@ -278,8 +367,8 @@ Counting each function once (zlib's code also sits in `example` and `minigzip`):
 48.14 after chains, 47.13 at the end; perfect 48 to 45.
 
 **Condition chains.** Invariant: a decision DAG of blocks that render nothing but their test, two exits, the test
-equal to the DAG's exit function by BDD identity. Owner: `structure/condition.rs` (derivation, BDD, check) with
-r2ssa stating which blocks owe only their branch. O(statements) with at most 16 blocks per head. Rejected: matching
+equal to the DAG's exit function by BDD identity. Owner: `structure/condition.rs` (derivation, BDD, check).
+O(statements) with at most 16 blocks per head. Rejected: matching
 the nested `if` text alone (it cannot see a shared test reached by `goto`, and the checker would infer the chain), and
 a name or flag-pattern check for the blocks. The GED got worse, not better: Joern builds a node for each operand of
 `&&` and `||` and one for the whole test, so a collapse costs a node and pays only where the source spelled `&&` and
