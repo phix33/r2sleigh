@@ -26,6 +26,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "equiv"))
+sys.path.insert(0, str(HERE))
+
+from run_gate import binaries_by_stem  # noqa: E402
 
 
 def targets(toml_path: Path) -> list[int]:
@@ -48,37 +51,54 @@ def one(r2s: Path, binary: Path, addresses: list[int]) -> dict:
             "maxrss_kb": resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss}
 
 
-def main() -> int:
+def cells(run: Path, opts, projects) -> list[tuple[str, str, str, Path, Path | None]]:
+    """`(opt, project, binary stem, toml, stripped file or None)` for every r2s toml of the run.
+
+    The stripped file is found by stem: `libz.so.1.2.13` on disk is the driver's binary `libz.so.1.2`.
+    """
+    found = []
+    for opt in opts:
+        for toml_path in sorted(run.glob(f"{opt}/*/decompiled/r2sleigh_native_*.toml")):
+            project = toml_path.parts[-3]
+            if projects and project not in projects:
+                continue
+            binary = toml_path.name.removesuffix(".toml")[len("r2sleigh_native_"):]
+            stripped = binaries_by_stem(toml_path.parent.parent / "stripped").get(binary)
+            found.append((opt, project, binary, toml_path, stripped))
+    return found
+
+
+def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--r2s", type=Path)
     p.add_argument("--run", type=Path)
     p.add_argument("--project", action="append")
     p.add_argument("--opt", action="append")
     p.add_argument("--one", nargs=2, metavar=("BINARY", "TOML"))
-    args = p.parse_args()
+    args = p.parse_args(argv)
     if args.one:
         print(json.dumps(one(args.r2s, Path(args.one[0]), targets(Path(args.one[1])))))
         return 0
     print("project\topt\tbinary\tasked\trendered\tdeclined\tseconds\tmaxrss_kb")
-    for opt in args.opt or ("O2", "O2-noinline"):
-        for toml_path in sorted(args.run.glob(f"{opt}/*/decompiled/r2sleigh_native_*.toml")):
-            project = toml_path.parts[-3]
-            if args.project and project not in args.project:
-                continue
-            binary = toml_path.name.removesuffix(".toml")[len("r2sleigh_native_"):]
-            stripped = toml_path.parent.parent / "stripped" / binary
-            if not stripped.exists():
-                continue
-            out = subprocess.run([sys.executable, __file__, "--r2s", str(args.r2s), "--one", str(stripped), str(toml_path)],
-                                 capture_output=True, text=True, check=False)
-            try:
-                r = json.loads(out.stdout.strip().splitlines()[-1])
-            except (ValueError, IndexError):
-                print(f"{project}\t{opt}\t{binary}\tFAILED\t\t\t\t", flush=True)
-                print(out.stderr[-300:], file=sys.stderr)
-                continue
-            print(f"{project}\t{opt}\t{binary}\t{r['asked']}\t{r['rendered']}\t{r['declined']}\t{r['seconds']}\t{r['maxrss_kb']}",
-                  flush=True)
+    timed = unresolved = failed = 0
+    for opt, project, binary, toml_path, stripped in cells(args.run, args.opt or ("O2", "O2-noinline"), args.project):
+        if stripped is None:
+            unresolved += 1
+            print(f"{project}\t{opt}\t{binary}\tNO-STRIPPED-BINARY\t\t\t\t", flush=True)
+            continue
+        out = subprocess.run([sys.executable, __file__, "--r2s", str(args.r2s), "--one", str(stripped), str(toml_path)],
+                             capture_output=True, text=True, check=False)
+        try:
+            r = json.loads(out.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            failed += 1
+            print(f"{project}\t{opt}\t{binary}\tFAILED\t\t\t\t", flush=True)
+            print(out.stderr[-300:], file=sys.stderr)
+            continue
+        timed += 1
+        print(f"{project}\t{opt}\t{binary}\t{r['asked']}\t{r['rendered']}\t{r['declined']}\t{r['seconds']}\t{r['maxrss_kb']}",
+              flush=True)
+    print(f"timed {timed} binaries, {unresolved} without a stripped binary, {failed} failed", file=sys.stderr)
     return 0
 
 

@@ -45,7 +45,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from run_gate import split_name  # noqa: E402
+from run_gate import binaries_by_stem, split_name  # noqa: E402
 
 MINING = ("bzip2", "zlib", "grep")
 HELD_OUT = ("bash", "diffutils", "findutils", "gzip", "libexpat")
@@ -113,7 +113,7 @@ def dump(tree: Path, r2s: Path, out: Path, projects, opt_levels=OPT_LEVELS, deco
     for opt in opt_levels:
         for project in projects:
             project_dir = tree / opt / project
-            stripped = {p.stem: p for p in sorted((project_dir / "stripped").glob("*")) if p.is_file()}
+            stripped = binaries_by_stem(project_dir / "stripped")
             for binary, targets in sorted(function_targets(project_dir, decompilers).items()):
                 if binary not in stripped:
                     print(f"skip {opt}/{project}/{binary}: no stripped binary", file=sys.stderr)

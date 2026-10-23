@@ -44,6 +44,11 @@ def split_name(stem: str, decompilers: list[str]) -> tuple[str, str] | None:
     return None
 
 
+def binaries_by_stem(directory: Path) -> dict[str, Path]:
+    """`{stem: file}` of a run's `stripped/` directory: `libz.so.1.2.13` is the driver's binary `libz.so.1.2`."""
+    return {path.stem: path for path in sorted(directory.glob("*")) if path.is_file()}
+
+
 def rendered_binaries(tree: Path, decompilers: list[str], since: float | None = None) -> list[dict]:
     """The (opt, project, binary, decompiler) cells the driver decompiled into this tree, with function counts."""
     cells = []
