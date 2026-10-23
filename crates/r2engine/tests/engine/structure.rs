@@ -504,3 +504,201 @@ fn a_merge_entered_late_by_a_gapped_copy_reads_as_a_residual_whatever_was_promis
         );
     }
 }
+
+/// The bytes of `body` at `BASE`, then `atan2f`'s linkage stub (`jmp qword [rip + 2]`) and its slot at `STUB`.
+const fn with_the_atan2f_stub(body: &[u8]) -> [u8; 0xa0] {
+    let mut bytes = [0xcc; 0xa0];
+    let mut at = 0;
+    while at < body.len() {
+        bytes[at] = body[at];
+        at += 1;
+    }
+    let stub = [0xff, 0x25, 0x02, 0x00, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0];
+    let mut at = 0;
+    while at < stub.len() {
+        bytes[0x90 + at] = stub[at];
+        at += 1;
+    }
+    bytes
+}
+
+/// `lane_nondom9`: `xmm1` merges two loads; one arm of `ucomiss xmm4, xmm2` calls `atan2f(xmm4, xmm1)`, the
+/// other reads its low lane (`comiss xmm1, xmm2`). The listing is in the D68 section of the ADR.
+static LANE_READ_BESIDE_THE_CALL: [u8; 0xa0] = with_the_atan2f_stub(&[
+    0x48, 0x83, 0xec, 0x08, 0xf3, 0x0f, 0x10, 0x62, 0x10, 0xf3, 0x0f, 0x10, 0x52, 0x14, 0x48, 0x85,
+    0xff, 0x74, 0x06, 0xf3, 0x0f, 0x10, 0x0e, 0xeb, 0x05, 0xf3, 0x0f, 0x10, 0x4e, 0x04, 0x0f, 0x2e,
+    0xe2, 0x76, 0x0a, 0x0f, 0x2f, 0xca, 0x76, 0x12, 0x48, 0x83, 0xc4, 0x08, 0xc3, 0x0f, 0x28, 0xc4,
+    0xe8, 0x5b, 0x00, 0x00, 0x00, 0x48, 0x83, 0xc4, 0x08, 0xc3, 0x48, 0x83, 0xc4, 0x08, 0xc3,
+]);
+
+/// The same with the branch the other way: `ja call`, so the call is on the taken edge.
+static LANE_READ_BESIDE_THE_TAKEN_CALL: [u8; 0xa0] = with_the_atan2f_stub(&[
+    0x48, 0x83, 0xec, 0x08, 0xf3, 0x0f, 0x10, 0x62, 0x10, 0xf3, 0x0f, 0x10, 0x52, 0x14, 0x48, 0x85,
+    0xff, 0x74, 0x06, 0xf3, 0x0f, 0x10, 0x0e, 0xeb, 0x05, 0xf3, 0x0f, 0x10, 0x4e, 0x04, 0x0f, 0x2e,
+    0xe2, 0x77, 0x0a, 0x0f, 0x2f, 0xca, 0x76, 0x12, 0x48, 0x83, 0xc4, 0x08, 0xc3, 0x0f, 0x28, 0xc4,
+    0xe8, 0x5b, 0x00, 0x00, 0x00, 0x48, 0x83, 0xc4, 0x08, 0xc3, 0x48, 0x83, 0xc4, 0x08, 0xc3,
+]);
+
+/// The same as the first with the call on the fall-through edge and the lane read on the taken one.
+static LANE_READ_BESIDE_THE_FALLTHROUGH_CALL: [u8; 0xa0] = with_the_atan2f_stub(&[
+    0x48, 0x83, 0xec, 0x08, 0xf3, 0x0f, 0x10, 0x62, 0x10, 0xf3, 0x0f, 0x10, 0x52, 0x14, 0x48, 0x85,
+    0xff, 0x74, 0x06, 0xf3, 0x0f, 0x10, 0x0e, 0xeb, 0x05, 0xf3, 0x0f, 0x10, 0x4e, 0x04, 0x0f, 0x2e,
+    0xe2, 0x76, 0x0d, 0x0f, 0x28, 0xc4, 0xe8, 0x65, 0x00, 0x00, 0x00, 0x48, 0x83, 0xc4, 0x08, 0xc3,
+    0x0f, 0x2f, 0xca, 0x76, 0x05, 0x48, 0x83, 0xc4, 0x08, 0xc3, 0x48, 0x83, 0xc4, 0x08, 0xc3,
+]);
+
+/// `c`, rendered from `code` with blocks written in `order`, the program importing `atan2f` at its stub.
+fn atan2f_caller_under(order: WriteOrder, code: &'static [u8]) -> String {
+    with_write_order(order, || {
+        let literal = Literal::of_code(code, &[("f", BASE, 0x3f)])
+            .importing("atan2f")
+            .running_on(common::GLIBC);
+        OpenProgram::of(literal)
+            .rendered(BASE)
+            .expect("it renders")
+            .response
+            .output
+            .into_text()
+    })
+}
+
+/// The identifier `text` starts with.
+fn identifier(text: &str) -> String {
+    text.chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect()
+}
+
+/// The locals a rendering declares: the lines of its preamble that are `type name;`.
+fn locals_of(c: &str) -> BTreeSet<String> {
+    c.lines()
+        .map(str::trim)
+        .take_while(|line| !line.starts_with("/*"))
+        .filter_map(|line| line.strip_suffix(';'))
+        .filter(|line| !line.contains(['(', '=']))
+        .map(|line| {
+            line.rsplit([' ', '*'])
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect()
+}
+
+/// The locals read in `args`, the text after a call's opening parenthesis, that `assigned` lacks.
+fn unassigned_in(
+    args: &str,
+    locals: &BTreeSet<String>,
+    assigned: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut unassigned = Vec::new();
+    let mut rest = args;
+    while !rest.is_empty() {
+        let name = identifier(rest);
+        let skip = name.len().max(1).min(rest.len());
+        if locals.contains(&name) && !assigned.contains(&name) {
+            unassigned.push(name);
+        }
+        rest = &rest[skip..];
+    }
+    unassigned
+}
+
+/// What a path to a statement has assigned, or `None` where it returned: a path meet keeps what both assign.
+type Assigned = Option<BTreeSet<String>>;
+
+fn meet(a: Assigned, b: Assigned) -> Assigned {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.intersection(&b).cloned().collect()),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
+/// An `if` being read: what was assigned before it, and at the end of its then arm once that is read.
+enum Frame {
+    Block,
+    If {
+        before: Assigned,
+        then_end: Option<Assigned>,
+    },
+}
+
+/// The locals the first call to `callee` reads that some path to it leaves unassigned, over structured C:
+/// `if`/`else`, bare blocks, `return` and assignments (a `goto` or a label is not read, and fails the test).
+fn unassigned_at_call(c: &str, callee: &str) -> Vec<String> {
+    let locals = locals_of(c);
+    let call = format!("{callee}(");
+    let mut assigned = Some(BTreeSet::<String>::new());
+    let mut frames = Vec::<Frame>::new();
+    let body = c
+        .lines()
+        .skip_while(|line| !line.contains("/* r2dec proof"));
+    for line in body.map(str::trim) {
+        assert!(
+            !line.starts_with("goto ") && !line.ends_with(": ;"),
+            "structured C only: {c}"
+        );
+        if line == "{" {
+            frames.push(Frame::Block);
+        } else if line.starts_with("if (") && line.ends_with('{') {
+            let before = assigned.clone();
+            frames.push(Frame::If {
+                before,
+                then_end: None,
+            });
+        } else if line == "} else {" {
+            let Some(Frame::If { before, then_end }) = frames.last_mut() else {
+                panic!("an else without an if: {c}");
+            };
+            *then_end = Some(assigned.take());
+            assigned.clone_from(before);
+        } else if line == "}" {
+            assigned = match frames.pop() {
+                Some(Frame::If {
+                    then_end: Some(then_end),
+                    ..
+                }) => meet(then_end, assigned.take()),
+                Some(Frame::If { before, .. }) => meet(assigned.take(), before),
+                _ => assigned.take(),
+            };
+        } else if line.starts_with("return") {
+            assigned = None;
+        } else if let Some(at) = line.find(&call) {
+            let Some(assigned) = &assigned else { continue };
+            return unassigned_in(&line[at + call.len()..], &locals, assigned);
+        } else if let Some((target, _)) = line.split_once(" = ")
+            && let Some(set) = &mut assigned
+        {
+            set.insert(identifier(target));
+        }
+    }
+    panic!("no call to {callee}: {c}")
+}
+
+#[test]
+fn a_call_argument_is_never_a_lane_that_only_the_other_arm_assigns_under_every_write_order() {
+    // The lane is read where the call is not dominated by it: the argument is the carrier, or a
+    // residual, never the lane (ROADMAP D68).
+    for (layout, code) in [
+        ("lane_nondom9", &LANE_READ_BESIDE_THE_CALL),
+        ("lane_nondom7", &LANE_READ_BESIDE_THE_TAKEN_CALL),
+        ("lane_nondom8", &LANE_READ_BESIDE_THE_FALLTHROUGH_CALL),
+    ] {
+        for order in ORDERS {
+            let c = atan2f_caller_under(order, code);
+            let arguments = common::call_arguments(&c, "atan2f")
+                .unwrap_or_else(|| panic!("{layout} {order:?}: no call\n{c}"));
+            assert_eq!(arguments.len(), 2, "{layout} {order:?}\n{c}");
+            assert_eq!(
+                unassigned_at_call(&c, "atan2f"),
+                Vec::<String>::new(),
+                "{layout} {order:?}\n{c}"
+            );
+            assert!(
+                arguments[1].contains("r2sleigh_residual_") || arguments[1].contains("xmm1_"),
+                "{layout} {order:?}: {arguments:?}\n{c}"
+            );
+        }
+    }
+}
