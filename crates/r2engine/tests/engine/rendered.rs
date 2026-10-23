@@ -51,6 +51,29 @@ fn a_call_to_an_import_declared_never_to_return_ends_the_function() {
     assert!(!returns, "{c}");
 }
 
+#[test]
+fn an_arm_ending_in_a_call_declared_never_to_return_is_a_conjunction_that_leaves_by_it() {
+    // `test edi, edi; jne no; test esi, esi; jne no; mov edi, 1; call exit; no: xor eax, eax; ret`: the
+    // arm that calls `exit` ends control, so the certificate must read it so, at each stage and at the end.
+    let mut program = OpenProgram::of(Literal::new().importing("exit").running_on(GLIBC));
+    let call = i32::try_from(STUB as i64 - (TWO + 18) as i64).expect("near");
+    let mut code = vec![
+        0x85, 0xff, 0x75, 0x0e, 0x85, 0xf6, 0x75, 0x0a, 0xbf, 0x01, 0, 0, 0, 0xe8,
+    ];
+    code.extend_from_slice(&call.to_le_bytes());
+    code.extend_from_slice(&[0x31, 0xc0, 0xc3]);
+    program.source_mut().write(TWO, &code);
+    let c = c_of(&mut program, TWO);
+    assert!(!c.contains("r2sleigh refused"), "{c}");
+    let tests: Vec<_> = c
+        .lines()
+        .filter(|line| line.trim_start().starts_with("if "))
+        .collect();
+    assert_eq!(tests.len(), 1, "{c}");
+    assert!(tests[0].contains(" && ") && !c.contains("goto"), "{c}");
+    assert!(c.contains("exit(1)"), "{c}");
+}
+
 /// `g: jmp t` then `t: lea eax, [rdi + rdi*2 + 1]; ret`, each a stated function.
 const TAIL_JUMPING: &[u8] = &[
     0xe9, 0x0b, 0x00, 0x00, 0x00, // g: jmp t
