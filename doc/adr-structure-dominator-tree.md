@@ -238,3 +238,17 @@ since descending can change which chains collapse. On the corpus the claim was r
 a chain and none held two, so the re-reading was 9,011 of 885,426 statement reads (1.0%), at most 1,532 in one function
 (libc 0x97e10). A consumed region is skipped, not read for chains of its own (the old removal made that so;
 `a_consumed_region_is_not_read_for_chains_of_its_own` pins it).
+
+**Latch copies: the reads are counted once.** Invariant: a loop's copies are written before its test only when every
+read of each is inside the loop. Owner: `structure/latch.rs`. `may_hoist` counted the reads of the whole loop body for
+each candidate latch, so a statement was counted once per enclosing candidate (O(n·d) for depth d): 50 nested loops
+counted 8,100 expressions and 100 counted 31,200 (450 and 900 now). One scan counts the reads of the function and, for
+each `for (;;)`, takes the reads of its copies inside the loop as the count at its exit less the count at its entry; a
+second walk writes the loops the scan allowed, in the order the scan met them. The scan reads each expression once and
+the walk touches no expression, whatever the depth. The scan takes the latch's shape before the loop's body is
+rewritten, where the old pass took it after the inner loops were: `live`, `parts` and `continues` stop at a nested
+loop and a rewrite only moves statements, so the shape and the counts agree (the census, byte for byte, is the check).
+On the corpus the claim was real and bounded: a candidate loop sits at most 5 loops deep (4,993 of 5,688 functions have
+no candidate, then 492, 158, 30, 13 and 2 by the deepest one's depth), and the per-latch rescans were 366,432 of
+7,704,538 expression visits (4.8%). The worst function, libc 0x16b210, has 16 candidates side by side, which repeat
+nothing: only nesting repeats a statement.

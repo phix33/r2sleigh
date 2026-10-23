@@ -8,33 +8,157 @@ use crate::ast::{BinaryOp, CExpr, CStmt};
 use crate::symbol::SymbolId;
 
 /// Write the copies of each latch before its test where the C text allows; the number of loops.
-/// O(statements) for the reads of the whole function, once, and O(loop) for each latch.
+/// O(statements): the reads are counted in one pass, a loop's from the counts at its entry and exit.
 pub(crate) fn hoist(root: &mut CStmt) -> usize {
-    let mut total = BTreeMap::new();
-    count_reads(root, &mut total);
-    walk(root, &total)
+    let mut scan = Scan::default();
+    scan.stmt(root);
+    let verdicts = scan.verdicts();
+    if !verdicts.iter().any(Option::is_some) {
+        return 0;
+    }
+    let mut verdicts = verdicts.into_iter();
+    let written = walk(root, &mut verdicts);
+    debug_assert!(
+        verdicts.next().is_none(),
+        "the walk met each loop the scan did"
+    );
+    written
 }
 
-fn walk(stmt: &mut CStmt, total: &BTreeMap<SymbolId, usize>) -> usize {
+/// The reads of the function and, for each `for (;;)` in pre-order, the latch it has and how often
+/// each of the latch's copies is read inside the loop.
+#[derive(Default)]
+struct Scan {
+    /// Reads of each variable so far.
+    reads: BTreeMap<SymbolId, usize>,
+    loops: Vec<Option<Latch>>,
+}
+
+/// The latch of a loop: whether the arm that stays is the test's true arm, and each variable that
+/// arm copies with its reads before the loop, then inside it.
+struct Latch {
+    stay_is_true: bool,
+    copies: Vec<(SymbolId, usize)>,
+}
+
+impl Scan {
+    fn stmt(&mut self, stmt: &CStmt) {
+        match stmt {
+            CStmt::Observed { stmt, .. } => self.stmt(stmt),
+            CStmt::Block(stmts) => stmts.iter().for_each(|stmt| self.stmt(stmt)),
+            CStmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                self.read(cond);
+                self.stmt(then_body);
+                if let Some(else_body) = else_body {
+                    self.stmt(else_body);
+                }
+            }
+            CStmt::While { cond, body } | CStmt::DoWhile { body, cond } => {
+                self.read(cond);
+                self.stmt(body);
+            }
+            CStmt::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                self.read(expr);
+                for case in cases {
+                    self.read(&case.value);
+                    case.body.iter().for_each(|stmt| self.stmt(stmt));
+                }
+                default.iter().flatten().for_each(|stmt| self.stmt(stmt));
+            }
+            CStmt::For {
+                init: None,
+                cond: None,
+                update: None,
+                body,
+            } => self.forever(body),
+            CStmt::For {
+                init,
+                cond,
+                update,
+                body,
+            } => {
+                // A statement in the header holds no loop for `walk` to find.
+                if let Some(init) = init {
+                    init.visit_exprs(&mut |root| self.read(root));
+                }
+                cond.iter().chain(update).for_each(|expr| self.read(expr));
+                self.stmt(body);
+            }
+            other => other.visit_exprs(&mut |root| self.read(root)),
+        }
+    }
+
+    fn forever(&mut self, body: &CStmt) {
+        let at = self.loops.len();
+        let latch = latch_of(body);
+        self.loops.push(latch.map(|(stay_is_true, targets)| {
+            Latch {
+                stay_is_true,
+                copies: (targets.into_iter())
+                    .map(|target| (target, self.count(target)))
+                    .collect(),
+            }
+        }));
+        self.stmt(body);
+        let reads = &self.reads;
+        if let Some(latch) = &mut self.loops[at] {
+            for (target, before) in &mut latch.copies {
+                *before = reads.get(target).copied().unwrap_or(0) - *before;
+            }
+        }
+    }
+
+    fn read(&mut self, expr: &CExpr) {
+        let reads = &mut self.reads;
+        reads_of(expr, &mut |symbol| *reads.entry(symbol).or_default() += 1);
+    }
+
+    fn count(&self, symbol: SymbolId) -> usize {
+        self.reads.get(&symbol).copied().unwrap_or(0)
+    }
+
+    /// For each loop, `Some(stay_is_true)` when its copies may be written before its test: nothing
+    /// outside the loop reads them, so every read of each is inside.
+    fn verdicts(&self) -> Vec<Option<bool>> {
+        (self.loops.iter())
+            .map(|latch| {
+                let latch = latch.as_ref()?;
+                let beyond = |(target, inside): &(SymbolId, usize)| self.count(*target) != *inside;
+                (!latch.copies.iter().any(beyond)).then_some(latch.stay_is_true)
+            })
+            .collect()
+    }
+}
+
+/// Write the loops `verdicts` allow, taken in the order `Scan::stmt` met them.
+fn walk(stmt: &mut CStmt, verdicts: &mut impl Iterator<Item = Option<bool>>) -> usize {
     match stmt {
-        CStmt::Observed { stmt, .. } => walk(stmt, total),
-        CStmt::Block(stmts) => stmts.iter_mut().map(|stmt| walk(stmt, total)).sum(),
+        CStmt::Observed { stmt, .. } => walk(stmt, verdicts),
+        CStmt::Block(stmts) => stmts.iter_mut().map(|stmt| walk(stmt, verdicts)).sum(),
         CStmt::If {
             then_body,
             else_body,
             ..
-        } => walk(then_body, total) + else_body.as_deref_mut().map_or(0, |e| walk(e, total)),
-        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => walk(body, total),
+        } => walk(then_body, verdicts) + else_body.as_deref_mut().map_or(0, |e| walk(e, verdicts)),
+        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => walk(body, verdicts),
         CStmt::Switch { cases, default, .. } => {
             let in_cases: usize = (cases.iter_mut())
                 .flat_map(|case| case.body.iter_mut())
-                .map(|stmt| walk(stmt, total))
+                .map(|stmt| walk(stmt, verdicts))
                 .sum();
             in_cases
                 + default
                     .iter_mut()
                     .flatten()
-                    .map(|stmt| walk(stmt, total))
+                    .map(|stmt| walk(stmt, verdicts))
                     .sum::<usize>()
         }
         CStmt::For {
@@ -43,22 +167,23 @@ fn walk(stmt: &mut CStmt, total: &BTreeMap<SymbolId, usize>) -> usize {
             update: None,
             body,
         } => {
-            let inner = walk(body, total);
-            let Some(stay_is_true) = may_hoist(body, total) else {
+            let verdict = verdicts.next().expect("the scan met this loop");
+            let inner = walk(body, verdicts);
+            let Some(stay_is_true) = verdict else {
                 return inner;
             };
             let taken = std::mem::replace(&mut **body, CStmt::Empty);
             **body = moved(taken, stay_is_true);
             inner + 1
         }
-        CStmt::For { body, .. } => walk(body, total),
+        CStmt::For { body, .. } => walk(body, verdicts),
         _ => 0,
     }
 }
 
-/// Whether the latch's copies may be written before its test, and if so whether the arm that
-/// stays is the test's true arm.
-fn may_hoist(body: &CStmt, total: &BTreeMap<SymbolId, usize>) -> Option<bool> {
+/// Whether a loop's body ends in a latch whose copies could be written before its test, and if so
+/// whether the arm that stays is the test's true arm, and the variables it copies.
+fn latch_of(body: &CStmt) -> Option<(bool, Vec<SymbolId>)> {
     let stmts = live(body);
     let (last, before) = stmts.split_last()?;
     let (test, on_true, on_false) = parts(last)?;
@@ -73,19 +198,12 @@ fn may_hoist(body: &CStmt, total: &BTreeMap<SymbolId, usize>) -> Option<bool> {
         return None;
     }
     let targets: BTreeSet<SymbolId> = copies_of(stay)?.into_iter().collect();
-    // The test reads none of what is written, and nothing outside this loop reads it.
-    let mut read_by_test = BTreeMap::new();
-    count_expr_reads(test, &mut read_by_test);
-    if targets
-        .iter()
-        .any(|target| read_by_test.contains_key(target))
-    {
-        return None;
-    }
-    let mut inside = BTreeMap::new();
-    count_reads(body, &mut inside);
-    let read_beyond = |target: &SymbolId| total.get(target) != inside.get(target);
-    (!targets.iter().any(read_beyond)).then_some(stay_is_true)
+    // The test reads none of what is written.
+    let mut read_by_test = false;
+    reads_of(test, &mut |symbol| {
+        read_by_test |= targets.contains(&symbol)
+    });
+    (!read_by_test).then(|| (stay_is_true, targets.into_iter().collect()))
 }
 
 /// The variables an arm assigns, when it is plain assignments to variables and nothing else but a
@@ -157,31 +275,35 @@ fn pure(expr: &CExpr) -> bool {
     !calls && !super::certify::writes(expr)
 }
 
-/// How often each variable is read in `stmt`: a plain assignment's target is written, not read.
-fn count_reads(stmt: &CStmt, into: &mut BTreeMap<SymbolId, usize>) {
-    stmt.visit_exprs(&mut |root| count_expr_reads(root, into));
-}
-
-fn count_expr_reads(expr: &CExpr, into: &mut BTreeMap<SymbolId, usize>) {
+/// Each read of a variable in `expr`: a plain assignment's target is written, not read.
+fn reads_of(expr: &CExpr, read: &mut impl FnMut(SymbolId)) {
+    #[cfg(test)]
+    COUNTED.with(|counted| counted.set(counted.get() + 1));
     match expr.unobserved() {
-        CExpr::Var(symbol) => *into.entry(*symbol).or_default() += 1,
+        CExpr::Var(symbol) => read(*symbol),
         CExpr::Binary {
             op: BinaryOp::Assign,
             left,
             right,
-        } if matches!(left.unobserved(), CExpr::Var(_)) => count_expr_reads(right, into),
+        } if matches!(left.unobserved(), CExpr::Var(_)) => reads_of(right, read),
         other => {
             for child in other.children() {
-                count_expr_reads(child, into);
+                reads_of(child, read);
             }
         }
     }
 }
 
 #[cfg(test)]
+thread_local! {
+    /// The expressions read for the variables they name, in this thread.
+    static COUNTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{UnaryOp, test_render_observation_id};
+    use crate::ast::{SwitchCase, UnaryOp, test_render_observation_id};
     use crate::symbol::SymbolTable;
 
     struct Fixture {
@@ -250,6 +372,166 @@ mod tests {
             panic!("a block body");
         };
         (stmts.clone(), count)
+    }
+
+    /// `depth` loops inside one another, each with a copy that nothing outside it reads.
+    fn nested(f: &mut Fixture, depth: usize) -> CStmt {
+        let (a, n) = (f.var("a"), f.var("n"));
+        let test = CExpr::binary(BinaryOp::Ne, a.clone(), n);
+        let mut inner = None;
+        for level in (0..depth).rev() {
+            let x = f.var(&format!("x{level}"));
+            let mut body = vec![work(0x20)];
+            body.extend(inner.take());
+            body.push(latch(
+                test.clone(),
+                vec![assign(&x, a.clone()), CStmt::Continue],
+            ));
+            inner = Some(CStmt::For {
+                init: None,
+                cond: None,
+                update: None,
+                body: Box::new(CStmt::Block(body)),
+            });
+        }
+        CStmt::Block(inner.into_iter().collect())
+    }
+
+    /// The loops written and the expressions read for `hoist` of `depth` nested loops.
+    fn read_for(depth: usize) -> (usize, usize) {
+        let mut root = nested(&mut Fixture::new(), depth);
+        let before = COUNTED.with(std::cell::Cell::get);
+        let written = hoist(&mut root);
+        (written, COUNTED.with(std::cell::Cell::get) - before)
+    }
+
+    #[test]
+    fn nested_loops_are_read_once_however_deep_they_go() {
+        // Doubling the depth at most doubles the expressions read; reading each loop's whole body,
+        // inner loops included, would quadruple them.
+        let (few, many) = (read_for(50), read_for(100));
+        assert_eq!(
+            (few.0, many.0),
+            (50, 100),
+            "every level writes its copy first"
+        );
+        assert!(
+            many.1 <= 2 * few.1,
+            "{} read for 50 loops, {} for 100",
+            few.1,
+            many.1
+        );
+    }
+
+    fn looped(body: Vec<CStmt>) -> CStmt {
+        CStmt::For {
+            init: None,
+            cond: None,
+            update: None,
+            body: Box::new(CStmt::Block(body)),
+        }
+    }
+
+    /// The statements of the body of a `for`.
+    fn body_of(stmt: &CStmt) -> &[CStmt] {
+        let CStmt::For { body, .. } = stmt else {
+            panic!("a for: {stmt:?}");
+        };
+        let CStmt::Block(stmts) = &**body else {
+            panic!("a block body");
+        };
+        stmts
+    }
+
+    /// Whether the latch ending `body` still copies on its staying arm.
+    fn copies_on_arm(body: &[CStmt]) -> bool {
+        let Some(CStmt::Observed { stmt, .. }) = body.last() else {
+            panic!("a marked latch");
+        };
+        let CStmt::If { then_body, .. } = &**stmt else {
+            panic!("an if");
+        };
+        !matches!(&**then_body, CStmt::Empty)
+    }
+
+    #[test]
+    fn a_copy_read_in_the_enclosing_loop_outside_the_inner_one_stays_on_its_arm() {
+        let mut f = Fixture::new();
+        let (x, y, a, n) = (f.var("x"), f.var("y"), f.var("a"), f.var("n"));
+        let test = CExpr::binary(BinaryOp::Ne, a.clone(), n);
+        let inner = || {
+            looped(vec![
+                work(0x20),
+                latch(test.clone(), vec![assign(&x, a.clone()), CStmt::Continue]),
+            ])
+        };
+        let outer_latch = || latch(test.clone(), vec![assign(&y, a.clone()), CStmt::Continue]);
+        let read_x = || CStmt::Expr(x.clone());
+        // Read after the inner loop, and before it: only the outer loop's copy is written first.
+        for body in [
+            vec![inner(), read_x(), outer_latch()],
+            vec![read_x(), inner(), outer_latch()],
+        ] {
+            let mut root = CStmt::Block(vec![looped(body)]);
+            assert_eq!(hoist(&mut root), 1);
+            let CStmt::Block(top) = &root else {
+                panic!("a block");
+            };
+            let outer = body_of(&top[0]);
+            let inner = outer.iter().find(|stmt| matches!(stmt, CStmt::For { .. }));
+            assert!(copies_on_arm(body_of(inner.expect("the inner loop"))));
+            assert!(!copies_on_arm(outer), "{outer:?}");
+        }
+        // Read nowhere else: both write their copies first.
+        let mut root = CStmt::Block(vec![looped(vec![inner(), outer_latch()])]);
+        assert_eq!(hoist(&mut root), 2);
+    }
+
+    #[test]
+    fn the_scan_counts_every_read_the_whole_tree_holds() {
+        // Each container reads a variable of its own in its header, so one the scan skips shows.
+        let mut f = Fixture::new();
+        let names = [
+            "i", "w", "d", "fi", "fc", "fu", "s", "c", "b", "r", "x", "o",
+        ];
+        let v: Vec<CExpr> = names.iter().map(|name| f.var(name)).collect();
+        let stmt = |expr: &CExpr| Box::new(CStmt::Expr(expr.clone()));
+        let tree = CStmt::Block(vec![
+            CStmt::if_stmt(
+                v[0].clone(),
+                CStmt::Expr(v[10].clone()),
+                Some(CStmt::Expr(v[11].clone())),
+            ),
+            CStmt::While {
+                cond: v[1].clone(),
+                body: stmt(&v[10]),
+            },
+            CStmt::DoWhile {
+                body: stmt(&v[10]),
+                cond: v[2].clone(),
+            },
+            CStmt::For {
+                init: Some(stmt(&v[3])),
+                cond: Some(v[4].clone()),
+                update: Some(v[5].clone()),
+                body: stmt(&v[10]),
+            },
+            CStmt::Switch {
+                expr: v[6].clone(),
+                cases: vec![SwitchCase {
+                    value: v[7].clone(),
+                    body: vec![CStmt::Expr(v[10].clone())],
+                }],
+                default: Some(vec![CStmt::Return(Some(v[9].clone()))]),
+            },
+            CStmt::Expr(CExpr::assign(v[8].clone(), v[10].clone())),
+        ]);
+        let mut whole = BTreeMap::new();
+        tree.visit_exprs(&mut |root| reads_of(root, &mut |s| *whole.entry(s).or_insert(0) += 1));
+        let mut scan = Scan::default();
+        scan.stmt(&tree);
+        assert_eq!(scan.reads, whole);
+        assert_eq!(whole.len(), 11, "every name but the assigned one is read");
     }
 
     #[test]
