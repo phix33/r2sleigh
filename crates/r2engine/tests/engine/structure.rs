@@ -260,3 +260,24 @@ fn a_copy_stays_on_its_arm_when_the_test_is_not_a_proven_read() {
     assert!(c.contains("for (; ; )") && !c.contains("do {"), "{c}");
     assert!(c.contains("r2sleigh_residual_u64"), "{c}");
 }
+
+/// `top: movzx edx, byte [rdi]; test dl, dl; je done; cmp dl, 0x3a; jne top; done: xor eax, eax; ret`: nothing
+/// is copied on the way round, so the chain is spelled on the side the loop leaves by.
+const SPIN_UNTIL_SEPARATOR: &[u8] = &[
+    0x0f, 0xb6, 0x17, 0x84, 0xd2, 0x74, 0x05, 0x80, 0xfa, 0x3a, 0x75, 0xf4, 0x31, 0xc0, 0xc3,
+];
+
+#[test]
+fn a_loop_that_leaves_on_a_chain_stays_on_both_tests_negated() {
+    // It leaves when `c == 0 || c == 58`, so it stays when `c != 0 && c != 58`: the connective swaps with the tests.
+    let c = c_of(SPIN_UNTIL_SEPARATOR);
+    let test = c
+        .lines()
+        .find(|line| line.contains("} while ("))
+        .unwrap_or_else(|| panic!("a do-while: {c}"));
+    assert_eq!(test.matches(" && ").count(), 1, "{c}");
+    assert!(
+        !test.contains(" || ") && test.matches("!= (uint8_t)").count() == 2,
+        "{c}"
+    );
+}
