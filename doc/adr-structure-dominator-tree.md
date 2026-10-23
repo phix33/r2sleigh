@@ -291,6 +291,43 @@ change, all of them the loops D59 reads (a `for (;;)` with a chain's two empty a
 none gains a goto or a residual site. Over bash, ld-2.31.so, fedora_32_bin_ls, ls-toybox, pigz, bashbot O0 and
 static-glibc with every name (3,953 functions) the 12 of D59 change and no other.
 
+## 2026-10-23: the guards and the spelling order, stacked
+
+D59 and D60 (the guards) and D58 (D2 spells every block once, in reverse postorder, before this section's placement
+writes any; "D2's spelling order" in adr-decompiler-rewrite.md) landed on one base and stack in this order. They meet
+in three places. An edge's copy is spelled by `render::spelled` as `EdgeText::Copies` and marked by the Writer as a
+statement of the block it leaves (`observe_copy`), which is what I_T counts and what the latch hoist moves. The latch
+hoist's reads are counted once for the whole function (`Scan`) and its copy test asks `Placed::edge_copy`. A chain
+member is a test whose text is nothing else, so the regions index asks only `test_block`.
+
+No function changes under both: over bash, ls-toybox, pigz, 0pack and pumasim (25,735 listed functions) 17 change under
+the guards alone and 55 under the spelling order alone, none is newly refused, and the effects add: residual sites
+0pack 47,850 (base), 47,850 (guards), 47,898 (both); pumasim 67,628, 67,628, 67,644; bash 10,316, 10,316, 10,322;
+ls-toybox 7,902, 7,902, 7,905; pigz 1,301 throughout. One function gains a goto, bash `0x48140` (1 to 2): D58's rule
+reads its tail's `r13_4` as a residual (a forward copy into the merge is a gap), and a skipped block that holds a
+residual is not copied into the arms that fall to it (D61 (3)). The write orders: O1, O2 and O3 differ 0, 0, 0 over
+bash, ls-toybox and pigz (2,508 functions) at the tip, against 0, 120 and 187 on the base with the knobs alone; the
+text moves in 64, 332 and 720 functions, so the knobs are live.
+
+On the mined set (1,570 functions, 1,305 scored, DecBench's GED, the method of the section below):
+
+| Build | Perfect | Mean GED | Total GED | Gotos | Functions with a goto | Held out gotos |
+|---|---|---|---|---|---|---|
+| base | 206 | 43.795 | 57,153 | 2,661 | 426 | 2,100 |
+| and the guards | 206 | 43.795 | 57,153 | 2,661 | 426 | 2,098 |
+| and the spelling order, the tip | 206 | 43.795 | 57,153 | 2,661 | 426 | 2,098 |
+
+The guards change no mined-set function. The spelling order changes the text of eight (`inflateCopy` of zlib's four
+programs at two optimisation levels: its block-transfer locals are numbered `_2` in reverse postorder) and no graph, so
+no GED moves. Held out (23 of radare2's test ELFs, 1,834 functions): rendered 1,496 and refused 338 in every build, none
+crashed; the 2 gotos fewer are fedora_32_bin_ls `0xe690` (36 to 34, the chain that continues to its head). Release
+`pdd` with `aa`, instructions retired, base, guards, tip, mean of two runs: 0pack `0x62ecf0` 71.71G, 71.78G, 71.75G;
+`0x58e3d0` 81.12G, 81.15G, 81.19G; `0x4e5f90` 60.35G, 60.39G, 60.35G; pumasim `0x23fdf0` 84.95G, 85.00G, 85.02G;
+`0x1fafb0` 70.03G, 70.06G, 70.02G; `0x2312c0` 73.11G, 73.15G, 73.13G (from -0.02% to +0.10%), peak footprint 156 to 278
+MB in every build, the six renderings byte-identical. The census goldens (442) and `stable_temporaries` (24) hold byte
+for byte at both heads, so nothing was blessed. The equivalence gate on the tip holds all 828 baseline records on x86-64
+(744 equal, 63 residual-trap, 1 slow, 20 unsupported) and on AArch64 (750 equal, 57 residual-trap, 1 slow, 20 unsupported) with none differing.
+
 ## 2026-10-22: the recoveries together
 
 Two branches landed on one base and stack in this order: condition chains, `while`/`do-while` and the latch's
