@@ -334,22 +334,20 @@ fn remove_dead(
         let before = seq[..at].iter().rev().find(|stmt| !blank(stmt));
         let dead = entry.filter(|_| before.is_some_and(|before| !completes(before, ev)));
         match dead {
-            Some(label) => remove_run(seq, at, runs[label].span, named),
+            Some(label) => remove_run(seq, at, runs[label].span),
             None => at += 1,
         }
     }
 }
 
-/// `seq[at]` and, of the `span - 1` blocks after it its run ran through, those no `goto` names.
-fn remove_run(seq: &mut Vec<CStmt>, at: usize, span: usize, named: &BTreeSet<String>) {
+/// `seq[at]` and the `span - 1` blocks after it that its run ran through. A `goto` to one of those
+/// is a `goto` to a tail of this run, which `replace_gotos` has already copied.
+fn remove_run(seq: &mut Vec<CStmt>, at: usize, span: usize) {
     seq.remove(at);
     for _ in 1..span {
-        let free = |next: &CStmt| match next {
-            CStmt::Empty | CStmt::Comment(_) => true,
-            CStmt::Block(_) => leading_label(next).is_none_or(|label| !named.contains(label)),
-            _ => false,
-        };
-        if !seq.get(at).is_some_and(free) {
+        let through =
+            |next: &CStmt| matches!(next, CStmt::Empty | CStmt::Comment(_) | CStmt::Block(_));
+        if !seq.get(at).is_some_and(through) {
             break;
         }
         seq.remove(at);
@@ -476,7 +474,7 @@ fn falling_ends(stmt: &CStmt, ev: &Evidence<'_>) -> Option<usize> {
     }
 }
 
-/// Put the next copy at every arm end [`falling_ends`] counts, in the same order.
+/// Put the next copy at every arm end [`falling_ends`] counts; which end gets the original's markers is no matter.
 fn append_to_ends(stmt: &mut CStmt, ev: &Evidence<'_>, next: &mut dyn FnMut() -> Vec<CStmt>) {
     match stmt {
         CStmt::Observed { stmt, .. } => append_to_ends(stmt, ev, next),

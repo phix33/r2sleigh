@@ -1247,12 +1247,11 @@ fn read_chains(
 }
 
 /// Compare an occurrence with `expected`, labels and all: a negation is read from the `!` over a
-/// marked atom, never from swapped arms. For a marked test (`exact`) no conversion is read either.
+/// marked atom, never from swapped arms.
 fn judge(
     cfg: &CFG,
     occurrence: &Occurrence,
     expected: Vec<(Target, EdgeLabel)>,
-    exact: bool,
 ) -> Option<Violation> {
     let block = occurrence.block;
     let mut rendered = occurrence.edges.clone();
@@ -1268,9 +1267,8 @@ fn judge(
     if rendered == expected {
         return None;
     }
-    if !exact
-        && (switch_edges_agree(&rendered, &expected)
-            || converted_conditional_agrees(&rendered, &expected))
+    if switch_edges_agree(&rendered, &expected)
+        || converted_conditional_agrees(&rendered, &expected)
     {
         return None;
     }
@@ -1282,11 +1280,11 @@ fn judge(
                 fallthrough: None, ..
             }
             | BlockTerminator::IndirectCall { fallthrough: None },
-        ) if !exact => Violation::TerminalFallthrough {
+        ) => Violation::TerminalFallthrough {
             block,
             to: rendered[0].0,
         },
-        Some(BlockTerminator::IndirectBranch) if expected.is_empty() && !exact => {
+        Some(BlockTerminator::IndirectBranch) if expected.is_empty() => {
             Violation::UnresolvedIndirect {
                 block,
                 to: rendered[0].0,
@@ -1431,11 +1429,11 @@ pub(crate) fn certify<R: Into<StatementRole>>(
         if chain_faulted.contains(&index) {
             continue;
         }
-        let (expected, exact) = match chain_edges.get(&index) {
-            Some(edges) => (edges.clone(), true),
-            None => (expected_edges(cfg, occurrence.block, &contract), false),
+        let expected = match chain_edges.get(&index) {
+            Some(edges) => edges.clone(),
+            None => expected_edges(cfg, occurrence.block, &contract),
         };
-        violations.extend(judge(cfg, occurrence, expected, exact));
+        violations.extend(judge(cfg, occurrence, expected));
     }
 
     let mut contracted = contracted.into_inner();
@@ -2107,14 +2105,15 @@ mod tests {
         // `a || b` over blocks that make a conjunction.
         let or = CExpr::binary(crate::ast::BinaryOp::Or, atom(0x10), atom(0x20));
         let certificate = run(chain_text(or, 0x30), &chain_cfg(), 0x10, &[("L", 0x40)]);
+        // The chain is the one fault: its head is not also read as a block with edges of its own.
         assert!(
-            certificate.violations.iter().any(|violation| matches!(
-                violation,
-                Violation::Chain {
+            matches!(
+                certificate.violations.as_slice(),
+                [Violation::Chain {
                     fault: super::super::condition::ChainFault::Different,
                     ..
-                }
-            )),
+                }]
+            ),
             "{certificate} {:?}",
             certificate.violations
         );
