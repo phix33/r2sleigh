@@ -364,6 +364,27 @@ first outcome, whichever block is written first, and the engine test
 under two layouts. A callee's result is a program fact the call sites should not each spell (ROADMAP
 D62).
 
+## The import-stub route
+
+A function is an import's stub when the program says its address is one and its body is only the
+transfer through the import's slot. Discovery owns the first half: `program::naming::imports` reads
+the stubs the container states (Mach-O `S_SYMBOL_STUBS`) and decodes the linkage sections (`.plt`,
+`.plt.sec`, `.plt.got`), and `Program::import_at(entry)` answers it in `O(log stubs)`. The body owns
+the second (`stub::import_stub`): one tail call, no store or other call, no register written that the
+transfer does not carry, so a stub that flushes a cache line first is a body
+(`an_effect_before_the_jump_keeps_a_stub_a_body`). The stub's name is the one discovery states, not
+the callee identity's.
+
+The route used to ask only the second half. A function in `.text` whose last instruction was a jump to
+an import's stub, or through its slot, was declared away as the import, with its branch and its
+argument arithmetic: bzip2 `default_bzfree` (`0x5b00`: `test rsi, rsi; je; mov rdi, rsi; jmp free`) and
+`default_bzalloc` (`0x5b20`: `imul esi, edx; movsxd rdi, esi; jmp malloc`) printed "import stub `free`
+has no body" and no C, while `afl` listed neither as an import. Two owners decided one fact and
+disagreed. Of the 63 DecBench rows r2s declined this way (2026-10-23), 52 write an argument register
+before the jump, 2 test first, and 9 are a bare `jmp` to the stub. All 63 render now: 22 without a
+residual, 24 with a parameter the body reads and nothing declares (P7), 16 with an `int` result whose
+upper half is a residual (W47), 1 with both.
+
 ## The proof line
 
 The proof line states what the rendering did and did not show. "Nothing was

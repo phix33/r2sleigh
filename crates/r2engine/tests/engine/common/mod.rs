@@ -176,6 +176,40 @@ const PLT_PASSING: [u8; 0x2b] = [
     0xc3, // ret
 ];
 
+/// [`PLT`]'s `.plt` and then `text`, a function of the program's own that reaches the stub at [`PLT_STUB`].
+const fn plt_then<const N: usize>(text: &[u8]) -> [u8; N] {
+    let mut bytes = [0; N];
+    let mut at = 0;
+    while at < 0x20 {
+        bytes[at] = PLT[at];
+        at += 1;
+    }
+    while at - 0x20 < text.len() {
+        bytes[at] = text[at - 0x20];
+        at += 1;
+    }
+    bytes
+}
+
+/// `test rsi, rsi; je L; mov rdi, rsi; jmp stub; L: ret`: `free` only where the pointer is set.
+const PLT_GUARDED_WRAPPER: [u8; 0x2e] = plt_then(&[
+    0x48, 0x85, 0xf6, // test rsi, rsi
+    0x74, 0x08, // je L
+    0x48, 0x89, 0xf7, // mov rdi, rsi
+    0xe9, 0xe3, 0xff, 0xff, 0xff, // jmp stub
+    0xc3, // L: ret
+]);
+
+/// `jmp stub`: a function of the program's own that is one jump, to the stub and not through its slot.
+const PLT_FORWARDING_WRAPPER: [u8; 0x25] = plt_then(&[0xe9, 0xeb, 0xff, 0xff, 0xff]);
+
+/// `imul esi, edx; movsxd rdi, esi; jmp stub`: the stub's one argument is computed from two.
+const PLT_COMPUTING_WRAPPER: [u8; 0x2b] = plt_then(&[
+    0x0f, 0xaf, 0xf2, // imul esi, edx
+    0x48, 0x63, 0xfe, // movsxd rdi, esi
+    0xe9, 0xe5, 0xff, 0xff, 0xff, // jmp stub
+]);
+
 /// A CET `.plt` of PLT0 and one lazy entry, which names no stub, then `.plt.sec`'s stub and a caller.
 const PLT_CET: [u8; 0x36] = [
     0xff, 0x35, 0xea, 0x0f, 0x00, 0x00, // push qword [rip + 0xfea]
@@ -651,6 +685,30 @@ impl Literal {
             import_write(PLT_SLOT, 8, import),
         ];
         program
+    }
+
+    /// A `.plt` whose stub is for `import`, then `code`: a function of the program's own that reaches it.
+    fn plt_wrapped(import: &str, code: &'static [u8]) -> Self {
+        let mut program = Self::plt_importing(import).running_on(GLIBC);
+        program.code = code;
+        program.container.segments = vec![code_segment(BASE, code.len() as u64)];
+        program.container.sections[1].vsize = code.len() as u64 - 0x20;
+        program
+    }
+
+    /// [`Self::plt_wrapped`] with a wrapper that frees only a pointer that is set.
+    pub fn plt_guarded_wrapper() -> Self {
+        Self::plt_wrapped("free", &PLT_GUARDED_WRAPPER)
+    }
+
+    /// [`Self::plt_wrapped`] with a function that is one jump to the stub.
+    pub fn plt_forwarding_wrapper() -> Self {
+        Self::plt_wrapped("free", &PLT_FORWARDING_WRAPPER)
+    }
+
+    /// [`Self::plt_wrapped`] with a wrapper that computes the stub's argument.
+    pub fn plt_computing_wrapper() -> Self {
+        Self::plt_wrapped("malloc", &PLT_COMPUTING_WRAPPER)
     }
 
     /// [`Self::plt_importing`], its caller writing `edi` before the call.

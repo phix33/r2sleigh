@@ -3,7 +3,7 @@
 
 use crate::common;
 
-use common::{BASE, CALLER, FORKED, GLIBC, Literal, ONE, PLT_STUB, STUB, TWO, opened};
+use common::{BASE, CALLER, FORKED, GLIBC, Literal, ONE, PLT_CALLER, PLT_STUB, STUB, TWO, opened};
 use r2engine::program::OpenProgram;
 
 #[test]
@@ -155,4 +155,50 @@ fn an_import_stub_is_its_import_s_declaration() {
     );
     assert!(!text.contains("return"), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
+}
+
+/// A function that reaches the stub after a test of its own is a body: a branch or a return on
+/// another path is not the import's declaration, and the C keeps both paths.
+#[test]
+fn a_guarded_wrapper_of_a_stub_is_a_body_not_the_stub() {
+    let mut program = OpenProgram::of(Literal::plt_guarded_wrapper());
+    let text = program
+        .rendered(PLT_CALLER)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(!text.contains("import stub at"), "{text}");
+    assert!(text.contains("free("), "{text}");
+    assert!(text.contains("if ("), "{text}");
+}
+
+/// The stub's argument is a value the wrapper computes, so the wrapper is not the import: calling
+/// it passes what it computes from, and the C says so.
+#[test]
+fn a_wrapper_that_computes_the_stub_s_argument_is_a_body_not_the_stub() {
+    let mut program = OpenProgram::of(Literal::plt_computing_wrapper());
+    let text = program
+        .rendered(PLT_CALLER)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(!text.contains("import stub at"), "{text}");
+    assert!(text.contains("malloc(") && text.contains(") * ("), "{text}");
+}
+
+/// One jump to the stub, with nothing else, is still a jump to another function: only the stub
+/// itself jumps through the loader's slot, so this one is a body that calls the import.
+#[test]
+fn a_function_that_only_jumps_to_a_stub_is_a_body_not_the_stub() {
+    let mut program = OpenProgram::of(Literal::plt_forwarding_wrapper());
+    let text = program
+        .rendered(PLT_CALLER)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(!text.contains("import stub at"), "{text}");
+    assert!(text.contains("free((void*)arg0);"), "{text}");
 }

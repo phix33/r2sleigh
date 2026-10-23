@@ -1,11 +1,12 @@
-//! The import-stub route: a function whose body is one tail transfer to an import and nothing
-//! else renders as the import's declaration in either pipeline (AGENTS.md, route policy).
+//! The import-stub route: the function at an address the program states is an import's stub renders
+//! as its declaration, where its body is that one transfer (doc/adr-decompiler-rewrite.md).
 
-/// The import a stub transfers to, where `prepared` is one: no store, no other call, no register
-/// written that the transfer does not carry, and a callee r2types resolves as an import.
+/// The stub at `prepared`'s entry for `stated`, the import the program says that address is, where
+/// the body is only the transfer. A body that merely ends in one is no stub.
 pub(crate) fn import_stub(
     prepared: &r2ssa::SsaArtifact,
     facts: &r2types::FunctionFacts,
+    stated: &str,
 ) -> Option<r2types::ImportStub> {
     let certificates = prepared.certificates();
     let [callsite] = certificates.callsites.values().collect::<Vec<_>>()[..] else {
@@ -69,11 +70,6 @@ pub(crate) fn import_stub(
         );
         return None;
     }
-    let name = identity
-        .display_name
-        .as_deref()
-        .or(identity.normalized_name.as_deref())
-        .or(identity.raw_name.as_deref())?;
     // The signature certified for this call site is the one a caller's call renders with: the
     // import's declaration at the slot the stub jumps through; the identity's own is by name.
     let certified = facts
@@ -82,7 +78,7 @@ pub(crate) fn import_stub(
         .and_then(|fact| fact.callee_signature.clone());
     Some(r2types::ImportStub {
         entry: prepared.function().entry,
-        name: name.to_owned(),
+        name: stated.to_owned(),
         signature: certified.or_else(|| identity.signature.clone()),
     })
 }
