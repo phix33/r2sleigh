@@ -68,6 +68,46 @@ fn production_has_no_legacy_name_identity_or_repair_answerers() {
     );
 }
 
+/// The production lines of `render/<file>` that contain any of `tokens`, as `file:line text`.
+fn render_lines_naming(file: &str, tokens: &[&str]) -> Vec<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/render")
+        .join(file);
+    let text = fs::read_to_string(&path).expect("a render source file should be UTF-8");
+    production_lines(&text)
+        .into_iter()
+        .filter(|(_, line)| tokens.iter().any(|token| line.contains(token)))
+        .map(|(index, line)| format!("{file}:{} {}", index + 1, line.trim()))
+        .collect()
+}
+
+/// A verdict is a function of the facts and the CFG's reverse postorder (ROADMAP D58): control reads
+/// no value and the spelling reads no placement, so no write order reaches a verdict.
+#[test]
+fn control_writes_only_what_was_spelled_and_the_spelling_reads_no_placement() {
+    let control = render_lines_naming("control.rs", &["Values", "values::"]);
+    assert!(
+        control.is_empty(),
+        "render/control.rs reads D2 only through `Spelled`:\n{}",
+        control.join("\n")
+    );
+    let placement = [
+        "exits_of(",
+        "merges_in(",
+        "labelled(",
+        "loop_headed_by(",
+        ".edge(",
+        "Placement",
+        "EdgeShape",
+    ];
+    let spelled = render_lines_naming("spelled.rs", &placement);
+    assert!(
+        spelled.is_empty(),
+        "render/spelled.rs spells before any block is placed:\n{}",
+        spelled.join("\n")
+    );
+}
+
 /// Lines outside `#[cfg(test)]` items, retaining zero-based source line numbers.
 /// Test items are skipped rather than treated as EOF so a production item
 /// placed after one cannot hide from an architecture interlock.

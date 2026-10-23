@@ -50,7 +50,7 @@ impl<'f> Placement<'f> {
         // no place.
         let placed_set: BTreeSet<u64> = cfg
             .block_addrs()
-            .filter(|addr| *addr == entry || dom.idom(*addr).is_some())
+            .filter(|addr| is_placed(dom, entry, *addr))
             .collect();
         let placed = |addr: u64| placed_set.contains(&addr);
 
@@ -237,6 +237,29 @@ impl<'f> Placement<'f> {
         *broken |= stays;
         stays
     }
+}
+
+/// Whether the entry reaches `addr`: only a reached block has a place.
+pub(crate) fn is_placed(dom: &DomTree, entry: u64, addr: u64) -> bool {
+    addr == entry || dom.idom(addr).is_some()
+}
+
+/// The placed blocks in the CFG's reverse postorder, which is the order every verdict is spelled in
+/// (`render::spelled`): a block comes after the blocks that dominate it. `O(B)`.
+pub(crate) fn placed_in_order(function: &r2ssa::SSAFunction) -> Vec<u64> {
+    let (dom, root) = (function.domtree(), function.root());
+    let order = (function.block_addrs().iter().copied())
+        .filter(|addr| is_placed(dom, root, *addr))
+        .collect::<Vec<_>>();
+    debug_assert!(
+        order.iter().copied().eq(function
+            .cfg()
+            .reverse_postorder()
+            .into_iter()
+            .filter(|addr| is_placed(dom, root, *addr))),
+        "the SSA function's blocks are the CFG's reverse postorder"
+    );
+    order
 }
 
 /// The blocks whose dominator subtree no edge leaves: the extremes of the successors' preorder

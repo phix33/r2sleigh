@@ -7,6 +7,7 @@ mod frame;
 pub(crate) mod globals;
 mod input;
 pub(crate) mod proof;
+mod spelled;
 mod tags;
 mod terms;
 mod values;
@@ -76,7 +77,16 @@ pub fn render(
     let mut c = CFunction::new(name, result_type(input));
     let tags = tags::Tags::of(input);
     let values = values::Values::new(input, &tags, std::rc::Rc::clone(&c.symbols));
-    let written = control::write(input, values.as_ref(), &work);
+    let function = input.function();
+    let placement = crate::structure::place::Placement::compute(
+        function.cfg(),
+        function.domtree(),
+        function.natural_loops(),
+        function.root(),
+    );
+    let order = crate::structure::place::placed_in_order(function);
+    let spelled = spelled::spell(input, values.as_ref(), &order, &work)?;
+    let written = control::write(input, spelled, &placement, &work);
     if let Some(stop) = written.stopped {
         return Err(stop.into());
     }
