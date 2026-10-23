@@ -2402,10 +2402,22 @@ impl<'a> Values<'a> {
             else {
                 // The edge's gap stands for this merge and the value it could not carry.
                 self.residual.borrow_mut()[inst.0 as usize] = true;
+                if forward {
+                    r2il::refusal_evidence!(
+                        "gapped-forward-copy",
+                        "{from:#x} -> {to:#x} renders no copy, so every read of the merge stays residual"
+                    );
+                }
                 out.push(unrendered_copy(to));
                 continue;
             };
             let copy = CStmt::Expr(source.clone());
+            if forward && from_id > to_block.id {
+                r2il::refusal_evidence!(
+                    "late-forward-edge",
+                    "{from:#x} -> {to:#x} pays a merge after {to:#x} was spelled, so its early reads stay residual"
+                );
+            }
             self.account_copy(inst, output, attempt, (&copy, forward));
             match clobbers {
                 false => out.push(self.assign_value(output, *name, source)),
