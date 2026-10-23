@@ -183,3 +183,27 @@ fn what_the_code_after_a_loop_reads_is_not_what_the_hoisted_copy_writes() {
         .expect("a return of the loop's value");
     assert!(!returned.contains(copied), "{c}");
 }
+
+/// `top: movzx edx, byte [rdi]; add rdi, 1; test dl, dl; je done; cmp dl, 0x3a; jne top; done: lea rax,
+/// [rdi - 1]; ret`: the second test goes back to the first, so the chain's exits are `done` and its own head.
+const SCAN_TO_SEPARATOR: &[u8] = &[
+    0x0f, 0xb6, 0x17, 0x48, 0x83, 0xc7, 0x01, 0x84, 0xd2, 0x74, 0x05, 0x80, 0xfa, 0x3a, 0x75, 0xf0,
+    0x48, 0x8d, 0x47, 0xff, 0xc3,
+];
+
+#[test]
+fn a_chain_whose_exit_is_a_continue_to_its_own_head_is_one_test() {
+    // Stop at a zero byte or a colon: the chain `c == 0 || c == 58` leaves, and its other exit is the
+    // head itself, so the loop is a `do-while` on `c != 0 && c != 58` with nothing left to `break`.
+    let c = c_of(SCAN_TO_SEPARATOR);
+    let test = c
+        .lines()
+        .find(|line| line.contains("} while ("))
+        .unwrap_or_else(|| panic!("a do-while: {c}"));
+    assert!(
+        test.contains(" && ") && test.contains("!= (uint8_t)0U"),
+        "{c}"
+    );
+    assert!(!c.contains("for (; ; )") && !c.contains("break"), "{c}");
+    assert_eq!(tests_of(&c).len(), 0, "{c}");
+}

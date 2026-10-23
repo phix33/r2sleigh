@@ -2010,6 +2010,36 @@ mod tests {
     }
 
     #[test]
+    fn a_chain_whose_second_test_goes_back_to_its_head_has_the_head_as_an_exit() {
+        // Both tests hold and the loop goes round again; either fails to 0x30.
+        let looped = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x30)),
+                (0x20, cond_branch(0x10, 0x30)),
+                (0x30, BlockTerminator::Return),
+            ],
+        );
+        let text = |stay: CStmt, leave: CStmt| {
+            let test = CStmt::if_stmt(both(atom(0x10), atom(0x20)), stay, Some(leave));
+            let body = CStmt::Block(vec![at(0x10, test)]);
+            CStmt::Block(vec![
+                CStmt::For {
+                    init: None,
+                    cond: None,
+                    update: None,
+                    body: Box::new(body),
+                },
+                at(0x30, CStmt::Return(None)),
+            ])
+        };
+        let right = run(text(CStmt::Continue, CStmt::Break), &looped, 0x10, &[]);
+        assert!(right.ok(), "{right}");
+        let swapped = run(text(CStmt::Break, CStmt::Continue), &looped, 0x10, &[]);
+        assert!(!swapped.ok(), "{swapped}");
+    }
+
+    #[test]
     fn a_chain_taking_the_other_exit_is_not_the_machine_s_even_with_the_test_negated() {
         // `a && b` reaching 0x40 on its true arm: the machine reaches it when it is false.
         let wrong = chain_text(both(atom(0x10), atom(0x20)), 0x40);

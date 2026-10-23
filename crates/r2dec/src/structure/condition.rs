@@ -538,9 +538,9 @@ pub(crate) fn exits<M: Machine>(
         if index > 0 && machine.entered_from_outside(*block, &members) {
             return Err(ChainFault::Outside { block: *block });
         }
-        // A lone test has no edge inside it: the loop that re-enters it leaves it.
+        // Only an edge to a later test is inside the DAG: one back to the head or an earlier test leaves it.
         let mut edge = |target: u64| match blocks.iter().position(|member| *member == target) {
-            Some(at) if blocks.len() > 1 => Edge::Node(at),
+            Some(at) if at > index => Edge::Node(at),
             _ => Edge::Exit(exit_index(&mut targets, machine.arrives(target))),
         };
         let (on_true, on_false) = (edge(on_true), edge(on_false));
