@@ -224,6 +224,24 @@ mod tests {
     /// Markers whose block is their index; the copy of marker `n` is marker `1000 + n`.
     struct Fixture;
 
+    impl crate::structure::certify::Placed for Fixture {
+        fn block_of(&self, id: RenderObservationId) -> Option<u64> {
+            Some(u64::from(id.index() % 1000))
+        }
+
+        fn statement_of(&self, id: RenderObservationId) -> Option<RenderObservationId> {
+            Some(id)
+        }
+
+        fn written(&self) -> usize {
+            0
+        }
+
+        fn edge_copy(&self, _id: RenderObservationId) -> bool {
+            false
+        }
+    }
+
     impl Marks for Fixture {
         fn block_of(&self, id: RenderObservationId) -> Option<u64> {
             Some(u64::from(id.index() % 1000))
@@ -463,10 +481,9 @@ mod tests {
             cfg,
             &DomTree::compute(cfg),
             cfg.entry,
-            &|id| Fixture.block_of(id),
+            &Fixture,
             &|_| None,
             &|_| StatementRole::Plain,
-            &|_| true,
         )
     }
 

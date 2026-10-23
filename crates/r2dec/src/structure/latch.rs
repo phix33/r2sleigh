@@ -3,14 +3,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::certify::Placed;
 use super::rotate::{continues, flatten, is_break, live, parts};
 use crate::ast::{BinaryOp, CExpr, CStmt};
 use crate::symbol::SymbolId;
 
 /// Write the copies of each latch before its test where the C text allows; the number of loops.
 /// O(statements): the reads are counted in one pass, a loop's from the counts at its entry and exit.
-pub(crate) fn hoist(root: &mut CStmt) -> usize {
-    let mut scan = Scan::default();
+pub(crate) fn hoist(root: &mut CStmt, placed: &dyn Placed) -> usize {
+    let mut scan = Scan::new(placed);
     scan.stmt(root);
     let verdicts = scan.verdicts();
     if !verdicts.iter().any(Option::is_some) {
@@ -27,8 +28,8 @@ pub(crate) fn hoist(root: &mut CStmt) -> usize {
 
 /// The reads of the function and, for each `for (;;)` in pre-order, the latch it has and how often
 /// each of the latch's copies is read inside the loop.
-#[derive(Default)]
-struct Scan {
+struct Scan<'p> {
+    placed: &'p dyn Placed,
     /// Reads of each variable so far.
     reads: BTreeMap<SymbolId, usize>,
     loops: Vec<Option<Latch>>,
@@ -41,7 +42,15 @@ struct Latch {
     copies: Vec<(SymbolId, usize)>,
 }
 
-impl Scan {
+impl<'p> Scan<'p> {
+    fn new(placed: &'p dyn Placed) -> Self {
+        Self {
+            placed,
+            reads: BTreeMap::new(),
+            loops: Vec::new(),
+        }
+    }
+
     fn stmt(&mut self, stmt: &CStmt) {
         match stmt {
             CStmt::Observed { stmt, .. } => self.stmt(stmt),
@@ -98,7 +107,7 @@ impl Scan {
 
     fn forever(&mut self, body: &CStmt) {
         let at = self.loops.len();
-        let latch = latch_of(body);
+        let latch = latch_of(body, self.placed);
         self.loops.push(latch.map(|(stay_is_true, targets)| {
             Latch {
                 stay_is_true,
@@ -183,7 +192,7 @@ fn walk(stmt: &mut CStmt, verdicts: &mut impl Iterator<Item = Option<bool>>) -> 
 
 /// Whether a loop's body ends in a latch whose copies could be written before its test, and if so
 /// whether the arm that stays is the test's true arm, and the variables it copies.
-fn latch_of(body: &CStmt) -> Option<(bool, Vec<SymbolId>)> {
+fn latch_of(body: &CStmt, placed: &dyn Placed) -> Option<(bool, Vec<SymbolId>)> {
     let stmts = live(body);
     let (last, before) = stmts.split_last()?;
     let (test, on_true, on_false) = parts(last)?;
@@ -197,7 +206,7 @@ fn latch_of(body: &CStmt) -> Option<(bool, Vec<SymbolId>)> {
     if before.is_empty() || before.iter().any(|stmt| continues(stmt)) || !pure(test) {
         return None;
     }
-    let targets: BTreeSet<SymbolId> = copies_of(stay)?.into_iter().collect();
+    let targets: BTreeSet<SymbolId> = copies_of(stay, placed)?.into_iter().collect();
     // The test reads none of what is written.
     let mut read_by_test = false;
     reads_of(test, &mut |symbol| {
@@ -206,16 +215,19 @@ fn latch_of(body: &CStmt) -> Option<(bool, Vec<SymbolId>)> {
     (!read_by_test).then(|| (stay_is_true, targets.into_iter().collect()))
 }
 
-/// The variables an arm assigns, when it is plain assignments to variables and nothing else but a
-/// closing `continue`.
-fn copies_of(arm: &CStmt) -> Option<Vec<SymbolId>> {
+/// The variables an arm assigns, when it is the copies its edge carries (assignments to variables
+/// under markers that say so) and nothing else but a closing `continue`.
+fn copies_of(arm: &CStmt, placed: &dyn Placed) -> Option<Vec<SymbolId>> {
     let mut statements = live(arm);
     if matches!(statements.last(), Some(CStmt::Continue)) {
         statements.pop();
     }
-    let targets: Option<Vec<SymbolId>> = statements
-        .into_iter()
-        .map(|stmt| match stmt {
+    let copy_target = |stmt: &CStmt| {
+        let ids = stmt.observation_ids();
+        if ids.is_empty() || !ids.iter().all(|id| placed.edge_copy(*id)) {
+            return None;
+        }
+        match stmt.unobserved() {
             CStmt::Expr(CExpr::Binary {
                 op: BinaryOp::Assign,
                 left,
@@ -225,8 +237,9 @@ fn copies_of(arm: &CStmt) -> Option<Vec<SymbolId>> {
                 _ => None,
             },
             _ => None,
-        })
-        .collect();
+        }
+    };
+    let targets: Option<Vec<SymbolId>> = statements.into_iter().map(copy_target).collect();
     targets.filter(|targets| !targets.is_empty())
 }
 
@@ -303,7 +316,7 @@ thread_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{SwitchCase, UnaryOp, test_render_observation_id};
+    use crate::ast::{RenderObservationId, SwitchCase, UnaryOp, test_render_observation_id};
     use crate::symbol::SymbolTable;
 
     struct Fixture {
@@ -326,8 +339,36 @@ mod tests {
         CStmt::observe_one(test_render_observation_id(block), stmt)
     }
 
-    fn assign(target: &CExpr, value: CExpr) -> CStmt {
+    /// Markers from this one on are copies an edge carries.
+    const COPY: u32 = 0x1000;
+
+    struct Edges;
+
+    impl Placed for Edges {
+        fn block_of(&self, id: RenderObservationId) -> Option<u64> {
+            Some(u64::from(id.index() % COPY))
+        }
+
+        fn statement_of(&self, id: RenderObservationId) -> Option<RenderObservationId> {
+            Some(id)
+        }
+
+        fn written(&self) -> usize {
+            0
+        }
+
+        fn edge_copy(&self, id: RenderObservationId) -> bool {
+            id.index() >= COPY
+        }
+    }
+
+    fn write(target: &CExpr, value: CExpr) -> CStmt {
         CStmt::Expr(CExpr::assign(target.clone(), value))
+    }
+
+    /// An assignment the latch's edge carries.
+    fn assign(target: &CExpr, value: CExpr) -> CStmt {
+        marker(COPY, write(target, value))
     }
 
     fn latch(test: CExpr, stay: Vec<CStmt>) -> CStmt {
@@ -361,7 +402,7 @@ mod tests {
 
     /// The same, for the loop that is statement `at` of the outer block.
     fn body_after_at(mut root: CStmt, at: usize) -> (Vec<CStmt>, usize) {
-        let count = hoist(&mut root);
+        let count = hoist(&mut root, &Edges);
         let CStmt::Block(outer) = root else {
             panic!("a block");
         };
@@ -401,7 +442,7 @@ mod tests {
     fn read_for(depth: usize) -> (usize, usize) {
         let mut root = nested(&mut Fixture::new(), depth);
         let before = COUNTED.with(std::cell::Cell::get);
-        let written = hoist(&mut root);
+        let written = hoist(&mut root, &Edges);
         (written, COUNTED.with(std::cell::Cell::get) - before)
     }
 
@@ -473,7 +514,7 @@ mod tests {
             vec![read_x(), inner(), outer_latch()],
         ] {
             let mut root = CStmt::Block(vec![looped(body)]);
-            assert_eq!(hoist(&mut root), 1);
+            assert_eq!(hoist(&mut root, &Edges), 1);
             let CStmt::Block(top) = &root else {
                 panic!("a block");
             };
@@ -484,7 +525,7 @@ mod tests {
         }
         // Read nowhere else: both write their copies first.
         let mut root = CStmt::Block(vec![looped(vec![inner(), outer_latch()])]);
-        assert_eq!(hoist(&mut root), 2);
+        assert_eq!(hoist(&mut root, &Edges), 2);
     }
 
     #[test]
@@ -528,7 +569,7 @@ mod tests {
         ]);
         let mut whole = BTreeMap::new();
         tree.visit_exprs(&mut |root| reads_of(root, &mut |s| *whole.entry(s).or_insert(0) += 1));
-        let mut scan = Scan::default();
+        let mut scan = Scan::new(&Edges);
         scan.stmt(&tree);
         assert_eq!(scan.reads, whole);
         assert_eq!(whole.len(), 11, "every name but the assigned one is read");
@@ -548,7 +589,7 @@ mod tests {
         assert_eq!(count, 1);
         // work; x = a; if (...) {} else { break; }
         assert_eq!(stmts.len(), 3, "{stmts:?}");
-        assert!(matches!(&stmts[1], CStmt::Expr(_)));
+        assert!(matches!(stmts[1].unobserved(), CStmt::Expr(_)));
         let CStmt::Observed { stmt, .. } = &stmts[2] else {
             panic!("the test stays marked");
         };
@@ -556,6 +597,30 @@ mod tests {
             panic!("an if");
         };
         assert!(matches!(&**then_body, CStmt::Empty));
+    }
+
+    #[test]
+    fn a_copy_that_carries_its_blocks_marker_moves_with_it() {
+        // An edge's copy is a statement of its block: the marker the certificate counts goes with it.
+        let mut f = Fixture::new();
+        let (x, a, n) = (f.var("x"), f.var("a"), f.var("n"));
+        let test = CExpr::binary(BinaryOp::Ne, a.clone(), n);
+        let copy = assign(&x, a);
+        let stay = vec![copy.clone(), CStmt::Continue];
+        let (stmts, count) = body_after(forever(vec![work(0x20), latch(test, stay)]));
+        assert_eq!(count, 1);
+        assert_eq!(stmts[1], copy);
+    }
+
+    #[test]
+    fn an_assignment_a_block_writes_is_no_copy_an_edge_carries() {
+        // The arm is the text of another block that assigns; hoisted, that block would run before the test.
+        let mut f = Fixture::new();
+        let (x, a, n) = (f.var("x"), f.var("a"), f.var("n"));
+        let test = CExpr::binary(BinaryOp::Ne, a.clone(), n);
+        let own = marker(0x30, write(&x, a));
+        let root = forever(vec![work(0x20), latch(test, vec![own, CStmt::Continue])]);
+        assert_eq!(body_after(root).1, 0);
     }
 
     #[test]
@@ -617,7 +682,7 @@ mod tests {
         else {
             panic!("a block");
         };
-        outer.insert(0, assign(&x, CExpr::int(0)));
+        outer.insert(0, write(&x, CExpr::int(0)));
         outer.push(CStmt::Return(Some(CExpr::int(1))));
         let (_, count) = body_after_at(CStmt::Block(outer), 1);
         assert_eq!(count, 1);

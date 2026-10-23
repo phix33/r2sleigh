@@ -42,12 +42,22 @@ struct Scope {
 /// a block's text they make.
 pub(crate) struct Occurrences {
     blocks: Vec<u64>,
-    addresses: Vec<u64>,
+    addresses: Vec<Option<u64>>,
+    /// By marker: the marker the placement wrote that this one stands for (itself, if it is one).
+    origins: Vec<u32>,
+    written: usize,
 }
 
 impl Occurrences {
-    pub(crate) const fn new(blocks: Vec<u64>, addresses: Vec<u64>) -> Self {
-        Self { blocks, addresses }
+    pub(crate) fn new(blocks: Vec<u64>, addresses: Vec<Option<u64>>) -> Self {
+        let written = blocks.len();
+        let origins = (0..written as u32).collect();
+        Self {
+            blocks,
+            addresses,
+            origins,
+            written,
+        }
     }
 
     /// The block a marker was written for.
@@ -56,7 +66,7 @@ impl Occurrences {
     }
 
     /// The instruction each marker's line accounts for, by marker.
-    pub(crate) fn into_addresses(self) -> Vec<u64> {
+    pub(crate) fn into_addresses(self) -> Vec<Option<u64>> {
         self.addresses
     }
 
@@ -71,6 +81,7 @@ impl Occurrences {
         let copy = RenderObservationId::from_dense_index(self.blocks.len());
         self.blocks.push(self.blocks[at]);
         self.addresses.push(self.addresses[at]);
+        self.origins.push(self.origins[at]);
         copy
     }
 
@@ -83,6 +94,26 @@ impl Occurrences {
     pub(crate) fn retract(&mut self, issued: usize) {
         self.blocks.truncate(issued);
         self.addresses.truncate(issued);
+        self.origins.truncate(issued);
+    }
+}
+
+impl super::certify::Placed for Occurrences {
+    fn block_of(&self, id: RenderObservationId) -> Option<u64> {
+        Self::block_of(self, id)
+    }
+
+    fn statement_of(&self, id: RenderObservationId) -> Option<RenderObservationId> {
+        let origin = *self.origins.get(id.index() as usize)?;
+        Some(RenderObservationId::from_dense_index(origin as usize))
+    }
+
+    fn written(&self) -> usize {
+        self.written
+    }
+
+    fn edge_copy(&self, id: RenderObservationId) -> bool {
+        self.addresses.get(id.index() as usize) == Some(&None)
     }
 }
 
@@ -653,7 +684,7 @@ mod tests {
 
     /// Markers 0 and 1, for blocks 0x10 and 0x20 and their instructions 0x11 and 0x21.
     fn marks() -> Occurrences {
-        Occurrences::new(vec![0x10, 0x20], vec![0x11, 0x21])
+        Occurrences::new(vec![0x10, 0x20], vec![Some(0x11), Some(0x21)])
     }
 
     #[test]
@@ -662,7 +693,7 @@ mod tests {
         let copy = marks.copy_of(id(1));
         assert_ne!(copy, id(1));
         assert_eq!((marks.block_of(copy), marks.issued()), (Some(0x20), 3));
-        assert_eq!(marks.into_addresses(), [0x11, 0x21, 0x21]);
+        assert_eq!(marks.into_addresses(), [Some(0x11), Some(0x21), Some(0x21)]);
     }
 
     #[test]
@@ -694,6 +725,6 @@ mod tests {
         marks.retract(before);
         assert_eq!((marks.issued(), marks.block_of(copy)), (before, None));
         assert_eq!(marks.block_of(id(1)), Some(0x20));
-        assert_eq!(marks.into_addresses(), [0x11, 0x21]);
+        assert_eq!(marks.into_addresses(), [Some(0x11), Some(0x21)]);
     }
 }

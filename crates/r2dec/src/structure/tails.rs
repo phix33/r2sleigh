@@ -513,9 +513,10 @@ fn append_to_ends(stmt: &mut CStmt, ev: &Evidence<'_>, next: &mut dyn FnMut() ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::RenderObservationId;
     use crate::ast::{CExpr, CType};
     use crate::prelude::ResidualCause;
-    use crate::structure::certify::{StatementRole, certify};
+    use crate::structure::certify::{Placed, StatementRole, certify};
     use crate::structure::shape::shape;
     use crate::structure::support::{at, branch, cfg, cond, cond_branch, expr};
     use crate::symbol::ExternalKind;
@@ -604,6 +605,51 @@ mod tests {
         count(stmt, &|stmt| matches!(stmt, CStmt::Label(_)))
     }
 
+    /// The markers a statement of `stmt` carries.
+    fn markers(stmt: &CStmt, into: &mut BTreeSet<u32>) {
+        into.extend(stmt.observation_ids().iter().map(|id| id.index()));
+        match stmt.unobserved() {
+            CStmt::Block(stmts) => stmts.iter().for_each(|stmt| markers(stmt, into)),
+            CStmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                markers(then_body, into);
+                else_body.iter().for_each(|body| markers(body, into));
+            }
+            CStmt::For { body, .. } | CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
+                markers(body, into);
+            }
+            _ => {}
+        }
+    }
+
+    /// `occurrences` with only the markers the tree started with as statements the placement wrote.
+    struct Started<'a> {
+        occurrences: &'a Occurrences,
+        markers: BTreeSet<u32>,
+    }
+
+    impl Placed for Started<'_> {
+        fn block_of(&self, id: RenderObservationId) -> Option<u64> {
+            let started = id.index() >= 0x100 || self.markers.contains(&id.index());
+            self.occurrences.block_of(id).filter(|_| started)
+        }
+
+        fn statement_of(&self, id: RenderObservationId) -> Option<RenderObservationId> {
+            self.occurrences.statement_of(id)
+        }
+
+        fn written(&self) -> usize {
+            0x100
+        }
+
+        fn edge_copy(&self, id: RenderObservationId) -> bool {
+            self.occurrences.edge_copy(id)
+        }
+    }
+
     /// The tree shaped, and the certificate's reading of the result. `distinct` names the return
     /// blocks whose value is a merge of pairwise-distinct values; `names` maps labels to blocks.
     fn shaped(
@@ -613,12 +659,15 @@ mod tests {
         distinct: &[u64],
     ) -> (CStmt, crate::structure::certify::ControlCertificate) {
         let blocks = (0..0x100u64).collect::<Vec<_>>();
-        let mut occurrences = Occurrences::new(blocks.clone(), blocks);
+        let mut occurrences =
+            Occurrences::new(blocks.clone(), blocks.iter().map(|b| Some(*b)).collect());
         let distinct_return = |block: u64| distinct.contains(&block);
         let evidence = Evidence {
             never_returns: &never_returns,
             distinct_return: &distinct_return,
         };
+        let mut started = BTreeSet::new();
+        markers(&body, &mut started);
         let body = shape(&mut occurrences, &evidence, body);
         let label_block = |name: &str| {
             names
@@ -626,18 +675,21 @@ mod tests {
                 .find(|(label, _)| *label == name)
                 .map(|(_, block)| *block)
         };
+        let written = Started {
+            occurrences: &occurrences,
+            markers: started,
+        };
         let certificate = certify(
             &body,
             cfg,
             &DomTree::compute(cfg),
             cfg.entry,
-            &|id| occurrences.block_of(id),
+            &written,
             &label_block,
             &|stmt| match never_returns(stmt) {
                 true => StatementRole::Ends,
                 false => StatementRole::Plain,
             },
-            &|_| false,
         );
         (body, certificate)
     }
@@ -768,7 +820,8 @@ mod tests {
     fn a_return_something_still_jumps_to_is_not_copied_away() {
         // `join_returns` alone, on a tree whose label a `goto` still names: the block must stay.
         let blocks = (0..0x100u64).collect::<Vec<_>>();
-        let mut occurrences = Occurrences::new(blocks.clone(), blocks);
+        let mut occurrences =
+            Occurrences::new(blocks.clone(), blocks.iter().map(|b| Some(*b)).collect());
         let evidence = Evidence {
             never_returns: &never_returns,
             distinct_return: &|_| true,

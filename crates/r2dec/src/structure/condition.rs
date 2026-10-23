@@ -21,10 +21,6 @@ pub(crate) enum ChainFault {
     NotConditional {
         block: u64,
     },
-    /// A block the chain tests owes the program more than its branch.
-    NotInert {
-        block: u64,
-    },
     /// A block past the head is entered from outside the chain.
     Outside {
         block: u64,
@@ -53,7 +49,6 @@ impl ChainFault {
             Self::NodeBudget => "node-budget",
             Self::Shape => "shape",
             Self::NotConditional { .. } => "not-conditional",
-            Self::NotInert { .. } => "not-inert",
             Self::Outside { .. } => "outside",
             Self::Rendered { .. } => "rendered",
             Self::ExitCount { .. } => "exit-count",
@@ -69,9 +64,7 @@ impl std::fmt::Display for ChainFault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.clause())?;
         match self {
-            Self::NotConditional { block } | Self::NotInert { block } | Self::Outside { block } => {
-                write!(f, " {block:#x}")
-            }
+            Self::NotConditional { block } | Self::Outside { block } => write!(f, " {block:#x}"),
             Self::Rendered { block } => write!(f, " {block:#x}"),
             Self::ExitCount { found } => write!(f, " {found}"),
             _ => Ok(()),
@@ -426,6 +419,8 @@ pub(crate) struct Written {
     pub(crate) formula: Formula,
     /// By node: the block whose marker the atom carries. The head's is first.
     pub(crate) blocks: Vec<u64>,
+    /// By node: the markers the atom carries.
+    pub(crate) marks: Vec<Vec<RenderObservationId>>,
 }
 
 /// The single block a marker set names.
@@ -461,39 +456,49 @@ pub(crate) fn read(
     if !marked(test, block_of) {
         return Ok(None);
     }
-    let mut blocks = Vec::new();
-    let formula = read_into(test, true, block_of, &mut blocks)?;
-    match blocks.is_empty() {
+    let mut atoms = Vec::new();
+    let formula = read_into(test, true, block_of, &mut atoms)?;
+    match atoms.is_empty() {
         true => Err(ChainFault::Shape),
-        false => Ok(Some(Written { formula, blocks })),
+        false => {
+            let (blocks, marks) = atoms.into_iter().unzip();
+            Ok(Some(Written {
+                formula,
+                blocks,
+                marks,
+            }))
+        }
     }
 }
+
+/// An atom of a written test: its block and the markers it carries.
+type ReadAtom = (u64, Vec<RenderObservationId>);
 
 fn read_into(
     expr: &CExpr,
     positive: bool,
     block_of: &dyn Fn(RenderObservationId) -> Option<u64>,
-    blocks: &mut Vec<u64>,
+    atoms: &mut Vec<ReadAtom>,
 ) -> Result<Formula, ChainFault> {
     match expr {
         CExpr::Observed { ids, .. } => {
-            let block =
-                single_block(&ids.iter().collect::<Vec<_>>(), block_of).ok_or(ChainFault::Shape)?;
-            blocks.push(block);
-            Ok(Formula::atom(blocks.len() - 1, positive))
+            let marks: Vec<_> = ids.iter().collect();
+            let block = single_block(&marks, block_of).ok_or(ChainFault::Shape)?;
+            atoms.push((block, marks));
+            Ok(Formula::atom(atoms.len() - 1, positive))
         }
-        CExpr::Paren(inner) => read_into(inner, positive, block_of, blocks),
+        CExpr::Paren(inner) => read_into(inner, positive, block_of, atoms),
         CExpr::Unary {
             op: UnaryOp::Not,
             operand,
-        } => read_into(operand, !positive, block_of, blocks),
+        } => read_into(operand, !positive, block_of, atoms),
         CExpr::Binary {
             op: op @ (BinaryOp::And | BinaryOp::Or),
             left,
             right,
         } => {
-            let left = read_into(left, positive, block_of, blocks)?;
-            let right = read_into(right, positive, block_of, blocks)?;
+            let left = read_into(left, positive, block_of, atoms)?;
+            let right = read_into(right, positive, block_of, atoms)?;
             // Under a negation the connective flips, as the atoms did.
             Ok(match (*op == BinaryOp::And) == positive {
                 true => left.and(right),
@@ -511,8 +516,6 @@ pub(crate) trait Machine {
     /// A block's `(true, false)` targets, when it ends in a two-way branch.
     fn successors(&self, block: u64) -> Option<(u64, u64)>;
     fn arrives(&self, target: u64) -> Self::Exit;
-    /// r2ssa's statement that a block owes the program nothing but its branch.
-    fn inert(&self, block: u64) -> bool;
     fn entered_from_outside(&self, block: u64, chain: &BTreeSet<u64>) -> bool;
 }
 
@@ -532,9 +535,6 @@ pub(crate) fn exits<M: Machine>(
     for (index, block) in blocks.iter().enumerate() {
         let (on_true, on_false) =
             (machine.successors(*block)).ok_or(ChainFault::NotConditional { block: *block })?;
-        if index > 0 && !machine.inert(*block) {
-            return Err(ChainFault::NotInert { block: *block });
-        }
         if index > 0 && machine.entered_from_outside(*block, &members) {
             return Err(ChainFault::Outside { block: *block });
         }
@@ -582,18 +582,13 @@ pub(crate) struct Report {
     pub(crate) refused: Vec<(u64, ChainFault)>,
 }
 
-/// Write each condition chain of the placed tree as one test where the DAG proves out; `inert` is
-/// r2ssa's statement that a block owes nothing but its branch. At most `MAX_ATOMS` blocks per head.
-pub(crate) fn collapse(
-    body: &mut CStmt,
-    marks: &mut dyn Marks,
-    inert: &dyn Fn(u64) -> bool,
-) -> Report {
+/// Write each condition chain of the placed tree as one test where the DAG proves out: a block past
+/// the head is a test whose text is nothing else. At most `MAX_ATOMS` blocks per head.
+pub(crate) fn collapse(body: &mut CStmt, marks: &mut dyn Marks) -> Report {
     let mut references = BTreeMap::new();
     count_gotos(body, &mut references, 1);
     let mut pass = Pass {
         marks,
-        inert,
         references,
         report: Report::default(),
     };
@@ -640,7 +635,6 @@ fn count_gotos(stmt: &CStmt, into: &mut BTreeMap<String, isize>, by: isize) {
 
 struct Pass<'e> {
     marks: &'e mut dyn Marks,
-    inert: &'e dyn Fn(u64) -> bool,
     /// Gotos to each label in the tree as it now stands.
     references: BTreeMap<String, isize>,
     report: Report,
@@ -704,8 +698,7 @@ impl Pass<'_> {
         let mut regions = Regions::new();
         for (index, stmt) in stmts.iter().enumerate() {
             if let Some((label, test)) = labelled_test(stmt)
-                && let Some(block) = test_block(test, &*self.marks)
-                && (self.inert)(block)
+                && test_block(test, &*self.marks).is_some()
             {
                 regions.insert(label.to_owned(), index);
             }
@@ -727,7 +720,6 @@ impl Pass<'_> {
         };
         let explore = Explore {
             marks: &*self.marks,
-            inert: self.inert,
             stmts,
             after: at,
             regions,
@@ -1024,7 +1016,6 @@ impl Exit<'_> {
 /// A chain found in the tree, before any of it is changed.
 struct Explore<'s> {
     marks: &'s dyn Marks,
-    inert: &'s dyn Fn(u64) -> bool,
     stmts: &'s [CStmt],
     after: usize,
     regions: &'s Regions,
@@ -1090,13 +1081,13 @@ impl<'s> Explore<'s> {
         match sole(arm) {
             CStmt::Goto(label) => self.jump(label),
             CStmt::Continue => Ok(self.exit(Exit::Continue)),
-            inner => match test_block(inner, self.marks) {
-                Some(block) if (self.inert)(block) => Ok(Edge::Node(self.test_at(inner, None)?)),
-                _ => {
-                    self.exits.push(Exit::Body(arm));
-                    Ok(Edge::Exit(self.exits.len() - 1))
-                }
-            },
+            inner if test_block(inner, self.marks).is_some() => {
+                Ok(Edge::Node(self.test_at(inner, None)?))
+            }
+            _ => {
+                self.exits.push(Exit::Body(arm));
+                Ok(Edge::Exit(self.exits.len() - 1))
+            }
         }
     }
 
@@ -1359,18 +1350,14 @@ mod tests {
         )])
     }
 
-    fn run(stmts: Vec<CStmt>, inert: &dyn Fn(u64) -> bool) -> (Vec<CStmt>, Report, Fixture) {
+    fn run(stmts: Vec<CStmt>) -> (Vec<CStmt>, Report, Fixture) {
         let mut marks = Fixture { copies: Vec::new() };
         let mut body = CStmt::Block(stmts);
-        let report = collapse(&mut body, &mut marks, inert);
+        let report = collapse(&mut body, &mut marks);
         let CStmt::Block(stmts) = body else {
             unreachable!("a block stays a block")
         };
         (stmts, report, marks)
-    }
-
-    fn all_inert(_: u64) -> bool {
-        true
     }
 
     /// The test of the first statement as text, markers shown as `[block:...]`.
@@ -1404,7 +1391,7 @@ mod tests {
             test(0x10, region(test(0x20, body(0x30), jump("L"))), jump("L")),
             CStmt::Block(vec![CStmt::Label("L".to_owned()), body(0x40)]),
         ];
-        let (stmts, report, marks) = run(stmts, &all_inert);
+        let (stmts, report, marks) = run(stmts);
         assert_eq!(report.collapsed, 1, "{:?}", report.refused);
         let CStmt::Observed { ids, stmt } = &stmts[0] else {
             panic!("the head stays a marked statement");
@@ -1433,7 +1420,7 @@ mod tests {
             CStmt::Block(vec![CStmt::Label("L1".to_owned()), body(0x40)]),
             CStmt::Block(vec![CStmt::Label("L2".to_owned()), body(0x50)]),
         ];
-        let (stmts, report, marks) = run(stmts, &all_inert);
+        let (stmts, report, marks) = run(stmts);
         assert_eq!(report.collapsed, 1, "{:?}", report.refused);
         assert_eq!(test_text(&stmts[0], &marks), "([[16]:0x10] || [[32]:0x20])");
         let CStmt::If { then_body, .. } = stmts[0].unobserved() else {
@@ -1450,7 +1437,7 @@ mod tests {
             labelled("C", test(0x30, body(0x50), jump("Y"))),
             CStmt::Block(vec![CStmt::Label("Y".to_owned()), body(0x60)]),
         ];
-        let (stmts, report, marks) = run(stmts, &all_inert);
+        let (stmts, report, marks) = run(stmts);
         assert_eq!(report.collapsed, 1, "{:?}", report.refused);
         assert_eq!(stmts.len(), 2, "the shared region went with the chain");
         assert_eq!(
@@ -1471,7 +1458,7 @@ mod tests {
                 CStmt::Goto("C".to_owned()),
             ]),
         ];
-        let (stmts, report, _) = run(stmts, &all_inert);
+        let (stmts, report, _) = run(stmts);
         assert_eq!(report.collapsed, 0);
         assert_eq!(
             report.refused,
@@ -1481,24 +1468,19 @@ mod tests {
     }
 
     #[test]
-    fn a_block_that_owes_more_than_its_branch_or_renders_text_is_no_member() {
+    fn a_block_that_renders_text_is_no_member() {
         let chain = |inner: CStmt| {
             vec![
                 test(0x10, region(inner), jump("L")),
                 CStmt::Block(vec![CStmt::Label("L".to_owned()), body(0x40)]),
             ]
         };
-        // The second block is not inert (r2ssa says it owes a load, say).
-        let (_, report, _) = run(chain(test(0x20, body(0x30), jump("L"))), &|block| {
-            block != 0x20
-        });
-        assert_eq!(report.collapsed, 0);
         // The second block renders a statement before its test.
         let text = CStmt::Block(vec![
             marker(0x20, CStmt::Expr(CExpr::int(1))),
             test(0x20, body(0x30), jump("L")),
         ]);
-        let (_, report, _) = run(chain(text), &all_inert);
+        let (_, report, _) = run(chain(text));
         assert_eq!(report.collapsed, 0);
         assert!(
             report.refused.is_empty(),
@@ -1514,7 +1496,7 @@ mod tests {
             test(0x10, region(test(0x20, body(0x30), copy)), jump("L")),
             CStmt::Block(vec![CStmt::Label("L".to_owned()), body(0x40)]),
         ];
-        let (_, report, _) = run(stmts, &all_inert);
+        let (_, report, _) = run(stmts);
         assert_eq!(report.collapsed, 0);
         assert_eq!(report.refused, [(0x10, ChainFault::ExitCount { found: 3 })]);
     }
@@ -1527,7 +1509,7 @@ mod tests {
             region(test(0x20, jump("X"), jump("Y"))),
             region(test(0x30, jump("X"), jump("Y"))),
         )];
-        let (_, report, _) = run(stmts, &all_inert);
+        let (_, report, _) = run(stmts);
         assert_eq!(report.collapsed, 0);
         assert_eq!(report.refused, [(0x10, ChainFault::NotShortCircuit)]);
     }
@@ -1702,7 +1684,7 @@ mod tests {
             stmts.push(CStmt::Block(vec![CStmt::Label(label), body(tail)]));
         }
         let before = INDEXED.with(std::cell::Cell::get);
-        let (_, report, _) = run(stmts, &all_inert);
+        let (_, report, _) = run(stmts);
         assert_eq!(report.collapsed, chains as usize, "{:?}", report.refused);
         INDEXED.with(std::cell::Cell::get) - before
     }
@@ -1736,7 +1718,7 @@ mod tests {
             stmts.extend(chain(head, label));
         }
         stmts.push(CStmt::Block(vec![CStmt::Label("Y".to_owned()), body(0x60)]));
-        let (stmts, report, marks) = run(stmts, &all_inert);
+        let (stmts, report, marks) = run(stmts);
         assert_eq!(report.collapsed, 3, "{:?}", report.refused);
         assert_eq!(
             stmts.len(),
@@ -1768,7 +1750,7 @@ mod tests {
             ),
             CStmt::Block(vec![CStmt::Label("Y".to_owned()), body(0x60)]),
         ];
-        let (stmts, report, marks) = run(stmts, &all_inert);
+        let (stmts, report, marks) = run(stmts);
         assert_eq!(report.collapsed, 1, "{:?}", report.refused);
         assert_eq!(report.refused, []);
         assert_eq!(stmts.len(), 2);
@@ -1790,7 +1772,7 @@ mod tests {
             test(0x10, body(0x50), inner),
             CStmt::Block(vec![CStmt::Label("L".to_owned()), body(0x60)]),
         ];
-        let (stmts, report, marks) = run(stmts, &all_inert);
+        let (stmts, report, marks) = run(stmts);
         assert_eq!(report.collapsed, 1, "{:?}", report.refused);
         let CStmt::If { else_body, .. } = stmts[0].unobserved() else {
             panic!("the outer test stays");

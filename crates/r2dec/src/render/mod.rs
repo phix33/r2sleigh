@@ -132,11 +132,7 @@ pub fn render(
     // Each marker names the instruction its statement was written for, so each line names its own.
     ready.seal_observation_markers(
         &mut crate::codegen::ObservationSealAuthority::staged(),
-        crate::codegen::ObservationLocations::new(
-            (occurrences.into_addresses().into_iter())
-                .map(Some)
-                .collect(),
-        ),
+        crate::codegen::ObservationLocations::new(occurrences.into_addresses()),
     );
     let emission = CodeGenerator::new(CodeGenConfig::default()).emit(&ready, input.ptr_bits());
     Ok(Rendered {
@@ -210,8 +206,7 @@ fn structured(
         }
     };
     let chains = |body: &mut CStmt, marks: &mut Occurrences| {
-        let inert = |addr: u64| owes_only_its_branch(input, addr);
-        crate::structure::condition::collapse(body, marks, &inert).collapsed != 0
+        crate::structure::condition::collapse(body, marks).collapsed != 0
     };
     let body = stage(
         "condition chains",
@@ -222,8 +217,8 @@ fn structured(
     );
     // The readability rewrites below copy a block's text as a new occurrence of that block.
     let body = crate::structure::shape::shape(marks, evidence, body);
-    let body = stage("latch copies", body, marks, &certified, |body, _| {
-        crate::structure::latch::hoist(body) != 0
+    let body = stage("latch copies", body, marks, &certified, |body, marks| {
+        crate::structure::latch::hoist(body, marks) != 0
     });
     stage("loop rotation", body, marks, &certified, |body, marks| {
         crate::structure::rotate::rotate(body, marks) != 0
@@ -248,10 +243,9 @@ fn control_certificate(
         function.cfg(),
         function.domtree(),
         function.root(),
-        &|id| occurrences.block_of(id),
+        occurrences,
         &|name| label_block.get(name).copied(),
         role,
-        &|addr| owes_only_its_branch(input, addr),
     )
 }
 
@@ -301,14 +295,6 @@ fn stage(
             body
         }
     }
-}
-
-/// Whether the block at `addr` owes the program nothing but the branch it ends in (r2ssa).
-fn owes_only_its_branch(input: &RenderInput<'_>, addr: u64) -> bool {
-    let graph = input.graph();
-    graph
-        .block_id_for_addr(addr)
-        .is_some_and(|block| input.obligations().owes_only_its_branch(graph, block))
 }
 
 /// D1.1's selections, each arm converted to `x`'s type as its own assignment converted it.
@@ -470,7 +456,10 @@ mod tests {
     /// Markers 0 and 1 for blocks 0x10 and 0x20, the second on the body's one statement.
     fn start() -> (CStmt, Occurrences) {
         let body = CStmt::observe_all([id(1)], CStmt::Break);
-        (body, Occurrences::new(vec![0x10, 0x20], vec![0x11, 0x21]))
+        (
+            body,
+            Occurrences::new(vec![0x10, 0x20], vec![Some(0x11), Some(0x21)]),
+        )
     }
 
     /// A stage that writes a copy of the body under a marker of its own, and one more marker.
@@ -487,7 +476,7 @@ mod tests {
         let kept = stage("copies", body.clone(), &mut marks, &refuse, copies);
         assert_eq!(kept, body);
         assert_eq!((marks.issued(), marks.block_of(id(1))), (2, Some(0x20)));
-        assert_eq!(marks.into_addresses(), [0x11, 0x21]);
+        assert_eq!(marks.into_addresses(), [Some(0x11), Some(0x21)]);
     }
 
     #[test]

@@ -18,8 +18,8 @@ pub(super) struct Written {
     pub(super) labels: BTreeMap<u64, String>,
     /// By observation index: the block a marked statement was written for, which the certificate reads.
     pub(super) blocks: Vec<u64>,
-    /// By observation index: the instruction, which each emitted line names.
-    pub(super) addresses: Vec<u64>,
+    /// By observation index: the instruction, which each emitted line names; none for an edge's copy.
+    pub(super) addresses: Vec<Option<u64>>,
     /// Where the work control stopped the writing, if it did.
     pub(super) stopped: Option<crate::control::DecompileExecutionStop>,
 }
@@ -68,7 +68,7 @@ struct Writer<'w, 'i> {
     placement: &'w Placement<'i>,
     labels: BTreeMap<u64, String>,
     blocks: Vec<u64>,
-    addresses: Vec<u64>,
+    addresses: Vec<Option<u64>>,
 }
 
 impl<'i> Writer<'_, 'i> {
@@ -87,6 +87,15 @@ impl<'i> Writer<'_, 'i> {
 
     /// The same, naming the instruction at `at` as the one the statement's line accounts for.
     fn observe_at(&mut self, addr: u64, at: u64, stmt: CStmt) -> CStmt {
+        self.mark(addr, Some(at), stmt)
+    }
+
+    /// A copy an edge of block `addr` carries: the block's statement, which no instruction writes.
+    fn observe_copy(&mut self, addr: u64, stmt: CStmt) -> CStmt {
+        self.mark(addr, None, stmt)
+    }
+
+    fn mark(&mut self, addr: u64, at: Option<u64>, stmt: CStmt) -> CStmt {
         let id = RenderObservationId::from_dense_index(self.blocks.len());
         self.blocks.push(addr);
         self.addresses.push(at);
@@ -413,10 +422,10 @@ impl<'i> Writer<'_, 'i> {
             let call = (self.values).and_then(|values| values.tail_gap(from, resolution));
             return vec![self.trap(from, GapKind::TailTransferNotRendered(call))];
         }
-        let mut out = self
-            .values
-            .map(|values| values.copies(from, to))
-            .unwrap_or_default();
+        let copies = (self.values).map_or_else(Vec::new, |values| values.copies(from, to));
+        let mut out: Vec<CStmt> = (copies.into_iter())
+            .map(|copy| self.observe_copy(from, copy))
+            .collect();
         if let Some(values) = self.values {
             values.transferred(from);
         }
