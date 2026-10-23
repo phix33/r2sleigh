@@ -42,8 +42,12 @@ pub(super) struct Values<'a> {
     /// that points to its inferred structure.
     members: Vec<Option<CExpr>>,
     /// By value index: the definitions a named value owes before a read of it is a variable; a merge
-    /// owes one per forward edge in, and a back edge pays none (doc/adr-decompiler-rewrite.md, Merges).
+    /// owes one per early forward edge in, and a back edge pays none (doc/adr-decompiler-rewrite.md, Merges).
     owed: RefCell<Vec<u32>>,
+    /// The merges the last attempt read as variables on a late edge's promise and that edge gapped.
+    broken: RefCell<Vec<ValueId>>,
+    /// The merges that owe one definition more than any edge pays, which no read of them clears.
+    forced: r2ssa::dense::IdSet<ValueId>,
     /// The dominator tree and root, which tell a forward edge from a back edge.
     dom: &'a r2ssa::domtree::DomTree,
     root: u64,
@@ -783,6 +787,7 @@ impl<'a> Values<'a> {
         input: &RenderInput<'a>,
         tags: &super::tags::Tags,
         symbols: Rc<RefCell<SymbolTable>>,
+        forced: &r2ssa::dense::IdSet<ValueId>,
     ) -> Option<Self> {
         let artifact: &'a SsaArtifact = input.artifact();
         let graph = input.graph();
@@ -818,6 +823,8 @@ impl<'a> Values<'a> {
             declared: vec![false; graph.values.len()],
             members: Vec::new(),
             owed: RefCell::new(vec![1; graph.values.len()]),
+            broken: RefCell::new(Vec::new()),
+            forced: forced.clone(),
             dom: input.function().domtree(),
             root: input.function().root(),
             bound,
@@ -979,9 +986,13 @@ impl<'a> Values<'a> {
                 .borrow_mut()
                 .declare(name, c.clone(), SymbolRole::Carrier);
             self.names[output.0 as usize] = Some((id, ty));
+            let forced = u32::from(self.forced.contains(output));
             self.owed.get_mut()[output.0 as usize] = match inst.payload {
-                InstPayload::Phi { .. } => *forward[inst.block.0 as usize]
-                    .get_or_insert_with(|| self.forward_in(input, inst.block)),
+                InstPayload::Phi { .. } => {
+                    forced
+                        + *forward[inst.block.0 as usize]
+                            .get_or_insert_with(|| self.forward_in(input, inst.block))
+                }
                 InstPayload::Op(_) => 1,
             };
             self.locals.get_mut().push(CLocal {
@@ -993,8 +1004,8 @@ impl<'a> Values<'a> {
         }
     }
 
-    /// The forward edges into `block`, each a copy its merges owe: the placed predecessors it does not
-    /// dominate, at least one. `O(preds)`.
+    /// The copies a merge in `block` owes: one per placed predecessor it does not dominate that is
+    /// spelled before it; a later one pays after the first reads and is verified (`broken`). `O(preds)`.
     fn forward_in(&self, input: &RenderInput<'_>, block: r2ssa::BlockId) -> u32 {
         let Some(block) = self.graph.block(block) else {
             return 1;
@@ -1007,7 +1018,19 @@ impl<'a> Values<'a> {
             })
             .collect::<Vec<_>>();
         forward.dedup();
-        u32::try_from(forward.len()).map_or(u32::MAX, |n| n.max(1))
+        let early = (forward.iter())
+            .filter(|pred| self.graph.block_id_for_addr(**pred) < Some(block.id))
+            .count();
+        u32::try_from(if forward.is_empty() { 1 } else { early }).unwrap_or(u32::MAX)
+    }
+
+    /// The merges this attempt read as variables on a late edge's promise that the edge then broke:
+    /// the next attempt owes them one more, so no read of them is a variable. Sorted, once each.
+    pub(super) fn broken(&self) -> Vec<ValueId> {
+        let mut broken = self.broken.borrow().clone();
+        broken.sort_unstable();
+        broken.dedup();
+        broken
     }
 
     /// A frame object's address in the function's one frame array (D4), and its extent: the
@@ -2355,6 +2378,7 @@ impl<'a> Values<'a> {
             return Vec::new();
         };
         let forward = !self.dom.is_back_edge(from, to);
+        let late = forward && from_id > to_block.id;
         let mut copies = Vec::new();
         for inst in to_block.insts.iter().filter_map(|id| self.graph.inst(*id)) {
             let InstPayload::Phi { predecessors } = &inst.payload else {
@@ -2400,25 +2424,12 @@ impl<'a> Values<'a> {
             let (Some((source, attempt)), Some((name, ty))) =
                 (source, self.names[output.0 as usize].as_ref())
             else {
-                // The edge's gap stands for this merge and the value it could not carry.
-                self.residual.borrow_mut()[inst.0 as usize] = true;
-                if forward {
-                    r2il::refusal_evidence!(
-                        "gapped-forward-copy",
-                        "{from:#x} -> {to:#x} renders no copy, so every read of the merge stays residual"
-                    );
-                }
-                out.push(unrendered_copy(to));
+                out.push(self.gapped_copy((inst, output), (from, to), (forward, late)));
                 continue;
             };
             let copy = CStmt::Expr(source.clone());
-            if forward && from_id > to_block.id {
-                r2il::refusal_evidence!(
-                    "late-forward-edge",
-                    "{from:#x} -> {to:#x} pays a merge after {to:#x} was spelled, so its early reads stay residual"
-                );
-            }
-            self.account_copy(inst, output, attempt, (&copy, forward));
+            self.promised((from, to), late);
+            self.account_copy(inst, output, attempt, (&copy, forward && !late));
             match clobbers {
                 false => out.push(self.assign_value(output, *name, source)),
                 true => {
@@ -2432,19 +2443,50 @@ impl<'a> Values<'a> {
         out
     }
 
+    /// A late edge's copy rendered: the early reads of its merge were right to rest on it.
+    fn promised(&self, (from, to): (u64, u64), late: bool) {
+        if late {
+            r2il::refusal_evidence!(
+                "late-forward-edge",
+                "{from:#x} -> {to:#x} pays a merge after {to:#x} was spelled; its reads rest on the copy rendering"
+            );
+        }
+    }
+
+    /// The gap that stands for a merge and the value its copy could not carry. On a forward edge it keeps
+    /// the merge owed; on a late one it breaks the promise the merge's early reads were made on.
+    fn gapped_copy(
+        &self,
+        (inst, output): (InstId, ValueId),
+        (from, to): (u64, u64),
+        (forward, late): (bool, bool),
+    ) -> CStmt {
+        self.residual.borrow_mut()[inst.0 as usize] = true;
+        if forward {
+            r2il::refusal_evidence!(
+                "gapped-forward-copy",
+                "{from:#x} -> {to:#x} renders no copy, so every read of the merge stays residual"
+            );
+        }
+        if late && !self.forced.contains(output) {
+            self.broken.borrow_mut().push(output);
+        }
+        unrendered_copy(to)
+    }
+
     /// The merge `inst` has a copy on this edge, rendered whether or not `stmt` is written. Only a copy
-    /// on a forward edge pays what the merge owes, once per edge; a self copy rides a back edge.
+    /// that `pays` (on an early forward edge) lowers what the merge owes, once per edge.
     fn account_copy(
         &self,
         inst: InstId,
         output: ValueId,
         attempt: Attempt,
-        (stmt, forward): (&CStmt, bool),
+        (stmt, pays): (&CStmt, bool),
     ) {
         *self.pending.borrow_mut() = attempt;
         self.mark(inst);
         self.residual_in(inst, stmt);
-        if let (true, Some(owed)) = (forward, self.owed.borrow_mut().get_mut(output.0 as usize)) {
+        if let (true, Some(owed)) = (pays, self.owed.borrow_mut().get_mut(output.0 as usize)) {
             debug_assert!(*owed > 0, "a forward edge pays a merge once");
             *owed = owed.saturating_sub(1);
         }

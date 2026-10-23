@@ -74,9 +74,7 @@ pub fn render(
     let work = DecompileWorkControl::new(control, DecompileWorkPhase::Structuring);
     work.poll()?;
     let name = rendered_name_of(input.name(), input.function().root());
-    let mut c = CFunction::new(name, result_type(input));
     let tags = tags::Tags::of(input);
-    let values = values::Values::new(input, &tags, std::rc::Rc::clone(&c.symbols));
     let function = input.function();
     let placement = crate::structure::place::Placement::compute(
         function.cfg(),
@@ -85,7 +83,7 @@ pub fn render(
         function.root(),
     );
     let order = crate::structure::place::placed_in_order(function);
-    let spelled = spelled::spell(input, values.as_ref(), &order, &work)?;
+    let (mut c, values, spelled) = spell_function(input, &tags, &name, &order, &work)?;
     let written = control::write(input, spelled, &placement, &work);
     if let Some(stop) = written.stopped {
         return Err(stop.into());
@@ -150,6 +148,38 @@ pub fn render(
         ledger,
         stopped,
     })
+}
+
+/// D2 over every placed block. A late edge's copy is promised to render; when one gaps, spell again with
+/// that merge owing one more (ADR D58). Each attempt adds a merge to `forced`, so they end.
+fn spell_function<'a>(
+    input: &RenderInput<'a>,
+    tags: &tags::Tags,
+    name: &str,
+    order: &[u64],
+    work: &DecompileWorkControl<'_>,
+) -> Result<(CFunction, Option<values::Values<'a>>, spelled::Spelled), DecompileExecutionStop> {
+    let mut forced = r2ssa::dense::IdSet::new(input.graph().values.len());
+    loop {
+        let c = CFunction::new(name.to_owned(), result_type(input));
+        let values = values::Values::new(input, tags, std::rc::Rc::clone(&c.symbols), &forced);
+        let spelled = spelled::spell(input, values.as_ref(), order, work)?;
+        let broken = values
+            .as_ref()
+            .map(values::Values::broken)
+            .unwrap_or_default();
+        if broken.is_empty() {
+            return Ok((c, values, spelled));
+        }
+        r2il::refusal_evidence!(
+            "late-copy-gapped",
+            "{name}: {} merges read as variables on a promise a late copy broke; spelling again",
+            broken.len()
+        );
+        broken
+            .into_iter()
+            .for_each(|merge| _ = forced.insert(merge));
+    }
 }
 
 /// What the values stage declared for `c`, or that its parameters are unknown.

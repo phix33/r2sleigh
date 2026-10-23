@@ -455,3 +455,52 @@ fn a_merge_whose_forward_copies_all_render_reads_as_a_variable_in_every_order() 
         assert!(c.contains("return (uint64_t)rax_3;"), "{order:?}\n{c}");
     }
 }
+
+/// `xor eax, eax; test edi, edi; je y; x: add eax, 1; cmp eax, esi; jl y; ret; y: add eax, 2; cmp eax, edx;
+/// jl x; ret`: two ways into the cycle x, y, so neither dominates the other and one edge of it is late.
+const IRREDUCIBLE: &[u8] = &[
+    0x31, 0xc0, 0x85, 0xff, 0x74, 0x08, 0x83, 0xc0, 0x01, 0x39, 0xf0, 0x7c, 0x01, 0xc3, 0x83, 0xc0,
+    0x02, 0x39, 0xd0, 0x7c, 0xf1, 0xc3,
+];
+
+#[test]
+fn a_merge_entered_late_by_an_irreducible_edge_reads_as_a_variable_when_every_copy_renders() {
+    // The edge that closes the cycle is spelled after the reads of the merge it enters, and renders its
+    // copy, so those reads are defined; no write order and no spelling order changes that.
+    let natural = c_under(WriteOrder::Natural, IRREDUCIBLE);
+    assert!(!natural.contains("r2sleigh_residual_"), "{natural}");
+    for order in ORDERS {
+        let c = c_under(order, IRREDUCIBLE);
+        assert_eq!(verdicts_of(&c), verdicts_of(&natural), "{order:?}\n{c}");
+        assert!(!c.contains("r2sleigh_residual_"), "{order:?}\n{c}");
+    }
+}
+
+/// `sub rsp, 0x18; xor eax, eax; test edi, edi; je y; x: lea rax, [rsp + 8]; test esi, esi; jne y; add rsp,
+/// 0x18; ret; y: add eax, 1; test edx, edx; jne x; add rsp, 0x18; ret`: the late edge carries a frame address.
+const IRREDUCIBLE_GAPPED: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, 0x31, 0xc0, 0x85, 0xff, 0x74, 0x0e, 0x48, 0x8d, 0x44, 0x24, 0x08, 0x85,
+    0xf6, 0x75, 0x05, 0x48, 0x83, 0xc4, 0x18, 0xc3, 0x83, 0xc0, 0x01, 0x85, 0xd2, 0x75, 0xeb, 0x48,
+    0x83, 0xc4, 0x18, 0xc3,
+];
+
+#[test]
+fn a_merge_entered_late_by_a_gapped_copy_reads_as_a_residual_whatever_was_promised_before() {
+    // The reads of the merge are spelled before the late edge, as variables on its promise; the edge
+    // gaps, so the function is spelled again with that merge owed one more.
+    let natural = verdicts_of(&c_under(WriteOrder::Natural, IRREDUCIBLE_GAPPED));
+    let carried = natural.never_assigned.to_lowercase();
+    assert!(!carried.is_empty() && !carried.contains(','), "{natural:?}");
+    for order in ORDERS {
+        let c = c_under(order, IRREDUCIBLE_GAPPED);
+        assert_eq!(verdicts_of(&c), natural, "{order:?}\n{c}");
+        assert!(c.contains("ValuesNotRendered"), "{order:?}\n{c}");
+        let reads = reads_of(&c, &carried);
+        assert!(
+            reads
+                .iter()
+                .all(|line| line.contains("r2sleigh_residual_u64(")),
+            "{order:?}: {reads:?}\n{c}"
+        );
+    }
+}
