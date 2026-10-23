@@ -31,6 +31,7 @@ sleigh = ["r2engine/x86", "r2engine/arm", "r2engine/riscv"]
 # Count allocations and live bytes in the engine's counters; with R2S_ALLOCATIONS set, print the
 # count and the heap peak after a script (the timing gate).
 alloc-count = []
+placement_mutants = ["r2engine/placement_mutants"]
 # Profile the heap: dhat's allocator; with R2S_HEAP_PROFILE set, a script writes dhat-heap.json (`census.py heap`).
 dhat-heap = ["dep:dhat"]
 

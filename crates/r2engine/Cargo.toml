@@ -21,9 +21,11 @@ default = []
 x86 = ["r2sleigh-lift/x86"]
 arm = ["r2sleigh-lift/arm"]
 riscv = ["r2sleigh-lift/riscv"]
+placement_mutants = ["r2dec/placement_mutants"]
 
 [dev-dependencies]
 proptest = "1.12"
+r2dec = { path = "../r2dec", features = ["placement_mutants"] }
 r2sleigh-lift = { path = "../r2sleigh-lift", default-features = false, features = [
     "x86",
     "arm",

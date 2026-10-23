@@ -6,6 +6,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use r2ssa::domtree::DomTree;
 use r2ssa::natural_loops::NaturalLoop;
 
+use super::order::WriteOrder;
+
 /// Where every block and every edge of a function goes, decided before any
 /// text is written.
 pub(crate) struct Placement<'f> {
@@ -112,13 +114,18 @@ impl<'f> Placement<'f> {
         }
         let rpo = placement.rpo.clone();
         let by_rpo = |list: &mut Vec<u64>| list.sort_by_key(|addr| rpo.get(addr).copied());
+        let order = WriteOrder::current();
         for list in placement.merge_children.values_mut() {
             by_rpo(list);
+            order.merges(list);
         }
         for list in placement.exits.values_mut() {
             by_rpo(list);
+            order.exits(list);
         }
-        placement.inline_exits(&closed_subtrees(cfg, dom, &placed_set));
+        if order.inlines_exits() {
+            placement.inline_exits(&closed_subtrees(cfg, dom, &placed_set));
+        }
         for from in cfg.block_addrs() {
             if !placed(from) {
                 continue;
@@ -432,5 +439,142 @@ mod tests {
             assert_eq!(placement.edge(0x20, 0x60), EdgeShape::Goto);
             assert!(!placement.labelled().contains(&0x70));
         });
+    }
+}
+
+#[cfg(all(test, feature = "placement_mutants"))]
+mod orders {
+    use super::*;
+    use crate::placement_mutants::{WriteOrder, with_write_order};
+    use crate::structure::support::{branch, cfg, cond_branch};
+    use r2ssa::cfg::{BlockTerminator, CFG};
+    use r2ssa::natural_loops::NaturalLoops;
+
+    const RETURN: BlockTerminator = BlockTerminator::Return;
+
+    /// Run `check` on the placement of `cfg` written in `order`.
+    fn under(order: WriteOrder, cfg: &CFG, check: impl FnOnce(&Placement<'_>)) {
+        let dom = DomTree::compute(cfg);
+        let loops = NaturalLoops::compute(cfg, &dom);
+        with_write_order(order, || {
+            check(&Placement::compute(cfg, &dom, &loops, cfg.entry));
+        });
+    }
+
+    /// A loop 0x20/0x30 leaving for the returns 0x40 (from its header) and 0x50 (from 0x30), which both
+    /// go on to the return 0x60: the loop's exits are 0x40, 0x50 and 0x60.
+    fn three_exits() -> CFG {
+        cfg(
+            0x10,
+            &[
+                (0x10, branch(0x20)),
+                (0x20, cond_branch(0x30, 0x40)),
+                (0x30, cond_branch(0x20, 0x50)),
+                (0x40, branch(0x60)),
+                (0x50, branch(0x60)),
+                (0x60, RETURN),
+            ],
+        )
+    }
+
+    /// An entry that branches two ways to two blocks that both go to 0x40 and 0x50, which both go to 0x60:
+    /// the entry's region holds the merges 0x40, 0x50 and 0x60.
+    fn three_merges() -> CFG {
+        cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x30)),
+                (0x20, cond_branch(0x40, 0x50)),
+                (0x30, cond_branch(0x40, 0x50)),
+                (0x40, branch(0x60)),
+                (0x50, branch(0x60)),
+                (0x60, RETURN),
+            ],
+        )
+    }
+
+    #[test]
+    fn keeping_the_exits_inlines_none() {
+        let loop_exits = cfg(
+            0x10,
+            &[
+                (0x10, branch(0x20)),
+                (0x20, cond_branch(0x30, 0x40)),
+                (0x30, cond_branch(0x20, 0x50)),
+                (0x40, RETURN),
+                (0x50, RETURN),
+            ],
+        );
+        under(WriteOrder::Natural, &loop_exits, |placement| {
+            assert_eq!(placement.exits_of(0).len(), 1);
+            assert!(placement.inlined.len() == 1 && placement.labelled().len() == 1);
+        });
+        under(WriteOrder::KeepExits, &loop_exits, |placement| {
+            assert_eq!(placement.exits_of(0), [0x40, 0x50]);
+            assert!(placement.inlined.is_empty());
+            assert_eq!(placement.labelled(), &BTreeSet::from([0x40, 0x50]));
+        });
+    }
+
+    #[test]
+    fn reversing_the_exits_reverses_the_exits_of_each_loop() {
+        under(WriteOrder::Natural, &three_exits(), |placement| {
+            assert_eq!(placement.exits_of(0), [0x40, 0x50, 0x60]);
+        });
+        under(WriteOrder::ExitsReversed, &three_exits(), |placement| {
+            assert_eq!(placement.exits_of(0), [0x60, 0x50, 0x40]);
+        });
+    }
+
+    #[test]
+    fn reversing_the_merges_reverses_the_merges_of_each_region() {
+        let natural = {
+            let mut found = Vec::new();
+            under(WriteOrder::Natural, &three_merges(), |placement| {
+                found = placement.merges_in(0x10).to_vec();
+                assert_eq!(found.len(), 3);
+                assert!(
+                    found
+                        .windows(2)
+                        .all(|pair| placement.rpo_of(pair[0]) < placement.rpo_of(pair[1]))
+                );
+            });
+            found
+        };
+        let reversed = natural.iter().rev().copied().collect::<Vec<_>>();
+        under(WriteOrder::MergesReversed, &three_merges(), |placement| {
+            assert_eq!(placement.merges_in(0x10), reversed);
+        });
+    }
+
+    /// The exits of the first loop and the merges of the entry's region, written in `order`.
+    fn lists(order: WriteOrder, cfg: &CFG) -> [Vec<u64>; 2] {
+        let mut found = [Vec::new(), Vec::new()];
+        under(order, cfg, |p| {
+            found = [p.exits_of(0).to_vec(), p.merges_in(0x10).to_vec()];
+        });
+        found
+    }
+
+    #[test]
+    fn only_the_order_asked_for_moves_a_placement() {
+        // Each order moves the one list it names and leaves the other as it was.
+        for graph in [three_exits(), three_merges()] {
+            let natural = lists(WriteOrder::Natural, &graph);
+            assert_eq!(lists(WriteOrder::MergesReversed, &graph)[0], natural[0]);
+            assert_eq!(lists(WriteOrder::ExitsReversed, &graph)[1], natural[1]);
+            assert_eq!(lists(WriteOrder::KeepExits, &graph)[1], natural[1]);
+        }
+    }
+
+    #[test]
+    fn a_write_order_holds_only_inside_its_scope() {
+        with_write_order(WriteOrder::ExitsReversed, || {
+            with_write_order(WriteOrder::KeepExits, || {
+                assert_eq!(WriteOrder::current(), WriteOrder::KeepExits);
+            });
+            assert_eq!(WriteOrder::current(), WriteOrder::ExitsReversed);
+        });
+        assert_eq!(WriteOrder::current(), WriteOrder::Natural);
     }
 }
