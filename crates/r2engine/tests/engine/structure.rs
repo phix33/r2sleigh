@@ -223,10 +223,8 @@ fn a_copy_stays_on_its_arm_when_the_test_reads_the_variable_it_writes() {
     assert!(c.contains("!= (uint32_t)arg1"), "{c}");
 }
 
-/// A loop with two ways out before its latch, both to a tail of five stores that reads the index:
-/// `xor eax, eax; top: movzx r8d, byte [rdi + rax]; cmp r8b, 0x2c; je b; test r8b, r8b; je early;
-/// mov [rdx], r8b; jmp latch; b: test r8b, r8b; je early; mov [rdx + 1], r8b; latch: lea ecx, [rax + 1];
-/// mov eax, ecx; cmp eax, esi; jne top; mov eax, -1; ret; early: mov [rdx + 2..6], al; ret`
+/// A loop with two ways out before its latch (`je early` twice) to a tail of five stores that reads the index,
+/// and a latch `lea ecx, [rax + 1]; mov eax, ecx; cmp eax, esi; jne top`.
 const TAIL_READS_THE_COPY_TARGET: &[u8] = &[
     0x31, 0xc0, 0x44, 0x0f, 0xb6, 0x04, 0x07, 0x41, 0x80, 0xf8, 0x2c, 0x74, 0x0a, 0x45, 0x84, 0xc0,
     0x74, 0x1f, 0x44, 0x88, 0x02, 0xeb, 0x09, 0x45, 0x84, 0xc0, 0x74, 0x15, 0x44, 0x88, 0x42, 0x01,

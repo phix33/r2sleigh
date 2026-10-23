@@ -2431,9 +2431,8 @@ mod tests {
 
     #[test]
     fn the_values_of_a_selection_carry_the_statements_of_their_blocks() {
-        // The triangle `test; je join; mov eax, 5; join:` as `x = c ? 0x1000 : 5`: the taken value is the
-        // test block's copy on that edge (marker 1), the other the empty block 0x20 (marker 2) and its copy
-        // (marker 3). Each block is written whole, though none of those markers stands at a statement.
+        // `x = c ? 0x1000 : 5` for a triangle: the values carry the test block's copy (marker 1) and block 0x20
+        // with its copy (markers 2, 3). Each block is written whole, though none stands at a statement.
         let placed = written(&[0x10, 0x10, 0x20, 0x20, 0x40], &[1, 3]);
         let cfg = cfg(
             0x10,
