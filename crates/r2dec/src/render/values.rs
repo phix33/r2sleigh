@@ -1,7 +1,7 @@
 //! D2: which values the text computes and where (doc/adr-decompiler-rewrite.md, "D2 and D3, as
 //! they are built"). Every value is its own local, so a term is valid wherever its producer dominates.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -51,6 +51,9 @@ pub(super) struct Values<'a> {
     /// The dominator tree and root, which tell a forward edge from a back edge.
     dom: &'a r2ssa::domtree::DomTree,
     root: u64,
+    /// The block whose text is being spelled: a name reads as a variable only where its definition
+    /// has run (doc/adr-decompiler-rewrite.md, "D2's spelling order").
+    reading: Cell<u64>,
     /// By instruction index: whether a statement assigns the instruction's output where it stands.
     bound: Vec<bool>,
     /// The frame array each stack object a spelled term names is declared as, on first use.
@@ -827,6 +830,7 @@ impl<'a> Values<'a> {
             forced: forced.clone(),
             dom: input.function().domtree(),
             root: input.function().root(),
+            reading: Cell::new(input.function().root()),
             bound,
             frame: super::frame::Frame::of(artifact),
             frame_array: RefCell::new(None),
@@ -1159,14 +1163,24 @@ impl<'a> Values<'a> {
     }
 
     /// A name as its class reads it: a parameter declared a pointer is read as its word, and a name
-    /// still owed a definition (a gapped copy, or a write not yet spelled) is never assigned.
+    /// still owed a definition or defined out of this block's scope is never assigned.
     fn read_name(&self, value: ValueId, name: SymbolId, held: &MachineType) -> Option<CExpr> {
-        if self.owed.borrow().get(value.0 as usize).copied() != Some(0) {
+        let owed = self.owed.borrow().get(value.0 as usize).copied();
+        let at = self.reading.get();
+        let scope = || self.artifact.value_defined_before(value, at, usize::MAX);
+        if let Err(cause) = variable_or_residual(owed == Some(0), scope) {
             let read = crate::prelude::residual(
                 &terms::c_type(held)?,
                 crate::prelude::ResidualCause::NeverAssigned,
             );
-            self.unassigned_read(value, super::proof::UnassignedCause::Unassigned, held);
+            if cause == super::proof::UnassignedCause::NotDominated {
+                r2il::refusal_evidence!(
+                    "read-not-dominated",
+                    "{} is read in {at:#x}, which its definition does not dominate",
+                    self.graph.var(value).display_name()
+                );
+            }
+            self.unassigned_read(value, cause, held);
             return read;
         }
         let var = CExpr::var(name);
@@ -1174,6 +1188,11 @@ impl<'a> Values<'a> {
             Some(true) => Some(CExpr::cast(terms::c_type(held)?, var)),
             _ => Some(var),
         }
+    }
+
+    /// Spell the text of the block at `addr` from here: its names are read there.
+    pub(super) fn enter(&self, addr: u64) {
+        self.reading.set(addr);
     }
 
     /// The variable `expr` reads as its word, where the variable is declared `to` already and the
@@ -2870,8 +2889,42 @@ fn writes_value(op: &SSAOp<ValueId>) -> bool {
         && op.dst().is_some()
 }
 
+/// Whether a bound name reads as its variable: its writes are all spelled (`assigned`) and its
+/// definition stands behind the read (`scope`, asked only then); else why it is a residual.
+fn variable_or_residual(
+    assigned: bool,
+    scope: impl FnOnce() -> bool,
+) -> Result<(), super::proof::UnassignedCause> {
+    use super::proof::UnassignedCause;
+    if !assigned {
+        Err(UnassignedCause::Unassigned)
+    } else if !scope() {
+        Err(UnassignedCause::NotDominated)
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::proof::UnassignedCause;
+
+    /// A name read where its definition does not dominate is a residual, however many of its writes
+    /// were spelled before: reverse postorder is not dominance (ROADMAP D68).
+    #[test]
+    fn a_name_is_a_variable_only_where_it_is_assigned_and_its_definition_stands_behind_the_read() {
+        assert_eq!(super::variable_or_residual(true, || true), Ok(()));
+        assert_eq!(
+            super::variable_or_residual(true, || false),
+            Err(UnassignedCause::NotDominated)
+        );
+        // A name still owed a write is unassigned, and scope is not asked.
+        assert_eq!(
+            super::variable_or_residual(false, || panic!("asked")),
+            Err(UnassignedCause::Unassigned)
+        );
+    }
+
     /// A declared name another language allows can still be a C keyword or reserved spelling.
     #[test]
     fn a_declared_name_c_reserves_is_no_identifier() {

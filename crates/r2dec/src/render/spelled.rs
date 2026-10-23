@@ -124,6 +124,9 @@ impl<'i> Spelling<'_, 'i> {
     /// A block's statements, then its terminator in the order it has always been spelled: each edge
     /// (so a copy is set before the test reads), then the operand it branches on.
     fn block(&self, addr: u64) -> BlockText {
+        if let Some(values) = self.values {
+            values.enter(addr);
+        }
         let statements = self.statements(addr);
         let Some(terminator) = self
             .input
