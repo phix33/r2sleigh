@@ -1,52 +1,18 @@
 //! The import-stub route: the function at an address the program states is an import's stub renders
 //! as its declaration, where its body is that one transfer (doc/adr-decompiler-rewrite.md).
 
-/// The stub at `prepared`'s entry for `stated`, the import the program says that address is, where
-/// the body is only the transfer. A body that merely ends in one is no stub.
+/// The stub at `prepared`'s entry, where the program says that address is an import's and the body
+/// is only the transfer to that import. A body that merely ends in one, or goes to another, is no stub.
 pub(crate) fn import_stub(
     prepared: &r2ssa::SsaArtifact,
     facts: &r2types::FunctionFacts,
-    stated: &str,
+    program: &dyn crate::native::Program,
 ) -> Option<r2types::ImportStub> {
-    let certificates = prepared.certificates();
-    let [callsite] = certificates.callsites.values().collect::<Vec<_>>()[..] else {
-        r2il::refusal_evidence!(
-            "import-stub-declaration",
-            "{:#x}: {} call sites, not one",
-            prepared.function().entry,
-            certificates.callsites.len()
-        );
-        return None;
-    };
-    if callsite.transfer != r2ssa::CallSiteTransfer::TailCall || !certificates.returns.is_empty() {
-        r2il::refusal_evidence!(
-            "import-stub-declaration",
-            "{:#x}: transfer {:?}, {} return certificates",
-            prepared.function().entry,
-            callsite.transfer,
-            certificates.returns.len()
-        );
-        return None;
-    }
-    let graph = prepared.graph();
-    let observable = observable_beside(prepared, callsite.at);
-    if let Some(inst) = observable {
-        r2il::refusal_evidence!(
-            "import-stub-declaration",
-            "{:#x}: the body defines observable state beside the transfer: {:?} -> {:?} caller_supplied={}",
-            prepared.function().entry,
-            inst.payload,
-            inst.output
-                .and_then(|output| graph.value(output))
-                .map(|value| (value.var.display_name(), value.canonical_storage)),
-            inst.output
-                .is_some_and(|output| graph.caller_supplied(output))
-        );
-        return None;
-    }
+    let stated = program.import_at(prepared.function().entry)?;
+    let at = lone_transfer(prepared)?;
     let Some(identity) = facts
         .callee_resolution()
-        .and_then(|resolution| resolution.identity_for_callsite(callsite.at))
+        .and_then(|resolution| resolution.identity_for_callsite(at))
     else {
         r2il::refusal_evidence!(
             "import-stub-declaration",
@@ -70,17 +36,72 @@ pub(crate) fn import_stub(
         );
         return None;
     }
+    // The address the transfer reaches must be bound to the stated import: the container says which,
+    // so a body that goes to another import (a patched stub) is a body, not this import's stub.
+    let bound = identity
+        .target_addr
+        .and_then(|target| program.import_at(target));
+    if bound.as_ref() != Some(&stated) {
+        r2il::refusal_evidence!(
+            "import-stub-declaration",
+            "{:#x}: stated as the stub of `{stated}`, the transfer goes to {:?}, bound to {:?}",
+            prepared.function().entry,
+            identity.target_addr.map(|target| format!("{target:#x}")),
+            bound
+        );
+        return None;
+    }
     // The signature certified for this call site is the one a caller's call renders with: the
     // import's declaration at the slot the stub jumps through; the identity's own is by name.
     let certified = facts
         .callsites()
-        .and_then(|callsites| callsites.by_callsite.get(callsite.at))
+        .and_then(|callsites| callsites.by_callsite.get(at))
         .and_then(|fact| fact.callee_signature.clone());
     Some(r2types::ImportStub {
         entry: prepared.function().entry,
-        name: stated.to_owned(),
+        name: stated,
         signature: certified.or_else(|| identity.signature.clone()),
     })
+}
+
+/// The one call site of a body that is only a tail transfer, with nothing a caller observes beside it.
+fn lone_transfer(prepared: &r2ssa::SsaArtifact) -> Option<r2ssa::InstId> {
+    let certificates = prepared.certificates();
+    let [callsite] = certificates.callsites.values().collect::<Vec<_>>()[..] else {
+        r2il::refusal_evidence!(
+            "import-stub-declaration",
+            "{:#x}: {} call sites, not one",
+            prepared.function().entry,
+            certificates.callsites.len()
+        );
+        return None;
+    };
+    if callsite.transfer != r2ssa::CallSiteTransfer::TailCall || !certificates.returns.is_empty() {
+        r2il::refusal_evidence!(
+            "import-stub-declaration",
+            "{:#x}: transfer {:?}, {} return certificates",
+            prepared.function().entry,
+            callsite.transfer,
+            certificates.returns.len()
+        );
+        return None;
+    }
+    let graph = prepared.graph();
+    if let Some(inst) = observable_beside(prepared, callsite.at) {
+        r2il::refusal_evidence!(
+            "import-stub-declaration",
+            "{:#x}: the body defines observable state beside the transfer: {:?} -> {:?} caller_supplied={}",
+            prepared.function().entry,
+            inst.payload,
+            inst.output
+                .and_then(|output| graph.value(output))
+                .map(|value| (value.var.display_name(), value.canonical_storage)),
+            inst.output
+                .is_some_and(|output| graph.caller_supplied(output))
+        );
+        return None;
+    }
+    Some(callsite.at)
 }
 
 /// An instruction that defines state a caller observes beside the transfer at `at`: an effect

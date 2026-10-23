@@ -711,6 +711,18 @@ impl Literal {
         Self::plt_wrapped("malloc", &PLT_COMPUTING_WRAPPER)
     }
 
+    /// [`Self::plt_importing`] with the container stating the stub at [`PLT_STUB`] stands for `stated`, as
+    /// Mach-O's indirect symbol table does, while its jump goes through the slot bound to `bound`.
+    pub fn plt_declaring(stated: &str, bound: &str) -> Self {
+        let mut program = Self::plt_importing(bound);
+        program.container.import_stubs = vec![r2engine::program::ImportStub {
+            vaddr: PLT_STUB,
+            size: 0x10,
+            symbol: stated.to_owned(),
+        }];
+        program
+    }
+
     /// [`Self::plt_importing`], its caller writing `edi` before the call.
     pub fn plt_passing(import: &str) -> Self {
         let mut program = Self::plt_importing(import);

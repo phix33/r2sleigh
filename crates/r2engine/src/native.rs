@@ -872,7 +872,7 @@ pub fn sealed(
 ) -> Result<crate::SealedFunctionAnalysis, Box<EngineDecompileResponse>> {
     let sealed =
         EngineSession::new().seal_function_from_input(request(target, entry, prepared, control))?;
-    Ok(sealed.stub_of(program.import_at(entry).as_deref()))
+    Ok(sealed.stub_of(program))
 }
 
 /// The request one prepared function is analysed under.

@@ -1454,14 +1454,14 @@ impl SealedFunctionAnalysis {
         &self.source_owned_facts
     }
 
-    /// This function as the stub of `stated`, the import the program says this address is, where
-    /// its body is only the transfer to it.
-    pub(crate) fn stub_of(mut self, stated: Option<&str>) -> Self {
+    /// This function as the stub of the import `program` says its address is, where its body is only
+    /// the transfer to that import.
+    pub(crate) fn stub_of(mut self, program: &dyn native::Program) -> Self {
         let (source, report) = (
             self.source_owned_facts.source(),
             self.source_owned_facts.report(),
         );
-        self.import_stub = stated.and_then(|import| stub::import_stub(source, report, import));
+        self.import_stub = stub::import_stub(source, report, program);
         self
     }
 }

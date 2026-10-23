@@ -372,8 +372,11 @@ the stubs the container states (Mach-O `S_SYMBOL_STUBS`) and decodes the linkage
 `.plt.sec`, `.plt.got`), and `Program::import_at(entry)` answers it in `O(log stubs)`. The body owns
 the second (`stub::import_stub`): one tail call, no store or other call, no register written that the
 transfer does not carry, so a stub that flushes a cache line first is a body
-(`an_effect_before_the_jump_keeps_a_stub_a_body`). The stub's name is the one discovery states, not
-the callee identity's.
+(`an_effect_before_the_jump_keeps_a_stub_a_body`). The transfer must also reach that import:
+`import_at` of the address it goes to names the same one, so a container-stated stub patched to jump
+through another import's slot is a body (`a_stub_whose_jump_goes_to_another_import_is_a_body_not_the_stated_stub`),
+never `free` declared with `malloc`'s types. The stub's name is the one discovery states, not the
+callee identity's.
 
 The route used to ask only the second half. A function in `.text` whose last instruction was a jump to
 an import's stub, or through its slot, was declared away as the import, with its branch and its

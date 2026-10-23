@@ -202,3 +202,38 @@ fn a_function_that_only_jumps_to_a_stub_is_a_body_not_the_stub() {
     assert!(!text.contains("import stub at"), "{text}");
     assert!(text.contains("free((void*)arg0);"), "{text}");
 }
+
+/// The container states a stub of `free` whose jump goes through the slot bound to `malloc`: a body, not a
+/// `free` declared with `malloc`'s types.
+#[test]
+fn a_stub_whose_jump_goes_to_another_import_is_a_body_not_the_stated_stub() {
+    let mut program = OpenProgram::of(Literal::plt_declaring("free", "malloc"));
+    let text = program
+        .rendered(PLT_STUB)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(
+        !text.contains("import stub at") && !text.contains("extern"),
+        "{text}"
+    );
+    assert!(text.contains("r2sleigh_residual"), "{text}");
+}
+
+/// A stub the container states, whose jump goes through the slot bound to the same import, is that import's
+/// declaration.
+#[test]
+fn a_stub_the_container_states_is_its_import_s_declaration_where_its_jump_agrees() {
+    let mut program = OpenProgram::of(Literal::plt_declaring("_Exit", "_Exit"));
+    let text = program
+        .rendered(PLT_STUB)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(
+        text.contains(&format!("import stub at {PLT_STUB:#x}")) && text.contains("`_Exit`"),
+        "{text}"
+    );
+}
