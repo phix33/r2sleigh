@@ -453,11 +453,13 @@ def leaf_statements(code):
 def fingerprint(record):
     """What a rendering says that no write order may change: the ledger's columns, the values read as
     never assigned, the residual sites by (instruction address, cause, gap kind, callee, reason), the
-    names it declares and links, and its leaf statements. `None` for a function that was refused."""
-    if record.get("refused"):
-        return None
+    names it declares and links, and its leaf statements. A refused function has one too, its refusal
+    (the kind and the reason, which counts the obligations and names the first unaccounted one) and
+    its ledger, since a verdict can move inside a refusal (ROADMAP D68)."""
+    refused = record.get("refused")
     addrs = {line["line"]: sorted(line["addrs"]) for line in record["lines"]}
     return {
+        "refusal": json.dumps(refused, sort_keys=True) if refused else None,
         "proof": record["proof"],
         "never_assigned": never_assigned(record["code"]),
         "sites": sorted(json.dumps([addrs.get(site["line"], []), site["cause"], site["gap"], site["callee"],
@@ -489,11 +491,14 @@ def selection_only(natural, mutant):
 
 
 def verdict_moves(natural, mutant):
-    """The parts of two fingerprints that differ, and how the pair is refused (`None` where neither is).
-    A difference in the statements that only the selection pass explains is no move (`selection_only`)."""
+    """The parts of two fingerprints that differ, and how the pair is refused (`None` where both or
+    neither are). A function without an answer on a side (a crash) has no fingerprint. A difference in
+    the statements that only the selection pass explains is no move (`selection_only`)."""
     if natural is None or mutant is None:
         return ([], "refused only under the mutant" if natural is not None else
                 "refused only at natural" if mutant is not None else None)
+    if bool(natural["refusal"]) != bool(mutant["refusal"]):
+        return ([], "refused only under the mutant" if mutant["refusal"] else "refused only at natural")
     moved = [part for part in natural if natural[part] != mutant[part]]
     if "statements" in moved and selection_only(natural["statements"], mutant["statements"]):
         moved.remove("statements")
@@ -551,7 +556,7 @@ def orders(args):
                     selected += was["fingerprint"]["statements"] != now["fingerprint"]["statements"]
                 if refusal:
                     parity[refusal] += 1
-                if moved or refusal == "refused only under the mutant":
+                if moved or refusal:
                     differ += 1
                     shown.append(f"  {name} {address}: {', '.join(moved) or refusal}")
         print(f"{order}: {differ} differ, {live} change text, {selected} differ only in a selection, {dict(parity)}")

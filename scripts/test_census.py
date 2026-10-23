@@ -174,12 +174,26 @@ class WriteOrders(unittest.TestCase):
         self.assertEqual(census.verdict_moves(census.fingerprint(record(EXIT_INLINED)), gone)[0], ["statements"])
 
     def test_a_function_refused_under_one_side_only_is_reported_with_the_side(self) -> None:
-        refused = {"refused": {"kind": "rendering", "reason": "control certificate"}}
+        refused = census.fingerprint(record(REFUSED, refused={"kind": "rendering", "reason": "control certificate"}))
         natural = census.fingerprint(record(EXIT_INLINED))
-        self.assertIsNone(census.fingerprint(refused))
+        self.assertEqual(census.verdict_moves(natural, refused), ([], "refused only under the mutant"))
+        self.assertEqual(census.verdict_moves(refused, natural), ([], "refused only at natural"))
+        # No answer (a crash) is no fingerprint, and two of them agree.
         self.assertEqual(census.verdict_moves(natural, None), ([], "refused only under the mutant"))
         self.assertEqual(census.verdict_moves(None, natural), ([], "refused only at natural"))
         self.assertEqual(census.verdict_moves(None, None), ([], None))
+
+    def test_a_verdict_that_moves_inside_a_refusal_is_a_moved_verdict(self) -> None:
+        # ls-toybox 0x5323c: refused the same way, with 214 residual obligations on one side and 216 on the other.
+        reason = {"kind": "rendering", "reason": "native effect obligations refused: 0 refused, 1 unaccounted"}
+        was = census.fingerprint(record(REFUSED, refused=reason, proof={"total": 1252, "residual": 214}))
+        now = census.fingerprint(record(REFUSED, refused=reason, proof={"total": 1252, "residual": 216}))
+        self.assertEqual(census.verdict_moves(was, now), (["proof"], None))
+        again = census.fingerprint(record(REFUSED, refused=reason, proof={"total": 1252, "residual": 214}))
+        self.assertEqual(census.verdict_moves(was, again), ([], None))
+        elsewhere = census.fingerprint(record(REFUSED, refused={**reason, "reason": reason["reason"] + " at 0x53748"},
+                                              proof={"total": 1252, "residual": 214}))
+        self.assertEqual(census.verdict_moves(was, elsewhere), (["refusal"], None))
 
 
 if __name__ == "__main__":
