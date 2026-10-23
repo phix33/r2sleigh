@@ -2,7 +2,10 @@
 
 use crate::common;
 
+use std::collections::BTreeSet;
+
 use common::{BASE, Literal};
+use r2dec::placement_mutants::{WriteOrder, with_write_order};
 use r2engine::program::OpenProgram;
 
 fn c_of(code: &'static [u8]) -> String {
@@ -280,4 +283,175 @@ fn a_loop_that_leaves_on_a_chain_stays_on_both_tests_negated() {
         !test.contains(" || ") && test.matches("!= (uint8_t)").count() == 2,
         "{c}"
     );
+}
+
+/// The four write orders a placement can be asked for: the natural one and the three mutants (ROADMAP D58).
+const ORDERS: [WriteOrder; 4] = [
+    WriteOrder::Natural,
+    WriteOrder::KeepExits,
+    WriteOrder::ExitsReversed,
+    WriteOrder::MergesReversed,
+];
+
+/// What no block write order may change: the ledger's columns, the never-assigned names and the set of
+/// statements apart from control and site numbers (a set: a tail is written once per jump to it).
+#[derive(Debug, PartialEq, Eq)]
+struct Verdicts {
+    ledger: String,
+    never_assigned: String,
+    statements: BTreeSet<String>,
+}
+
+fn verdicts_of(c: &str) -> Verdicts {
+    let proof = c
+        .lines()
+        .find(|line| line.contains("r2dec proof:"))
+        .unwrap_or_else(|| panic!("a proof line: {c}"));
+    let between = |from: &str, to: char| {
+        proof
+            .split_once(from)
+            .map(|(_, rest)| rest.split(to).next().unwrap_or_default().to_owned())
+            .unwrap_or_default()
+    };
+    let site = regex_free_site_numbers;
+    Verdicts {
+        ledger: between("source obligations:", ';'),
+        never_assigned: between("never assigned, read as residuals (", ')'),
+        statements: c
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.ends_with(';') && !line.starts_with("goto "))
+            .filter(|line| !matches!(*line, "break;" | "continue;") && !line.ends_with(": ;"))
+            .map(site)
+            .collect(),
+    }
+}
+
+/// `line` with each residual site's number replaced by `N`: sites are numbered in text order.
+fn regex_free_site_numbers(line: &str) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(at) = rest.find("r2sleigh_residual_") {
+        let (head, tail) = rest.split_at(at);
+        out.push_str(head);
+        let open = tail.find('(').map_or(tail.len(), |open| open + 1);
+        out.push_str(&tail[..open]);
+        let digits = tail[open..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .count();
+        out.push('N');
+        rest = &tail[open + digits..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A rendering of `code` with blocks written in `order`; each is a fresh program, so no memo is shared.
+fn c_under(order: WriteOrder, code: &'static [u8]) -> String {
+    with_write_order(order, || c_of(code))
+}
+
+/// The lines that name the variable `name` other than as the target of an assignment to it.
+fn reads_of<'c>(c: &'c str, name: &str) -> Vec<&'c str> {
+    c.lines()
+        .map(str::trim)
+        .filter(|line| line.contains(name) && !line.starts_with(&format!("{name} = ")))
+        .filter(|line| !line.ends_with(&format!(" {name};")))
+        .collect()
+}
+
+/// `sub rsp, 0x18; lea rax, [rsp + 8]; loop: cmp byte [rdi], 0; je out; cmp sil, [rdi]; je found;
+/// add rax, 1; add rdi, 1; jmp loop; out: add rsp, 0x18; ret; found: add rax, 5; add rsp, 0x18; ret`
+const FRAME_ADDRESS_LOOP: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, 0x48, 0x8d, 0x44, 0x24, 0x08, 0x80, 0x3f, 0x00, 0x74, 0x0f, 0x40, 0x3a,
+    0x37, 0x74, 0x0f, 0x48, 0x83, 0xc0, 0x01, 0x48, 0x83, 0xc7, 0x01, 0xeb, 0xec, 0x48, 0x83, 0xc4,
+    0x18, 0xc3, 0x48, 0x83, 0xc0, 0x05, 0x48, 0x83, 0xc4, 0x18, 0xc3,
+];
+
+/// The same, with `test rdx, rdx; je found2` before the loop: a second way to the exit that adds 5,
+/// which makes that exit a merge written after the loop whichever order the exits are written in.
+const FRAME_ADDRESS_LOOP_TWO_WAYS: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, 0x48, 0x8d, 0x44, 0x24, 0x08, 0x48, 0x85, 0xd2, 0x74, 0x19, 0x80, 0x3f,
+    0x00, 0x74, 0x0f, 0x40, 0x3a, 0x37, 0x74, 0x0f, 0x48, 0x83, 0xc0, 0x01, 0x48, 0x83, 0xc7, 0x01,
+    0xeb, 0xec, 0x48, 0x83, 0xc4, 0x18, 0xc3, 0x48, 0x83, 0xc0, 0x05, 0x48, 0x83, 0xc4, 0x18, 0xc3,
+];
+
+#[test]
+fn a_merge_whose_entry_copy_is_a_gap_reads_as_a_residual_under_every_write_order() {
+    // The loop's merge enters with a frame address (a gap); its only other copy is the latch's.
+    let mut texts = BTreeSet::new();
+    for code in [FRAME_ADDRESS_LOOP, FRAME_ADDRESS_LOOP_TWO_WAYS] {
+        let natural = c_under(WriteOrder::Natural, code);
+        assert!(natural.contains("ValuesNotRendered"), "{natural}");
+        let verdicts = verdicts_of(&natural);
+        for order in ORDERS {
+            let c = c_under(order, code);
+            assert_eq!(verdicts_of(&c), verdicts, "{order:?}\n{c}");
+            texts.insert(c);
+        }
+        // The loop's merge has no value on its way in, so no write order reads it as a variable.
+        assert!(verdicts.never_assigned.contains("RAX_2"), "{natural}");
+        for order in ORDERS {
+            let c = c_under(order, code);
+            let reads = reads_of(&c, "rax_2");
+            assert!(
+                reads
+                    .iter()
+                    .all(|line| line.contains("r2sleigh_residual_u64(")),
+                "{order:?}: {reads:?}\n{c}"
+            );
+        }
+    }
+    // The orders do move the text (the knob is live), or equal verdicts would prove nothing.
+    assert!(
+        texts.len() > 2,
+        "the orders wrote {} distinct texts",
+        texts.len()
+    );
+}
+
+/// `sub rsp, 0x18; test rdi, rdi; je other; lea rax, [rsp + 8]; jmp join; other: mov rax, rsi;
+/// join: add rsp, 0x18; ret`: one way into the join carries a frame address, which is a gap.
+const ONE_GAPPED_COPY: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, 0x48, 0x85, 0xff, 0x74, 0x07, 0x48, 0x8d, 0x44, 0x24, 0x08, 0xeb, 0x03,
+    0x48, 0x89, 0xf0, 0x48, 0x83, 0xc4, 0x18, 0xc3,
+];
+
+#[test]
+fn a_merge_with_one_gapped_forward_copy_reads_as_a_residual() {
+    // A gap traps where it stands, but the certificate lets control go on past it, so the value the
+    // merge holds on the other way in is no proof that a read of it is defined.
+    for order in ORDERS {
+        let c = c_under(order, ONE_GAPPED_COPY);
+        assert!(c.contains("ValuesNotRendered"), "{order:?}\n{c}");
+        assert!(
+            verdicts_of(&c).never_assigned.contains("RAX_3"),
+            "{order:?}\n{c}"
+        );
+        let reads = reads_of(&c, "rax_3");
+        assert!(
+            reads
+                .iter()
+                .all(|line| line.contains("r2sleigh_residual_u64(")),
+            "{order:?}: {reads:?}\n{c}"
+        );
+    }
+}
+
+/// `test rdi, rdi; je other; mov rax, rsi; jmp join; other: mov rax, rdx; join: ret`
+const BOTH_COPIES_RENDER: &[u8] = &[
+    0x48, 0x85, 0xff, 0x74, 0x05, 0x48, 0x89, 0xf0, 0xeb, 0x03, 0x48, 0x89, 0xd0, 0xc3, 0x90, 0x90,
+];
+
+#[test]
+fn a_merge_whose_forward_copies_all_render_reads_as_a_variable_in_every_order() {
+    let natural = verdicts_of(&c_under(WriteOrder::Natural, BOTH_COPIES_RENDER));
+    assert_eq!(natural.never_assigned, "");
+    for order in ORDERS {
+        let c = c_under(order, BOTH_COPIES_RENDER);
+        assert_eq!(verdicts_of(&c), natural, "{order:?}\n{c}");
+        assert!(!c.contains("r2sleigh_residual_"), "{order:?}\n{c}");
+        assert!(c.contains("return (uint64_t)rax_3;"), "{order:?}\n{c}");
+    }
 }

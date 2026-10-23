@@ -41,8 +41,12 @@ pub(super) struct Values<'a> {
     /// The structure member each cell term is, by term index: the accesses through a parameter
     /// that points to its inferred structure.
     members: Vec<Option<CExpr>>,
-    /// The named values a statement written so far assigns: a read of any other is a residual.
-    assigned: RefCell<Vec<bool>>,
+    /// By value index: the definitions a named value owes before a read of it is a variable; a merge
+    /// owes one per forward edge in, and a back edge pays none (doc/adr-decompiler-rewrite.md, Merges).
+    owed: RefCell<Vec<u32>>,
+    /// The dominator tree and root, which tell a forward edge from a back edge.
+    dom: &'a r2ssa::domtree::DomTree,
+    root: u64,
     /// By instruction index: whether a statement assigns the instruction's output where it stands.
     bound: Vec<bool>,
     /// The frame array each stack object a spelled term names is declared as, on first use.
@@ -813,7 +817,9 @@ impl<'a> Values<'a> {
             names: vec![None; graph.values.len()],
             declared: vec![false; graph.values.len()],
             members: Vec::new(),
-            assigned: RefCell::new(vec![false; graph.values.len()]),
+            owed: RefCell::new(vec![1; graph.values.len()]),
+            dom: input.function().domtree(),
+            root: input.function().root(),
             bound,
             frame: super::frame::Frame::of(artifact),
             frame_array: RefCell::new(None),
@@ -947,7 +953,7 @@ impl<'a> Values<'a> {
                 SymbolRole::Parameter(index),
             );
             self.names[value.0 as usize] = Some((name, ty));
-            self.assigned.get_mut()[value.0 as usize] = true;
+            self.owed.get_mut()[value.0 as usize] = 0;
             if let CType::Pointer(pointee) = &c
                 && let CType::Struct(tag) = pointee.as_ref()
             {
@@ -956,6 +962,7 @@ impl<'a> Values<'a> {
             self.params.push(CParam { ty: c, name });
         }
         self.members = self.members_of(input, pointing);
+        let mut forward = vec![None; self.graph.blocks.len()];
         for inst in &self.graph.insts {
             let Some(output) = inst.output.filter(|_| self.bound[inst.id.0 as usize]) else {
                 continue;
@@ -972,6 +979,11 @@ impl<'a> Values<'a> {
                 .borrow_mut()
                 .declare(name, c.clone(), SymbolRole::Carrier);
             self.names[output.0 as usize] = Some((id, ty));
+            self.owed.get_mut()[output.0 as usize] = match inst.payload {
+                InstPayload::Phi { .. } => *forward[inst.block.0 as usize]
+                    .get_or_insert_with(|| self.forward_in(input, inst.block)),
+                InstPayload::Op(_) => 1,
+            };
             self.locals.get_mut().push(CLocal {
                 ty: c,
                 name: id,
@@ -979,6 +991,23 @@ impl<'a> Values<'a> {
                 align: None,
             });
         }
+    }
+
+    /// The forward edges into `block`, each a copy its merges owe: the placed predecessors it does not
+    /// dominate, at least one. `O(preds)`.
+    fn forward_in(&self, input: &RenderInput<'_>, block: r2ssa::BlockId) -> u32 {
+        let Some(block) = self.graph.block(block) else {
+            return 1;
+        };
+        let (dom, root) = (self.dom, self.root);
+        let mut forward = (input.function().cfg().predecessors(block.addr).into_iter())
+            .filter(|pred| {
+                crate::structure::place::is_placed(dom, root, *pred)
+                    && !dom.is_back_edge(*pred, block.addr)
+            })
+            .collect::<Vec<_>>();
+        forward.dedup();
+        u32::try_from(forward.len()).map_or(u32::MAX, |n| n.max(1))
     }
 
     /// A frame object's address in the function's one frame array (D4), and its extent: the
@@ -1106,16 +1135,10 @@ impl<'a> Values<'a> {
         }
     }
 
-    /// A name as its class reads it: a parameter declared a pointer is read as its word, and a
-    /// name no statement written before assigns (its definition a gap) is never assigned.
+    /// A name as its class reads it: a parameter declared a pointer is read as its word, and a name
+    /// still owed a definition (a gapped copy, or a write not yet spelled) is never assigned.
     fn read_name(&self, value: ValueId, name: SymbolId, held: &MachineType) -> Option<CExpr> {
-        if !self
-            .assigned
-            .borrow()
-            .get(value.0 as usize)
-            .copied()
-            .unwrap_or(false)
-        {
+        if self.owed.borrow().get(value.0 as usize).copied() != Some(0) {
             let read = crate::prelude::residual(
                 &terms::c_type(held)?,
                 crate::prelude::ResidualCause::NeverAssigned,
@@ -1475,13 +1498,14 @@ impl<'a> Values<'a> {
         self.mark(inst.id);
         self.residual_in(inst.id, stmt);
         if let Some(output) = inst.output.filter(|value| self.is_named(*value)) {
-            self.assigns(output);
+            self.defines(output);
         }
     }
 
-    fn assigns(&self, value: ValueId) {
-        if let Some(slot) = self.assigned.borrow_mut().get_mut(value.0 as usize) {
-            *slot = true;
+    /// A statement written assigns `value` itself, which owes nothing more.
+    fn defines(&self, value: ValueId) {
+        if let Some(slot) = self.owed.borrow_mut().get_mut(value.0 as usize) {
+            *slot = 0;
         }
     }
 
@@ -1857,7 +1881,7 @@ impl<'a> Values<'a> {
         if let Some(def) = self.graph.def_inst(*result) {
             self.mark(def);
         }
-        self.assigns(*result);
+        self.defines(*result);
         Some(vec![assign(*name, value)])
     }
 
@@ -1914,7 +1938,7 @@ impl<'a> Values<'a> {
             .iter()
             .filter_map(|(named, _)| named.map(|(value, ..)| value))
         {
-            self.assigns(value);
+            self.defines(value);
         }
         for value in [halves.0, halves.1].into_iter().flatten() {
             if let Some(def) = self.graph.def_inst(value) {
@@ -1960,7 +1984,7 @@ impl<'a> Values<'a> {
         if let Some(def) = self.graph.def_inst(result) {
             self.mark(def);
         }
-        self.assigns(result);
+        self.defines(result);
         Some(assign(*name, value))
     }
 
@@ -2330,6 +2354,7 @@ impl<'a> Values<'a> {
         ) else {
             return Vec::new();
         };
+        let forward = !self.dom.is_back_edge(from, to);
         let mut copies = Vec::new();
         for inst in to_block.insts.iter().filter_map(|id| self.graph.inst(*id)) {
             let InstPayload::Phi { predecessors } = &inst.payload else {
@@ -2354,7 +2379,7 @@ impl<'a> Values<'a> {
             if input == output
                 && let Some((spelled, attempt)) = source
             {
-                self.account_copy(inst.id, output, attempt, &CStmt::Expr(spelled));
+                self.account_copy(inst.id, output, attempt, (&CStmt::Expr(spelled), false));
                 continue;
             }
             copies.push((inst.id, output, source, reads));
@@ -2380,7 +2405,8 @@ impl<'a> Values<'a> {
                 out.push(unrendered_copy(to));
                 continue;
             };
-            self.account_copy(inst, output, attempt, &CStmt::Expr(source.clone()));
+            let copy = CStmt::Expr(source.clone());
+            self.account_copy(inst, output, attempt, (&copy, forward));
             match clobbers {
                 false => out.push(self.assign_value(output, *name, source)),
                 true => {
@@ -2394,13 +2420,22 @@ impl<'a> Values<'a> {
         out
     }
 
-    /// The merge `inst` has a copy on this edge: its instruction and what the source absorbed are
-    /// rendered, whether or not `stmt` is written.
-    fn account_copy(&self, inst: InstId, output: ValueId, attempt: Attempt, stmt: &CStmt) {
+    /// The merge `inst` has a copy on this edge, rendered whether or not `stmt` is written. Only a copy
+    /// on a forward edge pays what the merge owes, once per edge; a self copy rides a back edge.
+    fn account_copy(
+        &self,
+        inst: InstId,
+        output: ValueId,
+        attempt: Attempt,
+        (stmt, forward): (&CStmt, bool),
+    ) {
         *self.pending.borrow_mut() = attempt;
         self.mark(inst);
         self.residual_in(inst, stmt);
-        self.assigns(output);
+        if let (true, Some(owed)) = (forward, self.owed.borrow_mut().get_mut(output.0 as usize)) {
+            debug_assert!(*owed > 0, "a forward edge pays a merge once");
+            *owed = owed.saturating_sub(1);
+        }
     }
 
     /// A local `<name>_next` of the merge's type, where a cycle of copies goes through.
