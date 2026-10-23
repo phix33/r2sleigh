@@ -195,6 +195,116 @@ Ledgered: ROADMAP D62 (a callee's result presence is one fact per callee, not ea
 spell), D63 (reading a merge as a variable when any forward copy renders, which waits on the
 certificate agreeing that a gap traps) and D64 (`Values` immutable once spelled).
 
+### A name is read where its definition has run (D68)
+
+D58 reads a bound name as a variable when every write to it is spelled (`owed` is 0) and spells the
+blocks in reverse postorder. Reverse postorder is not dominance: a block spelled first can lie on the
+other arm of a branch from the block that reads. At `15486ea7` pumasim `0x279d80` and `0x27b040`
+read `tmp_lane_279e4c_0_0_1` and `tmp_lane_27b110_0_0_1` at an `atan2f` the lane's block does not
+dominate (4 reads, assigned only on the other arm), and the proof line said `0 residual`. The
+parents print the same C on a mirrored layout (`lane_nondom8`) and a residual at the tip, so D58
+moved which functions show the error; it was r2ssa's fact that was wrong.
+
+```text
+lane_nondom9(flag rdi, p rsi, q rdx): xmm1 = flag ? p[0] : p[1]; ucomiss xmm4, xmm2 (q[4], q[5])
+  jbe call; comiss xmm1, xmm2 (reads xmm1's low lane); jbe out; ret
+  call: movaps xmm0, xmm4; call atan2f; ret        out: ret
+```
+
+- **The fact.** `narrowed_argument` took `ValueViews::low_lane_value`, the first value of the lane's
+  class in definition order, as the call argument's `value` (the carrier as `lane_of`). The class
+  holds values of the same bits wherever defined: the carrier XMM1_6 is defined in `0x279e1c`, the
+  lane (a `SUBPIECE` the `comiss` reads) in `0x279e4c`, the call is in `0x279ec8`, and `0x279e3e`
+  branches to either. The first of a class need not dominate a read.
+- **r2ssa owns it.** `integrity::defined_before(function, graph, value, block, ordinal)` is the one
+  rule: an entry value, a phi or an earlier operation of the block, or a definition in a strictly
+  dominating block, `O(1)` from the dominator tree's preorder intervals. `narrowed_argument` keeps a
+  lane only where it holds at the call and otherwise states the carrier the walk reached with no
+  `lane_of`, which renders `(uint32_t)xmm1_6`, a truncation of a value that dominates (the state
+  before lane narrowing, for those calls). Where a later member of the class would have dominated,
+  the carrier is used instead (left, below). `validate_boundary_values` checks every value a sealed
+  fact reads against the place it reads it, `O(facts)`: call arguments and their carriers, call
+  targets, return values, the return address and the exit stack pointer, branch conditions and
+  switch selectors. A violation refuses the function (`IntegrityRule::BoundaryValueNotDominated`,
+  `SSA integrity: a boundary fact names a value its definition does not dominate`), as
+  `validate_ssa_function` does for an operation. It is beside that function and not in it:
+  `validate_ssa_function` runs on the `SSAFunction` before the seal, and the boundary facts exist
+  only after the seal has dropped the operations it reads. Call results are definitions the call
+  makes, not reads, and a comparison's operands (`PredicateFact::comparison`) name the copy classes
+  the condition compares, the same first-of-class pick; no renderer reads them, and checking them
+  refused 44 of bash's 1,568 functions in the first version of this check, so they are not checked.
+- **r2dec holds the line, as a hard rule.** `Values::read_name` asks r2ssa
+  (`SsaArtifact::value_defined_before`, the same rule) whether the name's definition has run in the
+  block being spelled (`Values::enter`, once per block in `Spelling::block`); if not, the read is a
+  residual with refusal evidence (`read-not-dominated`) and a proof-line cause of its own ("assigned
+  on only some paths to its read"). It is not a `debug_assert`: it is the one check on the text
+  itself, where the validator checks facts at their reads and the terms the arena expands read
+  names no fact mentions; it costs `O(1)` per read; and a `debug_assert` would abort in the build
+  that shows a violating read becoming a residual (rule 8: a visible residual beats plausible
+  unproven C). It decides nothing r2ssa owns: the rule is r2ssa's, the policy (a residual the proof
+  line names) is the renderer's. With the lane pick and the check both gone (`fact_mutants`, a
+  test-only feature) the guard alone makes the read a residual, under the four write orders; with the
+  pick gone and the check kept, r2ssa refuses the function. `Values` holds the block as a `Cell`,
+  set only by the spelling pass (D64).
+- **Siblings.** `low_lane_value` had one caller. The other first-of-class picks and where they go:
+
+  | Pick | Used as | Verdict |
+  |---|---|---|
+  | `low_lane_value` in `narrowed_argument` | a call argument the text reads | the defect; fixed |
+  | `proven_low_lane` in the callsite certificate | a proof that the bits are equal | unchanged: it proves the bits, `defined_before` the scope |
+  | `class_value` in `PredicateFact::comparison` operands | class names for range narrowing, trip and tail counts, certificates; r2types copies them into `PredicateComparisonFact` | not a read, no renderer reads it |
+  | `StackReloadSourceCertificate::canonical_source` | a key for r2types' address steps and field inference | not rendered |
+  | `class_value`/`class_key` in `values.rs`, `uncertified_call_reads`, `expression_phi_has_single_canonical_root`, `tail_offsets`, `address_candidates`, `predicates` | equality keys | safe |
+  | `copy_root`, `same_integer_root` | the view's root, which dominates what it is the copy root of | safe by construction |
+
+  r2ssa alone was enough for the 25,735 functions measured: with the guard turned into a report, the
+  five binaries read 0 names out of scope. The guard is the second line, not a second owner.
+
+Measured at the code tip, against `15486ea7` (the same dumps, `pddj` of every function):
+
+| | bash | ls-toybox | pigz | 0pack | pumasim | 10 more binaries |
+|---|---|---|---|---|---|---|
+| functions | 1,568 | 827 | 127 | 8,437 | 14,776 | 14,034 |
+| changed | 0 | 0 | 0 | 0 | 2 | 0 |
+| newly refused | 0 | 0 | 0 | 0 | 0 | 0 |
+| reads out of scope, tip (the dominance audit) | 0 | 0 | 0 | 0 | 4 in 2 functions | |
+| reads out of scope, now (also under O1, O2, O3) | 0 | 0 | 0 | 0 | 0 | |
+
+The two pumasim functions keep their ledger (rendered 352 and 327, residual 39 and 30 obligations,
+11 and 7 sites) and read `(uint32_t)xmm1_6` where they read the lane; the guards build, which made
+the argument a residual by an accident of order, has 47 and 38. Residual sites (135,070 in the five,
+226,226 in the ten) and gotos (27,108 and 48,832) are equal. clang `-Wuninitialized` (with
+`r2sleigh_residual_void` noreturn), functions that warn: bash 1, ls-toybox 1, pigz 0, 0pack 5 and
+pumasim 13 before, 1, 1, 0, 5 and 11 now; the 18 left all say `may be uninitialized`, and each
+binary has as many as at the parents. 240 generated float objects (1,920 functions, `libm`
+callees): 56 functions warn at the tip and 0 now, under the natural order and O1, O2 and O3 alike;
+90 change text, none is newly refused, and residual sites go 63,560 to 63,531 (34 functions have
+fewer; `s106_O1` `0x8000540` has 19 to 25 and one more `goto`, since the call now reads the
+carrier, whose chain holds a register read from entry, and renders that chain as residuals).
+`census.py orders` over bash, ls-toybox and pigz (2,508 functions): O1, O2 and O3 differ 0, 0, 0
+(the text moves in 64, 332 and 720; 0, 1 and 7 differ only in a selection), now over the refused
+functions' ledgers as well; 0pack `0x476982` has 9 residual sites under all four orders. Release
+`pdd` with `aa`, instructions retired, two runs each, tip then now: 0pack `0x62ecf0` 71.86G and
+71.73G, 71.89G and 71.86G; pumasim `0x23fdf0` 85.01G and 84.98G, 85.13G and 85.06G (+0.1%, the
+renderings md5-identical), peak footprint 251 to 261 MB and 255 to 257 MB in both.
+
+**Mutation.** `scripts/mutants_d68.py` applies each of 25 mutants of the checks and runs the tests
+that should kill it: 22 die (the lane pick unfiltered, with and without the check of the facts; the
+check unwired; the guard unwired, never told its block, letting a name through or naming the wrong
+cause; each of the validator's eight fact families dropped; `defined_before` off by one, with its phi
+case wrong, its entry case wrong or always true; the production write order changed three ways).
+Three live, each with its reason: the guard with r2ssa's pick and check both gone (by design: the
+guard holds alone, and the tests that accept a residual accept it), `strictly_dominates` for
+`dominates` in `defined_before` (equivalent: the same block returned above), and the block-end read
+placed at the block's start in the validator (no fact the fixtures hold reads a value its own block
+defines; the SSA validator orders those reads).
+
+Left: a later member of the lane's class that does dominate the call is not looked for (the carrier is
+used; `O(k)` per argument for k members, and `low_lanes` holds only the first of each class); the
+`canonical_source` of a stack reload and a comparison's operands are not checked, since nothing
+renders them; the production-order mutants are pinned by one unit test, the feature-on build being
+the one the workspace tests compile.
+
 ## D4's frame, as it is designed
 
 The machine stack below the entry stack pointer is one region; C must see one
