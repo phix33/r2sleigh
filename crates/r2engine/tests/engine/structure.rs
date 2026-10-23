@@ -207,3 +207,58 @@ fn a_chain_whose_exit_is_a_continue_to_its_own_head_is_one_test() {
     assert!(!c.contains("for (; ; )") && !c.contains("break"), "{c}");
     assert_eq!(tests_of(&c).len(), 0, "{c}");
 }
+
+/// `xor eax, eax; top: movzx r8d, byte [rdi + rax]; mov [rdx], r8b; lea ecx, [rax + 1]; cmp eax, esi;
+/// mov eax, ecx; jne top; xor eax, eax; ret`: the test compares the index the iteration began with.
+const TEST_READS_THE_COPY_TARGET: &[u8] = &[
+    0x31, 0xc0, 0x44, 0x0f, 0xb6, 0x04, 0x07, 0x44, 0x88, 0x02, 0x48, 0x8d, 0x48, 0x01, 0x39, 0xf0,
+    0x40, 0x89, 0xc8, 0x75, 0xed, 0x31, 0xc0, 0xc3,
+];
+
+#[test]
+fn a_copy_stays_on_its_arm_when_the_test_reads_the_variable_it_writes() {
+    // Written before the test, `i = i + 1` would make `i != n` compare the next index, not this one.
+    let c = c_of(TEST_READS_THE_COPY_TARGET);
+    assert!(c.contains("for (; ; )") && !c.contains("do {"), "{c}");
+    assert!(c.contains("!= (uint32_t)arg1"), "{c}");
+}
+
+/// A loop with two ways out before its latch, both to a tail of five stores that reads the index:
+/// `xor eax, eax; top: movzx r8d, byte [rdi + rax]; cmp r8b, 0x2c; je b; test r8b, r8b; je early;
+/// mov [rdx], r8b; jmp latch; b: test r8b, r8b; je early; mov [rdx + 1], r8b; latch: lea ecx, [rax + 1];
+/// mov eax, ecx; cmp eax, esi; jne top; mov eax, -1; ret; early: mov [rdx + 2..6], al; ret`
+const TAIL_READS_THE_COPY_TARGET: &[u8] = &[
+    0x31, 0xc0, 0x44, 0x0f, 0xb6, 0x04, 0x07, 0x41, 0x80, 0xf8, 0x2c, 0x74, 0x0a, 0x45, 0x84, 0xc0,
+    0x74, 0x1f, 0x44, 0x88, 0x02, 0xeb, 0x09, 0x45, 0x84, 0xc0, 0x74, 0x15, 0x44, 0x88, 0x42, 0x01,
+    0x48, 0x8d, 0x48, 0x01, 0x40, 0x89, 0xc8, 0x39, 0xf0, 0x75, 0xd7, 0xb8, 0xff, 0xff, 0xff, 0xff,
+    0xc3, 0x88, 0x42, 0x02, 0x88, 0x42, 0x03, 0x88, 0x42, 0x04, 0x88, 0x42, 0x05, 0x88, 0x42, 0x06,
+    0xc3,
+];
+
+#[test]
+fn a_copy_stays_on_its_arm_when_code_after_the_loop_reads_what_it_writes() {
+    // The tail after the loop reads `i`, and nothing here says which of the loop's exits reaches it,
+    // so the copy is written only where the loop goes on (ADR §5).
+    let c = c_of(TAIL_READS_THE_COPY_TARGET);
+    assert!(c.contains("for (; ; )") && !c.contains("do {"), "{c}");
+    let tail = c
+        .split("L2: ;")
+        .nth(1)
+        .unwrap_or_else(|| panic!("a tail: {c}"));
+    assert!(tail.contains("rax_2"), "{c}");
+}
+
+/// `push rbx; xor ebx, ebx; top: call 0x2000; inc ebx; test eax, eax; jne top; mov eax, ebx; pop rbx; ret`:
+/// the test reads a call's result, which nothing proves.
+const TEST_READS_AN_UNPROVEN_CALL: &[u8] = &[
+    0x53, 0x31, 0xdb, 0xe8, 0xf8, 0x0f, 0x00, 0x00, 0xff, 0xc3, 0x85, 0xc0, 0x75, 0xf5, 0x40, 0x89,
+    0xd8, 0x5b, 0xc3,
+];
+
+#[test]
+fn a_copy_stays_on_its_arm_when_the_test_is_not_a_proven_read() {
+    // The copy is not moved across a test that traps where its cell is unproven (ADR §5).
+    let c = c_of(TEST_READS_AN_UNPROVEN_CALL);
+    assert!(c.contains("for (; ; )") && !c.contains("do {"), "{c}");
+    assert!(c.contains("r2sleigh_residual_u64"), "{c}");
+}
