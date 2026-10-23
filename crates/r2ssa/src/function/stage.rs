@@ -359,8 +359,10 @@ impl Sealed {
             )?;
         // A fact that names a value its read does not stand behind is r2ssa's defect, refused with
         // the function rather than handed to a reader (ROADMAP D68).
-        crate::integrity::validate_boundary_values(&self.ir, &self.graph, &facts)
-            .map_err(super::integrity_refusal)?;
+        if !crate::fact_mutants::facts_unchecked() {
+            crate::integrity::validate_boundary_values(&self.ir, &self.graph, &facts)
+                .map_err(super::integrity_refusal)?;
+        }
         // What one prepared function holds is the space every later stage has
         // to work above, so it is reported beside the phases that built it.
         r2il::refusal_evidence!(

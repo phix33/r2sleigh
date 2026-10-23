@@ -1019,13 +1019,14 @@ pub(crate) fn narrowed_argument(
         .prep
         .and_then(|prep| proven_low_lane(&prep.views, at.graph, carrier, storage))
         .filter(|lane| {
-            crate::integrity::defined_before(
-                at.function,
-                at.graph,
-                *lane,
-                at.block_addr,
-                at.op_index,
-            )
+            crate::fact_mutants::unsound_lanes()
+                || crate::integrity::defined_before(
+                    at.function,
+                    at.graph,
+                    *lane,
+                    at.block_addr,
+                    at.op_index,
+                )
         });
     match lane {
         Some(lane) => (SourceCallArgumentValue::Value(lane), Some(carrier)),

@@ -38,6 +38,7 @@ pub(crate) mod demand;
 pub mod dense;
 pub(crate) mod division;
 pub mod domtree;
+pub mod fact_mutants;
 pub mod fixpoint;
 pub(crate) mod frame_address;
 pub mod function;

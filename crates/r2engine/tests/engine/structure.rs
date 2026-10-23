@@ -702,3 +702,60 @@ fn a_call_argument_is_never_a_lane_that_only_the_other_arm_assigns_under_every_w
         }
     }
 }
+
+#[test]
+fn a_lane_the_facts_name_on_the_other_arm_is_read_as_a_residual_not_as_a_variable() {
+    // The knob states the lane as r2ssa did before D68; the renderer's own rule still makes the read a
+    // residual, which the proof line names (ROADMAP D68).
+    for (layout, code, named) in [
+        ("lane_nondom9", &LANE_READ_BESIDE_THE_CALL, true),
+        ("lane_nondom7", &LANE_READ_BESIDE_THE_TAKEN_CALL, true),
+        // Here the lane's block is spelled after the call's, so the write is not yet spelled.
+        (
+            "lane_nondom8",
+            &LANE_READ_BESIDE_THE_FALLTHROUGH_CALL,
+            false,
+        ),
+    ] {
+        for order in ORDERS {
+            let facts = r2ssa::fact_mutants::Facts::UnsoundLanesUnchecked;
+            let c = r2ssa::fact_mutants::with_facts(facts, || atan2f_caller_under(order, code));
+            let arguments = common::call_arguments(&c, "atan2f")
+                .unwrap_or_else(|| panic!("{layout} {order:?}: no call\n{c}"));
+            assert!(
+                arguments[1].contains("r2sleigh_residual_"),
+                "{layout} {order:?}: {arguments:?}\n{c}"
+            );
+            assert_eq!(
+                unassigned_at_call(&c, "atan2f"),
+                Vec::<String>::new(),
+                "{c}"
+            );
+            assert_eq!(
+                c.contains("assigned on only some paths to its read"),
+                named,
+                "{layout} {order:?}\n{c}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_lane_the_facts_name_on_the_other_arm_refuses_the_function_while_r2ssa_checks_its_facts() {
+    // With only the pick unsound, r2ssa refuses what it states itself (ROADMAP D68): no C is written.
+    let facts = r2ssa::fact_mutants::Facts::UnsoundLanes;
+    for code in [
+        &LANE_READ_BESIDE_THE_CALL,
+        &LANE_READ_BESIDE_THE_TAKEN_CALL,
+        &LANE_READ_BESIDE_THE_FALLTHROUGH_CALL,
+    ] {
+        let c = r2ssa::fact_mutants::with_facts(facts, || {
+            atan2f_caller_under(WriteOrder::Natural, code)
+        });
+        assert!(
+            c.contains("refused f: SSA integrity: a boundary fact names a value"),
+            "{c}"
+        );
+        assert!(!c.contains("atan2f("), "{c}");
+    }
+}

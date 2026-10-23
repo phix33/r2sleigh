@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::{
-    CallSiteId, InstPayload, SourceCallArgumentSpec, SourceCallResult, SourceCallSiteIdentity,
-    SourceCallSiteInterface, SourceFunctionInterface,
+    CallSiteId, InstId, InstPayload, SourceCallArgumentSpec, SourceCallResult,
+    SourceCallSiteIdentity, SourceCallSiteInterface, SourceFunctionInterface,
 };
 use r2il::ArchSpec;
 
@@ -12,6 +12,7 @@ const VECTOR: u64 = 0x100;
 const MERGE: u64 = 0x100c;
 const READER: u64 = 0x1010;
 const CALLER: u64 = 0x1018;
+const CALLEE: u64 = 0x4000;
 
 fn storage(offset: u64, size: u32) -> CanonicalStorageId {
     CanonicalStorageId {
@@ -52,6 +53,12 @@ fn lane_read() -> Vec<R2ILOp> {
 /// Two arms load a vector register that merges at `MERGE`, which branches to `READER` (reads its low
 /// lane) or `CALLER` (calls with it). `lane_in_the_merge` moves that read above the branch.
 fn lane_call(lane_in_the_merge: bool) -> SsaArtifact {
+    sealed_lane_call(lane_in_the_merge).expect("the lane call prepares")
+}
+
+/// The vector register `v`, its four lanes and the registers the call and returns use, with the
+/// projections that bind each lane to `v`.
+fn lane_arch() -> ArchSpec {
     let mut arch = ArchSpec::new("lane-test");
     arch.addr_size = 8;
     arch.add_register(RegisterDef::new("v", VECTOR, 16));
@@ -84,19 +91,24 @@ fn lane_call(lane_in_the_merge: bool) -> SsaArtifact {
     // The file lists its projections in the order of the storage they are for.
     projections.sort_by_key(|projection| projection.written);
     arch.register_projections = projections;
-    // As x86 writes `xmm1` from memory: the low lane loaded, the three above it zeroed.
-    let load = |addr| {
-        let mut ops = vec![R2ILOp::Load {
-            dst: make_reg(VECTOR, 4),
-            space: SpaceId::Ram,
-            addr: make_const(addr, 8),
-        }];
-        ops.extend((1..4).map(|lane| R2ILOp::Copy {
-            dst: make_reg(VECTOR + 4 * lane, 4),
-            src: make_const(0, 4),
-        }));
-        ops
-    };
+    arch
+}
+
+/// As x86 writes `xmm1` from memory: the low lane loaded, the three above it zeroed.
+fn load_vector(addr: u64) -> Vec<R2ILOp> {
+    let mut ops = vec![R2ILOp::Load {
+        dst: make_reg(VECTOR, 4),
+        space: SpaceId::Ram,
+        addr: make_const(addr, 8),
+    }];
+    ops.extend((1..4).map(|lane| R2ILOp::Copy {
+        dst: make_reg(VECTOR + 4 * lane, 4),
+        src: make_const(0, 4),
+    }));
+    ops
+}
+
+fn lane_blocks(lane_in_the_merge: bool) -> Vec<R2ILBlock> {
     let branch = |target| R2ILOp::Branch {
         target: make_const(target, 8),
     };
@@ -107,35 +119,26 @@ fn lane_call(lane_in_the_merge: bool) -> SsaArtifact {
     let ret = || R2ILOp::Return {
         target: make_reg(0x80, 8),
     };
-    let callee = make_ram(0x4000, 8);
-    let mut merge = if lane_in_the_merge {
-        lane_read()
-    } else {
-        Vec::new()
+    let (mut merge, mut reader) = match lane_in_the_merge {
+        true => (lane_read(), Vec::new()),
+        false => (Vec::new(), lane_read()),
     };
     merge.push(conditional(CALLER));
-    let mut reader = if lane_in_the_merge {
-        Vec::new()
-    } else {
-        lane_read()
-    };
     reader.push(ret());
-    let blocks = [
+    let call = R2ILOp::Call {
+        target: make_ram(CALLEE, 8),
+    };
+    vec![
         block(0x1000, vec![conditional(0x1008)]),
-        block(0x1004, [load(0x2000), vec![branch(MERGE)]].concat()),
-        block(0x1008, [load(0x2010), vec![branch(MERGE)]].concat()),
+        block(0x1004, [load_vector(0x2000), vec![branch(MERGE)]].concat()),
+        block(0x1008, [load_vector(0x2010), vec![branch(MERGE)]].concat()),
         block(MERGE, merge),
         block(READER, reader),
-        block(
-            CALLER,
-            vec![
-                R2ILOp::Call {
-                    target: callee.clone(),
-                },
-                ret(),
-            ],
-        ),
-    ];
+        block(CALLER, vec![call, ret()]),
+    ]
+}
+
+fn sealed_lane_call(lane_in_the_merge: bool) -> Result<SsaArtifact, crate::SsaPrepareError> {
     let revision = b"lane-call";
     let interface = SourceFunctionInterface::new_exact(
         revision.to_vec(),
@@ -147,9 +150,10 @@ fn lane_call(lane_in_the_merge: bool) -> SsaArtifact {
     .and_then(|interface| interface.with_return_address_storage(storage(0x80, 8)))
     .and_then(|interface| interface.with_stack_pointer_storage(storage(0x88, 8)))
     .expect("a function interface");
+    let callee = CanonicalStorageId::from_varnode(&make_ram(CALLEE, 8));
     let call = SourceCallSiteInterface::new(
         revision.to_vec(),
-        SourceCallSiteIdentity::new(CALLER, CanonicalStorageId::from_varnode(&callee)),
+        SourceCallSiteIdentity::new(CALLER, callee),
         true,
         "lane-abi",
         [SourceCallArgumentSpec::new(0, storage(VECTOR, 4))],
@@ -158,14 +162,15 @@ fn lane_call(lane_in_the_merge: bool) -> SsaArtifact {
         SourceCallResult::Void,
     )
     .expect("a call interface");
-    crate::testing::prepared(
-        &blocks,
-        &crate::Arch::from(arch),
+    SsaArtifact::for_decompile_with_interfaces_and_control(
+        &lane_blocks(lane_in_the_merge),
+        Some(&crate::Arch::from(lane_arch())),
         Some(interface),
+        crate::SourceMachineRoles::default(),
         vec![call],
-        [storage(0x88, 8)],
+        crate::testing::call_effect([], [storage(0x88, 8)]),
+        &crate::control::UncheckedSsaWorkControl,
     )
-    .expect("the lane call prepares")
 }
 
 /// The call's one argument, and the instruction that defines a value, as `(block, is a phi)`.
@@ -256,42 +261,9 @@ fn refused_for(
 /// A change to the facts that puts a value out of its read's scope.
 type Forge = Box<dyn Fn(&mut crate::PreparedFunctionFacts)>;
 
-#[test]
-fn a_boundary_fact_naming_a_value_its_read_does_not_stand_behind_is_refused() {
-    use crate::semantic::SwitchPredicateFact;
-    use crate::{CallBoundaryValueFact, SourceReturnAddressFact, SourceReturnStackPointerFact};
-    let artifact = lane_call(false);
-    crate::integrity::validate_boundary_values(
-        artifact.function(),
-        artifact.graph(),
-        artifact.facts(),
-    )
-    .expect("the facts the collector states hold");
-    let lane = lane_defined_in(&artifact, READER);
-    let SourceCallArgumentValue::Value(carrier) = the_argument(&artifact).value else {
-        panic!("the carrier is a value");
-    };
-    // The return in `CALLER`, which the `READER` arm does not lead to.
-    let caller_return = |facts: &crate::PreparedFunctionFacts, graph: &crate::SsaGraph| {
-        facts
-            .boundaries
-            .returns
-            .iter()
-            .map(|(at, _)| at)
-            .find(|at| {
-                graph
-                    .walk_start(*at)
-                    .is_some_and(|(block, _)| block == CALLER)
-            })
-            .expect("a return in the calling block")
-    };
-    let slot = CallBoundarySlot::Register {
-        index: 0,
-        storage: storage(0x80, 8),
-    };
-    let graph = artifact.graph();
-    let at = caller_return(artifact.facts(), graph);
-    let cases: Vec<(&str, Forge)> = vec![
+/// The forged facts that put `lane` in a call's place: its argument, the carrier it is of, its target.
+fn call_forgeries(lane: ValueId, carrier: ValueId) -> Vec<(&'static str, Forge)> {
+    vec![
         (
             "call argument",
             Box::new(move |f| {
@@ -306,14 +278,13 @@ fn a_boundary_fact_naming_a_value_its_read_does_not_stand_behind_is_refused() {
         (
             "call argument carrier",
             Box::new(move |f| {
-                let argument = &mut f
+                let call = f
                     .boundaries
                     .calls
                     .get_mut(&CallSiteId(0))
-                    .expect("the call")
-                    .arguments[0];
-                argument.value = SourceCallArgumentValue::Value(carrier);
-                argument.lane_of = Some(lane);
+                    .expect("the call");
+                call.arguments[0].value = SourceCallArgumentValue::Value(carrier);
+                call.arguments[0].lane_of = Some(lane);
             }),
         ),
         (
@@ -322,9 +293,20 @@ fn a_boundary_fact_naming_a_value_its_read_does_not_stand_behind_is_refused() {
                 f.call_sites
                     .by_id
                     .values_mut()
-                    .for_each(|site| site.target = lane);
+                    .for_each(|site| site.target = lane)
             }),
         ),
+    ]
+}
+
+/// The forged facts that put `lane` in the return at `at`: a value, the return address, the stack pointer.
+fn return_forgeries(lane: ValueId, at: InstId) -> Vec<(&'static str, Forge)> {
+    use crate::{CallBoundaryValueFact, SourceReturnAddressFact, SourceReturnStackPointerFact};
+    let slot = CallBoundarySlot::Register {
+        index: 0,
+        storage: storage(0x80, 8),
+    };
+    vec![
         (
             "return value",
             Box::new(move |f| {
@@ -348,12 +330,20 @@ fn a_boundary_fact_naming_a_value_its_read_does_not_stand_behind_is_refused() {
             Box::new(move |f| {
                 let ret = f.boundaries.returns.get_mut(at).expect("the return");
                 let storage = storage(0x88, 8);
-                ret.exit_stack_pointer = Some(SourceReturnStackPointerFact::ReachingValue {
+                let sp = SourceReturnStackPointerFact::ReachingValue {
                     storage,
                     value: lane,
-                });
+                };
+                ret.exit_stack_pointer = Some(sp);
             }),
         ),
+    ]
+}
+
+/// The forged facts that put `lane` in a branch's place: its condition, a switch's selector.
+fn branch_forgeries(lane: ValueId) -> Vec<(&'static str, Forge)> {
+    use crate::semantic::SwitchPredicateFact;
+    vec![
         (
             "branch condition",
             Box::new(move |f| {
@@ -366,18 +356,50 @@ fn a_boundary_fact_naming_a_value_its_read_does_not_stand_behind_is_refused() {
         (
             "switch selector",
             Box::new(move |f| {
-                f.predicates.switches.insert(
-                    MERGE,
-                    SwitchPredicateFact {
-                        block_addr: MERGE,
-                        selector: Some(lane),
-                        cases: Vec::new(),
-                        default: None,
-                    },
-                );
+                let switch = SwitchPredicateFact {
+                    block_addr: MERGE,
+                    selector: Some(lane),
+                    cases: Vec::new(),
+                    default: None,
+                };
+                f.predicates.switches.insert(MERGE, switch);
             }),
         ),
-    ];
+    ]
+}
+
+#[test]
+fn a_boundary_fact_naming_a_value_its_read_does_not_stand_behind_is_refused() {
+    let artifact = lane_call(false);
+    crate::integrity::validate_boundary_values(
+        artifact.function(),
+        artifact.graph(),
+        artifact.facts(),
+    )
+    .expect("the facts the collector states hold");
+    let lane = lane_defined_in(&artifact, READER);
+    let SourceCallArgumentValue::Value(carrier) = the_argument(&artifact).value else {
+        panic!("the carrier is a value");
+    };
+    // The return in `CALLER`, which the `READER` arm does not lead to.
+    let graph = artifact.graph();
+    let at = (artifact.facts().boundaries.returns.iter())
+        .map(|(at, _)| at)
+        .find(|at| {
+            graph
+                .walk_start(*at)
+                .is_some_and(|(block, _)| block == CALLER)
+        })
+        .expect("a return in the calling block");
+    let cases = [
+        call_forgeries(lane, carrier),
+        return_forgeries(lane, at),
+        branch_forgeries(lane),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    assert_eq!(cases.len(), 8);
     for (fact, forge) in cases {
         assert_eq!(refused_for(&artifact, fact, forge), fact);
     }
@@ -422,4 +444,29 @@ fn a_value_is_defined_before_the_operations_after_its_definition_and_not_those_u
         |block, ordinal| crate::integrity::defined_before(function, graph, lane, block, ordinal);
     assert!(!on_the_arm(CALLER, 0) && !on_the_arm(MERGE, usize::MAX));
     assert!(on_the_arm(READER, usize::MAX));
+}
+
+#[cfg(feature = "fact_mutants")]
+#[test]
+fn an_unsound_lane_is_refused_by_the_check_of_the_sealed_facts() {
+    use crate::fact_mutants::{Facts, with_facts};
+    // The lane on the other arm is what the pick would state; sealing the function refuses it.
+    let refused = with_facts(Facts::UnsoundLanes, || sealed_lane_call(false));
+    assert!(matches!(
+        refused,
+        Err(crate::SsaPrepareError::Integrity(
+            crate::IntegrityRule::BoundaryValueNotDominated
+        ))
+    ));
+    // Unchecked, that fact is stated: the lane defined on the `READER` arm, of the merge's vector.
+    let unchecked = with_facts(Facts::UnsoundLanesUnchecked, || sealed_lane_call(false))
+        .expect("sealed without the check");
+    let argument = the_argument(&unchecked);
+    let SourceCallArgumentValue::Value(lane) = argument.value else {
+        panic!("a value: {argument:?}");
+    };
+    assert_eq!(defined_in(&unchecked, lane), (READER, false));
+    assert!(argument.lane_of.is_some());
+    // A lane read above the branch stands behind the call: the same pick, nothing to refuse.
+    assert!(with_facts(Facts::UnsoundLanes, || sealed_lane_call(true)).is_ok());
 }
