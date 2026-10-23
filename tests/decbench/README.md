@@ -75,8 +75,15 @@ function its own from the moment r2s starts on it
   or `harness: r2s <ending> while rendering <addr>` (a crash or deadline, after
   which r2s restarts at the next function) -- and
   `rendered + declined == requested` is checked.
-* **Checkpoints.** The partial result is pickled after every function, so the
-  driver's hard kill keeps what was answered.
+* **Checkpoints.** The partial result is pickled to the driver's progress path
+  every `R2SLEIGH_CHECKPOINT_SECONDS` (default 30) and at the end, so the driver's
+  hard kill loses one interval of answers at most. (One pickle per function was
+  quadratic: 2.5 MB each on bzip2, 18 MB on bash, and the backend took 9 to 13
+  times r2s alone.) A re-run that finds the checkpoint of the same r2s build,
+  binary bytes and targets asks r2s only for the addresses it has no answer for;
+  the official driver gives each attempt a fresh path, so this serves a manual
+  re-run. `r2s_batch.py` hands each answer over while r2s is still running, which
+  is what makes a checkpoint taken mid-process hold anything.
 * **Fails closed.** A binary carrying `.symtab` or any debug section
   (`.debug_*`, `.zdebug_*`, `.gnu_debugdata`) is declined
   whole: nothing r2s says about it is admissible.

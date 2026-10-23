@@ -4,9 +4,10 @@
     r2s_timing.py --r2s <r2s> --run <results tree> [--project NAME ...] > timing.tsv
 
 The official driver's wall time for r2s includes the backend's progress checkpoint, a pickle of the whole partial
-result after every function, which grows with the binary. This replays the same `s <addr>; pddj` stream through the
-same runner (`tests/equiv/r2s_batch.py`) with no checkpoint, and prints per binary: functions asked, rendered,
-declined, wall seconds (open, `aa`, every function) and the peak resident set of the r2s process in kB.
+result (every 30 s since 2026-10-23; after every function before, which grew with the binary). This replays the same
+`s <addr>; pddj` stream through the same runner (`tests/equiv/r2s_batch.py`) with no checkpoint, and prints per binary:
+functions asked, rendered, declined, wall seconds (open, `aa`, every function) and the peak resident set of the r2s
+process in kB.
 Targets are the addresses the run's own tomls name (rendered plus failed), so the two measure the same set.
 Each binary runs in its own Python process, serially, so the peak RSS is that binary's alone.
 """
