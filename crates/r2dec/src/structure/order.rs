@@ -6,7 +6,8 @@ pub(crate) use off::WriteOrder;
 #[cfg(feature = "placement_mutants")]
 pub use on::{WriteOrder, with_write_order};
 
-#[cfg(not(feature = "placement_mutants"))]
+// Compiled under test with the feature too, so the production order is pinned wherever tests run.
+#[cfg(any(test, not(feature = "placement_mutants")))]
 mod off {
     /// The only order: the facts' own.
     #[derive(Clone, Copy)]
@@ -92,5 +93,20 @@ mod on {
                 list.reverse();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The order every production build writes in is the facts' own: exits inlined, no list permuted.
+    #[test]
+    fn production_writes_in_the_facts_own_order() {
+        let production = super::off::WriteOrder::current();
+        let mut list = [3, 1, 2];
+        production.exits(&mut list);
+        assert_eq!(list, [3, 1, 2]);
+        production.merges(&mut list);
+        assert_eq!(list, [3, 1, 2]);
+        assert!(production.inlines_exits());
     }
 }
