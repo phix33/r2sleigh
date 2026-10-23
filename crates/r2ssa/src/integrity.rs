@@ -9,6 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::function::{DefSite, SSAFunction, SourceSite};
+use crate::graph::{InstId, SsaGraph, ValueId};
+use crate::semantic::{PreparedFunctionFacts, SourceCallArgumentValue};
 use crate::{CanonicalStorageId, SSAOp, SSAVar, VarId};
 
 /// The scalar-width rule violated by one regular SSA operation.
@@ -44,6 +46,7 @@ pub enum IntegrityRule {
     ScalarWidthMismatch,
     ZeroWidthValue,
     UseNotDominated,
+    BoundaryValueNotDominated,
 }
 
 impl fmt::Display for IntegrityRule {
@@ -72,6 +75,9 @@ impl fmt::Display for IntegrityRule {
             Self::ScalarWidthMismatch => "an operation violates a scalar-width rule",
             Self::ZeroWidthValue => "a value has zero width",
             Self::UseNotDominated => "a read is not dominated by its definition",
+            Self::BoundaryValueNotDominated => {
+                "a boundary fact names a value its definition does not dominate"
+            }
         })
     }
 }
@@ -99,6 +105,7 @@ impl SsaIntegrityError {
             Self::ScalarWidthMismatch { .. } => IntegrityRule::ScalarWidthMismatch,
             Self::ZeroWidthValue { .. } => IntegrityRule::ZeroWidthValue,
             Self::UseNotDominated { .. } => IntegrityRule::UseNotDominated,
+            Self::BoundaryValueNotDominated { .. } => IntegrityRule::BoundaryValueNotDominated,
         }
     }
 }
@@ -201,6 +208,22 @@ pub enum SsaIntegrityError {
         def_block_addr: u64,
         def_site: DefSite,
     },
+    /// A fact of the sealed function (a call's argument, a return's value, a branch's condition)
+    /// names a value whose definition does not dominate the place the fact reads it.
+    BoundaryValueNotDominated {
+        fact: &'static str,
+        site: BoundarySite,
+        var: SSAVar,
+    },
+}
+
+/// Where a boundary fact reads a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundarySite {
+    /// Before this operation.
+    Inst(InstId),
+    /// At the end of the block at this address, where its branch is.
+    BlockEnd(u64),
 }
 
 /// Exact site at which a zero-width SSA value was observed.
@@ -350,6 +373,10 @@ impl fmt::Display for SsaIntegrityError {
                 f,
                 "SSA value {var} read at {site:?} in block 0x{block_addr:x} is defined at \
                  {def_site:?} in block 0x{def_block_addr:x}, which does not dominate the read"
+            ),
+            Self::BoundaryValueNotDominated { fact, site, var } => write!(
+                f,
+                "the {fact} fact names {var} at {site:?}, which its definition does not dominate"
             ),
         }
     }
@@ -681,6 +708,104 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
         }
     }
 
+    Ok(())
+}
+
+/// Whether `value` is defined where operation `ordinal` of the block at `block_addr` reads: an entry
+/// value, a phi or earlier operation of it, or a strictly dominating block's. `O(1)`.
+pub(crate) fn defined_before(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    value: ValueId,
+    block_addr: u64,
+    ordinal: usize,
+) -> bool {
+    let Some(def) = graph.def_inst(value) else {
+        return true;
+    };
+    let Some(def_block) = graph
+        .inst(def)
+        .and_then(|inst| graph.block(inst.block))
+        .map(|block| block.addr)
+    else {
+        return false;
+    };
+    if def_block == block_addr {
+        return graph
+            .op_ordinal(def)
+            .is_none_or(|defined| defined < ordinal);
+    }
+    function.domtree().strictly_dominates(def_block, block_addr)
+}
+
+/// Every value a boundary fact reads (call arguments, targets, return values, branch conditions,
+/// switch selectors) is defined where it reads it, `O(facts)`; what is not a read is not checked.
+#[expect(
+    clippy::result_large_err,
+    reason = "the diagnostic keeps the offending value; validation runs once, when the artifact is sealed"
+)]
+pub(crate) fn validate_boundary_values(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &PreparedFunctionFacts,
+) -> Result<(), SsaIntegrityError> {
+    let read = |fact: &'static str, site: BoundarySite, value: ValueId| {
+        let place = match site {
+            BoundarySite::Inst(inst) => graph.walk_start(inst),
+            BoundarySite::BlockEnd(addr) => Some((addr, usize::MAX)),
+        };
+        match place {
+            Some((block_addr, ordinal))
+                if defined_before(function, graph, value, block_addr, ordinal) =>
+            {
+                Ok(())
+            }
+            _ => Err(SsaIntegrityError::BoundaryValueNotDominated {
+                fact,
+                site,
+                var: graph.var(value).clone(),
+            }),
+        }
+    };
+    for call in facts.boundaries.calls.values() {
+        let site = BoundarySite::Inst(call.at);
+        for argument in &call.arguments {
+            if let SourceCallArgumentValue::Value(value) = argument.value {
+                read("call argument", site, value)?;
+            }
+            if let Some(carrier) = argument.lane_of {
+                read("call argument carrier", site, carrier)?;
+            }
+        }
+    }
+    for call in facts.call_sites.by_id.values() {
+        read("call target", BoundarySite::Inst(call.at), call.target)?;
+    }
+    for ret in facts.boundaries.returns.values() {
+        let site = BoundarySite::Inst(ret.at);
+        for value in &ret.values {
+            read("return value", site, value.value)?;
+        }
+        if let Some(address) = ret.return_address {
+            read("return address", site, address.value)?;
+        }
+        if let Some(value) = ret.exit_stack_pointer.and_then(|sp| sp.value()) {
+            read("exit stack pointer", site, value)?;
+        }
+    }
+    for predicate in facts.predicates.predicates.values() {
+        let site = BoundarySite::BlockEnd(predicate.block_addr);
+        read("branch condition", site, predicate.condition)?;
+    }
+    for switch in facts.predicates.switches.values() {
+        if let Some(selector) = switch.selector {
+            read(
+                "switch selector",
+                BoundarySite::BlockEnd(switch.block_addr),
+                selector,
+            )?;
+        }
+    }
     Ok(())
 }
 
