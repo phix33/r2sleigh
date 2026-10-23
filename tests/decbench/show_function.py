@@ -30,7 +30,9 @@ def main(argv: list[str] | None = None) -> int:
     from decbench.models.project import OptimizationLevel, Project
     from decbench.pipeline.executor import PipelineConfig, PipelineExecutor
     from decbench.results_store import gather_project_tomls
-    from decbench.metrics.type_match import extract_ground_truth_type_index
+    from decbench.metrics.type_match import _ground_truth_for_function, extract_ground_truth_type_index
+    from decbench.utils.binfmt import detect, source_function_owners
+    from decbench.utils.dwarf_policy import dwarf_follow_abstract_origin
 
     ck = pickle.loads((a.run / "checkpoints" / f"{a.project}.pkl").read_bytes())
     opt = OptimizationLevel(a.opt)
@@ -43,33 +45,34 @@ def main(argv: list[str] | None = None) -> int:
         if m in ev and a.function in ev[m].function_results:
             v = ev[m].function_results[a.function]
             print(f"{m}: {v.value}  {({k: v.metadata[k] for k in v.metadata if k in ('tp','fp','fn','gt_vars','source_nodes','source_edges','decompiled_nodes','decompiled_edges')})}")
-    gt = extract_ground_truth_type_index(res.binary_path)
-    for addr, names in gt.items():
-        if a.function in names and (addr == fn.address or len(names) == 1):
-            print("DWARF variables:")
-            for v in names[a.function]:
-                print("  ", v["name"], "arg" if v["is_arg"] else "loc", v["type"][:5], "stack" if v["rbp_offset"] else "")
+    info = detect(res.binary_path)
+    variables = _ground_truth_for_function(extract_ground_truth_type_index(res.binary_path), a.function,
+                                           int(fn.address), info.arch if info is not None else "")
+    if variables:
+        print("DWARF variables:")
+        for v in variables:
+            print("  ", v["name"], "arg" if v["is_arg"] else "loc", v["type"][:5], "stack" if v["rbp_offset"] else "")
+    # The unit that defines the function is the one the binary's DWARF names for its address, never a guess by name.
+    units, owner = {}, None
     if not a.no_source or a.graphs:
         project = Project.from_toml(next(t for t in gather_project_tomls() if t.stem == a.project))
         PipelineExecutor(PipelineConfig(output_dir=a.run, optimization_levels=[opt]))._discover_existing_binaries([project], a.run)
-    if not a.no_source:
-        for stem, path in project.preprocessed_sources.get(opt, {}).items():
-            body = function_body(Path(path).read_text(errors="replace"), a.function)
-            if body:
-                print(f"--- source ({stem}.i)")
-                print(body)
-                break
+        units = {stem: Path(path) for stem, path in project.preprocessed_sources.get(opt, {}).items()}
+        owner = source_function_owners(
+            res.binary_path, set(units), follow_abstract_origin=dwarf_follow_abstract_origin()).get(int(fn.address))
+        if owner is None:
+            print(f"--- source: no DWARF owner at {hex(fn.address)}")
+    if owner is not None and not a.no_source:
+        body = function_body(units[owner[1]].read_text(errors="replace"), owner[0])
+        if body:
+            print(f"--- source ({units[owner[1]].name})")
+            print(body)
     if a.graphs:
         from decbench.utils.cfg import extract_cfgs_from_decompilation, extract_cfgs_from_source
 
         sub = res.model_copy(update={"functions": {a.function: fn}})
         dgraph = extract_cfgs_from_decompilation(sub).get(a.function)
-        sgraph = None
-        for stem, path in project.preprocessed_sources.get(opt, {}).items():
-            sg = extract_cfgs_from_source(Path(path))
-            if a.function in sg:
-                sgraph = sg[a.function]
-                break
+        sgraph = extract_cfgs_from_source(units[owner[1]]).get(owner[0]) if owner is not None else None
         for label, g in (("source", sgraph), (a.dec, dgraph)):
             if g is None:
                 continue

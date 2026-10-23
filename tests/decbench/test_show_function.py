@@ -74,8 +74,14 @@ class Shown(unittest.TestCase):
         (self.run / "checkpoints").mkdir()
         (self.run / "checkpoints" / "zlib.pkl").write_bytes(b"")
         self.loaded = []
-        self.source_graphs = {"crc32": chain(3)}
-        self.units = {"crc32": Path("crc32.i")}
+        self.owner_calls, self.variable_calls = [], []
+        # Two units define a crc32, `alpha` sorts first; the DWARF says the function at 0x1000 is zeta's.
+        self.units = {}
+        for stem, value in (("alpha", 1), ("zeta", 2)):
+            (self.run / f"{stem}.i").write_text(f"int crc32(void) {{ return {value}; }}\n")
+            self.units[stem] = self.run / f"{stem}.i"
+        self.source_graphs = {"alpha": {"crc32": chain(7)}, "zeta": {"crc32": chain(3)}}
+        self.owners = {0x1000: ("crc32", "zeta")}
 
         class Project:
             preprocessed_sources = {"O2": self.units}
@@ -93,6 +99,14 @@ class Shown(unittest.TestCase):
                 pass
 
         graphs = {"crc32": chain(2)}
+
+        def source_function_owners(path, stems, follow_abstract_origin=False):
+            self.owner_calls.append((path, set(stems), follow_abstract_origin))
+            return self.owners
+
+        def ground_truth_for_function(index, name, address, architecture):
+            self.variable_calls.append((name, address, architecture))
+            return [{"name": "strm", "is_arg": True, "type": ["z_stream*"], "rbp_offset": 0}]
         stand_ins = {
             "decbench": module("decbench"), "decbench.models": module("decbench.models"),
             "decbench.pipeline": module("decbench.pipeline"), "decbench.metrics": module("decbench.metrics"),
@@ -103,10 +117,16 @@ class Shown(unittest.TestCase):
             "decbench.results_store": module(
                 "decbench.results_store", gather_project_tomls=lambda: [Path("tomls/zlib.toml")]),
             "decbench.metrics.type_match": module(
-                "decbench.metrics.type_match", extract_ground_truth_type_index=lambda path: {}),
+                "decbench.metrics.type_match", extract_ground_truth_type_index=lambda path: {},
+                _ground_truth_for_function=ground_truth_for_function),
             "decbench.utils.cfg": module(
                 "decbench.utils.cfg", extract_cfgs_from_decompilation=lambda result: graphs,
-                extract_cfgs_from_source=lambda path: self.source_graphs),
+                extract_cfgs_from_source=lambda path: self.source_graphs[Path(path).stem]),
+            "decbench.utils.binfmt": module(
+                "decbench.utils.binfmt", source_function_owners=source_function_owners,
+                detect=lambda path: types.SimpleNamespace(arch="x86")),
+            "decbench.utils.dwarf_policy": module(
+                "decbench.utils.dwarf_policy", dwarf_follow_abstract_origin=lambda: True),
         }
         checkpoint = {"decompile": {"O2": {"libz.so.1.2": {"r2sleigh_native": Result()}}},
                       "evaluate": {"O2": {"libz.so.1.2": {"r2sleigh_native": {}}}}}
@@ -132,6 +152,26 @@ class Shown(unittest.TestCase):
         self.assertIn("--- source block graph: 3 blocks, 2 edges", text)
         self.assertIn("--- r2sleigh_native block graph: 2 blocks, 1 edges", text)
         self.assertNotIn("--- source (", text)
+
+    def test_the_source_is_the_unit_the_dwarf_names_for_the_address_not_the_first_that_has_the_name(self):
+        text = self.show("--graphs")
+        self.assertIn("--- source (zeta.i)\n{ return 2; }", text)
+        self.assertNotIn("return 1;", text)
+        self.assertIn("--- source block graph: 3 blocks, 2 edges", text)  # zeta's chain(3), not alpha's chain(7)
+        self.assertEqual(self.owner_calls, [(Path("/unused/libz.so.1.2.13"), {"alpha", "zeta"}, True)])
+
+    def test_a_function_whose_address_has_no_owner_shows_no_source_and_says_so(self):
+        self.owners = {}
+        text = self.show("--graphs")
+        self.assertIn("--- source: no DWARF owner at 0x1000", text)
+        self.assertNotIn("--- source (", text)
+        self.assertNotIn("--- source block graph", text)
+        self.assertIn("--- r2sleigh_native block graph: 2 blocks, 1 edges", text)
+
+    def test_the_dwarf_variables_are_the_ones_the_type_metric_joins_by_address(self):
+        text = self.show("--no-source")
+        self.assertEqual(self.variable_calls, [("crc32", 0x1000, "x86")])
+        self.assertIn("DWARF variables:\n   strm arg ['z_stream*'] ", text)
 
     def test_the_project_is_not_loaded_when_neither_source_nor_graphs_are_asked_for(self):
         text = self.show("--no-source")
