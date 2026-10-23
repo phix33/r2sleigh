@@ -138,8 +138,10 @@ the placement chooses to put an exit inside a loop or after it and a merge in th
 - **One pass, then the layout.** `render::spelled::spell` walks `function.block_addrs()` (r2ssa's block
   order, which is the CFG's reverse postorder, filtered by `place::is_placed`) and spells each block's
   statements, then its edges (the copies of a target's merges, `transferred`, or a tail call and the
-  gap that stands for it), then the operand the block ends on, in the order `Writer::arms` used to:
-  a copy is set before the test that follows it reads. The result is a typed table (`Spelled`, by
+  gap that stands for it), then the operand the block ends on, in the order `Writer::arms` used to.
+  No verdict depends on that order: a block's test reads no merge its own forward edges pay, since a
+  merge the block's test reads dominates the block and so enters it only by a back edge, which pays
+  nothing. The result is a typed table (`Spelled`, by
   block address) that the Writer takes once per block. The Writer holds no `Values`: it decides
   regions, loops, labels and switch case grouping, and `crates/r2dec/tests/architecture.rs` keeps
   `control.rs` free of `Values` and `spelled.rs` free of the placement.

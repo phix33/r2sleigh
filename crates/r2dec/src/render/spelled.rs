@@ -121,8 +121,8 @@ struct Spelling<'s, 'i> {
 }
 
 impl<'i> Spelling<'_, 'i> {
-    /// A block's statements, then its terminator in the order it has always been spelled: each edge
-    /// (so a copy is set before the test reads), then the operand it branches on.
+    /// A block's statements, then each edge, then the operand it branches on: the order the Writer
+    /// used. No verdict depends on it; a test reads no merge its own forward edges pay (ROADMAP D68).
     fn block(&self, addr: u64) -> BlockText {
         if let Some(values) = self.values {
             values.enter(addr);
