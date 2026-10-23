@@ -10,6 +10,7 @@ re-scored without decompiling it again. This takes the stored `DecompilationResu
 `project_source_functions`, `extract_source_cfgs` and DecBench's `evaluate_project` exactly as `main` does, writes the
 scores into the checkpoint, and leaves `finalize_results.py` to rebuild `scoreboard.toml`. Nothing is decompiled, and
 the per-binary `evaluated/*.toml` files are not touched (the output directory of `evaluate_project` is a scratch one).
+`--workers` above 1 is refused when a binary's stored C is over 8 MB (`run_gate.py`).
 """
 
 from __future__ import annotations
@@ -20,6 +21,8 @@ import pickle
 import sys
 import tempfile
 from pathlib import Path
+
+from run_gate import refuse_unsafe_workers
 
 
 def main() -> int:
@@ -45,6 +48,9 @@ def main() -> int:
     decs = args.decompilers.split(",")
     ckpt = args.tree / "checkpoints" / f"{args.project}.pkl"
     ck = pickle.loads(ckpt.read_bytes())
+    for opt_decompiled in ck["decompile"].values():
+        refuse_unsafe_workers({stem: {d: per[d] for d in decs if d in per}
+                               for stem, per in opt_decompiled.items()}, args.workers)
     project = Project.from_toml(next(t for t in gather_project_tomls() if t.stem == args.project))
     rb.discover(project, args.tree)
     scratch = Path(tempfile.mkdtemp(prefix="evaluate_checkpointed_"))

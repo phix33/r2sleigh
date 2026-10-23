@@ -29,6 +29,7 @@ from decbench.metrics.base import Metric
 from decbench.metrics.registry import MetricRegistry, register_metric
 from decbench.models.metrics import AggregationType, MetricValue
 from phase_timing import install_phase_timing
+from run_gate import install_workers_guard
 
 
 def register_vj_ged_if_needed() -> None:
@@ -99,6 +100,7 @@ def run_benchmark(arguments: list[str]) -> None:
         raise SystemExit(f"no {script}: DecBench must be installed from a checkout (pip -e)")
     sys.argv = [str(script), *arguments]
     sys.path.insert(0, str(script.parent))
+    install_workers_guard()  # before the driver imports `evaluate_project`
     runpy.run_path(str(script), run_name="__main__")
 
 

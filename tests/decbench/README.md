@@ -107,14 +107,27 @@ Evaluating r2s's `bash` (a 13 MB C file for 1,540 functions) takes 5.2 GB in one
 `evaluate_project` worker. Four workers on the 8 GB benchmark host are killed by
 the OOM killer, `evaluate_project` then returns `{}` for the binary, and the
 scoreboard silently drops it: the 2026-10-17 run scored no bash row for any
-decompiler (angr kept 692 rows of one build). Run `bash` with `--workers 1`, check
-`evaluated/<binary>.toml` is not 16 bytes, and read the scoreboard only over rows
-every compared decompiler has (`compare_runs.py --exclude-project bash`): the
-scoreboard's denominator is every row *anyone* scored, so a row only one decompiler
-has counts as a miss for the others. A re-run of one decompiler is
+decompiler (angr kept 692 rows of one build). Two gates in `run_gate.py` now stop
+that, and `run_decbench.sh` runs both:
+
+* `--workers` above 1 is refused for a binary whose decompiled C exceeds 8 MB
+  (exit 72): before the run, for C already in `--out`; inside the driver, before
+  `evaluate_project` (`decbench_cli.py` installs the guard, and it raises
+  `SystemExit` because the driver catches `Exception` there and carries on with
+  `{}`); and by `evaluate_checkpointed.py`. Run `bash` with `--workers 1`.
+* After the driver, every binary it decompiled in this run needs an
+  `evaluated/<binary>.toml` that carries a score key of each decompiler that
+  rendered functions of it; a missing file, the 16-byte `binary = "bash"` and a
+  file that scores only other decompilers stop the run (exit 71) and name the
+  cells. Checked on the 2026-10-17 tree it reports 55 of 192 cells, all bash.
+
+Read the scoreboard only over rows every compared decompiler has
+(`compare_runs.py --exclude-project bash` for a tree that has none): its
+denominator is every row *anyone* scored, so a row only one decompiler has counts
+as a miss for the others. A re-run of one decompiler is
 `DECBENCH_REDO_DECOMPILERS=r2sleigh_native` on a copy of the tree; DecBench's
-`finalize_results.py --allow-drops` is needed when functions that used to be declined
-(rows named by their address) are now rendered.
+`finalize_results.py --allow-drops` is needed when functions that used to be
+declined (rows named by their address) are now rendered.
 
 Analysis tools
 --------------
