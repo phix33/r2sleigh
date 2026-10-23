@@ -331,17 +331,17 @@ was tuned to the score, and the benchmark rewards the source's spelling, which t
 win the perfect count back (10 newly perfect, 1 lost) and take 1,917 gotos away. No recovery is added or dropped to
 move the sum.
 
-**Ledgered, not fixed here.** ROADMAP D58: a rendering decision must not depend on the order blocks are written
-(a callee's declaration was fixed; whether a name reads as a value or as a NeverAssigned residual is still the text
-written so far, which no write order makes right for a loop-carried merge whose entry copy is a gap; 0pack
-`0x476982`). ROADMAP D59 (a chain whose exit is a `continue` to its own head faulted `ExitCount` and reverted every
-chain of the function: bash `0x2e540`) and D60 (the certificate asked nothing of a copy's statements) are closed in
-"2026-10-23" below.
+**Ledgered, not fixed here.** ROADMAP D59 (a chain whose exit is a `continue` to its own head faulted `ExitCount` and
+reverted every chain of the function: bash `0x2e540`) and D60 (the certificate asked nothing of a copy's statements)
+are closed in "2026-10-23: the guards, and what a copy says", and D61 holds what they leave. ROADMAP D58 was ledgered
+here and has landed since: whether a statement renders and whether a name reads as a value or as a NeverAssigned
+residual are spelled once, in reverse postorder, before this section's placement writes anything ("D2's spelling
+order" in adr-decompiler-rewrite.md), so none of this section's write orders reaches a verdict.
 
 **Left**, by when:
 
 - Next: the assignment before a copied or joined return, folded at the owner that spells the edge copy
-  (`return a;`); the exit edge's copies after a loop whose only exit is the latch (about 140 loops); D58 and D61.
+  (`return a;`); the exit edge's copies after a loop whose only exit is the latch (about 140 loops); D61.
 - Conditional: the four-statement bound and the skipped-block-first order were chosen on the mined set, so they move
   with a measurement on projects the analysis did not mine; the unguarded join (+17, 2 lost), only with a CFG fact that
   separates `return a || b` from two returns; a `while` whose exit arm is not a bare `break` (34 loops), once the exit

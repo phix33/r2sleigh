@@ -101,6 +101,15 @@ The obligation inventory says what must be rendered, so no stage re-derives it.
   seal points a merge source that is a copy, through any chain, of the merge's own
   output at the merge itself, and r2dec compares ids, never spellings. Coalescing a phi web into one variable is the
   partition, r2ssa's to state from `ValueLiveness` and `StorageSpans` (D2.1).
+  A merge reads as a variable only when every distinct placed *forward* edge into its block renders its
+  copy (`Values::owed`: one per forward edge spelled before the merge, set by `forward_in` from the CFG's
+  predecessors and `DomTree::is_back_edge`, paid once per edge by `account_copy`). A back edge, a self copy
+  and a gap pay nothing, so a latch copy never justifies a read at the header and one gapped forward copy
+  keeps every read residual. A gap traps where it stands
+  (`a_gap_is_written_as_the_residual_call_whose_helper_traps`), which would make "any forward copy renders"
+  sound at run time, but the certificate lets control go on past a gap
+  (`GapKind::ValuesNotRendered.ends_control()` is false) and a verdict does not lean on what the
+  certificate denies; the weaker rule is ledgered in "D2's spelling order".
 - **Frame.** A stack object is a C byte array only where r2ssa proves the
   storage is the callee's (`callee_allocation`, or a source slot that is a
   local or a parameter home); a slot at or above the entry stack pointer
@@ -118,6 +127,71 @@ The obligation inventory says what must be rendered, so no stage re-derives it.
 
 Cost: one canonicalisation, `O(terms × rules applied)`, then one pass over
 the operations and their uses.
+
+## D2's spelling order
+
+Every verdict D2 gives (a statement rendered or a gap, a name read as a variable or as a NeverAssigned
+residual, an edge copy, an extern, a local) is a function of the sealed facts and the reverse postorder
+of the placed blocks. It is never a function of the order `control::Writer` composes blocks, which
+the placement chooses to put an exit inside a loop or after it and a merge in this region or that.
+
+- **One pass, then the layout.** `render::spelled::spell` walks `function.block_addrs()` (r2ssa's block
+  order, which is the CFG's reverse postorder, filtered by `place::is_placed`) and spells each block's
+  statements, then its edges (the copies of a target's merges, `transferred`, or a tail call and the
+  gap that stands for it), then the operand the block ends on, in the order `Writer::arms` used to:
+  a copy is set before the test that follows it reads. The result is a typed table (`Spelled`, by
+  block address) that the Writer takes once per block. The Writer holds no `Values`: it decides
+  regions, loops, labels and switch case grouping, and `crates/r2dec/tests/architecture.rs` keeps
+  `control.rs` free of `Values` and `spelled.rs` free of the placement.
+- **Why a pass and not a prediction.** Whether a block's statements render is not knowable from the
+  facts alone: a term with no spelling, a type with no C type, a callee the symbol table shadows and an
+  identifier a global claimed first each decide it, and a predictor of those would be a second copy of
+  the spelling rules. So the order of spelling is made a fact of the CFG, and cost stays `O(B + E +
+  statements + phi inputs)`, one sweep, no fixpoint.
+- **Forward edges are exact.** The first arrival at a merge is never over a back edge, since a back
+  edge's source is dominated by the merge, and every read the merge dominates follows an arrival. A
+  forward predecessor comes before the merge in reverse postorder where the region is reducible. In an
+  irreducible region an edge can be forward by dominance and still retreat in reverse postorder (a
+  *late* edge): its copy is spelled after the first reads of the merge it enters. The merge is not owed
+  that copy; it is verified. The first attempt reads the merge as a variable on the promise that the
+  copy renders, and `Values::broken` names every merge whose late copy gapped; `render` then spells the
+  function again with each of those owing one definition more than any edge pays, and stops when an
+  attempt breaks no promise. Each attempt adds a merge to the set, so there are at most as many attempts
+  as merges; over bash, ls-toybox and pigz (2,508 functions) 43 hold a late edge (280 edges) and one is
+  spelled again, over 0pack and pumasim (23,201 answered) 123 hold one (1,084 edges) and none is. The rule stays "every forward edge renders its copy", checked by the attempt that
+  stands, and the attempts are a function of the facts and the order. Owing the late copy at the early
+  reads instead made 36 functions read 424 more sites as residuals that the copy would have defined.
+- **The gate.** `placement_mutants` (a cargo feature, off by default and absent from release builds)
+  permutes the placement's write order: O1 keeps every loop exit after its loop, O2 reverses each
+  loop's exits, O3 reverses each region's merges. `census.py orders` runs `pddj` of every function of
+  bash, ls-toybox and pigz under each and compares what no write order may change (the ledger's
+  columns, the never-assigned names, the residual sites by instruction address, cause and gap kind, the
+  declared names and links, and the set of statement lines apart from control). The rendered text
+  itself cannot be equal: O1 turns an inlined exit into a `goto`, and O2 and O3 move blocks, so the
+  labels and the site numbers move. The structure stages (chains, tails, latch, rotate) read text
+  order, copy text and never call `Values`; their shapes differ by layout by design and are not
+  gated, and nor is the selection pass (`if (c) x = a; else x = b;` against `x = c ? a : b;`), which
+  the fingerprint counts apart.
+
+Measured (2026-10-23) over bash, ls-toybox and pigz, 2,508 functions, one mutant build per step:
+
+| Step | O1 differ | O2 differ | O3 differ | Functions whose text moves (O1, O2, O3) |
+|---|---|---|---|---|
+| the knobs alone (write-order dependent) | 0 | 120 | 187 | 64, 338, 722 |
+| spelled in reverse postorder | 0 | 0 | 0 | 64, 332, 720 |
+| and the forward-edge rule | 0 | 0 | 0 | 64, 332, 720 |
+
+One function under O2 and seven under O3 differ only in a selection. Against the base, the natural
+order moves 13 of the 2,508 functions (+9 residual sites): the lazily declared locals of seven bash
+functions' block-transfer loops are numbered in reverse postorder (`reached_5` for `reached`), bash
+`0x8ee40` lists its `_next` temporaries in another order, and five hold a gapped forward copy (bash
+`0x2dd90`, `0x48140`, `0x85d70`, ls-toybox `0x392dc`, `0x501c8`). 0pack `0x476982` has 9 residual
+sites under all four orders: the base's 7 under O1 read `rsp_8` after a loop whose entry copy at
+`0x4769b1` is a gap, so nothing assigns it on a zero-trip path, and that read is what the rule refuses.
+
+Ledgered: ROADMAP D62 (a callee's result presence is one fact per callee, not each call site's to
+spell), D63 (reading a merge as a variable when any forward copy renders, which waits on the
+certificate agreeing that a gap traps) and D64 (`Values` immutable once spelled).
 
 ## D4's frame, as it is designed
 
@@ -176,7 +250,7 @@ with an exit written in the loop a call that does not overwrite it was first (`u
 first outcome, whichever block is written first, and the engine test
 `a_callee_is_declared_by_its_first_call_in_address_order_whichever_block_is_written_first` holds it
 under two layouts. A callee's result is a program fact the call sites should not each spell (ROADMAP
-D58).
+D62).
 
 ## The proof line
 
