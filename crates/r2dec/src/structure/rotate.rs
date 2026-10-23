@@ -592,6 +592,48 @@ mod tests {
     }
 
     #[test]
+    fn a_loop_that_leaves_on_a_chain_stays_on_its_negation_with_the_connective_flipped() {
+        // `if (a || b) break;` stays while `!a && !b`: the connective swaps with the atoms (De Morgan).
+        let atom = |block: u32| {
+            CExpr::observe_one(
+                test_render_observation_id(block),
+                CExpr::int(i64::from(block)),
+            )
+        };
+        let leaves = CExpr::binary(BinaryOp::Or, atom(0x20), atom(0x25));
+        let header = marker(
+            0x20,
+            CStmt::if_stmt(leaves, brk(), Some(CStmt::Block(vec![work(0x30)]))),
+        );
+        let (looped, count) = rotated_once(forever(vec![header]));
+        assert_eq!(count, 1);
+        let CStmt::Observed { stmt, .. } = &looped else {
+            panic!("marked");
+        };
+        let CStmt::While { cond, .. } = &**stmt else {
+            panic!("a while");
+        };
+        let CExpr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } = cond
+        else {
+            panic!("a conjunction: {cond:?}");
+        };
+        for (side, block) in [(left, 0x20), (right, 0x25)] {
+            let CExpr::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } = &**side
+            else {
+                panic!("a negated atom: {side:?}");
+            };
+            assert_eq!(atom_block(operand), Some(block));
+        }
+    }
+
+    #[test]
     fn a_loop_whose_rotation_leaves_no_block_in_its_body_fails_the_certificate_and_stays_a_for() {
         // The header branches to itself: `while (c) {}` owns no block, which the certificate
         // reads as an operation's own loop, so the stage that wrote it is not kept.
